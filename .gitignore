@@ -1,0 +1,5 @@
+# secrets and machine-local Claude Code settings
+.env
+.claude/.env
+.claude/settings.local.json
+.claude/settings.local.json.bak
