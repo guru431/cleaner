@@ -48,3 +48,9 @@ def test_tokens_by_shape():
 def test_password_in_prose():
     assert found("Временный пароль Qwerty123 действует сутки") == {"Qwerty123"}
     assert found("Пароль администратора: Summer2024") == {"Summer2024"}
+
+
+def test_library_rules_cover_tokens_our_own_rules_do_not_know():
+    key = "SG." + "Xk2pQ9vLm4Rt7Wz1Bc8Ny3" + "." + "Hd6Js0Ua5Ef2Gi9Ko4Lp7Mq1Nr8Os3Pt6Qu0Rv5Sw2Y"
+    assert len(key) == 3 + 22 + 1 + 43
+    assert found(f"sendgrid: {key}") == {key}

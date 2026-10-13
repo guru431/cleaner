@@ -59,6 +59,35 @@ _NOT_SECRET = frozenset({
 # Подстановки и выражения — не значения: ${VAR}, $(...), %VAR%, {{...}}, <...>, [[...]], $var, (...
 _TEMPLATE = re.compile(r"^(?:[*xX•·.]+|\$\{.*\}|\$\(.*|%\w+%|\{\{.*\}\}|<[^>]*>|\[\[[^\]]*\]\]|\$\w+|\(.*)$")
 
+# Правила по энтропии и по ключевым словам шумят на обычном тексте; контекст у нас свой.
+_SKIPPED_PLUGINS = frozenset({"Base64HighEntropyString", "HexHighEntropyString", "KeywordDetector"})
+
+
+def _library_spans(text: str, own: list[Span]) -> list[Span]:
+    """Токены известных сервисов по правилам detect-secrets — там, где свои правила ничего не нашли."""
+    from detect_secrets.core.plugins.util import get_mapping_from_secret_type_to_class
+    from detect_secrets.core.scan import scan_line
+    from detect_secrets.settings import transient_settings
+
+    names = [
+        cls.__name__
+        for cls in get_mapping_from_secret_type_to_class().values()
+        if cls.__name__ not in _SKIPPED_PLUGINS
+    ]
+    spans: list[Span] = []
+    with transient_settings({"plugins_used": [{"name": plugin} for plugin in names]}):
+        offset = 0
+        for line in text.splitlines(keepends=True):
+            for secret in scan_line(line):
+                value = secret.secret_value or ""
+                position = line.find(value) if len(value) >= 8 else -1
+                if position >= 0:
+                    start, end = offset + position, offset + position + len(value)
+                    if not any(span.start < end and start < span.end for span in own):
+                        spans.append(Span(start, end, EntityType.SECRET, name, validated=True))
+            offset += len(line)
+    return spans
+
 
 def _value(m: re.Match[str]) -> tuple[int, int] | None:
     """Границы значения в совпадении или None, если это не секрет."""
@@ -103,4 +132,4 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         bounds = _value(m)
         if bounds and _looks_like_password(text[bounds[0]:bounds[1]]):
             spans.append(Span(*bounds, EntityType.SECRET, name))
-    return spans
+    return spans + _library_spans(text, spans)
