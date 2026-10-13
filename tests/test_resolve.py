@@ -1,0 +1,96 @@
+from cleaner.core.detect.merge import MergedSpan
+from cleaner.core.entities.resolve import Resolver, canonical_key
+from cleaner.core.types import ChatState, DictEntry, Settings
+from cleaner.core.types import EntityType as T
+
+GENERIC = frozenset({"www", "mail"})
+
+
+def resolve(state: ChatState, text: str, *spans: tuple[str, T], settings: Settings = Settings()) -> list[str]:
+    merged = [
+        MergedSpan(text.index(value), text.index(value) + len(value), type_, ("infra",))
+        for value, type_ in spans
+    ]
+    return [r.surrogate for r in Resolver(state, settings, text, GENERIC).run(text, merged)]
+
+
+def test_labels_are_numbered_per_type_and_stay_the_same(state):
+    text = "a@x.example b@x.example Иванов"
+    spans = (("a@x.example", T.EMAIL), ("b@x.example", T.EMAIL), ("Иванов", T.PERSON))
+    assert resolve(state, text, *spans) == ["<EMAIL_1>", "<EMAIL_2>", "<PERSON_1>"]
+    assert resolve(state, "снова b@x.example", ("b@x.example", T.EMAIL)) == ["<EMAIL_2>"]
+
+
+def test_canonical_keys_join_notations():
+    assert canonical_key(T.PHONE, "+7 (916) 123-45-67") == canonical_key(T.PHONE, "89161234567")
+    assert canonical_key(T.EMAIL, "Ivanov@Corp.Example") == "ivanov@corp.example"
+    assert canonical_key(T.ACCOUNT, r"CONTOSO\Ivanov") == "ivanov"
+    assert canonical_key(T.ORG, "ООО «Ромашка»") == canonical_key(T.ORG, "ромашка")
+    assert canonical_key(T.PASSPORT, "45 08 123456") == canonical_key(T.PASSPORT, "4508 номер 123456")
+
+
+def test_square_label_style(state):
+    state.label_style = "square"
+    assert resolve(state, "a@x.example", ("a@x.example", T.EMAIL)) == ["[[EMAIL_1]]"]
+
+
+def test_host_names_keep_their_structure(state):
+    text = "srv-dc01.msk.corp.contoso.ru, SRV-DC01, corp.contoso.ru, www.contoso.ru"
+    spans = (
+        ("srv-dc01.msk.corp.contoso.ru", T.HOST),
+        ("SRV-DC01", T.HOST),
+        ("corp.contoso.ru", T.HOST),
+        ("www.contoso.ru", T.HOST),
+    )
+    assert resolve(state, text, *spans) == [
+        "host-1.sub-2.sub-3.domain-1.example",
+        "HOST-1",
+        "sub-3.domain-1.example",
+        "www.domain-1.example",
+    ]
+    searchable = {form for entity in state.entities.values() for form in entity.forms}
+    assert "srv-dc01" in searchable and "corp" not in searchable
+
+
+def test_netbios_domain_shares_the_number_with_its_dns_name(state):
+    settings = Settings(always=(DictEntry(T.DOMAIN, "contoso.ru", ("CONTOSO",)),))
+    spans = (("contoso.ru", T.DOMAIN), ("CONTOSO", T.DOMAIN))
+    assert resolve(state, "contoso.ru CONTOSO", *spans, settings=settings) == ["domain-1.example", "DOMAIN-1"]
+
+
+def test_addresses_macs_and_sids(state):
+    sid = "S-1-5-21-1004336348-1177238915-682003330-1104"
+    text = f"10.1.2.5 10.1.2.77 00:1A:2B:3C:4D:5E 00-1a-2b-3c-4d-5e {sid}"
+    a, b, mac_colon, mac_dash, fake_sid = resolve(
+        state,
+        text,
+        ("10.1.2.5", T.IP),
+        ("10.1.2.77", T.IP),
+        ("00:1A:2B:3C:4D:5E", T.MAC),
+        ("00-1a-2b-3c-4d-5e", T.MAC),
+        (sid, T.SID),
+    )
+    assert a.startswith("10.") and a != "10.1.2.5"
+    assert a.rsplit(".", 1)[0] == b.rsplit(".", 1)[0]
+    assert a.endswith(".5") and b.endswith(".77")
+    assert (mac_colon, mac_dash) == ("02:00:00:00:00:01", "02-00-00-00-00-01")
+    assert fake_sid == "S-1-5-21-1111111111-2222222222-3333333331-1104"
+
+
+def test_address_colliding_with_an_open_value_gets_a_label(state):
+    fake = resolve(state, "10.1.2.5", ("10.1.2.5", T.IP))[0]
+    other = ChatState(chat_id="other", net_key=state.net_key)
+    settings = Settings(never=frozenset({fake}))
+    assert resolve(other, "10.1.2.5", ("10.1.2.5", T.IP), settings=settings) == ["<IP_1>"]
+
+
+def test_merged_key_points_to_the_kept_entity(state):
+    first = resolve(state, "Иванов", ("Иванов", T.PERSON))
+    kept = next(iter(state.entities.values()))
+    state.key_alias["PERSON:иванов и."] = kept.id
+    assert resolve(state, "Иванов И.", ("Иванов И.", T.PERSON)) == first
+    assert kept.forms == ["Иванов", "Иванов И."]
+
+
+def test_value_of_the_wrong_shape_falls_back_to_a_label(state):
+    assert resolve(state, "не адрес", ("не адрес", T.IP)) == ["<IP_1>"]
