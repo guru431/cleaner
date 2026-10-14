@@ -93,6 +93,37 @@ def test_lowercase_domain_prefix_must_be_known():
     assert (T.ACCOUNT, "petrov") in found(r"вход contoso\petrov", ctx)
 
 
+def accounts(text: str) -> set[str]:
+    return {value for type_, value in found(text) if type_ is T.ACCOUNT}
+
+
+def test_account_after_a_user_switch():
+    """Обзор 1А, P1: двоеточие перед доменом — это ключ команды, а не диск."""
+    for text in (r"net use \\FS01\share /user:CONTOSO\ivanov", r"runas /user:CONTOSO\ivanov cmd"):
+        result = found(text)
+        assert (T.DOMAIN, "CONTOSO") in result and (T.ACCOUNT, "ivanov") in result, text
+
+
+def test_json_escaped_backslashes():
+    """Обзор 1А, P1: в журналах JSON обратная косая удвоена."""
+    text = r'{"user": "CONTOSO\\ivanov", "path": "C:\\Users\\ivanov\\Desktop", "share": "\\\\FS01\\share"}'
+    result = found(text)
+    assert (T.DOMAIN, "CONTOSO") in result
+    assert accounts(text) == {"ivanov"}
+    assert (T.HOST, "FS01") in result
+    assert "Users" not in {value for _, value in result}
+
+
+def test_ipv6_address_followed_by_a_colon():
+    assert (T.IP, "2a00:1450:4010::65") in found("Адрес 2a00:1450:4010::65: не отвечает")
+
+
+def test_profile_name_with_a_space_and_with_trailing_punctuation():
+    """Обзор 1А, P1: имя с пробелом целиком, точка после имени — не часть имени."""
+    assert accounts(r"Профиль C:\Users\Иван Петров\Desktop") == {"Иван Петров"}
+    assert accounts(r"Профиль C:\Users\ivanov. Учётка CONTOSO\ivanov") == {"ivanov"}
+
+
 def test_sid_and_dn():
     result = found(
         "SID S-1-5-21-1004336348-1177238915-682003330-1104, системный S-1-5-18, "

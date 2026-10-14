@@ -26,23 +26,30 @@ _MAC_KEEP = frozenset({"ffffffffffff", "000000000000"})
 _URL_HOST = re.compile(
     r"\b[a-z][a-z0-9+.-]*://(?:[^\s/@]+@)?(?P<host>[^\s/:?#\"'<>\[\]@]+)", re.IGNORECASE
 )
-_UNC_HOST = re.compile(r"(?<![\\\w])\\\\(?P<host>[\w.-]+)(?=\\)")
+# Двоеточие перед «\\» — это «C:\\Users» из журнала JSON, а не сетевой путь; путь из JSON — «\\\\host».
+_UNC_HOST = re.compile(r"(?<![\\\w:])\\\\(?:\\\\)?(?P<host>[\w.-]+)(?=\\)")
 _PARAM_HOST = re.compile(r"(?<![\w-])(?:-ComputerName|-Server|-cn|/S)[ \t]+(?P<host>[\w.-]+)", re.IGNORECASE)
 _MACHINE = re.compile(r"(?<![\w.$-])(?P<host>(?=[A-Za-z-]*\d)[A-Za-z0-9][A-Za-z0-9-]{1,14})\$(?![\w$])")
 _DOTTED = re.compile(r"(?<![\w.$@-])(?:\w(?:[\w-]{0,61}\w)?\.)+[^\W\d_][\w-]{1,62}(?![\w-]|\.\w)")
 
+# Перед доменом может стоять двоеточие ключа команды («/user:CONTOSO\ivanov»); обратная косая
+# бывает удвоена (журналы JSON).
 _DOMAIN_LOGIN = re.compile(
-    r"(?<![\w\\./:-])(?P<dom>[A-Za-z][A-Za-z0-9-]{1,14})\\(?P<login>[A-Za-z0-9_][\w.$-]{0,63})(?![\w\\])"
+    r"(?<![\w\\./-])(?P<dom>[A-Za-z][A-Za-z0-9-]{1,14})\\{1,2}(?P<login>[A-Za-z0-9_][\w.$-]{0,63})(?![\w\\])"
 )
 _FILE_EXT = re.compile(
     r"\.(?:txt|log|docx?|xlsx?|pptx?|pdf|exe|dll|ps1|psm1|bat|cmd|ini|cfg|conf|xml|json|ya?ml|csv|zip|7z|rar"
     r"|bak|tmp|sys|dat|msi|png|jpe?g|gif|lnk|reg|evtx?|py|sh|sql|db|mdb|pst|ost|html?)$",
     re.IGNORECASE,
 )
+# Имя профиля из двух-трёх слов с пробелами берётся целиком, если за ним идёт разделитель пути;
+# иначе — до пробела, а знак препинания в конце отрезается.
 _PROFILE = re.compile(
-    r"(?:\b[a-z]:\\Users\\|(?<![\w.])\\Users\\|(?<![\w.])/home/|(?<![\w.])/Users/)(?P<login>[^\\/\s:*?\"<>|]+)",
+    r"(?:\b[a-z]:\\{1,2}Users\\{1,2}|(?<![\w.\\])\\{1,2}Users\\{1,2}|(?<![\w.])/home/|(?<![\w.])/Users/)"
+    r"(?:(?P<spaced>[^\W\d_]+(?: [^\W\d_]+){1,2})(?=\\|/)|(?P<login>[^\\/\s:*?\"<>|]+))",
     re.IGNORECASE,
 )
+_TRAILING = ".,;:!?)"
 _SID = re.compile(r"(?<![\w-])S-1-5-21-\d+-\d+-\d+(?:-\d+)?(?![\w-])")
 _DN = re.compile(
     r"(?<![\w=])(?:(?:CN|OU|O|L|ST|C)=[^,;\r\n\"<>=]+,\s*)+DC=[\w-]+(?:,\s*DC=[\w-]+)*"
@@ -69,12 +76,15 @@ def _ipv4(text: str) -> Iterator[Span]:
 
 def _ipv6(text: str) -> Iterator[Span]:
     for m in _IPV6.finditer(text):
+        candidate = m.group()
+        if candidate.endswith(":") and not candidate.endswith("::"):
+            candidate = candidate[:-1]      # двоеточие после адреса — знак препинания
         try:
-            ip = ipaddress.IPv6Address(m.group())
+            ip = ipaddress.IPv6Address(candidate)
         except ValueError:
             continue
         if netmap.is_maskable(ip):
-            yield Span(m.start(), m.end(), EntityType.IP, name, validated=True)
+            yield Span(m.start(), m.start() + len(candidate), EntityType.IP, name, validated=True)
 
 
 def _mac(text: str) -> Iterator[Span]:
@@ -153,9 +163,11 @@ def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:
             start = m.start("login")
             yield Span(start, start + len(login), EntityType.ACCOUNT, name)
     for m in _PROFILE.finditer(text):
-        login = m.group("login")
-        if login.lower() not in builtin and not re.search(r"[%$]", login):
-            yield Span(m.start("login"), m.end("login"), EntityType.ACCOUNT, name)
+        group = "spaced" if m.group("spaced") else "login"
+        login = m.group(group).rstrip(_TRAILING)
+        if login and login.lower() not in builtin and not re.search(r"[%$]", login):
+            start = m.start(group)
+            yield Span(start, start + len(login), EntityType.ACCOUNT, name)
 
 
 def detect(text: str, ctx: DetectContext) -> list[Span]:
