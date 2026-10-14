@@ -60,7 +60,8 @@ _XML = re.compile(
     r"<(?P<tag>[\w.-]*(?:password|passwd|secret|token|api[_-]?key)[\w.-]*)>(?P<bare>[^<\r\n]+)</(?P=tag)>",
     re.IGNORECASE,
 )
-_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s:/@]+:(?P<bare>[^\s@/]+)@", re.IGNORECASE)
+# Длина схемы ограничена: без предела цепочка «a.b.a.b…» без «://» даёт квадратичный перебор.
+_URL = re.compile(r"\b[a-z][a-z0-9+.-]{0,31}://[^\s:/@]+:(?P<bare>[^\s@/]+)@", re.IGNORECASE)
 _CLI = re.compile(
     r"(?<![\w-])(?:--?(?:password|passwd|pwd|pass|secret|token|api-key)(?:\s+|=)|/p(?:assword)?:)" + _VALUE,
     re.IGNORECASE,
