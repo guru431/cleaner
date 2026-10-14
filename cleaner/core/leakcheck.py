@@ -26,8 +26,9 @@ def check(text: str, state: ChatState, settings: Settings) -> list[Leak]:
         chars[start:end] = " " * (end - start)
     open_values = settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
     # Открытые значения тоже вырезаются: внутри открытого «srv-dc01.corp.contoso.ru» части
-    # «srv-dc01» и «contoso.ru» — не утечка, их показали намеренно.
-    for start, end, _ in find_forms("".join(chars), [(value, "none", None) for value in open_values]):
+    # «srv-dc01» и «contoso.ru» — не утечка, их показали намеренно. Только целыми словами:
+    # открытое «Ivan» не должно прятать от проверки «ivanov».
+    for start, end, _ in find_forms("".join(chars), [(value, "letters", None) for value in open_values]):
         chars[start:end] = " " * (end - start)
     forms: list[tuple[str, str, str | None]] = []
     for entity in state.entities.values():

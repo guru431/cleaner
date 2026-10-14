@@ -103,7 +103,7 @@ def _is_address(value: str) -> bool:
     return True
 
 
-def _well_known(value: str, ctx: DetectContext) -> bool:
+def well_known(value: str, ctx: DetectContext) -> bool:
     """Общеизвестное имя или имя из списка «никогда не скрывать», включая поддомены."""
     parts = value.lower().strip(".").split(".")
     listed = ctx.builtin.well_known_domains | ctx.settings.never
@@ -135,7 +135,7 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
     for pattern in (_URL_HOST, _UNC_HOST, _PARAM_HOST):
         for m in pattern.finditer(text):
             value = m.group("host").rstrip(".")
-            if not re.fullmatch(r"[\w.-]+", value) or _is_address(value) or _well_known(value, ctx):
+            if not re.fullmatch(r"[\w.-]+", value) or _is_address(value) or well_known(value, ctx):
                 continue
             start = m.start("host")
             yield Span(start, start + len(value), _name_type(value), name)
@@ -144,7 +144,7 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
             yield Span(m.start("host"), m.end("host"), EntityType.HOST, name)
     for m in _DOTTED.finditer(text):
         value = m.group()
-        if not _well_known(value, ctx) and _plausible(value, text, m.end(), ctx):
+        if not well_known(value, ctx) and _plausible(value, text, m.end(), ctx):
             yield Span(m.start(), m.end(), _name_type(value), name)
 
 

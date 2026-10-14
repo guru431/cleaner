@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import bisect
+import re
 from dataclasses import dataclass, field
 
 from cleaner.core import leakcheck, surrogates
@@ -19,20 +20,70 @@ DETECTORS = (rules, secrets, infra, dictionary)
 _MAX_PASSES = 3
 
 # Фрагмент такого вида, задевший выданную замену, — это она сама в другой записи
-# («postmaster@domain-1.example», SID с RID): второй раз его не заменяют (FR-5.9).
+# («postmaster@domain-1.example», SID с RID) или новое значение рядом с ней («petrov@domain-1.example»,
+# «host-1.fabrikam.ru»). Замену второй раз не заменяют (FR-5.9), а часть вне неё скрывают.
 _COMPOSED = frozenset({
     EntityType.EMAIL, EntityType.HOST, EntityType.DOMAIN, EntityType.IP,
     EntityType.MAC, EntityType.SID, EntityType.DN,
 })
+# Составные записи, у которых часть вне замены — самостоятельное значение: «petrov» у адреса,
+# «fabrikam.ru» у имени, «OU=Servers,DC=fabrikam,DC=local» у DN. У адресов, MAC и SID такой части
+# не бывает: фрагмент вокруг их замены — та же замена в другой записи.
+_SPLIT = frozenset({EntityType.EMAIL, EntityType.HOST, EntityType.DOMAIN, EntityType.DN})
+_SEPARATORS = ".@,=\\/:;\"' \t\r\n"
+_WORD = re.compile(r"\w")
+# Служебные ящики (RFC 2142) человека не выдают: «postmaster@domain-1.example» — та же подмена домена.
+_ROLE_MAILBOXES = frozenset({
+    "postmaster", "hostmaster", "webmaster", "abuse", "noc", "security", "info", "marketing", "sales",
+    "support", "noreply", "no-reply",
+})
 
 
-def _kept(span: MergedSpan, ranges: list[tuple[int, int]], starts: list[int]) -> bool:
-    """Оставить ли фрагмент: он не внутри выданной замены и не составная запись вокруг неё."""
+def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext) -> MergedSpan | None:
+    """Часть записи между заменами, без разделителей по краям; None — скрывать нечего."""
+    while start < end and text[start] in _SEPARATORS:
+        start += 1
+    while end > start and text[end - 1] in _SEPARATORS:
+        end -= 1
+    value = text[start:end]
+    if not _WORD.search(value):
+        return None         # одни разделители
+    if span.type is EntityType.DN:
+        # Имя атрибута без значения («CN=» перед заменой) ничего не выдаёт.
+        return MergedSpan(start, end, EntityType.DN, span.sources) if "=" in value else None
+    if span.type is EntityType.EMAIL and "@" not in text[span.start:start]:
+        if value.lower() in ctx.builtin.builtin_accounts | _ROLE_MAILBOXES:
+            return None
+        return MergedSpan(start, end, EntityType.ACCOUNT, span.sources)    # имя до «@»
+    # Часть имени узла. Общеизвестная («example» после подмены NetBIOS-имени, «www») — не значение.
+    if infra.well_known(value, ctx):
+        return None
+    return MergedSpan(start, end, EntityType.HOST, span.sources)           # домен из неё выделит Resolver
+
+
+def _outside(
+    text: str, span: MergedSpan, ranges: list[tuple[int, int]], starts: list[int], ctx: DetectContext,
+) -> list[MergedSpan]:
+    """Что скрыть из фрагмента: его целиком, его части вне выданных замен или ничего."""
     i = bisect.bisect_right(starts, span.start) - 1
     if i >= 0 and ranges[i][1] >= span.end:
-        return False
-    overlaps = (i >= 0 and ranges[i][1] > span.start) or (i + 1 < len(ranges) and ranges[i + 1][0] < span.end)
-    return not (overlaps and span.type in _COMPOSED)
+        return []           # внутри выданной замены
+    first = i if i >= 0 and ranges[i][1] > span.start else i + 1
+    last = first
+    while last < len(ranges) and ranges[last][0] < span.end:
+        last += 1
+    if first == last or span.type not in _COMPOSED:
+        return [span]
+    if span.type not in _SPLIT:
+        return []
+    pieces, position = [], span.start
+    for start, end in [*ranges[first:last], (span.end, span.end)]:
+        if start > position:
+            piece = _piece(text, span, position, min(start, span.end), ctx)
+            if piece:
+                pieces.append(piece)
+        position = max(position, end)
+    return pieces
 
 
 @dataclass(frozen=True)
@@ -94,7 +145,7 @@ def sanitize(state: ChatState, text: str, settings: Settings) -> SanitizeResult:
         before = _forms(state)
         ctx = _context(state, settings)
         found = [span for detector in DETECTORS for span in detector.detect(text, ctx)]
-        merged = [m for m in merge(text, found, ctx) if _kept(m, protected, starts)]
+        merged = [part for m in merge(text, found, ctx) for part in _outside(text, m, protected, starts, ctx)]
         resolved = Resolver(state, settings, text, ctx.builtin.generic_labels).run(text, merged)
         if _forms(state) == before:
             break

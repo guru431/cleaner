@@ -165,3 +165,57 @@ def test_leakcheck_finds_a_planted_original_and_ignores_surrogates(state, settin
     assert leakcheck.check(result.sanitized, state, settings) == []
     planted = result.sanitized + " см. также contoso.ru"
     assert [planted[leak.start:leak.end] for leak in leakcheck.check(planted, state, settings)] == ["contoso.ru"]
+
+
+def test_login_in_a_url_is_masked_and_the_host_keeps_its_mapping(state, settings):
+    result = sanitize(state, "git clone https://ivanov@git.contoso.ru/team/repo.git", settings)
+    assert result.sanitized == "git clone https://<ACCOUNT_1>@host-1.domain-1.example/team/repo.git"
+    assert restore(state, result.sanitized, settings).text == "git clone https://ivanov@git.contoso.ru/team/repo.git"
+
+
+def test_new_values_next_to_an_issued_surrogate_are_masked(state, settings):
+    """Обзор пакета исправлений 1А, P1: часть составной записи вне выданной замены скрывается."""
+    sanitize(state, r"Сервер srv-dc01.contoso.ru, учётка CONTOSO\ivanov", settings)
+    assert sanitize(state, "Писал с petrov@domain-1.example", settings).sanitized == (
+        "Писал с <ACCOUNT_2>@domain-1.example"
+    )
+    assert sanitize(state, "Пишу с ivanov@domain-1.example", settings).sanitized == "Пишу с <ACCOUNT_1>@domain-1.example"
+    assert sanitize(state, "Проверь host-1.fabrikam.ru", settings).sanitized == "Проверь host-1.domain-3.example"
+    assert sanitize(state, "CN=host-1,OU=Servers,DC=fabrikam,DC=local", settings).sanitized == "CN=host-1,<DN_1>"
+    assert restore(state, "Напишите на <ACCOUNT_2>@domain-1.example", settings).text == (
+        "Напишите на petrov@contoso.ru"
+    )
+
+
+def test_well_known_part_next_to_a_surrogate_is_not_masked(state, settings):
+    """Часть рядом с заменой, которая сама общеизвестна («example» после NetBIOS-имени, «www»),
+    не скрывается и не становится искомым написанием для следующих текстов."""
+    sanitize(state, r"Учётка CONTOSO\ivanov", settings)
+    assert sanitize(state, "Пишу с petrov@domain-1.example", settings).sanitized == "Пишу с <ACCOUNT_2>@domain-1.example"
+    text = "Ссылка https://www.domain-1.example/x, например example"
+    assert sanitize(state, text, settings).sanitized == text
+
+
+def test_issued_surrogate_in_another_notation_stays_as_is(state, settings):
+    sanitize(state, "Сервер srv-dc01.contoso.ru", settings)
+    for text in ("Ответ ушёл на postmaster@domain-1.example", "Узел host-1.domain-1.example, домен domain-1.example"):
+        result = sanitize(state, text, settings)
+        assert (result.sanitized, len(state.entities)) == (text, 2), text
+
+
+def test_opened_value_does_not_hide_a_longer_original_from_the_leak_check(state, settings):
+    """Обзор пакета исправлений 1А, P1: открытое «Ivan» не прячет «ivanov» от проверки утечек."""
+    sanitize(state, r"учётка CONTOSO\ivanov", settings)
+    ops.unmask(state, "Ivan")
+    planted = "пишет ivanov"
+    assert [planted[leak.start:leak.end] for leak in leakcheck.check(planted, state, settings)] == ["ivanov"]
+
+
+def test_sanitized_text_with_masked_pieces_pasted_back_changes_nothing(state, settings):
+    """Review Focus: повторная вставка очищенного текста, где части рядом с заменой уже скрыты."""
+    sanitize(state, r"Сервер srv-dc01.contoso.ru, учётка CONTOSO\ivanov", settings)
+    first = sanitize(state, "Писал petrov@domain-1.example про CN=host-1,OU=Servers,DC=fabrikam,DC=local", settings)
+    counts = (len(state.entities), len(state.surrogates))
+    again = sanitize(state, first.sanitized, settings)
+    assert again.sanitized == first.sanitized == "Писал <ACCOUNT_2>@domain-1.example про CN=host-1,<DN_1>"
+    assert (len(state.entities), len(state.surrogates)) == counts

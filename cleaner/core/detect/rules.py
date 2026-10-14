@@ -15,8 +15,10 @@ _BEFORE = 40
 _AFTER = 15
 
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-# «схема://пользователь:» прямо перед «…@хост» — это учётные данные адреса, а не e-mail.
-_USERINFO_BEFORE = re.compile(r"[a-z][a-z0-9+.-]{0,31}://[^\s/@]*$", re.IGNORECASE)
+# «схема://» прямо перед «…@хост»: то, что до «@», — пользователь адреса, а не e-mail. Знаки «?#=»
+# в нём значат, что это уже параметры адреса («?mail=ivanov@contoso.ru»), — тогда это e-mail.
+_USERINFO_BEFORE = re.compile(r"[a-z][a-z0-9+.-]{0,31}://(?P<user>[^\s/@]*)$", re.IGNORECASE)
+_NOT_USERINFO = re.compile(r"[?#=]")
 _IPV4_DOMAIN = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 # +7 или 8 и ровно десять цифр с любыми разделителями: «8 (4852) 12-34-56», «+7 916 1234567».
 _PHONE_RU = re.compile(r"(?<![\w+])(?:\+7|8)(?:[\s()-]{0,3}\d){10}(?!\d)")
@@ -125,7 +127,11 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
 
     for m in _EMAIL.finditer(text):
         local, _, domain = m.group().rpartition("@")
-        if _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()]):
+        url = _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()])
+        user = url.group("user") + local if url else ""
+        if url and not _NOT_USERINFO.search(user):
+            if ":" not in user:
+                add(m.start(), m.start() + len(local), EntityType.ACCOUNT)    # вход: https://ivanov@git…
             continue        # пароль из адреса найдёт слой секретов, хост — слой инфраструктуры
         if _IPV4_DOMAIN.fullmatch(domain):
             add(m.start(), m.start() + len(local), EntityType.ACCOUNT)     # вход вида ivanov@10.1.2.5

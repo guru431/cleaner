@@ -102,3 +102,18 @@ def test_birthdate_needs_context_and_a_real_date():
     assert (T.BIRTHDATE, "01.02.1980") in found("Иванов, 01.02.1980 г.р.")
     assert T.BIRTHDATE not in types("Встреча 01.02.2026")
     assert T.BIRTHDATE not in types("31.02.1980 г.р.")
+
+
+def test_login_in_a_url_is_an_account_not_an_email():
+    """Обзор пакета исправлений 1А, P1: «схема://ivanov@хост» — вход, и его скрывают."""
+    for text, login in (
+        ("git clone https://ivanov@git.contoso.ru/team/repo.git", "ivanov"),
+        ("ssh://ivanov@srv-db01.contoso.ru:22", "ivanov"),
+        ("ftp://petrov@files.contoso.ru", "petrov"),
+    ):
+        assert found(text) == {(T.ACCOUNT, login)}, text
+
+
+def test_address_in_url_parameters_is_an_email_and_url_credentials_are_not():
+    assert found("https://portal.contoso.ru?mail=ivanov@contoso.ru") == {(T.EMAIL, "ivanov@contoso.ru")}
+    assert found("REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru:5432/app") == set()
