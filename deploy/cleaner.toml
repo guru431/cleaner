@@ -1,0 +1,17 @@
+# Настройки Cleaner на example. Установщик кладёт файл в /etc/cleaner/cleaner.toml один раз
+# и дальше его не трогает: правка на сервере переживает обновление.
+
+[server]
+host = "example"   # только интерфейс сети клиентов example/19 (SEC-8)
+port = 5464
+tls_cert = "/etc/cleaner/tls/cert.pem"
+tls_key = "/etc/cleaner/tls/key.pem"
+
+[paths]
+data_dir = "/var/lib/cleaner"
+
+[limits]
+max_text_chars = 500000
+
+[ui]
+utc_offset_hours = 3

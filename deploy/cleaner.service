@@ -1,0 +1,38 @@
+[Unit]
+Description=Cleaner: очистка данных перед облачными LLM
+# Адрес example должен уже быть на интерфейсе: служба слушает только его.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=cleaner
+Group=cleaner
+WorkingDirectory=/opt/cleaner
+EnvironmentFile=/etc/cleaner/cleaner.env
+Environment="CLEANER_CONFIG=/etc/cleaner/cleaner.toml"
+Environment="HOME=/var/lib/cleaner"
+Environment="HF_HUB_OFFLINE=1"
+Environment="TRANSFORMERS_OFFLINE=1"
+Environment="HF_HUB_DISABLE_TELEMETRY=1"
+Environment="DO_NOT_TRACK=1"
+ExecStart=/opt/cleaner/.venv/bin/python -m cleaner serve
+MemoryMax=8G
+Nice=10
+CPUWeight=20
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/cleaner
+Restart=always
+RestartSec=20
+# До этапа 3 — как у остальных служб сервера. Этап 3 убирает эти четыре строки,
+# границы выхода наружу задаёт cleaner-egress.service.
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=example/19
+IPAddressAllow=172.16.0.0/12
+
+[Install]
+WantedBy=multi-user.target
