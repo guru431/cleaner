@@ -180,3 +180,16 @@ def test_short_value_under_a_key_is_kept():
     assert found("mysql --password Q7 db") == {"Q7"}
     for text in ("password: no", "Пароль: да", "Пароль: нет"):
         assert found(text) == set(), text
+
+
+def test_long_key_names_still_hold_secrets():
+    """Финальный обзор 1В: предел длины имени ключа пропускал длинные ключи Spring и переменных окружения."""
+    for text in (
+        "spring.security.oauth2.client.registration.keycloak-corporate.client-secret=Zx81kLmN02pQ",
+        "SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_KEYCLOAK_CORPORATE_CLIENT_SECRET=Zx81kLmN02pQ",
+    ):
+        assert found(text) == {"Zx81kLmN02pQ"}, text
+
+
+def test_pair_inside_another_value_is_still_found():
+    assert found("id:token=Zx81kLmN02pQ") == {"Zx81kLmN02pQ"}

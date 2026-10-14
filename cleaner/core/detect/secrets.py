@@ -38,13 +38,17 @@ _TOKEN = re.compile(
 _BARE = r"(?P<bare>(?:[^\s;&,\"'<>]|[;&,](?![\s;&,]|[\w.-]+=|$))+)"
 _VALUE = rf"""(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)'|{_BARE})"""
 # Имя ключа содержит слово целиком или склеенным: db_password, dbpass, userpwd, accessToken.
-# Длина частей вокруг слова ограничена: без предела цепочка «tokentoken…» без «=» даёт
-# квадратичный перебор.
-_KEY = (
-    r"[\w.-]{0,64}(?:password|passwd|passphrase|pass|pwd|secret|token|api[_-]?key|access[_-]?key"
-    r"|private[_-]?key|credential|пароль)[\w.-]{0,64}"
+# Имя берётся целиком одним проходом без возвратов («++»), а слово секрета ищется в нём кодом:
+# предел длины имени пропускал длинные ключи (spring….client-secret), а без предела выражение
+# со словом внутри перебирало «tokentoken…» квадратичное время. Значение разбирается отдельно и
+# только у ключа со словом секрета: пара без него не съедает соседнюю («id:token=…»).
+_KEY_NAME = re.compile(r"""(?<![\w.-])(?P<key>[\w.-]++)["']?\s*[:=]\s*""")
+_KEY_WORD = re.compile(
+    r"password|passwd|passphrase|pass|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key"
+    r"|credential|пароль",
+    re.IGNORECASE,
 )
-_KV = re.compile(rf"""(?<![\w.-])(?P<key>{_KEY})["']?\s*[:=]\s*{_VALUE}""", re.IGNORECASE)
+_VALUE_AT = re.compile(_VALUE)
 # Имена ключей, которые содержат те же слова, но хранят не секрет: счётчики токенов,
 # политики паролей, атрибуты Active Directory, обычные слова с «pass».
 _NOT_SECRET_KEY = re.compile(
@@ -179,13 +183,17 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         for pattern in (_PEM, _JWT, _TOKEN)
         for m in pattern.finditer(text)
     ]
-    for pattern in (_KV, _XML, _URL, _CLI, _SECURE, _AUTH, _BEARER):
+    for m in _KEY_NAME.finditer(text):
+        key = m.group("key")
+        if not _KEY_WORD.search(key) or (_NOT_SECRET_KEY.fullmatch(key) and not _SECRET_END.search(key)):
+            continue
+        value = _VALUE_AT.match(text, m.end())
+        bounds = _value(value, minimum=2) if value else None
+        if bounds:
+            spans.append(Span(*bounds, EntityType.SECRET, name))
+    for pattern in (_XML, _URL, _CLI, _SECURE, _AUTH, _BEARER):
         for m in pattern.finditer(text):
-            if pattern is _KV:
-                key = m.group("key")
-                if _NOT_SECRET_KEY.fullmatch(key) and not _SECRET_END.search(key):
-                    continue
-            bounds = _value(m, minimum=2 if pattern in (_KV, _CLI) else 3)
+            bounds = _value(m, minimum=2 if pattern is _CLI else 3)
             if bounds:
                 spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PHRASE.finditer(text):

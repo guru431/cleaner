@@ -15,10 +15,10 @@ from cleaner.core.types import ChatState, Settings
 @pytest.mark.parametrize(
     "text",
     [
-        "a.b." * 5000, "CN=a," * 5000, "x" * 20000, "1," * 10000, "a:" * 10000,
+        "a.b." * 5000, "CN=a," * 5000, "x" * 20000, "1," * 10000, "a:" * 10000, "token" * 20000 + "=Zx81kLmN02pQ",
         "token" * 4000, "pwd" * 7000, "a_pass" * 3500, "8 " * 50000,
     ],
-    ids=["dotted", "dn", "letters", "commas", "colons", "token", "pwd", "a_pass", "eights"],
+    ids=["dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights"],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
     ctx = DetectContext(Settings())
