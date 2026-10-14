@@ -3,7 +3,7 @@ import pytest
 from cleaner.core import leakcheck
 from cleaner.core.detect import infra
 from cleaner.core.pipeline import sanitize
-from cleaner.core.types import ChatRule, Policy, Settings, default_policies
+from cleaner.core.types import ChatRule, DictEntry, Policy, Settings, default_policies
 from cleaner.core.types import EntityType as T
 
 
@@ -51,6 +51,14 @@ def test_text_without_sensitive_data_is_returned_unchanged(state, settings, text
     result = sanitize(state, text, settings)
     assert (result.sanitized, result.spans, result.notices, result.leaks) == (text, [], [], [])
     assert state.entities == {}
+
+
+def test_dictionary_value_is_one_entity_whatever_the_spacing_and_spelling(state):
+    """Обзор 1А, P1: пробелы и «ё/е» не должны ни прятать значение, ни делить его на две метки."""
+    settings = Settings(always=(DictEntry(T.PERSON, "Иванов Иван Иванович", ("Семёнов",)),))
+    result = sanitize(state, "Иванов Иван  Иванович, он же Семенов", settings)
+    assert result.sanitized == "<PERSON_1>, он же <PERSON_1>"
+    assert result.deliverable
 
 
 def test_foreign_label_is_reported_and_left_alone(state, settings):

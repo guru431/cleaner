@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities import hostmap, labels, macsid, netmap
+from cleaner.core.match import normalize
 from cleaner.core.types import ChatState, Entity, EntityType, Settings, Surrogate
 
 T = EntityType
@@ -44,11 +45,11 @@ def canonical_key(type_: EntityType, value: str) -> str:
     if type_ is T.MAC:
         return macsid.mac_key(value)
     if type_ is T.ORG:
-        words = re.sub(r"[\"'«»“”„.]", " ", value.lower()).split()
+        words = re.sub(r"[\"'«»“”„.]", " ", normalize(value)).split()
         return " ".join(w for w in words if w not in _LEGAL_FORMS) or " ".join(words)
     if type_ is T.ADDRESS:
-        return " ".join(re.sub(r"[^\w\s]", " ", value.lower()).split())
-    return " ".join(value.lower().split())
+        return " ".join(re.sub(r"[^\w\s]", " ", normalize(value)).split())
+    return normalize(value)
 
 
 def _ip_text(value: str) -> str:
@@ -69,7 +70,7 @@ class Resolver:
         for entry in settings.always:
             key = self._dictionary_key(entry.type, entry.value)
             for form in (entry.value, *entry.aliases):
-                self.alias[(entry.type, form.lower())] = key
+                self.alias[(entry.type, normalize(form))] = key
         self.open_values = settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
         self.real_ips: set[str] = set()
 
@@ -154,7 +155,7 @@ class Resolver:
         return self._issue(entity, "label", make)
 
     def _labelled(self, type_: EntityType, value: str, origin: str) -> tuple[Entity, str]:
-        key = self.alias.get((type_, value.lower())) or canonical_key(type_, value)
+        key = self.alias.get((type_, normalize(value))) or canonical_key(type_, value)
         entity = self._entity(type_, key, value, origin)
         return entity, self._label(entity)
 
@@ -207,7 +208,8 @@ class Resolver:
     def _part(self, label: str, origin: str, leading: bool, standalone: bool = False) -> tuple[Entity, str]:
         """Одна часть имени узла. Искомой становится только отдельная или «похожая на имя узла» часть."""
         searchable = standalone or (leading and re.search(r"[\d-]", label) is not None)
-        entity = self._entity(T.HOST, label.lower(), label, origin, searchable)
+        key = self.alias.get((T.HOST, normalize(label))) or label.lower()
+        entity = self._entity(T.HOST, key, label, origin, searchable)
 
         def make() -> str:
             prefix = "host" if leading else "sub"
@@ -219,7 +221,7 @@ class Resolver:
         return entity, hostmap.mirror_case(label, self._issue(entity, "name", make))
 
     def _netbios(self, value: str, origin: str) -> tuple[Entity, str]:
-        key = self.alias.get((T.DOMAIN, value.lower())) or value.lower()
+        key = self.alias.get((T.DOMAIN, normalize(value))) or value.lower()
         entity = self._entity(T.DOMAIN, key, value, origin)
 
         def make() -> str:
@@ -242,7 +244,7 @@ class Resolver:
         if not registrable:                      # неизвестный суффикс: домен — две последние части
             parts = value.split(".")
             left, registrable = parts[:-2], ".".join(parts[-2:])
-        key = self.alias.get((T.DOMAIN, registrable.lower())) or registrable.lower()
+        key = self.alias.get((T.DOMAIN, normalize(registrable))) or registrable.lower()
         domain = self._entity(T.DOMAIN, key, registrable, origin)
 
         def make() -> str:

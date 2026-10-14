@@ -25,3 +25,17 @@ def test_none_mode_matches_anywhere():
 
 def test_search_ignores_case_and_returns_original_offsets():
     assert hits("Пишет ИВАНОВ", ("иванов", "letters", "p")) == [("ИВАНОВ", "p")]
+
+
+def test_any_run_of_whitespace_matches_a_single_space():
+    """Обзор 1А, P1: двойной пробел, неразрывный пробел и перевод строки между словами."""
+    text = "Иванов  Иван Иванович; Иванов\r\nИван Иванович"
+    found = hits(text, ("Иванов Иван Иванович", "letters", 1))
+    assert found == sorted([("Иванов  Иван Иванович", 1), ("Иванов\r\nИван Иванович", 1)])
+
+
+def test_yo_and_decomposed_letters_match_their_plain_forms():
+    """Обзор 1А, P1: «ё» и «е» — одна буква; «ё» из двух знаков (NFD) — тоже."""
+    text = "Семенов, Семёнов и СЕМЁНОВ"
+    found = hits(text, ("Семёнов", "letters", 1))
+    assert found == sorted([("Семенов", 1), ("Семёнов", 1), ("СЕМЁНОВ", 1)])

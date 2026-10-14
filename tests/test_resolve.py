@@ -58,6 +58,13 @@ def test_netbios_domain_shares_the_number_with_its_dns_name(state):
     assert resolve(state, "contoso.ru CONTOSO", *spans, settings=settings) == ["domain-1.example", "DOMAIN-1"]
 
 
+def test_aliases_of_a_host_entry_form_one_entity(state):
+    """Обзор 1А, P1: варианты написания хоста из словаря — одна сущность (раздел 5.8)."""
+    settings = Settings(always=(DictEntry(T.HOST, "srv-dc01", ("dc01",)),))
+    spans = (("srv-dc01", T.HOST), ("dc01", T.HOST))
+    assert resolve(state, "srv-dc01 dc01", *spans, settings=settings) == ["host-1", "host-1"]
+
+
 def test_addresses_macs_and_sids(state):
     sid = "S-1-5-21-1004336348-1177238915-682003330-1104"
     text = f"10.1.2.5 10.1.2.77 00:1A:2B:3C:4D:5E 00-1a-2b-3c-4d-5e {sid}"
