@@ -9,9 +9,11 @@ import regex
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
-from cleaner.core.detect.base import load_builtin
+from cleaner.core.detect.base import DetectorError, load_builtin
 from cleaner.core.detect.dictionary import PATTERN_TIMEOUT
+from cleaner.core.detect.llm import CompletionError
 from cleaner.core.types import EntityType, Policy
+from cleaner.engines import GATEWAY_KEY_ENV, LocalSettings, local_settings, save_local_settings
 from cleaner.storage.repo import User
 from cleaner.web import auth, render
 from cleaner.web.deps import Viewer, get_admin, get_form, page, repo_of
@@ -29,6 +31,7 @@ EVENTS = (
     "login", "login_failed", "logout", "chat_created", "chat_deleted", "sanitize", "restore", "edit", "leak",
     "dictionary_changed", "dictionary_import", "pattern_changed", "policy_changed",
     "user_created", "user_disabled", "user_enabled", "password_changed", "error", "jobs_interrupted",
+    "settings_changed",
 )
 _SHOWN = 50
 
@@ -221,6 +224,49 @@ def builtin(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
         ],
         never=[row for row in repo_of(request).dictionary() if row.list == "never"],
     )
+
+
+# --- локальная модель (FR-9.1, SEC-12) -------------------------------------------------
+
+def _local_page(request: Request, viewer: Viewer, result: str = "", failed: bool = False) -> Response:
+    engines = request.app.state.engines
+    status = engines.status() if engines is not None else {"key": False, "models": {}}
+    return page(
+        request, "local_llm.html", viewer, current=local_settings(repo_of(request)), status=status,
+        key_env=GATEWAY_KEY_ENV, result=result, failed=failed,
+    )
+
+
+@router.get("/local-llm")
+def local_llm(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
+    return _local_page(request, viewer)
+
+
+@router.post("/local-llm")
+def save_local_llm(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    url, model = form.get("url", "").strip(), form.get("model", "").strip()
+    if not url or not model:
+        raise HTTPException(400, "Укажите адрес и модель")
+    trusted = frozenset(line.strip().lower() for line in form.get("trusted", "").splitlines() if line.strip())
+    try:
+        save_local_settings(repo_of(request), LocalSettings(url, model, trusted, form.get("schema") != "prompt"))
+    except ValueError as exc:
+        raise HTTPException(400, f"Адрес отклонён: {exc}") from None
+    repo_of(request).audit("settings_changed", viewer.user.id, section="local_llm")
+    return _redirect("/settings/local-llm")
+
+
+@router.post("/local-llm/check")
+def check_local_llm(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    """Тестовый запрос без пользовательских данных (по образцу FR-8.2)."""
+    engines = request.app.state.engines
+    try:
+        if engines is None:
+            raise DetectorError("локальная модель не подключена к приложению")
+        engines.client().complete([{"role": "user", "content": "Ответь одним словом: готово"}], max_tokens=16)
+    except (DetectorError, CompletionError) as exc:
+        return _local_page(request, viewer, f"Проверка не прошла: {exc}", failed=True)
+    return _local_page(request, viewer, "Локальная модель ответила.")
 
 
 # --- пользователи (FR-12.1) -------------------------------------------------------

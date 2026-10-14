@@ -22,6 +22,8 @@ set -a; . data/cleaner.env; set +a          # главный ключ — в о�
 .venv/Scripts/python.exe -m cleaner serve    # http://127.0.0.1:5464
 ```
 
+Слой 5, проверка риска и распознавание сканов ходят в шлюз сервера (`http://example:30000/v1`, адрес задаётся на странице «Настройки → Локальная модель»). Ключ — строкой `CLEANER_GATEWAY_KEY=…` в `data/cleaner.env`, которую дописывает владелец (ключ `cleaner-dev`, `sudo ai-ctl gateway-key create cleaner-dev`); в репозиторий и в вывод сессии он не попадает.
+
 Без `--config` и `CLEANER_CONFIG` действуют настройки по умолчанию: адрес 127.0.0.1, данные в `data/` (каталог в `.gitignore`).
 
 ## Установка на example

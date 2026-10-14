@@ -15,6 +15,7 @@ from pathlib import Path
 from cleaner import config
 from cleaner.clock import SystemClock
 from cleaner.config import Config
+from cleaner.core.detect.base import DetectorError
 from cleaner.storage import crypto, db
 from cleaner.storage.repo import Repository
 from cleaner.web import auth
@@ -58,6 +59,18 @@ def _repository(cfg: Config, master: bytes | None = None, create: bool = False) 
         conn.close()
 
 
+# Библиотеки моделей не обращаются в интернет (NFR-2, раздел 2 спецификации); на сервере то же задаёт юнит.
+OFFLINE = {
+    "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1",
+    "DO_NOT_TRACK": "1", "TOKENIZERS_PARALLELISM": "false",
+}
+
+
+def _offline() -> None:
+    """До первого импорта библиотек моделей: они читают переменные при импорте."""
+    os.environ.update(OFFLINE)
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     cfg, env_file = _config(args), Path(args.env_file)
     if cfg.db_path.exists():
@@ -77,8 +90,10 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    _offline()
     import uvicorn
 
+    from cleaner.engines import Engines
     from cleaner.web.app import create_app
 
     cfg = _config(args)
@@ -86,7 +101,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     with _repository(cfg) as repo:
         app = create_app(
             repo, SystemClock(), secure_cookies=bool(cfg.tls_cert), max_text_chars=cfg.max_text_chars,
-            tz=timezone(timedelta(hours=cfg.utc_offset_hours)),
+            tz=timezone(timedelta(hours=cfg.utc_offset_hours)), engines=Engines(repo, cfg.models_dir),
+            max_file_mb=cfg.max_file_mb,
         )
         # Журнал доступа выключен: в строке запроса бывает поиск по названиям чатов (SEC-11).
         uvicorn.run(
@@ -205,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         return handlers[args.command](args)
-    except (ValueError, OSError, sqlite3.Error, crypto.CryptoError) as exc:
+    except (ValueError, OSError, sqlite3.Error, crypto.CryptoError, DetectorError) as exc:
         print(f"ошибка: {exc}", file=sys.stderr)
         return 1
 

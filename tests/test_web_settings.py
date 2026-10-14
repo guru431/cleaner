@@ -4,6 +4,8 @@ import regex
 
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Policy
+from cleaner.engines import LocalSettings, local_settings
+from cleaner.local_llm import LocalLLMError
 
 
 def test_settings_are_for_admins_only(ivan):
@@ -112,3 +114,23 @@ def test_audit_is_filtered_by_event_user_and_day(browser, repo, clock):
     assert events(since="2026-10-15") == ["login"]
     assert events(until="2026-10-14") == ["restore"]
     assert admin.get("/settings/audit", since="вчера").status_code == 400
+
+
+def test_local_model_settings_are_saved_and_a_public_address_is_refused(boss, repo):
+    boss.post("/settings/local-llm", url="http://example:30000/v1", model="qwen-27b-fast", trusted="", schema="prompt")
+    assert local_settings(repo) == LocalSettings("http://example:30000/v1", "qwen-27b-fast", frozenset(), False)
+    response = boss.post("/settings/local-llm", url="http://8.8.8.8:30000/v1", model="x", trusted="")
+    assert response.status_code == 400 and "не петлевой" in response.text
+    assert local_settings(repo).url == "http://example:30000/v1"
+    assert [e.details for e in repo.audit_events("settings_changed")] == [{"section": "local_llm"}]
+
+
+def test_local_model_check_reports_the_outcome(boss, engines):
+    assert "Локальная модель ответила" in boss.post("/settings/local-llm/check").text
+    engines.completer.error = LocalLLMError("unavailable", "локальная модель недоступна")
+    assert "Проверка не прошла: локальная модель недоступна" in boss.post("/settings/local-llm/check").text
+
+
+def test_local_model_settings_are_for_admins_only(ivan):
+    assert ivan.get("/settings/local-llm").status_code == 403
+    assert ivan.post("/settings/local-llm", url="http://127.0.0.1:30000/v1", model="m").status_code == 403

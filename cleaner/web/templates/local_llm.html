@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Локальная модель — Cleaner{% endblock %}
+{% block main %}
+<p><a href="/settings">← Настройки</a></p>
+<h1>Локальная модель</h1>
+<p>Через шлюз сервера идут слой 5, проверка остаточного риска и распознавание сканов. Адрес — только петлевой, частной сети или из списка доверенных.</p>
+<p>Ключ шлюза ({{ key_env }}): {% if status.key %}задан в окружении службы{% else %}<span class="error">не задан</span>{% endif %}.</p>
+<form method="post" action="/settings/local-llm">
+  {% include "_csrf.html" %}
+  <label>Адрес, OpenAI-совместимый, до /v1 <input name="url" value="{{ current.url }}" required></label>
+  <label>Модель <input name="model" value="{{ current.model }}" required></label>
+  <label>Доверенные узлы вне частных сетей — по одному в строке <textarea name="trusted" rows="3">{{ current.trusted | sort | join("\n") }}</textarea></label>
+  <label>Схема ответа <select name="schema">
+    <option value="response_format"{% if current.schema %} selected{% endif %}>параметром response_format</option>
+    <option value="prompt"{% if not current.schema %} selected{% endif %}>только в тексте запроса</option>
+  </select></label>
+  <button>Сохранить</button>
+</form>
+<form method="post" action="/settings/local-llm/check">{% include "_csrf.html" %}<button>Проверить сохранённую настройку</button></form>
+{% if result %}<p class="{{ 'error' if failed else 'muted' }}">{{ result }}</p>{% endif %}
+<h2>Модели на диске</h2>
+<ul>
+  {% for name, present in status.models.items() %}
+  <li>{{ name }}: {% if present %}загружена{% else %}<span class="error">нет — выполните models download</span>{% endif %}</li>
+  {% endfor %}
+</ul>
+{% endblock %}

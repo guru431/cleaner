@@ -62,17 +62,40 @@ class FakeSecondPass:
         ]
 
 
+class FakeCompleter:
+    """Локальная модель для тестов: отдаёт заготовленные ответы по очереди и запоминает запросы."""
+
+    def __init__(self, *answers: str) -> None:
+        self.answers = list(answers)
+        self.requests: list[dict] = []
+        self.error: Exception | None = None
+
+    def complete(self, messages, *, max_tokens, json_schema=None) -> str:
+        self.requests.append({"messages": messages, "max_tokens": max_tokens, "json_schema": json_schema})
+        if self.error is not None:
+            raise self.error
+        return self.answers.pop(0) if self.answers else '{"items": []}'
+
+
 class FakeEngines:
     """Тяжёлые и сетевые части для тестов: модели и локальная модель подменены, сети нет."""
 
     def __init__(self) -> None:
         self.ner_layer = FakeNer()
         self.second = FakeSecondPass()
+        self.completer = FakeCompleter()
         self.unavailable: str | None = None     # причина, по которой включённый слой недоступен
 
     def _check(self) -> None:
         if self.unavailable:
             raise DetectorError(self.unavailable)
+
+    def status(self) -> dict:
+        return {"key": True, "models": {}}
+
+    def client(self):
+        self._check()
+        return self.completer
 
     def ner(self):
         self._check()

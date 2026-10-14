@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import uvicorn
 from argon2 import PasswordHasher
@@ -63,6 +65,8 @@ def test_users_key_export_import_and_backup(home, monkeypatch, clock):
 
 
 def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monkeypatch):
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY", "DO_NOT_TRACK", "TOKENIZERS_PARALLELISM"):
+        monkeypatch.setenv(name, "")
     monkeypatch.setenv(crypto.MASTER_KEY_ENV, init(home))
     calls = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: calls.append(kwargs))
@@ -73,6 +77,7 @@ def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monk
     assert main(["serve"]) == 0
     [kwargs] = calls
     assert (kwargs["host"], kwargs["ssl_certfile"], kwargs["access_log"]) == ("example", "c.pem", False)
+    assert os.environ["HF_HUB_OFFLINE"] == "1" and os.environ["TRANSFORMERS_OFFLINE"] == "1"
 
 
 def test_models_verify_names_what_is_missing(home, capsys):
