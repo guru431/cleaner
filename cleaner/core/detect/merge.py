@@ -1,6 +1,7 @@
 """Объединение фрагментов разных слоёв."""
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -31,6 +32,49 @@ def _rank(span: Span) -> int:
     return 3
 
 
+# Шаг 3 (раздел 5.7): части имени рядом — фамилия, имя, отчество, инициалы — один PERSON.
+_NAME_GAP = re.compile(r"[ \t]+")
+_INITIAL_GAP = re.compile(r"\.[ \t]*")
+_LONE_LETTER = re.compile(r"(?<![^\W\d_])[^\W\d_]$")
+_INITIALS_AFTER = re.compile(r"[ \t]+([А-ЯЁA-Z]\.(?:[ \t]?[А-ЯЁA-Z]\.)?)")
+_INITIALS_BEFORE = re.compile(r"(?<![^\W\d_])([А-ЯЁA-Z]\.(?:[ \t]?[А-ЯЁA-Z]\.)?)[ \t]*$")
+
+
+def _adjacent(text: str, previous: MergedSpan, span: MergedSpan) -> bool:
+    """Между частями — только пробелы; «точка с пробелом» — только после инициала («И. Иванов»), а не в конце предложения."""
+    gap = text[previous.end:span.start]
+    if not gap or _NAME_GAP.fullmatch(gap):
+        return True
+    return bool(_INITIAL_GAP.fullmatch(gap)) and _LONE_LETTER.search(text, previous.start, previous.end) is not None
+
+
+def _with_initials(text: str, span: MergedSpan, floor: int, ceiling: int) -> MergedSpan:
+    """Инициалы перед именем и после него — часть упоминания; соседние фрагменты не задеваются."""
+    start, end = span.start, span.end
+    after = _INITIALS_AFTER.match(text, end, ceiling)
+    if after:
+        end = after.end(1)
+    before = _INITIALS_BEFORE.search(text, floor, start)
+    if before:
+        start = before.start(1)
+    return MergedSpan(start, end, span.type, span.sources)
+
+
+def _join_names(text: str, spans: list[MergedSpan]) -> list[MergedSpan]:
+    out: list[MergedSpan] = []
+    for index, span in enumerate(spans):
+        if span.type is EntityType.PERSON:
+            ceiling = spans[index + 1].start if index + 1 < len(spans) else len(text)
+            span = _with_initials(text, span, out[-1].end if out else 0, ceiling)
+            previous = out[-1] if out else None
+            if previous is not None and previous.type is EntityType.PERSON and _adjacent(text, previous, span):
+                sources = tuple(dict.fromkeys(previous.sources + span.sources))
+                out[-1] = MergedSpan(previous.start, span.end, EntityType.PERSON, sources)
+                continue
+        out.append(span)
+    return out
+
+
 def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSpan]:
     policies = ctx.settings.policies
     active = sorted(
@@ -56,4 +100,4 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
             continue
         senior = min(group, key=lambda s: (_rank(s), s.start - s.end))
         merged.append(MergedSpan(start, end, senior.type, sources))
-    return merged
+    return _join_names(text, merged)

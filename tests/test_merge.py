@@ -47,3 +47,37 @@ def test_manual_rule_survives_the_never_list():
 def test_types_switched_off_are_dropped():
     ctx = DetectContext(Settings(policies=default_policies() | {T.MAC: Policy.OFF}))
     assert merge("00:1A:2B:3C:4D:5E", [Span(0, 17, T.MAC, "infra")], ctx) == []
+
+
+def test_name_parts_side_by_side_become_one_person():
+    text = "Иванов Иван Иванович"
+    spans = [Span(0, 6, T.PERSON, "ner"), Span(7, 11, T.PERSON, "ner"), Span(12, 20, T.PERSON, "dict")]
+    assert merge(text, spans, CTX) == [MergedSpan(0, 20, T.PERSON, ("ner", "dict"))]
+
+
+def test_initials_next_to_a_name_join_it():
+    for text, span, expected in (
+        ("Иванов И.И. пришёл", Span(0, 6, T.PERSON, "ner"), (0, 11)),
+        ("Иванов И. И. пришёл", Span(0, 6, T.PERSON, "ner"), (0, 12)),
+        ("пришёл И.И. Иванов", Span(12, 18, T.PERSON, "ner"), (7, 18)),
+        ("от J. Smith", Span(6, 11, T.PERSON, "ner"), (3, 11)),
+    ):
+        [merged] = merge(text, [span], CTX)
+        assert (merged.start, merged.end) == expected, text
+
+
+def test_initial_marked_without_its_dot_joins_the_surname():
+    text = "И. Иванов пришёл"
+    assert merge(text, [Span(0, 1, T.PERSON, "ner"), Span(3, 9, T.PERSON, "ner")], CTX) == [MergedSpan(0, 9, T.PERSON, ("ner",))]
+
+
+def test_sentence_end_list_and_other_types_are_not_joined():
+    text = "Ответил Иванов. В итоге a@x.example"
+    spans = [Span(8, 14, T.PERSON, "ner"), Span(24, 35, T.EMAIL, "rules", validated=True)]
+    assert [(m.start, m.end) for m in merge(text, spans, CTX)] == [(8, 14), (24, 35)]
+    text = "Иванову и Петрову"
+    spans = [Span(0, 7, T.PERSON, "ner"), Span(10, 17, T.PERSON, "ner")]
+    assert [(m.start, m.end) for m in merge(text, spans, CTX)] == [(0, 7), (10, 17)]
+    text = "Писал Петров Сергей. Иванов Иван согласен"
+    spans = [Span(6, 19, T.PERSON, "ner"), Span(21, 32, T.PERSON, "ner")]
+    assert [(m.start, m.end) for m in merge(text, spans, CTX)] == [(6, 19), (21, 32)]
