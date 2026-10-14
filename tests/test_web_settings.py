@@ -146,3 +146,14 @@ def test_gold_list_shows_counts_but_no_text_and_only_to_admins(boss, ivan, repo)
     assert repo.gold() == []
     assert boss.post(f"/settings/gold/{gold_id}/delete").status_code == 404
     assert len(repo.audit_events("gold_deleted")) == 1
+
+
+def test_admin_sets_the_layer_defaults(boss, repo, ivan):
+    boss.post("/settings/layers", llm="yes")
+    assert repo.layer_defaults() == {"ner": False, "llm": True}
+    boss.post("/settings/layers", ner="yes")
+    assert repo.layer_defaults() == {"ner": True, "llm": False}
+    assert [e.details for e in repo.audit_events("settings_changed")] == [
+        {"section": "layers", "ner": True, "llm": False}, {"section": "layers", "ner": False, "llm": True},
+    ]
+    assert ivan.post("/settings/layers", ner="yes").status_code == 403

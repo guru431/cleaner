@@ -12,6 +12,17 @@
       </form>
       <a href="/chats/{{ chat.id }}/entities">Таблица замен</a>
     </header>
+    <section class="layers">
+      {% for name, label in layer_names.items() %}
+      <form method="post" action="/chats/{{ chat.id }}/layers">
+        {% include "_csrf.html" %}
+        <input type="hidden" name="layer" value="{{ name }}">
+        <input type="hidden" name="enabled" value="{{ 'no' if layers[name] else 'yes' }}">
+        <span{% if not layers[name] %} class="warn"{% endif %}>{{ label }}: {% if layers[name] %}включён{% else %}выключен{% endif %}</span>
+        <button>{% if layers[name] %}Выключить для этого чата{% else %}Включить для этого чата{% endif %}</button>
+      </form>
+      {% endfor %}
+    </section>
 
     {% for e in entries %}
     <article class="item" id="item-{{ e.id }}">

@@ -32,7 +32,7 @@ EVENTS = (
     "login", "login_failed", "logout", "chat_created", "chat_deleted", "sanitize", "restore", "edit", "leak",
     "dictionary_changed", "dictionary_import", "pattern_changed", "policy_changed",
     "user_created", "user_disabled", "user_enabled", "password_changed", "error", "jobs_interrupted",
-    "settings_changed", "gold_added", "gold_deleted", "risk_check",
+    "settings_changed", "gold_added", "gold_deleted", "risk_check", "layer_changed",
 )
 _SHOWN = 50
 
@@ -234,7 +234,7 @@ def _local_page(request: Request, viewer: Viewer, result: str = "", failed: bool
     status = engines.status() if engines is not None else {"key": False, "models": {}}
     return page(
         request, "local_llm.html", viewer, current=local_settings(repo_of(request)), status=status,
-        key_env=GATEWAY_KEY_ENV, result=result, failed=failed,
+        key_env=GATEWAY_KEY_ENV, result=result, failed=failed, defaults=repo_of(request).layer_defaults(),
     )
 
 
@@ -268,6 +268,16 @@ def check_local_llm(request: Request, form: dict[str, str] = Depends(get_form), 
     except (DetectorError, CompletionError) as exc:
         return _local_page(request, viewer, f"Проверка не прошла: {exc}", failed=True)
     return _local_page(request, viewer, "Локальная модель ответила.")
+
+
+@router.post("/layers")
+def save_layers(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    """Умолчания слоёв 4 и 5 для чатов, где пользователь не выбирал сам (FR-3.8)."""
+    values = {"ner": form.get("ner") == "yes", "llm": form.get("llm") == "yes"}
+    repo = repo_of(request)
+    repo.set_layer_defaults(values)
+    repo.audit("settings_changed", viewer.user.id, section="layers", **values)
+    return _redirect("/settings/local-llm")
 
 
 # --- пользователи (FR-12.1) -------------------------------------------------------

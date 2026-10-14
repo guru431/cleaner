@@ -14,7 +14,7 @@ from cleaner.service import ChatService, EditRefused
 from cleaner.storage.repo import Item
 from cleaner.web import render
 from cleaner.web.deps import Viewer, get_admin, get_form, get_viewer, own_chat, page, repo_of, service_of
-from cleaner.web.routes_chats import can_retry, input_view
+from cleaner.web.routes_chats import LAYER_NAMES, can_retry, input_view
 
 router = APIRouter()
 _ITEM_ID = re.compile(r"[0-9a-f]{32}")
@@ -54,6 +54,13 @@ def _warnings(item: Item) -> list[str]:
             f"На страницах {_pages(item.meta['unread_pages'])} распознавание не нашло текста: "
             "их содержимое в очищенный текст не попало."
         )
+    ran = item.meta.get("layers", [])
+    for layer, label in LAYER_NAMES.items():
+        if layer not in ran:
+            warnings.append(
+                f"{label} для этого текста не выполнялся: слой выключен. Если он нужен — включите его для чата "
+                "и нажмите «Очистить заново всеми включёнными слоями»."
+            )
     return warnings
 
 

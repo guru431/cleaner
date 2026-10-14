@@ -11,6 +11,7 @@ from cleaner.web.deps import Upload, Viewer, get_form, get_upload, get_viewer, o
 
 router = APIRouter()
 _TITLE = 200
+LAYER_NAMES = {"ner": "Слой 4 — модели распознавания имён", "llm": "Слой 5 — локальная модель"}
 
 
 def chat_list(request: Request, viewer: Viewer, query: str = "") -> list[Chat]:
@@ -81,6 +82,7 @@ def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depe
     return page(
         request, "chat.html", viewer, chat=chat, chats=chat_list(request, viewer, q), q=q, entries=_entries(view),
         max_file_mb=request.app.state.max_file_bytes // (1024 * 1024),
+        layers=service_of(request).layers(chat_id), layer_names=LAYER_NAMES,
     )
 
 
@@ -157,6 +159,17 @@ def retry(request: Request, chat_id: str, item_id: str, form: dict[str, str] = D
     except KeyError:
         raise HTTPException(404, "Текст не найден") from None
     return RedirectResponse(f"/chats/{chat_id}/items/{item_id}", status_code=303)
+
+
+@router.post("/chats/{chat_id}/layers")
+def set_layer(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
+    """FR-3.8: слои 4 и 5 отключаются для чата явным действием; действует на следующие очистки."""
+    own_chat(request, chat_id, viewer)
+    try:
+        service_of(request).set_layer(chat_id, viewer.user.id, form.get("layer", ""), form.get("enabled") == "yes")
+    except EditRefused as exc:
+        raise HTTPException(400, str(exc)) from None
+    return RedirectResponse(f"/chats/{chat_id}", status_code=303)
 
 
 @router.get("/chats/{chat_id}/items/{item_id}/download")

@@ -123,3 +123,21 @@ def test_text_left_running_fails_at_start_and_can_be_run_again(ivan, repo, clock
     ivan.post(f"/chats/{chat_id}/items/{item.id}/retry")
     assert repo.item(chat_id, item.id).sanitized == "почта <EMAIL_1>"
     assert ivan.post(f"/chats/{chat_id}/items/{'0' * 32}/retry").status_code == 404
+
+
+def flat(html: str) -> str:
+    return " ".join(html.split())
+
+
+def test_layer_is_switched_off_for_a_chat_shown_on_the_review_and_logged(ivan, repo):
+    """FR-3.8: отключение — явным действием, видно на экране проверки, записано в журнал."""
+    chat_id = ivan.chat()
+    assert "Слой 4 — модели распознавания имён: включён" in flat(ivan.get(f"/chats/{chat_id}").text)
+    ivan.post(f"/chats/{chat_id}/layers", layer="ner", enabled="no")
+    assert "Слой 4 — модели распознавания имён: выключен" in flat(ivan.get(f"/chats/{chat_id}").text)
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    item_id = repo.items(chat_id)[0].id
+    page = flat(ivan.get(f"/chats/{chat_id}/items/{item_id}").text)
+    assert "Слой 4 — модели распознавания имён для этого текста не выполнялся" in page
+    assert [e.details for e in repo.audit_events("layer_changed")] == [{"layer": "ner", "enabled": False}]
+    assert ivan.post(f"/chats/{chat_id}/layers", layer="rules", enabled="no").status_code == 400

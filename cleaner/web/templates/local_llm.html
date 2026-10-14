@@ -18,6 +18,14 @@
 </form>
 <form method="post" action="/settings/local-llm/check">{% include "_csrf.html" %}<button>Проверить сохранённую настройку</button></form>
 {% if result %}<p class="{{ 'error' if failed else 'muted' }}">{{ result }}</p>{% endif %}
+<h2>Слои 4 и 5 по умолчанию</h2>
+<p>Действует в чатах, где пользователь не включал и не выключал слой сам.</p>
+<form method="post" action="/settings/layers">
+  {% include "_csrf.html" %}
+  <label><input type="checkbox" name="ner" value="yes"{% if defaults.ner %} checked{% endif %}> Слой 4 — модели распознавания имён</label>
+  <label><input type="checkbox" name="llm" value="yes"{% if defaults.llm %} checked{% endif %}> Слой 5 — локальная модель</label>
+  <button>Сохранить умолчания</button>
+</form>
 <h2>Модели на диске</h2>
 <ul>
   {% for name, present in status.models.items() %}
