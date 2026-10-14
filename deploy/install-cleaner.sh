@@ -60,6 +60,10 @@ require_safe_src() {
 require_safe_src "$SRC"
 [[ -d "$SRC/cleaner" && -f "$SRC/requirements-linux.txt" ]] || fail "$SRC — не дерево репозитория Cleaner"
 command -v python3.12 >/dev/null || fail "нет python3.12"
+# Первая установка или обновление — решается до любых изменений: откат обновления не должен
+# останавливать работающую службу, если до замены файлов дело не дошло.
+FIRST_INSTALL=1
+[[ -d "$APP/cleaner" || -f "$UNIT" ]] && FIRST_INSTALL=0
 
 # --- учётная запись и каталоги --------------------------------------------------
 # Своя учётная запись, не aiservice: цепочка наблюдения сервера пишет исходящие
@@ -103,16 +107,20 @@ PREV_UNIT=""
 rollback() {
     trap - ERR
     log "ОТКАТ: $1"
-    if [[ -n "$PREV_CODE" ]]; then rm -rf "$APP/cleaner"; mv "$PREV_CODE" "$APP/cleaner"; fi
-    if [[ -n "$PREV_VENV" ]]; then rm -rf "$APP/.venv"; mv "$PREV_VENV" "$APP/.venv"; fi
-    if [[ -n "$PREV_UNIT" ]]; then cp -a "$PREV_UNIT" "$UNIT"; fi
+    local swapped=0
+    if [[ -n "$PREV_CODE" ]]; then rm -rf "$APP/cleaner"; mv "$PREV_CODE" "$APP/cleaner"; swapped=1; fi
+    if [[ -n "$PREV_VENV" ]]; then rm -rf "$APP/.venv"; mv "$PREV_VENV" "$APP/.venv"; swapped=1; fi
+    if [[ -n "$PREV_UNIT" ]]; then cp -a "$PREV_UNIT" "$UNIT"; swapped=1; fi
+    rm -rf "$APP/.venv.new" "$APP/cleaner.new"
     systemctl daemon-reload || true
-    if [[ -n "$PREV_CODE" ]]; then
+    if [[ $FIRST_INSTALL -eq 1 ]]; then
+        systemctl disable --now cleaner.service >/dev/null 2>&1 || true
+        log "первая установка не удалась: служба остановлена, ключ и база не тронуты"
+    elif [[ $swapped -eq 1 ]]; then
         systemctl restart cleaner.service || true
         log "прежняя версия возвращена"
     else
-        systemctl disable --now cleaner.service >/dev/null 2>&1 || true
-        log "первая установка не удалась: служба остановлена, ключ и база не тронуты"
+        log "обновление не удалось до замены файлов: работающая служба не тронута"
     fi
     journalctl -u cleaner.service -n 30 --no-pager || true
     exit 1
