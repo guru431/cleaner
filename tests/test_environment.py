@@ -28,3 +28,13 @@ def test_detect_secrets_scans_a_plain_string():
     with transient_settings({"plugins_used": [{"name": n} for n in names]}):
         found = [secret.secret_value for secret in scan_line("aws_access_key_id = REDACTED_AWS_ACCESS_KEY")]
     assert "REDACTED_AWS_ACCESS_KEY" in found
+
+
+def test_pymorphy3_knows_name_parts_offline():
+    """Этап 2: словарь pymorphy3 ставится пакетом и работает без сети (раздел 5.9)."""
+    import pymorphy3
+
+    morph = pymorphy3.MorphAnalyzer()
+    assert any("Surn" in p.tag and p.normal_form == "иванов" for p in morph.parse("Иванову"))
+    assert any("Name" in p.tag and p.normal_form == "иван" for p in morph.parse("Ивана"))
+    assert any("Patr" in p.tag for p in morph.parse("Петровича"))

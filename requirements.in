@@ -7,3 +7,16 @@ jinja2
 python-multipart
 cryptography
 argon2-cffi
+# этапы 2 и 4: документы, модели распознавания имён, разбор имён, клиент шлюза
+docling-slim[format-pdf,format-office,format-email,format-html,convert-core,models-local]
+# распознавание таблиц в PDF (TableFormer) импортирует cv2, а slim-сборка его не ставит
+docling-ibm-models[opencv-python-headless]
+gliner
+transformers
+# сборка torch без CUDA: с PyPI на Linux она тянет пакеты NVIDIA на несколько гигабайт; 2.14.1+cpu
+# новее 2.14.1 по PEP 440, поэтому резолвер берёт её на обеих платформах
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+pymorphy3
+httpx
+huggingface-hub

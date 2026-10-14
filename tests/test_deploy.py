@@ -38,7 +38,7 @@ def test_unit_declares_what_the_spec_and_the_server_checks_expect():
 def _pins(path: Path) -> dict[str, str]:
     pins = {}
     for line in path.read_text(encoding="utf-8").splitlines():
-        if match := re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)", line):
+        if match := re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==(\S+)", line):
             pins[re.sub(r"[-_.]+", "-", match.group(1)).lower()] = match.group(2)
     return pins
 
@@ -65,3 +65,12 @@ def test_scripts_use_the_addresses_and_paths_of_the_unit_and_the_config(script):
         "APP=/opt/cleaner", f"DATA={cfg.data_dir.as_posix()}", "ETC=/etc/cleaner",
     ):
         assert line in lines, line
+
+
+def test_server_dependencies_take_torch_without_cuda():
+    """Сборка torch с PyPI тянет на Linux пакеты NVIDIA; видеокарта сервера занята языковой моделью."""
+    text = (ROOT / "requirements-linux.txt").read_text(encoding="utf-8")
+    assert "--extra-index-url https://download.pytorch.org/whl/cpu" in text.splitlines()
+    pins = _pins(ROOT / "requirements-linux.txt")
+    assert pins["torch"].endswith("+cpu")
+    assert not [name for name in pins if name.startswith(("nvidia-", "cuda-")) or name == "triton"]

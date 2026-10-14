@@ -2,8 +2,9 @@
 
 Кандидатов находит pip из .venv машины разработки: он разрешает зависимости для чужой платформы
 (--platform, --python-version, только колёса) и при --dry-run ничего не ставит. Маркеры зависимостей
-pip при этом считает по машине, где запущен (Windows, Python 3.14), поэтому нужный серверу набор
-пересчитывается заново по маркерам Linux и Python 3.12 из метаданных, которые pip вернул.
+pip сам считает по машине, где запущен (Windows, Python 3.14): тогда пакет только для Windows без колёс
+для Linux (pywin32 у docling-parse) делает разрешение невозможным. Поэтому pip запускается с маркерами
+сервера (SERVER), а нужный серверу набор ещё раз пересчитывается по ним из метаданных, которые pip вернул.
 
 Версии берутся из файлов машины разработки — на сервере работает тот же проверенный код; контрольные
 суммы — оттуда же: pip-compile --generate-hashes записывает суммы всех файлов версии, в том числе
@@ -31,8 +32,18 @@ SERVER = {
     "platform_system": "Linux", "platform_version": "", "python_full_version": "3.12.3",
     "python_version": "3.12", "sys_platform": "linux",
 }
-_PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)")
+# pip-compile пишет закреплённый пакет с дополнениями так: docling-slim[format-pdf,…]==2.139.0
+_PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==(\S+)")
 _HASH = re.compile(r"--hash=(sha256:[0-9a-f]{64})")
+# pip в отдельном процессе с маркерами сервера: packaging берёт окружение из default_environment() при каждой проверке.
+_PIP_WITH_SERVER_MARKERS = (
+    "import json, sys\n"
+    "from pip._vendor.packaging import markers\n"
+    "server = json.loads(sys.argv[1])\n"
+    "markers.default_environment = lambda: dict(server)\n"
+    "from pip._internal.cli.main import main\n"
+    "sys.exit(main(sys.argv[2:]))\n"
+)
 
 
 def canonical(name: str) -> str:
@@ -52,16 +63,20 @@ def read_lock(path: Path) -> dict[str, tuple[str, list[str]]]:
     return pins
 
 
-def candidates(wanted: list[str], pins: dict[str, tuple[str, list[str]]]) -> dict[str, list[str]]:
+def candidates(
+    wanted: list[str], pins: dict[str, tuple[str, list[str]]], indexes: list[str] = (),
+) -> dict[str, list[str]]:
     """Пакет → его Requires-Dist для всего, что pip выбрал бы при версиях из pins."""
     with tempfile.TemporaryDirectory() as tmp:
         constraints, report = Path(tmp) / "constraints.txt", Path(tmp) / "report.json"
         constraints.write_text("".join(f"{name}=={version}\n" for name, (version, _) in pins.items()), encoding="utf-8")
         subprocess.run(
             [
-                sys.executable, "-m", "pip", "install", "--dry-run", "--ignore-installed", "--quiet",
+                sys.executable, "-c", _PIP_WITH_SERVER_MARKERS, json.dumps(SERVER),
+                "install", "--dry-run", "--ignore-installed", "--quiet",
                 "--report", str(report), "--python-version", "3.12", "--implementation", "cp", "--abi", "cp312",
                 "--only-binary=:all:", *(f"--platform={platform}" for platform in PLATFORMS),
+                *(part for option in indexes for part in option.split(maxsplit=1)),
                 "-c", str(constraints), *wanted,
             ],
             check=True,
@@ -101,11 +116,11 @@ def main(argv: list[str]) -> int:
     for lock in locks:
         pins.update(read_lock(lock))
     # Строки «-c …» не передаются: файл с контрольными суммами включил бы у pip режим --require-hashes.
-    wanted = [
-        line.strip() for line in source.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith(("#", "-"))
-    ]
-    names, missing = closure(wanted, candidates(wanted, pins))
+    lines = [line.strip() for line in source.read_text(encoding="utf-8").splitlines()]
+    wanted = [line for line in lines if line and not line.startswith(("#", "-"))]
+    # Индексы (сборка torch без CUDA) — и разрешению зависимостей, и установщику на сервере: pip читает их из файла.
+    indexes = [line for line in lines if line.startswith(("--extra-index-url ", "--index-url "))]
+    names, missing = closure(wanted, candidates(wanted, pins, indexes))
     missing += [name for name in names if name not in pins]
     if missing:
         print(f"не собрать: {', '.join(sorted(missing))} — нет у pip для этой платформы или в файлах машины разработки")
@@ -113,6 +128,7 @@ def main(argv: list[str]) -> int:
     lines = [
         f"# Сервер: Linux x86_64, CPython 3.12. Собран deploy/lock_linux.py из {source.name};",
         f"# версии и контрольные суммы — из {', '.join(lock.name for lock in locks)}. Руками не править.",
+        *indexes,
     ]
     for name in names:
         version, hashes = pins[name]

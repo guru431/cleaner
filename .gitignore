@@ -12,3 +12,6 @@ __pycache__/
 
 # local data: development database and master key
 /data/
+
+# models downloaded by `cleaner models download` for development
+/models/
