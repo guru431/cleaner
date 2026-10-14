@@ -5,6 +5,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from cleaner import config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,3 +51,17 @@ def test_server_dependencies_pin_the_versions_tested_on_the_dev_machine():
         assert server and {package: dev.get(package) for package in server} == server, name
         blocks = (ROOT / name).read_text(encoding="utf-8").split("==")[1:]
         assert all("--hash=sha256:" in block for block in blocks), name
+
+
+@pytest.mark.parametrize("script", ["check-cleaner.sh"])
+def test_scripts_use_the_addresses_and_paths_of_the_unit_and_the_config(script):
+    """Установщик и проверка живут отдельно от юнита и настроек: адрес, порт и каталоги у них общие."""
+    cfg = config.load(DEPLOY / "cleaner.toml")
+    text = (DEPLOY / script).read_text(encoding="utf-8")
+    assert text.startswith("#!/usr/bin/env bash\n") and "\r" not in text
+    lines = text.splitlines()
+    for line in (
+        f"HOST_IP={cfg.host}", f"PORT={cfg.port}", "CLIENTS=example/19",
+        "APP=/opt/cleaner", f"DATA={cfg.data_dir.as_posix()}", "ETC=/etc/cleaner",
+    ):
+        assert line in lines, line
