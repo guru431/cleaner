@@ -33,8 +33,9 @@ _TOKEN = re.compile(
 
 # Значение без кавычек тянется до пробела. «;», «&» и «,» внутри пароля законны; концом значения
 # они служат, только если за ними пробел, конец текста или следующее поле вида «имя=»
-# (строка подключения, параметры адреса).
-_BARE = r"(?P<bare>(?:[^\s;&,\"'<>]|[;&,](?![\s;&,]|[\w .-]+=|$))+)"
+# (строка подключения, параметры адреса). Имя поля пробелов не содержит: в «pwd=Qw,er7y retries=3»
+# запятая — часть пароля.
+_BARE = r"(?P<bare>(?:[^\s;&,\"'<>]|[;&,](?![\s;&,]|[\w.-]+=|$))+)"
 _VALUE = rf"""(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)'|{_BARE})"""
 # Имя ключа содержит слово целиком или склеенным: db_password, dbpass, userpwd, accessToken.
 _KEY = (
@@ -56,6 +57,12 @@ _NOT_SECRET_KEY = re.compile(
                               |last[_.-]?set|neverexpires|required|changed|reset\w*)""",
     re.IGNORECASE | re.VERBOSE,
 )
+# Ключ, который кончается словом секрета, хранит секрет, какие бы слова ни стояли перед ним:
+# bypass_token, passwordResetToken, VERCEL_AUTOMATION_BYPASS_SECRET. Список выше его не отменяет.
+_SECRET_END = re.compile(
+    r"(?:^|[_.-])(?i:password|passwd|passphrase|pass|pwd|secret|token|key|credentials?|пароль)$"
+    r"|(?<=[a-z])(?:Password|Passwd|Passphrase|Pass|Pwd|Secret|Token|Key|Credentials?)$"
+)
 _XML = re.compile(
     r"<(?P<tag>[\w.-]*(?:password|passwd|secret|token|api[_-]?key)[\w.-]*)>(?P<bare>[^<\r\n]+)</(?P=tag)>",
     re.IGNORECASE,
@@ -70,14 +77,17 @@ _SECURE = re.compile(
     r"""ConvertTo-SecureString\s+(?:-String\s+)?(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)')""",
     re.IGNORECASE,
 )
-# После тире или дефиса в прозе часто идёт не пароль («Пароль — это…»): такое значение
-# принимается, только если похоже на пароль; после «:» и «=» — любое.
+# После тире или дефиса в прозе часто идёт не пароль («Пароль — это строка…»). Такое значение
+# отбрасывается, только если это слово-связка или за ним продолжается фраза, а само оно на пароль
+# не похоже; после «:» и «=» берётся любое.
 _PHRASE = re.compile(
     r"(?<!\w)(?:пароль|password)(?:[ \t]+[\w-]+){0,3}"
     r"(?P<sep>[ \t]*[:=][ \t]*|[ \t]*[—–][ \t]*|[ \t]+-[ \t]+)" + _VALUE,
     re.IGNORECASE,
 )
 _PROSE = re.compile(r"(?<!\w)(?:пароль|password)(?:\s+is)?\s+(?P<bare>[^\s,;:=]+)", re.IGNORECASE)
+_LINKING_WORDS = frozenset({"это", "is", "was", "not", "see", "не", "см"})
+_CLAUSE = re.compile(r"[ \t]+\w")
 _AUTH = re.compile(
     r"\bauthorization\s*[:=]\s*[\"']?(?:bearer|basic|token|negotiate|ntlm|apikey)\s+(?P<bare>[^\s\"'<>,;]+)",
     re.IGNORECASE,
@@ -86,7 +96,7 @@ _BEARER = re.compile(r"(?<!\w)bearer\s+(?P<bare>[A-Za-z0-9._~+/=-]{16,})", re.IG
 
 _NOT_SECRET = frozenset({
     "true", "false", "yes", "no", "none", "null", "nil", "on", "off", "required", "optional",
-    "enabled", "disabled", "bearer", "basic", "string", "text", "prompt",
+    "enabled", "disabled", "bearer", "basic", "string", "text", "prompt", "да", "нет",
 })
 # Подстановки и выражения — не значения: ${VAR}, $(...), $env:VAR, %VAR%, {{...}}, <...>, [[...]],
 # $VAR и $var без цифр (переменная), (... . «$ecret123» с цифрами — значение.
@@ -131,8 +141,9 @@ def _library_spans(text: str, own: list[Span]) -> list[Span]:
     return spans
 
 
-def _value(m: re.Match[str]) -> tuple[int, int] | None:
-    """Границы значения в совпадении или None, если это не секрет."""
+def _value(m: re.Match[str], minimum: int = 3) -> tuple[int, int] | None:
+    """Границы значения в совпадении или None, если это не секрет. После имени ключа или параметра
+    берётся и короткое значение (minimum=2): «password=Q7» — тоже пароль."""
     for group in ("dq", "sq", "bare"):
         if group not in m.re.groupindex or m.group(group) is None:
             continue
@@ -143,7 +154,7 @@ def _value(m: re.Match[str]) -> tuple[int, int] | None:
             while end > start and m.string[end - 1] in ".,)]}":
                 end -= 1
         value = m.string[start:end]
-        if len(value) < 3 or value.lower() in _NOT_SECRET or _TEMPLATE.match(value):
+        if len(value) < minimum or value.lower() in _NOT_SECRET or _TEMPLATE.match(value):
             return None
         return start, end
     return None
@@ -167,17 +178,21 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
     ]
     for pattern in (_KV, _XML, _URL, _CLI, _SECURE, _AUTH, _BEARER):
         for m in pattern.finditer(text):
-            if pattern is _KV and _NOT_SECRET_KEY.fullmatch(m.group("key")):
-                continue
-            bounds = _value(m)
+            if pattern is _KV:
+                key = m.group("key")
+                if _NOT_SECRET_KEY.fullmatch(key) and not _SECRET_END.search(key):
+                    continue
+            bounds = _value(m, minimum=2 if pattern in (_KV, _CLI) else 3)
             if bounds:
                 spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PHRASE.finditer(text):
         bounds = _value(m)
         if not bounds:
             continue
+        value = text[bounds[0]:bounds[1]]
         dashed = m.group("sep").strip() in ("—", "–", "-")
-        if not dashed or _looks_like_password(text[bounds[0]:bounds[1]]):
+        prose = value.lower() in _LINKING_WORDS or _CLAUSE.match(text, bounds[1]) is not None
+        if not dashed or not prose or _looks_like_password(value):
             spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PROSE.finditer(text):
         bounds = _value(m)

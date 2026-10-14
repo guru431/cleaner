@@ -1,3 +1,5 @@
+import pytest
+
 from cleaner.core.detect import secrets
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.types import Settings
@@ -108,3 +110,73 @@ def test_library_rules_do_not_read_process_wide_plugin_settings(monkeypatch):
 
 def test_allowlist_pragma_does_not_switch_the_library_rules_off():
     assert found(f"sendgrid: {SENDGRID}  # pragma: allowlist secret") == {SENDGRID}
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("bypass_token=Zx81kLmN02pQ", "Zx81kLmN02pQ"),
+        ("passthrough_secret: Zx81kLmN02pQ", "Zx81kLmN02pQ"),
+        ("compass_api_key=Zx81kLmN02pQ", "Zx81kLmN02pQ"),
+        ("context_token: Zx81kLmN02pQ", "Zx81kLmN02pQ"),
+        ("password_reset_token: 9f8e7d6c5b4a3f2e", "9f8e7d6c5b4a3f2e"),
+        ("passwordResetToken=9f8e7d6c5b4a3f2e", "9f8e7d6c5b4a3f2e"),
+        ("password_resetKey=Zx81kLmN02pQ", "Zx81kLmN02pQ"),
+        ("VERCEL_AUTOMATION_BYPASS_SECRET=Zx81kLmN02pQ", "Zx81kLmN02pQ"),
+    ],
+)
+def test_key_ending_in_a_secret_word_is_never_skipped(text, value):
+    """Обзор пакета исправлений 1А, P1: стоп-слово в начале ключа не отменяет секрет в конце."""
+    assert found(text) == {value}
+
+
+def test_stop_listed_keys_still_hold_no_secret():
+    for text in ("bypass=Zx81kLmN02pQ", "context_tokens: 8192", "token_url: https://login.example/t",
+                 "password_reset: weekly", "compass_heading: 270"):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("Пароль от Wi-Fi — sunflower", "sunflower"),
+        ("Пароль — qwertyuiop", "qwertyuiop"),
+        ("Пароль - Summer", "Summer"),
+        ("Пароль — sunflower, логин ivanov", "sunflower"),
+        ("Пароль — Qwerty123 действует сутки", "Qwerty123"),
+    ],
+)
+def test_word_after_a_dash_is_a_password_unless_prose_follows(text, value):
+    assert found(text) == {value}
+
+
+def test_prose_after_a_dash_is_left_alone():
+    for text in ("Пароль — это строка из 8 символов", "password - see vault", "Пароль — тот же, что и раньше",
+                 "Пароль — минимум 8 символов"):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("pwd=Qw,er7y retries=3", "Qw,er7y"),
+        ("mysql --password=Pa,ss1 --host=db01", "Pa,ss1"),
+        ("export DB_PASSWORD=S3cr,et user=app", "S3cr,et"),
+        ("token=ab&cd ef=1", "ab&cd"),
+    ],
+)
+def test_comma_before_a_spaced_word_belongs_to_the_value(text, value):
+    """Обзор пакета исправлений 1А, P1: в имени следующего поля нет пробелов."""
+    assert found(text) == {value}
+
+
+def test_value_still_stops_at_the_next_field():
+    assert found("Password=Pa;ss1;Server=db") == {"Pa;ss1"}
+    assert found("https://api.example/x?token=abc123def&user=ivanov") == {"abc123def"}
+
+
+def test_short_value_under_a_key_is_kept():
+    assert found("password=Q7") == {"Q7"}
+    assert found("mysql --password Q7 db") == {"Q7"}
+    for text in ("password: no", "Пароль: да", "Пароль: нет"):
+        assert found(text) == set(), text
