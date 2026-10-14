@@ -53,7 +53,7 @@ def test_server_dependencies_pin_the_versions_tested_on_the_dev_machine():
         assert all("--hash=sha256:" in block for block in blocks), name
 
 
-@pytest.mark.parametrize("script", ["check-cleaner.sh"])
+@pytest.mark.parametrize("script", ["check-cleaner.sh", "install-cleaner.sh"])
 def test_scripts_use_the_addresses_and_paths_of_the_unit_and_the_config(script):
     """Установщик и проверка живут отдельно от юнита и настроек: адрес, порт и каталоги у них общие."""
     cfg = config.load(DEPLOY / "cleaner.toml")
