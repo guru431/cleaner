@@ -13,16 +13,27 @@ from cleaner.core.types import ChatState, EntityType, Policy, Settings
 Piece = tuple[str, str | None]      # текст и вид выделения; None — кусок ещё не обработан
 Handler = Callable[[re.Match[str]], Piece | None]
 
-# Всё, что может стать ссылкой. Цель ссылки Markdown и атрибут HTML берутся целиком, вместе
-# с кавычками внутри; голый адрес тянется до пробела или кавычки и не кончается знаком препинания.
+# Всё, что может стать ссылкой. Цель ссылки Markdown берётся вместе со скобками внутри («x_(1).png»),
+# атрибут HTML с адресом — целиком, с кавычками внутри. Голый адрес (со схемой или на «www.») тянется
+# до пробела и не кончается знаком препинания или кавычкой; адрес сразу после кавычки кончается
+# такой же кавычкой («"https://…","<EMAIL_1>"»), а без неё идёт и через кавычки («?q='…'»).
+_START = r"(?:(?:[a-z][a-z0-9+.-]{0,31}:)?//|(?<![\w.-])www\.)"
+_END = r"[^\s\"'`.,;:!?)\]}]"
 _LINK = re.compile(
-    r"\]\((?P<md>[^)\r\n]*)\)"
-    r"|(?:href|src)\s*=\s*(?P<quote>[\"'])(?P<attr>.*?)(?P=quote)"
-    r"|(?P<mailto>mailto:[^\s\"'`]*[^\s\"'`.,;:!?)\]}])"
-    r"|(?P<url>(?:[a-z][a-z0-9+.-]{0,31}:)?//[^\s\"'`]*[^\s\"'`.,;:!?)\]}])",
+    r"\]\((?P<md>(?:[^()\r\n]|\([^()\r\n]*\))*)\)"
+    r"|(?<![\w-])(?:href|src|srcset|action|formaction|poster|data|background|cite|ping)"
+    r"\s*=\s*(?P<quote>[\"'])(?P<attr>.*?)(?P=quote)"
+    rf"|(?P<mailto>mailto:[^\s\"'`]*{_END})"
+    rf"|(?<=\")(?P<dq>{_START}[^\s\"`]*{_END})"
+    rf"|(?<=')(?P<sq>{_START}[^\s'`]*{_END})"
+    rf"|(?P<url>{_START}[^\s`]*{_END})",
     re.IGNORECASE,
 )
-_URL_HOST = re.compile(r"(?:[a-z][a-z0-9+.-]{0,31}:)?//(?:[^/@\s]*@)?(\[[^\]]+\]|[^/:?#\s]+)", re.IGNORECASE)
+# Хост — по правилам браузера: имя пользователя кончается на «@» и не содержит «/?#\»,
+# хост кончается на «/», «\», «:», «?» или «#».
+_URL_HOST = re.compile(
+    r"(?:[a-z][a-z0-9+.-]{0,31}:)?//(?:[^/?#\\@\s]*@)?(\[[^\]]+\]|[^/\\:?#\s]+)", re.IGNORECASE
+)
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 _MAC = re.compile(
     r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
@@ -132,14 +143,17 @@ class _Restorer:
 
     def _is_own(self, target: str) -> bool:
         """Ведёт ли ссылка на наш узел или наш адрес. Всё остальное — чужая ссылка."""
+        target = target.strip()
         if target.lower().startswith("mailto:"):
             address = target[len("mailto:"):]
             return address in self.state.surrogates          # без параметров: в них может быть что угодно
-        host = _URL_HOST.match(target.strip())
+        if target.lower().startswith("www."):
+            target = "//" + target
+        host = _URL_HOST.match(target)
         return bool(host) and self._host_is_ours(host.group(1))
 
     def _link(self, m: re.Match[str]) -> Piece | None:
-        target = m.group("md") or m.group("attr") or m.group("mailto") or m.group("url") or ""
+        target = next((m.group(name) for name in ("md", "attr", "mailto", "dq", "sq", "url") if m.group(name)), "")
         if self._is_own(target):
             return None         # ссылка на наш же узел восстанавливается как обычный текст
         if self._inner(m.group()) == m.group():

