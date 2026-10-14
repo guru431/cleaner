@@ -1,0 +1,32 @@
+:root { --line: #d0d4da; --muted: #667; --warn: #8a5a00; --bad: #a40000; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.45 system-ui, sans-serif; color: #1d2228; }
+main { padding: 1rem 1.5rem; }
+.top { display: flex; gap: 1rem; align-items: center; padding: .5rem 1.5rem; border-bottom: 1px solid var(--line); }
+.top .who { margin-left: auto; color: var(--muted); }
+.top form { margin: 0; }
+.login { max-width: 22rem; margin: 4rem auto; display: grid; gap: .75rem; }
+.layout { display: grid; grid-template-columns: 18rem 1fr; gap: 1.5rem; }
+.sidebar ul { list-style: none; padding: 0; }
+.sidebar li.current a { font-weight: 600; }
+.sidebar small { color: var(--muted); display: block; }
+.panels { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+pre { white-space: pre-wrap; word-break: break-word; border: 1px solid var(--line); padding: .75rem; margin: .5rem 0; }
+textarea, input[type=text], input:not([type]) { width: 100%; font: inherit; }
+.item { border-bottom: 1px solid var(--line); padding: .5rem 0 1rem; }
+.error { color: var(--bad); }
+.warn { color: var(--warn); }
+.counters, .summary { color: var(--muted); }
+table { border-collapse: collapse; width: 100%; }
+td, th { border-bottom: 1px solid var(--line); padding: .3rem .5rem; text-align: left; vertical-align: top; }
+td form { display: inline; }
+mark { border-radius: 2px; padding: 0 1px; background: #e8eaf6; cursor: pointer; }
+mark.active { outline: 2px solid #1d2228; }
+mark.leak, mark.blocked { background: #ffcdd2; outline: 1px solid var(--bad); }
+.t-PERSON { background: #ffe0b2; } .t-ORG { background: #dcedc8; } .t-ADDRESS { background: #f0f4c3; }
+.t-EMAIL { background: #b3e5fc; } .t-PHONE { background: #b2dfdb; } .t-SECRET { background: #ffcdd2; }
+.t-ACCOUNT { background: #e1bee7; } .t-IP, .t-MAC { background: #c5cae9; } .t-HOST, .t-DOMAIN { background: #d1c4e9; }
+.t-SID, .t-DN { background: #cfd8dc; } .t-TERM { background: #fff9c4; }
+.r-restored { background: #c8e6c9; } .r-altered { background: #fff59d; } .r-derived { background: #b3e5fc; }
+.r-unknown, .r-foreign_link { background: #ffcdd2; } .r-kept_by_policy { background: #e0e0e0; }
+.danger { margin-top: 2rem; color: var(--bad); }
