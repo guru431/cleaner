@@ -10,6 +10,7 @@ from fastapi.responses import RedirectResponse, Response
 
 from cleaner.core.types import EntityType
 from cleaner.service import ChatService, EditRefused
+from cleaner.storage.repo import Item
 from cleaner.web import render
 from cleaner.web.deps import Viewer, get_admin, get_form, get_viewer, own_chat, page, repo_of, service_of
 from cleaner.web.routes_chats import can_retry, input_view
@@ -33,6 +34,26 @@ def _back(chat_id: str, form: dict[str, str]) -> str:
     """Возврат после правки: к экрану проверки текста, иначе в таблицу замен. Адрес собирается здесь, не из формы."""
     item_id = form.get("item_id", "")
     return f"/chats/{chat_id}/items/{item_id}" if _ITEM_ID.fullmatch(item_id) else f"/chats/{chat_id}/entities"
+
+
+def _pages(numbers: list[int]) -> str:
+    return ", ".join(str(number) for number in numbers)
+
+
+def _warnings(item: Item) -> list[str]:
+    """Предупреждения экрана проверки о происхождении текста и о слоях (FR-2.5, FR-6.7)."""
+    warnings = []
+    if item.meta.get("ocr_pages"):
+        warnings.append(
+            f"Текст получен распознаванием изображения (страницы: {_pages(item.meta['ocr_pages'])}). "
+            "Распознавание ошибается в именах и числах — проверьте замены особенно внимательно."
+        )
+    if item.meta.get("unread_pages"):
+        warnings.append(
+            f"На страницах {_pages(item.meta['unread_pages'])} распознавание не нашло текста: "
+            "их содержимое в очищенный текст не попало."
+        )
+    return warnings
 
 
 def _edit(
@@ -75,7 +96,7 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
         summary=render.summary(item, state), fragments=fragments,
         notices=[(_NOTICES.get(code, code), count) for code, count in notices.items()],
         exposed=[", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],
-        types=render.TYPE_NAMES, pending=False, retry=can_retry(item), warnings=[],
+        types=render.TYPE_NAMES, pending=False, retry=can_retry(item), warnings=_warnings(item),
     )
 
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import UploadFile
 
 from cleaner.service import ChatService
 from cleaner.storage.repo import Chat, Repository, Session, User
@@ -89,6 +90,34 @@ async def get_form(request: Request, viewer: Viewer = Depends(get_viewer)) -> di
     if not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), viewer.session.csrf.encode("utf-8")):
         raise HTTPException(403, "Форма устарела — обновите страницу")
     return {key: value for key, value in form.items() if isinstance(value, str)}
+
+
+_UPLOAD_OVERHEAD = 64 * 1024        # поля формы и заголовки частей multipart
+
+
+@dataclass(frozen=True)
+class Upload:
+    filename: str        # только для расширения: нигде не сохраняется
+    data: bytes
+
+
+async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)) -> Upload:
+    """Файл из формы multipart с токеном формы. Предел — max_file_mb (FR-2.2); Cleaner файл на диск не пишет (FR-2.7)."""
+    limit = request.app.state.max_file_bytes
+    too_large = f"Файл больше {limit // (1024 * 1024)} МБ"
+    if int(request.headers.get("content-length") or 0) > limit + _UPLOAD_OVERHEAD:
+        raise HTTPException(413, too_large)
+    form = await request.form(max_files=1, max_fields=4)
+    if not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), viewer.session.csrf.encode("utf-8")):
+        raise HTTPException(403, "Форма устарела — обновите страницу")
+    upload = form.get("file")
+    if not isinstance(upload, UploadFile) or not upload.filename:
+        raise HTTPException(400, "Выберите файл")
+    data = await upload.read(limit + 1)
+    await upload.close()
+    if len(data) > limit:
+        raise HTTPException(413, too_large)
+    return Upload(upload.filename, data)
 
 
 def page(request: Request, name: str, viewer: Viewer | None, status_code: int = 200, **context: object) -> HTMLResponse:

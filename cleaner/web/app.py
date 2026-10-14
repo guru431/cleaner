@@ -37,6 +37,9 @@ HSTS = "max-age=31536000"
 _STATUS_TEXT = {404: "Страница не найдена", 405: "Такое действие здесь не поддерживается"}
 
 
+_UPLOAD_HEADROOM = 1024 * 1024      # поля формы и заголовки частей multipart сверх самого файла
+
+
 class BodyLimit:
     """Предел тела запроса для всех маршрутов, вход тоже. Считаются принятые байты, а не заголовок
     Content-Length: у тела, присланного частями (chunked), этого заголовка нет."""
@@ -45,17 +48,24 @@ class BodyLimit:
         self.app = app
         self.limit = limit
 
+    def _limit(self, scope: Scope) -> int:
+        """У загрузки файла свой предел — max_file_mb (FR-2.2); у остальных запросов — общий."""
+        if scope["path"].endswith("/upload"):
+            return scope["app"].state.max_file_bytes + _UPLOAD_HEADROOM
+        return self.limit
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         received = 0
+        limit = self._limit(scope)
 
         async def limited() -> Message:
             nonlocal received
             message = await receive()
             received += len(message.get("body", b""))
-            if received > self.limit:
+            if received > limit:
                 raise StarletteHTTPException(413, "Слишком большой запрос")
             return message
 

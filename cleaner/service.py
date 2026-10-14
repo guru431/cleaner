@@ -155,13 +155,21 @@ class ChatService:
         self.submit(self.process, chat_id, item.id, user_id)
         return self.repo.item(chat_id, item.id) or item
 
-    def process(self, chat_id: str, item_id: str, user_id: str) -> None:
-        """Задание: очистить элемент всеми включёнными слоями и записать. Отказ — элемент failed с причиной."""
+    def add_file(self, chat_id: str, user_id: str, filename: str, data: bytes) -> Item:
+        """Файл — в очередь. Его байты живут только в памяти задания; имя нужно лишь для расширения (FR-2.7)."""
+        item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="queued"))
+        self.submit(self.process, chat_id, item.id, user_id, data, filename)
+        return self.repo.item(chat_id, item.id) or item
+
+    def process(self, chat_id: str, item_id: str, user_id: str, data: bytes | None = None, filename: str = "") -> None:
+        """Задание: извлечь текст файла, очистить всеми включёнными слоями, записать. Отказ — элемент failed."""
         try:
             item = self.repo.item(chat_id, item_id)
             if item is None:
                 return                                  # чат удалили, пока задание ждало очереди
             self.repo.set_item_status(chat_id, item_id, "running")
+            if data is not None:
+                item = self._extract(chat_id, item, data, filename)
             self._check_length(item.original)
             layers, ran = self._live_layers(chat_id)
             report = self._sanitize_item(chat_id, item, layers, ran)
@@ -173,6 +181,25 @@ class ChatService:
         self.repo.audit("sanitize", user_id, chat_id, **report)
         if report["leaks"]:
             self.repo.audit("leak", user_id, chat_id, count=report["leaks"])
+
+    def _extract(self, chat_id: str, item: Item, data: bytes, filename: str) -> Item:
+        """Текст из файла записывается сразу: если очистка не удастся, его можно очистить заново без файла."""
+        from cleaner.ingest.extract import ExtractError
+
+        if self.engines is None:
+            raise ExtractError("Разбор файлов не подключён")
+        extracted = self.engines.extractor().extract(
+            filename, data, lambda done, total: self.repo.set_item_progress(chat_id, item.id, f"{done}/{total}"),
+        )
+        meta: dict[str, object] = {"kind": extracted.kind}
+        if extracted.pages:
+            meta["pages"] = extracted.pages
+        if extracted.ocr_pages:
+            meta["ocr_pages"] = list(extracted.ocr_pages)
+        if extracted.unread_pages:
+            meta["unread_pages"] = list(extracted.unread_pages)
+        self.repo.set_item_original(chat_id, item.id, extracted.text, meta)
+        return replace(item, original=extracted.text, meta=meta)
 
     def _sanitize_item(self, chat_id: str, item: Item, layers: Layers, ran: list[str]) -> dict[str, object]:
         report: dict[str, object] = {}

@@ -2,6 +2,7 @@ import pytest
 
 from cleaner.core import leakcheck
 from cleaner.core.detect import infra
+from cleaner.core.detect.base import DetectorError
 from cleaner.core.leakcheck import Leak
 from cleaner.core.types import EntityType as T
 from cleaner.service import AnswerView, ChatService, EditRefused, InputView, TextTooLong
@@ -243,3 +244,20 @@ def test_text_in_progress_cannot_be_retried_or_edited(repo, chat):
         service.mask_value(chat_id, user, item.id, "Заря", T.TERM)
     [entry] = service.view(chat_id).items
     assert not entry.deliverable
+
+
+def test_extracted_text_is_kept_when_cleaning_fails_so_it_can_be_retried(repo, chat, engines, with_ner):
+    user, chat_id = chat
+    service = ChatService(repo, engines=engines)
+    original_ner = engines.ner
+
+    def broken_ner():
+        raise DetectorError("Слой 4 недоступен")
+
+    engines.ner = broken_ner
+    item = service.add_file(chat_id, user, "letter.eml", b"From: a@x.example\n\nbody")
+    stored = repo.item(chat_id, item.id)
+    assert (stored.status, stored.original, stored.meta["kind"]) == ("failed", "Документ: почта doc@x.example", "eml")
+    engines.ner = original_ner
+    service.retry(chat_id, user, item.id)
+    assert repo.item(chat_id, item.id).sanitized == "Документ: почта <EMAIL_1>"

@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from cleaner.service import ChatView, EditRefused, InputView, TextTooLong
 from cleaner.storage.repo import Chat, Item
 from cleaner.web import render
-from cleaner.web.deps import Viewer, get_form, get_viewer, own_chat, page, repo_of, service_of
+from cleaner.web.deps import Upload, Viewer, get_form, get_upload, get_viewer, own_chat, page, repo_of, service_of
 
 router = APIRouter()
 _TITLE = 200
@@ -114,6 +114,13 @@ def add_input(request: Request, chat_id: str, form: dict[str, str] = Depends(get
         item = service_of(request).add_input(chat_id, viewer.user.id, text)
     except TextTooLong as exc:
         raise HTTPException(413, str(exc)) from None
+    return RedirectResponse(f"/chats/{chat_id}/items/{item.id}", status_code=303)
+
+
+@router.post("/chats/{chat_id}/upload")
+def upload(request: Request, chat_id: str, upload: Upload = Depends(get_upload), viewer: Viewer = Depends(get_viewer)) -> Response:
+    own_chat(request, chat_id, viewer)
+    item = service_of(request).add_file(chat_id, viewer.user.id, upload.filename, upload.data)
     return RedirectResponse(f"/chats/{chat_id}/items/{item.id}", status_code=303)
 
 

@@ -10,6 +10,7 @@ from cleaner.core.detect.base import DetectorError
 from cleaner.core.types import ChatState, Settings
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Span
+from cleaner.ingest.extract import Extractor
 from cleaner.storage import db
 from cleaner.storage.repo import Repository
 from cleaner.web import auth
@@ -77,6 +78,19 @@ class FakeCompleter:
         return self.answers.pop(0) if self.answers else '{"items": []}'
 
 
+class FakeDocuments:
+    """Разбор документов для тестов: вместо Docling — заданный текст."""
+
+    def __init__(self) -> None:
+        self.text = "Документ: почта doc@x.example"
+
+    def convert(self, data: bytes, kind: str) -> str:
+        return self.text
+
+    def pdf_pages(self, data: bytes, pages) -> dict[int, str]:
+        return {number: self.text for number in pages}
+
+
 class FakeEngines:
     """Тяжёлые и сетевые части для тестов: модели и локальная модель подменены, сети нет."""
 
@@ -85,6 +99,8 @@ class FakeEngines:
         self.second = FakeSecondPass()
         self.completer = FakeCompleter()
         self.unavailable: str | None = None     # причина, по которой включённый слой недоступен
+        self.documents = FakeDocuments()
+        self.ocr_text = "Скан: почта scan@x.example"
 
     def _check(self) -> None:
         if self.unavailable:
@@ -104,6 +120,9 @@ class FakeEngines:
     def llm(self):
         self._check()
         return self.second
+
+    def extractor(self) -> Extractor:
+        return Extractor(self.documents, lambda image, mime: self.ocr_text)
 
 
 @pytest.fixture
@@ -176,6 +195,9 @@ class Browser:
 
     def post(self, path: str, **fields: str):
         return self.client.post(path, data={"csrf": self.csrf, **fields})
+
+    def upload(self, path: str, filename: str, data: bytes):
+        return self.client.post(path, data={"csrf": self.csrf}, files={"file": (filename, data, "application/octet-stream")})
 
     def chat(self, title: str = "Консультация") -> str:
         """Новый чат, его id. Маршрут появляется в задаче 7."""

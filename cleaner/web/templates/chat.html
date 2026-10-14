@@ -55,6 +55,11 @@
       <label>Текст для очистки <textarea name="text" rows="8" required></textarea></label>
       <button>Очистить</button>
     </form>
+    <form method="post" action="/chats/{{ chat.id }}/upload" enctype="multipart/form-data">
+      {% include "_csrf.html" %}
+      <label>Файл до {{ max_file_mb }} МБ: DOCX, XLSX, PPTX, PDF (и скан), EML, MSG, HTML, CSV, текст, PNG, JPEG <input type="file" name="file" required></label>
+      <button>Загрузить и очистить</button>
+    </form>
     <form method="post" action="/chats/{{ chat.id }}/answer">
       {% include "_csrf.html" %}
       <label>Ответ модели <textarea name="answer" rows="6" required></textarea></label>
