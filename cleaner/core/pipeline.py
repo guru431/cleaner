@@ -4,15 +4,16 @@ from __future__ import annotations
 import bisect
 import re
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from cleaner.core import leakcheck, surrogates
 from cleaner.core.detect import dictionary, infra, rules, secrets
-from cleaner.core.detect.base import DetectContext
+from cleaner.core.detect.base import DetectContext, Detector
 from cleaner.core.detect.merge import MergedSpan, merge
 from cleaner.core.entities import labels
 from cleaner.core.entities.resolve import ResolvedSpan, Resolver
 from cleaner.core.leakcheck import Leak
-from cleaner.core.types import ChatState, EntityType, Policy, Settings
+from cleaner.core.types import ChatState, EntityType, Policy, Settings, Span
 
 DETECTORS = (rules, secrets, infra, dictionary)
 
@@ -86,6 +87,25 @@ def _outside(
     return pieces
 
 
+class SecondPass(Protocol):
+    """Слой 5: по тексту, очищенному слоями 1–4, находит пропущенное; позиции — в оригинале (раздел 5.6)."""
+
+    def find(self, text: str, sanitized: str, state: ChatState) -> list[Span]: ...
+
+
+@dataclass(frozen=True)
+class Layers:
+    """Слои 4 и 5. По умолчанию не выполняются.
+
+    cached — их находки, посчитанные для этого текста раньше: модели не вызываются, а находки
+    проходят объединение и сопоставление заново, с текущими правилами чата.
+    """
+
+    ner: Detector | None = None
+    llm: SecondPass | None = None
+    cached: tuple[Span, ...] | None = None
+
+
 @dataclass(frozen=True)
 class Notice:
     code: str       # surrogate_in_input | foreign_label
@@ -100,6 +120,7 @@ class SanitizeResult:
     notices: list[Notice] = field(default_factory=list)
     leaks: list[Leak] = field(default_factory=list)
     blocked: list[ResolvedSpan] = field(default_factory=list)
+    model_spans: list[Span] = field(default_factory=list)   # находки слоёв 4–5 для повторной очистки без моделей
 
     @property
     def deliverable(self) -> bool:
@@ -129,8 +150,25 @@ def _apply(text: str, spans: list[ResolvedSpan]) -> str:
     return "".join(pieces)
 
 
-def sanitize(state: ChatState, text: str, settings: Settings) -> SanitizeResult:
-    """Заменяет чувствительные фрагменты и обновляет state. Исключения слоёв не перехватываются."""
+def _passes(
+    state: ChatState, text: str, settings: Settings,
+    protected: list[tuple[int, int]], starts: list[int], extra: list[Span],
+) -> list[ResolvedSpan]:
+    """Шаги 5.2–5.8 до трёх раз (раздел 5.10); находки слоёв 4–5 добавляются к каждому проходу."""
+    resolved: list[ResolvedSpan] = []
+    for _ in range(_MAX_PASSES):
+        before = _forms(state)
+        ctx = _context(state, settings)
+        found = [span for detector in DETECTORS for span in detector.detect(text, ctx)] + extra
+        merged = [part for m in merge(text, found, ctx) for part in _outside(text, m, protected, starts, ctx)]
+        resolved = Resolver(state, settings, text, ctx.builtin.generic_labels).run(text, merged)
+        if _forms(state) == before:
+            break
+    return resolved
+
+
+def sanitize(state: ChatState, text: str, settings: Settings, layers: Layers = Layers()) -> SanitizeResult:
+    """Заменяет чувствительные фрагменты и обновляет state. Исключения слоёв не перехватываются (FR-3.7)."""
     protected = surrogates.find(state, text)
     notices = [Notice("surrogate_in_input", start, end) for start, end in protected]
     for m in labels.SHAPE.finditer(text):
@@ -140,18 +178,22 @@ def sanitize(state: ChatState, text: str, settings: Settings) -> SanitizeResult:
             protected.append(m.span())
     protected.sort()
     starts = [start for start, _ in protected]
-    resolved: list[ResolvedSpan] = []
-    for _ in range(_MAX_PASSES):
-        before = _forms(state)
-        ctx = _context(state, settings)
-        found = [span for detector in DETECTORS for span in detector.detect(text, ctx)]
-        merged = [part for m in merge(text, found, ctx) for part in _outside(text, m, protected, starts, ctx)]
-        resolved = Resolver(state, settings, text, ctx.builtin.generic_labels).run(text, merged)
-        if _forms(state) == before:
-            break
+    if layers.cached is not None:
+        extra = list(layers.cached)
+    else:
+        extra = layers.ner.detect(text, _context(state, settings)) if layers.ner is not None else []
+    resolved = _passes(state, text, settings, protected, starts, extra)
+    if layers.cached is None and layers.llm is not None:
+        # Слой 5 — один раз, по тексту, который уже очистили слои 1–4; затем проходы повторяются с его находками.
+        found = layers.llm.find(text, _apply(text, resolved), state)
+        if found:
+            extra = extra + found
+            resolved = _passes(state, text, settings, protected, starts, extra)
     sanitized = _apply(text, resolved)
     blocked = [
         span for span in resolved
         if settings.policies.get(state.entities[span.entity_id].type) is Policy.BLOCK
     ]
-    return SanitizeResult(sanitized, resolved, notices, leakcheck.check(sanitized, state, settings), blocked)
+    return SanitizeResult(
+        sanitized, resolved, notices, leakcheck.check(sanitized, state, settings), blocked, extra,
+    )

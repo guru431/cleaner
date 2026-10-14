@@ -1,11 +1,14 @@
+import re
+
 import pytest
 
 from cleaner.core import leakcheck
 from cleaner.core.detect import infra
+from cleaner.core.detect.base import DetectorError
 from cleaner.core.entities import ops
-from cleaner.core.pipeline import sanitize
+from cleaner.core.pipeline import Layers, sanitize
 from cleaner.core.restore import restore
-from cleaner.core.types import ChatRule, DictEntry, Policy, Settings, default_policies
+from cleaner.core.types import ChatRule, DictEntry, Policy, Settings, Span, default_policies
 from cleaner.core.types import EntityType as T
 
 
@@ -219,3 +222,67 @@ def test_sanitized_text_with_masked_pieces_pasted_back_changes_nothing(state, se
     again = sanitize(state, first.sanitized, settings)
     assert again.sanitized == first.sanitized == "Писал <ACCOUNT_2>@domain-1.example про CN=host-1,<DN_1>"
     assert (len(state.entities), len(state.surrogates)) == counts
+
+
+class Marks:
+    """Слой 4 для теста: помечает заданные строки и считает вызовы."""
+
+    name = "ner"
+
+    def __init__(self, marks):
+        self.marks, self.calls = marks, 0
+
+    def detect(self, text, ctx=None):
+        self.calls += 1
+        return [
+            Span(m.start(), m.end(), type_, "ner", 0.9)
+            for value, type_ in self.marks.items() for m in re.finditer(re.escape(value), text)
+        ]
+
+
+class SecondPass:
+    """Слой 5 для теста: запоминает, какой текст видел, и помечает заданные строки в оригинале."""
+
+    def __init__(self, marks):
+        self.marks, self.seen = marks, []
+
+    def find(self, text, sanitized, state):
+        self.seen.append(sanitized)
+        return [
+            Span(m.start(), m.end(), type_, "llm")
+            for value, type_ in self.marks.items() for m in re.finditer(re.escape(value), text)
+        ]
+
+
+def test_layer_4_runs_once_per_text_and_its_findings_are_returned(state, settings):
+    ner = Marks({"Петров": T.PERSON})
+    result = sanitize(state, "Петров, a@x.example", settings, Layers(ner=ner))
+    assert result.sanitized == "<PERSON_1>, <EMAIL_1>"
+    assert ner.calls == 1                                   # не на каждый проход 5.10
+    assert [(s.start, s.end, s.source) for s in result.model_spans] == [(0, 6, "ner")]
+
+
+def test_cached_findings_are_used_instead_of_the_models(state, settings):
+    ner = Marks({})
+    result = sanitize(state, "Петров", settings, Layers(ner=ner, cached=(Span(0, 6, T.PERSON, "ner", 0.9),)))
+    assert (result.sanitized, ner.calls) == ("<PERSON_1>", 0)
+
+
+def test_second_pass_reads_the_text_cleaned_by_layers_1_to_4(state, settings):
+    llm = SecondPass({"sunflower77": T.SECRET})
+    result = sanitize(state, "a@x.example, на стикере sunflower77", settings, Layers(llm=llm))
+    assert llm.seen == ["<EMAIL_1>, на стикере sunflower77"]
+    assert result.sanitized == "<EMAIL_1>, на стикере <SECRET_1>"
+    assert [s.source for s in result.model_spans] == ["llm"]
+
+
+def test_failing_model_layer_stops_sanitizing_and_changes_nothing(state, settings):
+    class Broken:
+        name = "ner"
+
+        def detect(self, text, ctx=None):
+            raise DetectorError("модели не загружены")
+
+    with pytest.raises(DetectorError):
+        sanitize(state, "почта a@x.example", settings, Layers(ner=Broken()))
+    assert state.entities == {}
