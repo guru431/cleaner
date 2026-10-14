@@ -102,7 +102,7 @@ def add_input(request: Request, chat_id: str, form: dict[str, str] = Depends(get
         item = service_of(request).add_input(chat_id, viewer.user.id, text)
     except TextTooLong as exc:
         raise HTTPException(413, str(exc)) from None
-    return RedirectResponse(f"/chats/{chat_id}#item-{item.id}", status_code=303)
+    return RedirectResponse(f"/chats/{chat_id}/items/{item.id}", status_code=303)
 
 
 @router.post("/chats/{chat_id}/answer")

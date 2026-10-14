@@ -14,7 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from cleaner.clock import Clock
 from cleaner.service import ChatService
 from cleaner.storage.repo import Repository
-from cleaner.web import auth, routes_auth, routes_chats
+from cleaner.web import auth, routes_auth, routes_chats, routes_review
 from cleaner.web.deps import LoginRequired, page
 
 log = logging.getLogger("cleaner.web")
@@ -44,6 +44,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static")), name="static")
     app.include_router(routes_auth.router)
     app.include_router(routes_chats.router)
+    app.include_router(routes_review.router)
 
     @app.exception_handler(LoginRequired)
     async def to_login(request: Request, exc: LoginRequired) -> Response:

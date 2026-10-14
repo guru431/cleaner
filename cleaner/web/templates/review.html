@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Проверка — {{ chat.title }} — Cleaner{% endblock %}
+{% block main %}
+<p><a href="/chats/{{ chat.id }}">← {{ chat.title }}</a> · <a href="/chats/{{ chat.id }}/entities">Таблица замен</a></p>
+<h1>Проверка текста {{ item.seq }}</h1>
+
+<section class="summary">
+  <p>Замены: {% for name, count in summary %}{{ name }} — {{ count }}{% if not loop.last %}, {% endif %}{% else %}нет{% endfor %}.</p>
+  {% for text, count in notices %}<p class="warn">{{ text }} ({{ count }})</p>{% endfor %}
+  {% if exposed %}
+  <p class="warn">Прежний вариант этого текста содержал открытым значение, которое теперь скрывается: {{ exposed | join("; ") }}. Если текст уже был передан, значение ушло открытым.</p>
+  {% endif %}
+  {% if leaks %}
+  <p class="error">Проверка утечек: найдено оригиналов — {{ leaks }}. Выдача заблокирована, пока они не скрыты.</p>
+  {% else %}
+  <p>Проверка утечек: оригиналов в очищенном тексте нет.</p>
+  {% endif %}
+  {% if blocked %}
+  <p class="error">Фрагментов типа с политикой «блокировать» — {{ blocked }}. Выдача заблокирована, пока они есть в тексте.</p>
+  {% endif %}
+</section>
+
+<div class="panels">
+  <div>
+    <h2>Оригинал</h2>
+    <pre id="original">
+{{ original }}</pre>
+  </div>
+  <div>
+    <h2>Очищенный</h2>
+    <pre id="sanitized">
+{{ sanitized }}</pre>
+    {% if deliverable %}
+    <button type="button" data-copy="sanitized">Скопировать</button>
+    <a href="/chats/{{ chat.id }}/items/{{ item.id }}/download">Скачать .txt</a>
+    {% endif %}
+  </div>
+</div>
+
+<h2>Скрыть фрагмент</h2>
+<form method="post" action="/chats/{{ chat.id }}/mask">
+  {% include "_csrf.html" %}
+  <input type="hidden" name="item_id" value="{{ item.id }}">
+  <label>Выделите фрагмент в оригинале или впишите его <textarea id="mask-value" name="value" rows="2" required></textarea></label>
+  <label>Тип <select name="type">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select></label>
+  <button>Скрывать во всём чате</button>
+</form>
+
+{% if viewer.is_admin %}
+<h2>В словарь организации</h2>
+<form method="post" action="/chats/{{ chat.id }}/dictionary">
+  {% include "_csrf.html" %}
+  <input type="hidden" name="item_id" value="{{ item.id }}">
+  <input name="value" placeholder="Значение" required>
+  <select name="list"><option value="always">всегда скрывать</option><option value="never">никогда не скрывать</option></select>
+  <select name="type">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select>
+  <button>Добавить</button>
+</form>
+{% endif %}
+
+<h2>Замены в этом тексте</h2>
+<table>
+  <tr><th>Фрагмент</th><th>Замена</th><th>Тип</th><th></th></tr>
+  {% for f in fragments %}
+  <tr>
+    <td>{{ f.value }}</td><td>{{ f.surrogate }}</td><td>{{ f.type }}</td>
+    <td>
+      <form method="post" action="/chats/{{ chat.id }}/unmask">
+        {% include "_csrf.html" %}
+        <input type="hidden" name="item_id" value="{{ item.id }}">
+        <input type="hidden" name="value" value="{{ f.value }}">
+        <button>Снять замену во всём чате</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

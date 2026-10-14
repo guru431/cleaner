@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Таблица замен — {{ chat.title }} — Cleaner{% endblock %}
+{% block main %}
+<p><a href="/chats/{{ chat.id }}">← {{ chat.title }}</a></p>
+<h1>Таблица замен</h1>
+<form method="post" action="/chats/{{ chat.id }}/refresh">
+  {% include "_csrf.html" %}
+  <button>Очистить тексты чата заново с текущими настройками</button>
+</form>
+<table>
+  <tr><th>Замена</th><th>Тип</th><th>Оригинал</th><th>Вхождений</th><th>Действия</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.surrogates | join(", ") }}</td>
+    <td>{{ r.type_name }}</td>
+    <td>{{ r.restore_value }}{% if r.forms | length > 1 %}<br><small>{{ r.forms | join(", ") }}</small>{% endif %}</td>
+    <td>{{ r.count }}</td>
+    <td>
+      <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/unmask">
+        {% include "_csrf.html" %}<button>Снять замену</button>
+      </form>
+      <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/retype">
+        {% include "_csrf.html" %}
+        <select name="type">{% for code, name in types.items() %}<option value="{{ code.value }}"{% if code == r.type %} selected{% endif %}>{{ name }}</option>{% endfor %}</select>
+        <button>Сменить тип</button>
+      </form>
+      <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/restore-value">
+        {% include "_csrf.html" %}
+        <input name="value" value="{{ r.restore_value }}" required>
+        <button>Подставлять при восстановлении</button>
+      </form>
+      {% if r.peers %}
+      <form method="post" action="/chats/{{ chat.id }}/entities/merge">
+        {% include "_csrf.html" %}
+        <input type="hidden" name="keep" value="{{ r.id }}">
+        <select name="drop">{% for peer_id, label in r.peers %}<option value="{{ peer_id }}">{{ label }}</option>{% endfor %}</select>
+        <button>Присоединить</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5">Замен пока нет</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}
