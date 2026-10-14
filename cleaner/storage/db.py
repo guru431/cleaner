@@ -1,13 +1,32 @@
-"""Соединение с SQLite, схема и транзакции."""
+"""Соединение с SQLite, схема, нумерованные миграции и транзакции."""
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 1
-_SCHEMA = Path(__file__).with_name("schema.sql")
+_SCHEMA = Path(__file__).with_name("schema.sql")          # версия 1
+_MIGRATIONS = Path(__file__).with_name("migrations")       # 0002_*.sql, 0003_*.sql, …
+_NUMBERED = re.compile(r"(\d{4})_[a-z0-9_]+\.sql")
+
+
+def migrations(directory: Path | None = None) -> list[tuple[int, Path]]:
+    """Файлы миграций по возрастанию номера. Номера идут подряд с 2: пропуск — ошибка сборки, а не тихий сбой."""
+    found = []
+    for path in (directory or _MIGRATIONS).glob("*.sql"):
+        m = _NUMBERED.fullmatch(path.name)
+        if m:
+            found.append((int(m.group(1)), path))
+    found.sort()
+    numbers = [number for number, _ in found]
+    if numbers != list(range(2, 2 + len(numbers))):
+        raise RuntimeError(f"миграции должны идти подряд с 0002: {numbers}")
+    return found
+
+
+SCHEMA_VERSION = max((number for number, _ in migrations()), default=1)
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -21,14 +40,29 @@ def connect(path: Path | str) -> sqlite3.Connection:
     return conn
 
 
-def migrate(conn: sqlite3.Connection) -> None:
+def _apply(conn: sqlite3.Connection, script: str, version: int) -> None:
+    """Скрипт и номер версии — одной транзакцией: сбой посередине не оставляет половину схемы."""
+    try:
+        conn.executescript(f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version = {version};\nCOMMIT;")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
+def migrate(conn: sqlite3.Connection, directory: Path | None = None) -> None:
+    """Пустая база получает схему версии 1, затем все миграции по порядку, каждую — своей транзакцией."""
+    steps = migrations(directory)
+    latest = max((number for number, _ in steps), default=1)
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version == SCHEMA_VERSION:
-        return
-    if version != 0:
-        raise RuntimeError(f"база версии {version}, программа знает версию {SCHEMA_VERSION}")
-    conn.executescript(_SCHEMA.read_text(encoding="utf-8"))
-    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    if version > latest:
+        raise RuntimeError(f"база версии {version}, программа знает версию {latest}")
+    if version == 0:
+        _apply(conn, _SCHEMA.read_text(encoding="utf-8"), 1)
+        version = 1
+    for number, path in steps:
+        if number > version:
+            _apply(conn, path.read_text(encoding="utf-8"), number)
 
 
 @contextmanager
