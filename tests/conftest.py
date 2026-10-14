@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from cleaner.core.types import ChatState, Settings
+from cleaner.storage import db
+from cleaner.storage.repo import Repository
 
 
 @pytest.fixture
@@ -29,3 +31,11 @@ class FakeClock:
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock()
+
+
+@pytest.fixture
+def repo(tmp_path, clock):
+    conn = db.connect(tmp_path / "cleaner.db")
+    db.migrate(conn)
+    yield Repository(conn, bytes(range(32)), clock)
+    conn.close()
