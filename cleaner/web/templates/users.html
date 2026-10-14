@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Пользователи — Cleaner{% endblock %}
+{% block main %}
+<p><a href="/settings">← Настройки</a></p>
+<h1>Пользователи</h1>
+<table>
+  <tr><th>Логин</th><th>Роль</th><th>Состояние</th><th>Новый пароль</th><th></th></tr>
+  {% for u in rows %}
+  <tr>
+    <td>{{ u.login }}</td>
+    <td>{{ "администратор" if u.role == "admin" else "пользователь" }}</td>
+    <td>{{ "отключён" if u.disabled else "активен" }}</td>
+    <td>
+      <form method="post" action="/settings/users/{{ u.id }}/password">
+        {% include "_csrf.html" %}
+        <input name="password" type="password" minlength="12" autocomplete="new-password" required>
+        <button>Сменить</button>
+      </form>
+    </td>
+    <td>
+      <form method="post" action="/settings/users/{{ u.id }}/disable">
+        {% include "_csrf.html" %}
+        <input type="hidden" name="disabled" value="{{ 'no' if u.disabled else 'yes' }}">
+        <button>{{ "Включить" if u.disabled else "Отключить" }}</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+<h2>Новый пользователь</h2>
+<form method="post" action="/settings/users">
+  {% include "_csrf.html" %}
+  <input name="login" placeholder="Логин" required>
+  <input name="password" type="password" placeholder="Пароль, не короче 12 знаков" minlength="12" autocomplete="new-password" required>
+  <select name="role"><option value="user">пользователь</option><option value="admin">администратор</option></select>
+  <button>Создать</button>
+</form>
+{% endblock %}

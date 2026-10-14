@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Словарь — Cleaner{% endblock %}
+{% block main %}
+<p><a href="/settings">← Настройки</a></p>
+<h1>Словарь организации</h1>
+
+<h2>Добавить</h2>
+<form method="post" action="/settings/dictionary">
+  {% include "_csrf.html" %}
+  <select name="list"><option value="always">всегда скрывать</option><option value="never">никогда не скрывать</option></select>
+  <input name="value" placeholder="Значение" required>
+  <select name="type">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select>
+  <label>Варианты написания, по одному в строке <textarea name="aliases" rows="2"></textarea></label>
+  <input name="comment" placeholder="Комментарий">
+  <button>Добавить</button>
+</form>
+
+{% for title, rows in (("Всегда скрывать", always), ("Никогда не скрывать", never)) %}
+<h2>{{ title }}</h2>
+<table>
+  <tr><th>Значение</th><th>Тип</th><th>Варианты</th><th>Комментарий</th><th></th></tr>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.value }}</td><td>{{ types[r.type] if r.type else "" }}</td>
+    <td>{{ r.aliases | join(", ") }}</td><td>{{ r.comment }}</td>
+    <td><form method="post" action="/settings/dictionary/{{ r.id }}/delete">{% include "_csrf.html" %}<button>Удалить</button></form></td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5">Пусто</td></tr>
+  {% endfor %}
+</table>
+{% endfor %}
+
+<h2>Импорт из CSV</h2>
+<form method="post" action="/settings/dictionary/import">
+  {% include "_csrf.html" %}
+  <label>Содержимое файла CSV (выгрузка AD или DNS) <textarea name="csv" rows="8" required></textarea></label>
+  <label>Колонка <input name="column" placeholder="Имя колонки из первой строки"></label>
+  <select name="delimiter"><option value="comma">запятая</option><option value="semicolon">точка с запятой</option><option value="tab">табуляция</option></select>
+  <select name="list"><option value="always">всегда скрывать</option><option value="never">никогда не скрывать</option></select>
+  <select name="type">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select>
+  <button name="action" value="preview">Показать, что будет добавлено</button>
+</form>
+{% endblock %}

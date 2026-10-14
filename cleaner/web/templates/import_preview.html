@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Импорт — Cleaner{% endblock %}
+{% block main %}
+<p><a href="/settings/dictionary">← Словарь</a></p>
+<h1>Импорт: предпросмотр</h1>
+<form method="post" action="/settings/dictionary/import">
+  {% include "_csrf.html" %}
+  <textarea name="csv" hidden>
+{{ csv_text }}</textarea>
+  <input type="hidden" name="delimiter" value="{{ delimiter }}">
+  <input type="hidden" name="list" value="{{ list_ }}">
+  <input type="hidden" name="type" value="{{ type_.value if type_ else '' }}">
+  <label>Колонка <select name="column">{% for h in headers %}<option{% if h == column %} selected{% endif %}>{{ h }}</option>{% endfor %}</select></label>
+  <button name="action" value="preview">Показать</button>
+  {% if column in headers %}<button name="action" value="save">Записать новые ({{ new | length }})</button>{% endif %}
+</form>
+{% if column in headers %}
+<p>В колонке значений: {{ total }}, новых для списка: {{ new | length }}{% if new | length > shown | length %}; показаны первые {{ shown | length }}{% endif %}.</p>
+<ul>{% for v in shown %}<li>{{ v }}</li>{% endfor %}</ul>
+{% else %}
+<p class="warn">Выберите колонку из первой строки файла.</p>
+{% endif %}
+{% endblock %}

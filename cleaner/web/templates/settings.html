@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Настройки — Cleaner{% endblock %}
+{% block main %}
+<h1>Настройки</h1>
+<ul>
+  <li><a href="/settings/policies">Политики типов</a></li>
+  <li><a href="/settings/dictionary">Словарь организации и импорт</a></li>
+  <li><a href="/settings/patterns">Пользовательские шаблоны</a></li>
+  <li><a href="/settings/builtin">Встроенные списки</a></li>
+  <li><a href="/settings/users">Пользователи</a></li>
+  <li><a href="/settings/audit">Журнал</a></li>
+</ul>
+<p>Подключения к облачным моделям и локальная модель появятся на этапах 3 и 4.</p>
+{% endblock %}

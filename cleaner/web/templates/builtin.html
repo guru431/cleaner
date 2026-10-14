@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Встроенные списки — Cleaner{% endblock %}
+{% block main %}
+<p><a href="/settings">← Настройки</a></p>
+<h1>Встроенные списки</h1>
+<p>Значения этих списков не скрываются. Свои значения добавляются в список «никогда не скрывать» словаря организации.</p>
+<form method="post" action="/settings/dictionary">
+  {% include "_csrf.html" %}
+  <input type="hidden" name="list" value="never">
+  <input type="hidden" name="back" value="builtin">
+  <input name="value" placeholder="Домен, имя узла или учётная запись" required>
+  <input name="comment" placeholder="Комментарий">
+  <button>Добавить</button>
+</form>
+<h2>Добавлено вами</h2>
+<p>{% for r in never %}{{ r.value }}{% if not loop.last %}, {% endif %}{% else %}ничего{% endfor %}</p>
+{% for title, values in lists %}
+<details><summary>{{ title }} ({{ values | length }})</summary><p>{{ values | join(", ") }}</p></details>
+{% endfor %}
+{% endblock %}
