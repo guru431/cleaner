@@ -1,3 +1,5 @@
+import pytest
+
 from cleaner.core.detect import infra
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities import hostmap
@@ -132,3 +134,23 @@ def test_sid_and_dn():
     assert (T.SID, "S-1-5-21-1004336348-1177238915-682003330-1104") in result
     assert "S-1-5-18" not in {value for _, value in result}
     assert (T.DN, "CN=Ivan Petrov,OU=IT,DC=contoso,DC=ru") in result
+
+
+@pytest.mark.parametrize(
+    "text, name",
+    [
+        (r'cd "C:\Users\Иван Петров"', "Иван Петров"),
+        (r"Профиль: C:\Users\Иван Петров.", "Иван Петров"),
+        (r"Профиль C:\Users\Иван Петров, а учётка другая", "Иван Петров"),
+        ("Профиль C:\\Users\\Иван Петров\nдальше", "Иван Петров"),
+        ("'/home/ivan petrov'", "ivan petrov"),
+    ],
+)
+def test_spaced_profile_name_before_a_quote_punctuation_or_line_end(text, name):
+    """Обзор пакета исправлений 1А, P1: имя с пробелом берётся целиком не только перед «\»."""
+    assert accounts(text) == {name}
+
+
+def test_profile_name_followed_by_prose_is_one_word():
+    assert accounts(r"профиль C:\Users\ivanov лежит на диске") == {"ivanov"}
+    assert accounts(r'cd "C:\Users\ivanov" && dir') == {"ivanov"}
