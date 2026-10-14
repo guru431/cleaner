@@ -63,6 +63,40 @@ def test_kpp_and_passport_need_context():
     assert (T.PASSPORT, "4508 номер 123456") in found("серия 4508 номер 123456")
 
 
+def test_numbers_next_to_a_comma_are_checked():
+    """Обзор 1А, P1: запятая рядом с номером (CSV) не должна прятать его от проверки."""
+    result = found("ИНН,КПП\nООО Ромашка,7707083893,770701001\nОГРН,1027700132195,\nСНИЛС,11223344595,")
+    assert (T.INN, "7707083893") in result
+    assert (T.KPP, "770701001") in result
+    assert (T.OGRN, "1027700132195") in result
+    assert (T.SNILS, "11223344595") in result
+
+
+def test_phone_with_any_grouping_of_ten_digits():
+    """Обзор 1А, P1: код города из четырёх цифр и группы 2-2-2."""
+    assert (T.PHONE, "8 (4852) 12-34-56") in found("тел. 8 (4852) 12-34-56")
+    assert (T.PHONE, "+7 916 1234567") in found("звоните +7 916 1234567")
+
+
+def test_lone_eight_before_a_date_is_not_a_phone():
+    assert T.PHONE not in types("pid 8 2024-10-14 12:00:01 запуск")
+
+
+def test_card_next_to_an_expiry_date_a_cvv_or_another_group():
+    """Обзор 1А, P1: хвост после номера или группа перед ним не должны срывать проверку Луна."""
+    assert (T.CARD, "4111 1111 1111 1111") in found("карта 4111 1111 1111 1111 12/27")
+    assert (T.CARD, "4111 1111 1111 1111") in found("карта 4111 1111 1111 1111 123")
+    assert (T.CARD, "4111 1111 1111 1111") in found("от 2024 4111 1111 1111 1111")
+
+
+def test_card_is_not_cut_out_of_a_longer_digit_group():
+    assert T.CARD not in types("счёт 40702810200000000001")
+
+
+def test_passport_number_after_the_number_sign():
+    assert (T.PASSPORT, "4508 №123456") in found("Паспорт 4508 №123456")
+
+
 def test_birthdate_needs_context_and_a_real_date():
     assert (T.BIRTHDATE, "01.02.1980") in found("Дата рождения: 01.02.1980")
     assert (T.BIRTHDATE, "01.02.1980") in found("Иванов, 01.02.1980 г.р.")
