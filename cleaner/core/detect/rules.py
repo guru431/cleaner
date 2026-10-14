@@ -85,8 +85,17 @@ def _card_shape(parts: list[str]) -> bool:
     return all(len(part) == 4 for part in parts[:-1]) and 1 <= len(parts[-1]) <= 4
 
 
+def _extendable(parts: list[str]) -> bool:
+    """Может ли окно стать номером карты, если дописать к нему группы: все группы по 4 цифры или 4-6."""
+    return all(len(part) == 4 for part in parts) or [len(part) for part in parts] == [4, 6]
+
+
 def _cards(text: str, m: re.Match[str], add: Add) -> None:
-    """Все окна подряд идущих групп, которые выглядят как номер карты и проходят проверку Луна."""
+    """Все окна подряд идущих групп, которые выглядят как номер карты и проходят проверку Луна.
+
+    Окно перестаёт расти, как только номером карты стать уже не может: иначе цепочка коротких
+    чисел («8 8 8 …») перебирала бы по девятнадцать окон на каждую группу.
+    """
     groups = [(g.start() + m.start(), g.end() + m.start(), g.group()) for g in _DIGIT_GROUP.finditer(m.group())]
     for first in range(len(groups)):
         digits = ""
@@ -97,6 +106,8 @@ def _cards(text: str, m: re.Match[str], add: Add) -> None:
             parts = [group[2] for group in groups[first:last + 1]]
             if len(digits) >= 13 and _card_shape(parts) and validators.luhn(digits):
                 add(groups[first][0], groups[last][1], EntityType.CARD, True)
+            if not _extendable(parts):
+                break
 
 
 def _number(text: str, m: re.Match[str], add: Add) -> None:

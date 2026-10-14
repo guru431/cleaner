@@ -38,9 +38,11 @@ _TOKEN = re.compile(
 _BARE = r"(?P<bare>(?:[^\s;&,\"'<>]|[;&,](?![\s;&,]|[\w.-]+=|$))+)"
 _VALUE = rf"""(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)'|{_BARE})"""
 # Имя ключа содержит слово целиком или склеенным: db_password, dbpass, userpwd, accessToken.
+# Длина частей вокруг слова ограничена: без предела цепочка «tokentoken…» без «=» даёт
+# квадратичный перебор.
 _KEY = (
-    r"[\w.-]*(?:password|passwd|passphrase|pass|pwd|secret|token|api[_-]?key|access[_-]?key"
-    r"|private[_-]?key|credential|пароль)[\w.-]*"
+    r"[\w.-]{0,64}(?:password|passwd|passphrase|pass|pwd|secret|token|api[_-]?key|access[_-]?key"
+    r"|private[_-]?key|credential|пароль)[\w.-]{0,64}"
 )
 _KV = re.compile(rf"""(?<![\w.-])(?P<key>{_KEY})["']?\s*[:=]\s*{_VALUE}""", re.IGNORECASE)
 # Имена ключей, которые содержат те же слова, но хранят не секрет: счётчики токенов,
@@ -64,7 +66,8 @@ _SECRET_END = re.compile(
     r"|(?<=[a-z])(?:Password|Passwd|Passphrase|Pass|Pwd|Secret|Token|Key|Credentials?)$"
 )
 _XML = re.compile(
-    r"<(?P<tag>[\w.-]*(?:password|passwd|secret|token|api[_-]?key)[\w.-]*)>(?P<bare>[^<\r\n]+)</(?P=tag)>",
+    r"<(?P<tag>[\w.-]{0,64}(?:password|passwd|secret|token|api[_-]?key)[\w.-]{0,64})>"
+    r"(?P<bare>[^<\r\n]+)</(?P=tag)>",
     re.IGNORECASE,
 )
 # Длина схемы ограничена: без предела цепочка «a.b.a.b…» без «://» даёт квадратичный перебор.

@@ -7,14 +7,18 @@ import time
 import pytest
 
 from cleaner.core.detect.base import DetectContext
-from cleaner.core.pipeline import DETECTORS
-from cleaner.core.types import Settings
+from cleaner.core.pipeline import DETECTORS, sanitize
+from cleaner.core.restore import restore
+from cleaner.core.types import ChatState, Settings
 
 
 @pytest.mark.parametrize(
     "text",
-    ["a.b." * 5000, "CN=a," * 5000, "x" * 20000, "1," * 10000, "a:" * 10000],
-    ids=["dotted", "dn", "letters", "commas", "colons"],
+    [
+        "a.b." * 5000, "CN=a," * 5000, "x" * 20000, "1," * 10000, "a:" * 10000,
+        "token" * 4000, "pwd" * 7000, "a_pass" * 3500, "8 " * 50000,
+    ],
+    ids=["dotted", "dn", "letters", "commas", "colons", "token", "pwd", "a_pass", "eights"],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
     ctx = DetectContext(Settings())
@@ -22,3 +26,12 @@ def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
         started = time.perf_counter()
         detector.detect(text, ctx)
         assert time.perf_counter() - started < 0.5, detector.name
+
+
+def test_restore_is_fast_on_a_host_name_of_many_parts():
+    """Обзор пакета исправлений 1А, P2: проверка хоста ссылки шла квадратичное время."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "узел srv-dc01.corp.contoso.ru", Settings())
+    started = time.perf_counter()
+    restore(state, "https://" + "a." * 20000 + "x", Settings())
+    assert time.perf_counter() - started < 0.5

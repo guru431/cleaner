@@ -102,6 +102,9 @@ class _Restorer:
             text.lower() for text, surrogate in state.surrogates.items()
             if surrogate.kind in ("host", "ip", "ip6")
         }
+        # Больше частей, чем в самой длинной выданной подмене, одна цепочка не займёт: без этого
+        # предела хост «a.a.a…» из тысяч частей проверялся бы квадратичное время.
+        self.depth = max((text.count(".") + 1 for text in self.own_hosts), default=0)
         for text, surrogate in state.surrogates.items():
             if surrogate.kind == "ip":
                 self.fake_nets.add(int(ipaddress.IPv4Address(text.split("/")[0])) >> 8)
@@ -136,7 +139,7 @@ class _Restorer:
         for first in range(len(labels_)):
             if first not in reachable:
                 continue
-            for last in range(first + 1, len(labels_) + 1):
+            for last in range(first + 1, min(len(labels_), first + self.depth) + 1):
                 if ".".join(labels_[first:last]) in self.own_hosts:
                     reachable.add(last)
         return len(labels_) in reachable
