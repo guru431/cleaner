@@ -1,11 +1,11 @@
-"""Чаты: список с поиском, лента, ввод текста и ответа модели, скачивание очищенного текста."""
+"""Чаты: список с поиском, лента, ввод текста и ответа модели, состояние обработки, скачивание."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from cleaner.service import ChatView, InputView, TextTooLong
-from cleaner.storage.repo import Chat
+from cleaner.service import ChatView, EditRefused, InputView, TextTooLong
+from cleaner.storage.repo import Chat, Item
 from cleaner.web import render
 from cleaner.web.deps import Viewer, get_form, get_viewer, own_chat, page, repo_of, service_of
 
@@ -27,16 +27,27 @@ def input_view(view: ChatView, item_id: str) -> InputView:
     return entry
 
 
+def can_retry(item: Item) -> bool:
+    """Заново очищается сохранённый текст: вставленный или уже извлечённый из файла (сам файл не хранится)."""
+    return item.kind == "input" and item.status in ("done", "failed") and bool(item.original)
+
+
 def _entries(view: ChatView) -> list[dict[str, object]]:
     names = render.surrogates_by_entity(view.state)
     entries: list[dict[str, object]] = []
     for entry in view.items:
         item = entry.item
         if isinstance(entry, InputView):
+            common = {"kind": "input", "id": item.id, "seq": item.seq, "source": item.source, "status": item.status}
+            if item.status != "done":
+                entries.append(common | {
+                    "error": item.meta.get("error", ""), "progress": item.meta.get("progress", ""),
+                    "retry": can_retry(item),
+                })
+                continue
             blocked = frozenset(span["entity_id"] for span in entry.blocked)
-            entries.append({
-                "kind": "input", "id": item.id, "seq": item.seq, "deliverable": entry.deliverable,
-                "leaks": len(entry.leaks), "blocked": len(entry.blocked),
+            entries.append(common | {
+                "deliverable": entry.deliverable, "leaks": len(entry.leaks), "blocked": len(entry.blocked),
                 "exposed": [", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],
                 "html": render.highlight(item.sanitized or "", render.sanitized_marks(item, view.state, entry.leaks, blocked)),
             })
@@ -68,7 +79,8 @@ def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depe
     chat = own_chat(request, chat_id, viewer)
     view = service_of(request).view(chat_id)
     return page(
-        request, "chat.html", viewer, chat=chat, chats=chat_list(request, viewer, q), q=q, entries=_entries(view)
+        request, "chat.html", viewer, chat=chat, chats=chat_list(request, viewer, q), q=q, entries=_entries(view),
+        max_file_mb=request.app.state.max_file_bytes // (1024 * 1024),
     )
 
 
@@ -118,12 +130,34 @@ def add_answer(request: Request, chat_id: str, form: dict[str, str] = Depends(ge
     return RedirectResponse(f"/chats/{chat_id}#item-{item.id}", status_code=303)
 
 
+@router.get("/chats/{chat_id}/items/{item_id}/status")
+def item_status(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depends(get_viewer)) -> Response:
+    """Состояние обработки для опроса из app.js (раздел 14): коды и ход, без текста."""
+    own_chat(request, chat_id, viewer)
+    item = repo_of(request).item(chat_id, item_id)
+    if item is None:
+        raise HTTPException(404, "Текст не найден")
+    return JSONResponse({"status": item.status, "risk": item.risk_status, "progress": item.meta.get("progress", "")})
+
+
+@router.post("/chats/{chat_id}/items/{item_id}/retry")
+def retry(request: Request, chat_id: str, item_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
+    own_chat(request, chat_id, viewer)
+    try:
+        service_of(request).retry(chat_id, viewer.user.id, item_id)
+    except EditRefused as exc:
+        raise HTTPException(400, str(exc)) from None
+    except KeyError:
+        raise HTTPException(404, "Текст не найден") from None
+    return RedirectResponse(f"/chats/{chat_id}/items/{item_id}", status_code=303)
+
+
 @router.get("/chats/{chat_id}/items/{item_id}/download")
 def download(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depends(get_viewer)) -> Response:
     own_chat(request, chat_id, viewer)
     entry = input_view(service_of(request).view(chat_id), item_id)
     if not entry.deliverable:
-        raise HTTPException(409, "Выдача заблокирована: в тексте найден оригинал или фрагмент запрещённого типа")
+        raise HTTPException(409, "Выдача заблокирована: текст не обработан, в нём найден оригинал или фрагмент запрещённого типа")
     return Response(
         entry.item.sanitized,
         media_type="text/plain; charset=utf-8",

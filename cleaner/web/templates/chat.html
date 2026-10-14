@@ -16,7 +16,15 @@
     {% for e in entries %}
     <article class="item" id="item-{{ e.id }}">
       {% if e.kind == "input" %}
-      <h3>Текст {{ e.seq }} · <a href="/chats/{{ chat.id }}/items/{{ e.id }}">проверка</a></h3>
+      <h3>{% if e.source == "file" %}Файл{% else %}Текст{% endif %} {{ e.seq }}{% if e.status == "done" %} · <a href="/chats/{{ chat.id }}/items/{{ e.id }}">проверка</a>{% endif %}</h3>
+      {% if e.status in ("queued", "running") %}
+      <p class="muted" data-poll="/chats/{{ chat.id }}/items/{{ e.id }}/status">{% if e.status == "queued" %}В очереди{% else %}Обрабатывается{% endif %}… <span data-progress>{{ e.progress }}</span></p>
+      {% elif e.status == "failed" %}
+      <p class="error">Не обработан: {{ e.error }}</p>
+      {% if e.retry %}
+      <form method="post" action="/chats/{{ chat.id }}/items/{{ e.id }}/retry">{% include "_csrf.html" %}<button>Повторить</button></form>
+      {% endif %}
+      {% else %}
       {% if e.exposed %}
       <p class="warn">Прежний вариант этого текста содержал открытым значение, которое теперь скрывается: {{ e.exposed | join("; ") }}. Если текст уже был передан, значение ушло открытым.</p>
       {% endif %}
@@ -28,6 +36,7 @@
       {% if e.deliverable %}
       <button type="button" data-copy="text-{{ e.id }}">Скопировать</button>
       <a href="/chats/{{ chat.id }}/items/{{ e.id }}/download">Скачать .txt</a>
+      {% endif %}
       {% endif %}
       {% else %}
       <h3>Ответ модели {{ e.seq }}</h3>

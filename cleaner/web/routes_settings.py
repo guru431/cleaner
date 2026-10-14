@@ -28,7 +28,7 @@ DELIMITERS = {"comma": ",", "semicolon": ";", "tab": "\t"}
 EVENTS = (
     "login", "login_failed", "logout", "chat_created", "chat_deleted", "sanitize", "restore", "edit", "leak",
     "dictionary_changed", "dictionary_import", "pattern_changed", "policy_changed",
-    "user_created", "user_disabled", "user_enabled", "password_changed", "error",
+    "user_created", "user_disabled", "user_enabled", "password_changed", "error", "jobs_interrupted",
 )
 _SHOWN = 50
 

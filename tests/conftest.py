@@ -1,4 +1,5 @@
 import re
+from concurrent.futures import Executor, Future
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,6 +14,7 @@ from cleaner.storage import db
 from cleaner.storage.repo import Repository
 from cleaner.web import auth
 from cleaner.web.app import create_app
+from cleaner.web.jobs import Jobs
 
 _CSRF = re.compile(r'name="csrf" value="([^"]+)"')
 TEST_PASSWORD = "пароль-для-тестов"
@@ -86,6 +88,23 @@ def engines() -> FakeEngines:
     return FakeEngines()
 
 
+class Immediate(Executor):
+    """Исполнитель для тестов: задание выполняется сразу, в потоке запроса."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        future = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as exc:
+            future.set_exception(exc)
+        return future
+
+
+@pytest.fixture
+def jobs() -> Jobs:
+    return Jobs(Immediate())
+
+
 class FakeClock:
     def __init__(self) -> None:
         self.current = datetime(2026, 10, 14, 9, 0, tzinfo=timezone.utc)
@@ -143,10 +162,10 @@ class Browser:
 
 
 @pytest.fixture
-def app(repo, clock, monkeypatch):
+def app(repo, clock, monkeypatch, engines, jobs):
     # Быстрый Argon2 только в тестах: хэш хранит свои параметры, проверка пароля от этого не меняется.
     monkeypatch.setattr(auth, "_hasher", PasswordHasher(time_cost=1, memory_cost=1024, parallelism=1))
-    return create_app(repo, clock, secure_cookies=False)
+    return create_app(repo, clock, secure_cookies=False, engines=engines, jobs=jobs)
 
 
 @pytest.fixture

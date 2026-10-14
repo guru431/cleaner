@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from datetime import timezone, tzinfo
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -17,6 +19,7 @@ from cleaner.service import ChatService
 from cleaner.storage.repo import Repository
 from cleaner.web import auth, routes_auth, routes_chats, routes_review, routes_settings
 from cleaner.web.deps import MAX_BODY_BYTES, LoginRequired, page
+from cleaner.web.jobs import INTERRUPTED, Jobs
 
 log = logging.getLogger("cleaner.web")
 
@@ -60,15 +63,29 @@ class BodyLimit:
 
 
 def create_app(
-    repo: Repository, clock: Clock, *, secure_cookies: bool, max_text_chars: int = 500_000, tz: tzinfo = timezone.utc
+    repo: Repository, clock: Clock, *, secure_cookies: bool, max_text_chars: int = 500_000,
+    tz: tzinfo = timezone.utc, engines: Any = None, jobs: Jobs | None = None, max_file_mb: int = 50,
 ) -> FastAPI:
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    jobs = jobs or Jobs()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        jobs.shutdown()
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.repo = repo
     app.state.clock = clock
-    app.state.service = ChatService(repo, max_text_chars)
+    app.state.engines = engines                      # cleaner.engines.Engines; в тестах — заглушка
+    app.state.jobs = jobs
+    app.state.max_file_bytes = max_file_mb * 1024 * 1024
+    app.state.service = ChatService(repo, max_text_chars, engines, submit=jobs.submit)
     app.state.throttle = auth.Throttle(clock)
     app.state.secure_cookies = secure_cookies
     app.state.tz = tz
+    interrupted = repo.fail_interrupted(INTERRUPTED)  # служба одна, очередь в памяти: всё «в работе» прервано
+    if interrupted:
+        repo.audit("jobs_interrupted", count=interrupted)
     app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static")), name="static")
     app.include_router(routes_auth.router)
     app.include_router(routes_chats.router)

@@ -1,8 +1,12 @@
 import re
+import uuid
 
 from cleaner import service
 from cleaner.core.pipeline import SanitizeResult
 from cleaner.core.types import EntityType as T
+from cleaner.storage.repo import Item
+from cleaner.web.app import create_app
+from cleaner.web.jobs import INTERRUPTED
 
 
 def test_new_chat_gets_a_dated_title_and_the_list_is_searchable(ivan):
@@ -84,3 +88,38 @@ def test_largest_allowed_text_is_accepted(ivan, repo, monkeypatch):
     response = ivan.post(f"/chats/{chat_id}/input", text="😀" * 500_000)
     assert response.status_code == 303, response.text[:200]
     assert len(repo.items(chat_id)[0].original) == 500_000
+
+
+def test_status_of_a_text_is_served_as_json_without_its_content(ivan, repo):
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    item_id = repo.items(chat_id)[0].id
+    response = ivan.get(f"/chats/{chat_id}/items/{item_id}/status")
+    assert response.json() == {"status": "done", "risk": "", "progress": ""}
+    assert "a@x.example" not in response.text
+    assert ivan.get(f"/chats/{chat_id}/items/{'0' * 32}/status").status_code == 404
+
+
+def test_text_in_progress_is_polled_and_not_shown(ivan, repo):
+    chat_id = ivan.chat()
+    item = repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", "почта a@x.example", None, status="queued"))
+    poll = f'data-poll="/chats/{chat_id}/items/{item.id}/status"'
+    for path in (f"/chats/{chat_id}", f"/chats/{chat_id}/items/{item.id}"):
+        page = ivan.get(path).text
+        assert poll in page and "a@x.example" not in page, path
+    assert ivan.get(f"/chats/{chat_id}/items/{item.id}/download").status_code == 409
+
+
+def test_text_left_running_fails_at_start_and_can_be_run_again(ivan, repo, clock, engines, jobs):
+    """Обзор плана 2+4, пункт 1 (NFR-6)."""
+    chat_id = ivan.chat()
+    item = repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", "почта a@x.example", None, status="running"))
+    create_app(repo, clock, secure_cookies=False, engines=engines, jobs=jobs)          # перезапуск службы
+    stored = repo.item(chat_id, item.id)
+    assert (stored.status, stored.meta["error"]) == ("failed", INTERRUPTED)
+    assert [e.details for e in repo.audit_events("jobs_interrupted")] == [{"count": 1}]
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert INTERRUPTED in page and f"/items/{item.id}/retry" in page
+    ivan.post(f"/chats/{chat_id}/items/{item.id}/retry")
+    assert repo.item(chat_id, item.id).sanitized == "почта <EMAIL_1>"
+    assert ivan.post(f"/chats/{chat_id}/items/{'0' * 32}/retry").status_code == 404

@@ -30,3 +30,4 @@ mark.leak, mark.blocked { background: #ffcdd2; outline: 1px solid var(--bad); }
 .r-restored { background: #c8e6c9; } .r-altered { background: #fff59d; } .r-derived { background: #b3e5fc; }
 .r-unknown, .r-foreign_link { background: #ffcdd2; } .r-kept_by_policy { background: #e0e0e0; }
 .danger { margin-top: 2rem; color: var(--bad); }
+.muted { color: var(--muted); }

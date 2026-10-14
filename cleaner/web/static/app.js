@@ -25,3 +25,21 @@ document.addEventListener("selectionchange", () => {
   // Значение, а не позиции: браузер отдаёт переводы строк как LF, сервер ищет значение в оригинале сам.
   field.value = selection.toString().trim();
 });
+
+// Опрос фоновой обработки (раздел 14): пока задание в очереди или в работе — раз в секунду, потом перезагрузка.
+document.querySelectorAll("[data-poll]").forEach((element) => {
+  const field = element.dataset.pollField || "status";
+  const check = () => {
+    fetch(element.dataset.poll, { credentials: "same-origin", cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((state) => {
+        if (!state) { setTimeout(check, 5000); return; }
+        const progress = element.querySelector("[data-progress]");
+        if (progress) progress.textContent = state.progress || "";
+        if (state[field] === "queued" || state[field] === "running") setTimeout(check, 1000);
+        else window.location.reload();
+      })
+      .catch(() => setTimeout(check, 5000));
+  };
+  setTimeout(check, 1000);
+});

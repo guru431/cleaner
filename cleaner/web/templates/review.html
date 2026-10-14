@@ -4,8 +4,18 @@
 <p><a href="/chats/{{ chat.id }}">← {{ chat.title }}</a> · <a href="/chats/{{ chat.id }}/entities">Таблица замен</a></p>
 <h1>Проверка текста {{ item.seq }}</h1>
 
+{% if pending %}
+<section class="summary">
+  {% if item.status in ("queued", "running") %}
+  <p class="muted" data-poll="/chats/{{ chat.id }}/items/{{ item.id }}/status">{% if item.status == "queued" %}Текст в очереди{% else %}Текст обрабатывается{% endif %}… <span data-progress>{{ item.meta.progress or "" }}</span></p>
+  {% else %}
+  <p class="error">Текст не обработан: {{ item.meta.error }}</p>
+  {% endif %}
+</section>
+{% else %}
 <section class="summary">
   <p>Замены: {% for name, count in summary %}{{ name }} — {{ count }}{% if not loop.last %}, {% endif %}{% else %}нет{% endfor %}.</p>
+  {% for text in warnings %}<p class="warn">{{ text }}</p>{% endfor %}
   {% for text, count in notices %}<p class="warn">{{ text }} ({{ count }})</p>{% endfor %}
   {% if exposed %}
   <p class="warn">Прежний вариант этого текста содержал открытым значение, которое теперь скрывается: {{ exposed | join("; ") }}. Если текст уже был передан, значение ушло открытым.</p>
@@ -75,4 +85,12 @@
   </tr>
   {% endfor %}
 </table>
+{% endif %}
+
+{% if retry %}
+<form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/retry">
+  {% include "_csrf.html" %}
+  <button>{% if item.status == "done" %}Очистить заново всеми включёнными слоями{% else %}Повторить{% endif %}</button>
+</form>
+{% endif %}
 {% endblock %}

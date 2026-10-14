@@ -12,7 +12,7 @@ from cleaner.core.types import EntityType
 from cleaner.service import ChatService, EditRefused
 from cleaner.web import render
 from cleaner.web.deps import Viewer, get_admin, get_form, get_viewer, own_chat, page, repo_of, service_of
-from cleaner.web.routes_chats import input_view
+from cleaner.web.routes_chats import can_retry, input_view
 
 router = APIRouter()
 _ITEM_ID = re.compile(r"[0-9a-f]{32}")
@@ -54,6 +54,8 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
     view = service_of(request).view(chat_id)
     entry = input_view(view, item_id)
     item, state = entry.item, view.state
+    if item.status != "done":
+        return page(request, "review.html", viewer, chat=chat, item=item, pending=True, retry=can_retry(item))
     names = render.surrogates_by_entity(state)
     fragments, seen = [], set()
     for span in sorted(item.spans, key=lambda s: s["start"]):
@@ -73,7 +75,7 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
         summary=render.summary(item, state), fragments=fragments,
         notices=[(_NOTICES.get(code, code), count) for code, count in notices.items()],
         exposed=[", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],
-        types=render.TYPE_NAMES,
+        types=render.TYPE_NAMES, pending=False, retry=can_retry(item), warnings=[],
     )
 
 
