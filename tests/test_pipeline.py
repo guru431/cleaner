@@ -106,6 +106,22 @@ def test_public_surrogate_does_not_repeat_an_address_of_the_text(state, settings
     assert restore(state, result.sanitized, settings).text == text
 
 
+def test_sanitized_text_pasted_back_changes_nothing(state, settings):
+    """Обзор 1А, P2 (FR-5.9): своя замена в другом виде записи — всё равно своя."""
+    text = (
+        "SID S-1-5-21-1004336348-1177238915-682003330-1104, MAC 00:1A:2B:3C:4D:5E, "
+        "узел srv-dc01.corp.contoso.ru, почта i.ivanov@contoso.ru, адрес 10.1.2.5, "
+        "IPv6 2a00:1450:4010::65"
+    )
+    first = sanitize(state, text, settings)
+    counts = (len(state.entities), len(state.surrogates))
+    mac = next(s.surrogate for s in first.spans if state.entities[s.entity_id].type is T.MAC)
+    pasted = f"{first.sanitized}; {mac.replace(':', '-')}; postmaster@domain-1.example"
+    second = sanitize(state, pasted, settings)
+    assert second.sanitized == pasted
+    assert (len(state.entities), len(state.surrogates)) == counts
+
+
 def test_foreign_label_is_reported_and_left_alone(state, settings):
     result = sanitize(state, "В шаблоне стоит <PERSON_7>", settings)
     assert result.sanitized == "В шаблоне стоит <PERSON_7>"

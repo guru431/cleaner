@@ -77,3 +77,21 @@ def test_layers_1_to_3_fit_the_time_budget_on_a_large_input(state):
     elapsed = time.perf_counter() - started
     assert "user00042" not in result.sanitized
     assert elapsed < 3.0, f"очистка заняла {elapsed:.1f} с"
+
+
+@pytest.mark.integration
+def test_large_log_with_thousands_of_distinct_values_fits_the_time_budget(state, settings):
+    """Обзор 1А, P2: время не должно расти с размером таблицы замен (NFR-4)."""
+    lines = [
+        f"{n:05d} i.user{n}@corp{n % 97}.example.ru вошёл с 10.{n // 256 % 256}.{n % 256}.7 "
+        f"на srv-app{n:04d}.corp.contoso.ru\n"
+        for n in range(1400)
+    ]
+    text = "".join(lines)[:100_000]
+    for attempt in ("первая", "повторная"):
+        started = time.perf_counter()
+        result = sanitize(state, text, settings)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 3.0, f"{attempt} очистка заняла {elapsed:.1f} с"
+    assert len(state.surrogates) > 3000
+    assert "srv-app0042" not in result.sanitized

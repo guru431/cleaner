@@ -59,7 +59,7 @@ class RestoreResult:
     counters: dict[str, int]
 
 
-def _split(pieces: list[Piece], pattern: re.Pattern[str], handler: Handler) -> list[Piece]:
+def _split(pieces: list[Piece], pattern: re.Pattern[str] | surrogates.Finder, handler: Handler) -> list[Piece]:
     """Применяет handler к совпадениям pattern в ещё не обработанных кусках."""
     out: list[Piece] = []
     for text, kind in pieces:
@@ -84,8 +84,7 @@ class _Restorer:
     def __init__(self, state: ChatState, settings: Settings):
         self.state = state
         self.settings = settings
-        self.exact = surrogates.build_pattern(state)
-        self.caseless = surrogates.caseless(state)
+        self.exact = surrogates.Finder(state)
         self.fake_nets: set[int] = set()
         self.macs = {}
         self.own_hosts = {
@@ -104,8 +103,7 @@ class _Restorer:
     def run(self, pieces: list[Piece], links: bool) -> list[Piece]:
         if links:
             pieces = _split(pieces, _LINK, self._link)
-        if self.exact:
-            pieces = _split(pieces, self.exact, self._exact)
+        pieces = _split(pieces, self.exact, self._exact)
         pieces = _split(pieces, _TOLERANT, self._label)
         pieces = _split(pieces, _IPV4, self._derived_ip)
         return _split(pieces, _MAC, self._mac)
@@ -149,9 +147,9 @@ class _Restorer:
         self.counters["foreign_links"] += 1
         return m.group(), "foreign_link"
 
-    def _exact(self, m: re.Match[str]) -> Piece:
+    def _exact(self, m: surrogates.Hit) -> Piece:
         text = m.group()
-        surrogate = self.state.surrogates.get(text) or self.caseless[text.lower()]
+        surrogate = self.state.surrogates[m.key]
         entity = self.state.entities[surrogate.entity_id]
         if self._hidden(entity.type):
             self.counters["kept"] += 1

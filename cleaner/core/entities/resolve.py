@@ -13,6 +13,11 @@ from cleaner.core.types import ChatState, Entity, EntityType, Settings, Surrogat
 
 T = EntityType
 _DIGIT_TYPES = frozenset({T.INN, T.SNILS, T.OGRN, T.KPP, T.OMS, T.CARD, T.PASSPORT})
+# Записи адресов в тексте: IPv4 с длиной префикса и без, IPv6.
+_ADDRESS_TOKEN = re.compile(
+    r"(?<![\w.:])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\w|\.\d)"
+    r"|(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])"
+)
 _LEGAL_FORMS = frozenset(
     {"ооо", "зао", "оао", "пао", "ао", "ип", "нко", "гуп", "муп", "фгуп", "llc", "inc", "ltd", "gmbh", "corp", "co"}
 )
@@ -74,6 +79,7 @@ class Resolver:
                 self.alias[(entry.type, normalize(form))] = key
         self.open_values = settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
         self.real_ips: set[str] = set()
+        self._text_addresses: set[str] | None = None
 
     @staticmethod
     def _dictionary_key(type_: EntityType, value: str) -> str:
@@ -200,7 +206,9 @@ class Resolver:
         return entity, self._issue(entity, "ip", make)
 
     def _address_in_text(self, address: str) -> bool:
-        return re.search(rf"(?<![\w.:]){re.escape(address)}(?![\w:]|\.\d)", self.text) is not None
+        if self._text_addresses is None:      # собирается один раз на текст: проверок — тысячи
+            self._text_addresses = {m.group().lower() for m in _ADDRESS_TOKEN.finditer(self.text)}
+        return address.lower() in self._text_addresses
 
     def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str]:
         key = macsid.mac_key(value)

@@ -1,21 +1,38 @@
 """Конвейер очистки: слои → объединение → сущности → очищенный текст → проверка утечек."""
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 
 from cleaner.core import leakcheck, surrogates
 from cleaner.core.detect import dictionary, infra, rules, secrets
 from cleaner.core.detect.base import DetectContext
-from cleaner.core.detect.merge import merge
+from cleaner.core.detect.merge import MergedSpan, merge
 from cleaner.core.entities import labels
 from cleaner.core.entities.resolve import ResolvedSpan, Resolver
 from cleaner.core.leakcheck import Leak
-from cleaner.core.types import ChatState, Policy, Settings
+from cleaner.core.types import ChatState, EntityType, Policy, Settings
 
 DETECTORS = (rules, secrets, infra, dictionary)
 
 # Второй проход ищет написания сущностей, найденных в этом же тексте; третий — страховка.
 _MAX_PASSES = 3
+
+# Фрагмент такого вида, задевший выданную замену, — это она сама в другой записи
+# («postmaster@domain-1.example», SID с RID): второй раз его не заменяют (FR-5.9).
+_COMPOSED = frozenset({
+    EntityType.EMAIL, EntityType.HOST, EntityType.DOMAIN, EntityType.IP,
+    EntityType.MAC, EntityType.SID, EntityType.DN,
+})
+
+
+def _kept(span: MergedSpan, ranges: list[tuple[int, int]], starts: list[int]) -> bool:
+    """Оставить ли фрагмент: он не внутри выданной замены и не составная запись вокруг неё."""
+    i = bisect.bisect_right(starts, span.start) - 1
+    if i >= 0 and ranges[i][1] >= span.end:
+        return False
+    overlaps = (i >= 0 and ranges[i][1] > span.start) or (i + 1 < len(ranges) and ranges[i + 1][0] < span.end)
+    return not (overlaps and span.type in _COMPOSED)
 
 
 @dataclass(frozen=True)
@@ -70,15 +87,14 @@ def sanitize(state: ChatState, text: str, settings: Settings) -> SanitizeResult:
             state.foreign_labels.add(m.group())
             notices.append(Notice("foreign_label", m.start(), m.end()))
             protected.append(m.span())
+    protected.sort()
+    starts = [start for start, _ in protected]
     resolved: list[ResolvedSpan] = []
     for _ in range(_MAX_PASSES):
         before = _forms(state)
         ctx = _context(state, settings)
         found = [span for detector in DETECTORS for span in detector.detect(text, ctx)]
-        merged = [
-            m for m in merge(text, found, ctx)
-            if not any(start <= m.start and m.end <= end for start, end in protected)
-        ]
+        merged = [m for m in merge(text, found, ctx) if _kept(m, protected, starts)]
         resolved = Resolver(state, settings, text, ctx.builtin.generic_labels).run(text, merged)
         if _forms(state) == before:
             break
