@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from cleaner.core import leakcheck, surrogates
-from cleaner.core.detect import dictionary, infra, rules, secrets
+from cleaner.core.detect import dictionary, infra, orgs, rules, secrets
 from cleaner.core.detect.base import DetectContext, Detector
 from cleaner.core.detect.merge import MergedSpan, merge
 from cleaner.core.entities import labels
@@ -15,7 +15,7 @@ from cleaner.core.entities.resolve import ResolvedSpan, Resolver
 from cleaner.core.leakcheck import Leak
 from cleaner.core.types import ChatState, EntityType, Policy, Settings, Span
 
-DETECTORS = (rules, secrets, infra, dictionary)
+DETECTORS = (rules, secrets, infra, dictionary, orgs)
 
 # Второй проход ищет написания сущностей, найденных в этом же тексте; третий — страховка.
 _MAX_PASSES = 3
