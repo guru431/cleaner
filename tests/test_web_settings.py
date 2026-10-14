@@ -134,3 +134,15 @@ def test_local_model_check_reports_the_outcome(boss, engines):
 def test_local_model_settings_are_for_admins_only(ivan):
     assert ivan.get("/settings/local-llm").status_code == 403
     assert ivan.post("/settings/local-llm", url="http://127.0.0.1:30000/v1", model="m").status_code == 403
+
+
+def test_gold_list_shows_counts_but_no_text_and_only_to_admins(boss, ivan, repo):
+    user = repo.user_by_login("ivan").id
+    gold_id = repo.add_gold(user, "секрет Gg44 текст", [{"start": 0, "end": 6, "type": "TERM", "entity": 0, "origin": "manual"}])
+    page = boss.get("/settings/gold").text
+    assert "TERM — 1" in page and "ivan" in page and "Gg44" not in page
+    assert ivan.get("/settings/gold").status_code == 403
+    boss.post(f"/settings/gold/{gold_id}/delete")
+    assert repo.gold() == []
+    assert boss.post(f"/settings/gold/{gold_id}/delete").status_code == 404
+    assert len(repo.audit_events("gold_deleted")) == 1

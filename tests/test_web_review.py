@@ -99,3 +99,19 @@ def test_answers_have_no_review_screen(ivan, repo):
     chat_id = ivan.chat()
     ivan.post(f"/chats/{chat_id}/answer", answer="ответ")
     assert ivan.get(f"/chats/{chat_id}/items/{first_item(repo, chat_id)}").status_code == 404
+
+
+def test_reviewed_text_is_saved_as_a_gold_example(ivan, repo):
+    """FR-6.10: текст и итоговая разметка — с правками пользователя."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="Пишет a@x.example про a@x.example и Заря")
+    item_id = first_item(repo, chat_id)
+    ivan.post(f"/chats/{chat_id}/mask", item_id=item_id, value="Заря", type="TERM")
+    assert "Сохранить как эталон" in ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    assert ivan.post(f"/chats/{chat_id}/items/{item_id}/gold").status_code == 303
+    [row] = repo.gold()
+    assert row.text == "Пишет a@x.example про a@x.example и Заря"
+    assert [(s["type"], s["entity"], s["origin"]) for s in row.spans] == [
+        ("EMAIL", 0, "detector"), ("EMAIL", 0, "detector"), ("TERM", 1, "manual"),
+    ]
+    assert [e.details for e in repo.audit_events("gold_added")] == [{"spans": 3}]

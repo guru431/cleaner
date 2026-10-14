@@ -343,3 +343,27 @@ class ChatService:
         if not cleaned:
             raise EditRefused("пустое значение")
         self._edit(chat_id, user_id, "restore_value", lambda state, items: ops.set_restore_value(state, entity_id, cleaned))
+
+    # --- эталонный набор (FR-6.10, QA-1) --------------------------------------------------
+
+    def save_gold(self, chat_id: str, user_id: str, item_id: str) -> str:
+        """Проверенный пользователем текст и итоговая разметка — копией под общим ключом."""
+        state, _ = self.repo.load_state(chat_id)
+        item = self.repo.item(chat_id, item_id)
+        if item is None or item.kind != "input":
+            raise KeyError(item_id)
+        if item.status != "done":
+            raise EditRefused("текст ещё не очищен")
+        numbers: dict[str, int] = {}
+        spans = []
+        for span in sorted(item.spans, key=lambda s: s["start"]):
+            entity = state.entities.get(span["entity_id"])
+            if entity is None:
+                continue
+            spans.append({
+                "start": span["start"], "end": span["end"], "type": entity.type.value,
+                "entity": numbers.setdefault(entity.id, len(numbers)), "origin": entity.origin,
+            })
+        gold_id = self.repo.add_gold(user_id, item.original, spans)
+        self.repo.audit("gold_added", user_id, chat_id, spans=len(spans))
+        return gold_id

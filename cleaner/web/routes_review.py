@@ -79,6 +79,18 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
     )
 
 
+@router.post("/chats/{chat_id}/items/{item_id}/gold")
+def save_gold(request: Request, chat_id: str, item_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
+    own_chat(request, chat_id, viewer)
+    try:
+        service_of(request).save_gold(chat_id, viewer.user.id, item_id)
+    except EditRefused as exc:
+        raise HTTPException(400, str(exc)) from None
+    except KeyError:
+        raise HTTPException(404, "Текст не найден") from None
+    return RedirectResponse(f"/chats/{chat_id}/items/{item_id}", status_code=303)
+
+
 @router.post("/chats/{chat_id}/mask")
 def mask(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
     return _edit(request, chat_id, viewer, form, lambda service: service.mask_value(

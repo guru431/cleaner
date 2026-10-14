@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import io
+from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
 
 import regex
@@ -31,7 +32,7 @@ EVENTS = (
     "login", "login_failed", "logout", "chat_created", "chat_deleted", "sanitize", "restore", "edit", "leak",
     "dictionary_changed", "dictionary_import", "pattern_changed", "policy_changed",
     "user_created", "user_disabled", "user_enabled", "password_changed", "error", "jobs_interrupted",
-    "settings_changed",
+    "settings_changed", "gold_added", "gold_deleted",
 )
 _SHOWN = 50
 
@@ -351,3 +352,32 @@ def audit(
         request, "audit.html", viewer, rows=rows, logins={u.id: u.login for u in accounts}, users=accounts,
         events=EVENTS, event=event, user=user, since=since, until=until,
     )
+
+
+# --- эталонный набор (FR-6.10, QA-1) ----------------------------------------------------
+
+GOLD_TARGET = 200          # QA-1: не меньше 200 примеров к концу этапа 2
+
+
+@router.get("/gold")
+def gold(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
+    """Число примеров и разметка по типам — без текстов: чужие тексты администратор не видит (раздел 4 ТЗ)."""
+    repo = repo_of(request)
+    logins = {user.id: user.login for user in repo.users()}
+    rows = [
+        {
+            "id": row.id, "created_at": row.created_at, "login": logins.get(row.user_id, "—"), "length": len(row.text),
+            "types": ", ".join(f"{type_} — {count}" for type_, count in sorted(Counter(s["type"] for s in row.spans).items())),
+        }
+        for row in repo.gold()
+    ]
+    return page(request, "gold.html", viewer, rows=rows, target=GOLD_TARGET)
+
+
+@router.post("/gold/{gold_id}/delete")
+def delete_gold(request: Request, gold_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    repo = repo_of(request)
+    if not repo.delete_gold(gold_id):
+        raise HTTPException(404, "Пример не найден")
+    repo.audit("gold_deleted", viewer.user.id)
+    return _redirect("/settings/gold")

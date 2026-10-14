@@ -85,6 +85,13 @@
   </tr>
   {% endfor %}
 </table>
+
+<h2>Эталонный набор</h2>
+<form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/gold">
+  {% include "_csrf.html" %}
+  <button>Сохранить как эталон</button>
+  <span class="muted">Сначала проверьте замены. Копия текста с текущей разметкой попадёт в набор для измерения качества и останется в нём после удаления чата.</span>
+</form>
 {% endif %}
 
 {% if retry %}
