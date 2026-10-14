@@ -19,10 +19,14 @@ Handler = Callable[[re.Match[str]], Piece | None]
 # такой же кавычкой («"https://…","<EMAIL_1>"»), а без неё идёт и через кавычки («?q='…'»).
 _START = r"(?:(?:[a-z][a-z0-9+.-]{0,31}:)?//|(?<![\w.-])www\.)"
 _END = r"[^\s\"'`.,;:!?)\]}]"
+# Атрибут тянется и через строки (браузер выбрасывает из адреса переводы строк), но не дальше
+# 4096 знаков: незакрытая кавычка не должна захватить весь ответ. Цель определения ссылки
+# в угловых скобках («[1]: <https://… с пробелами>») — до последней «>» строки.
 _LINK = re.compile(
     r"\]\((?P<md>(?:[^()\r\n]|\([^()\r\n]*\))*)\)"
-    r"|(?<![\w-])(?:href|src|srcset|action|formaction|poster|data|background|cite|ping)"
-    r"\s*=\s*(?P<quote>[\"'])(?P<attr>.*?)(?P=quote)"
+    r"|\]:[ \t]*<(?P<ref>[^\r\n]*)>"
+    r"|(?<![\w-])(?:href|src|srcset|action|formaction|poster|data|background|cite|ping|style)"
+    r"\s*=\s*(?P<quote>[\"'])(?P<attr>[\s\S]{0,4096}?)(?P=quote)"
     rf"|(?P<mailto>mailto:[^\s\"'`]*{_END})"
     rf"|(?<=\")(?P<dq>{_START}[^\s\"`]*{_END})"
     rf"|(?<=')(?P<sq>{_START}[^\s'`]*{_END})"
@@ -146,7 +150,7 @@ class _Restorer:
 
     def _is_own(self, target: str) -> bool:
         """Ведёт ли ссылка на наш узел или наш адрес. Всё остальное — чужая ссылка."""
-        target = target.strip()
+        target = re.sub(r"[\t\r\n]", "", target.strip())   # браузер выбрасывает их из адреса
         if target.lower().startswith("mailto:"):
             address = target[len("mailto:"):]
             return address in self.state.surrogates          # без параметров: в них может быть что угодно
@@ -156,7 +160,9 @@ class _Restorer:
         return bool(host) and self._host_is_ours(host.group(1))
 
     def _link(self, m: re.Match[str]) -> Piece | None:
-        target = next((m.group(name) for name in ("md", "attr", "mailto", "dq", "sq", "url") if m.group(name)), "")
+        target = next(
+            (m.group(name) for name in ("md", "ref", "attr", "mailto", "dq", "sq", "url") if m.group(name)), ""
+        )
         if self._is_own(target):
             return None         # ссылка на наш же узел восстанавливается как обычный текст
         if self._inner(m.group()) == m.group():

