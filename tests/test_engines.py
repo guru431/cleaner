@@ -1,8 +1,12 @@
+import json
+
 import httpx
 import pytest
 
 from cleaner import models
 from cleaner.core.detect.base import DetectorError
+from cleaner.core.detect.llm import SCHEMA
+from cleaner.core.types import ChatState
 from cleaner.engines import Engines, LocalSettings, local_settings, save_local_settings
 from cleaner.ingest.extract import ExtractError
 
@@ -55,3 +59,16 @@ def test_extractor_sends_scans_to_the_gateway(repo, tmp_path):
 def test_documents_need_their_models(repo, tmp_path):
     with pytest.raises(ExtractError, match="модели Docling не загружены"):
         Engines(repo, tmp_path, environ={}).extractor().extract("a.docx", b"PK\x03\x04" + b"\x00" * 8)
+
+
+def test_layer_5_goes_to_the_gateway_with_the_configured_model(repo, tmp_path):
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"items": []}'}, "finish_reason": "stop"}]})
+
+    repo.set_setting("local_llm.model", "qwen-27b-fast")
+    engines = Engines(repo, tmp_path, environ={"CLEANER_GATEWAY_KEY": "k"}, transport=httpx.MockTransport(handler))
+    assert engines.llm().find("текст", "текст", ChatState("c", bytes(32))) == []
+    assert bodies[0]["model"] == "qwen-27b-fast" and bodies[0]["response_format"]["json_schema"]["schema"] == SCHEMA

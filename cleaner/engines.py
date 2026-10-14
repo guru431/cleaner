@@ -14,6 +14,7 @@ from pathlib import Path
 
 from cleaner import models
 from cleaner.core.detect.base import DetectorError
+from cleaner.core.detect.llm import LlmLayer
 from cleaner.ingest.documents import Docling
 from cleaner.ingest.extract import Extractor
 from cleaner.local_llm import LocalLLM, LocalLLMConfig, check_address
@@ -90,5 +91,6 @@ class Engines:
     def ner(self):
         raise DetectorError("Слой 4 недоступен: модели распознавания имён ещё не подключены")
 
-    def llm(self):
-        raise DetectorError("Слой 5 недоступен: второй проход локальной модели ещё не подключён")
+    def llm(self) -> LlmLayer:
+        """Слой 5 через шлюз; схема ответа — параметром или текстом запроса, по настройке (проверка E задачи 3)."""
+        return LlmLayer(self.client(), send_schema=local_settings(self.repo).schema)
