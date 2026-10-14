@@ -188,7 +188,7 @@ def test_extracted_text_and_risk_are_stored_encrypted(tmp_path, repo):
 
 def test_chat_layers_follow_the_default_until_chosen(repo):
     user, chat = new_chat(repo)
-    assert (repo.layer_defaults(), repo.chat_layers(chat)) == ({"ner": False, "llm": False}, {})
+    assert (repo.layer_defaults(), repo.chat_layers(chat)) == ({"ner": True, "llm": False}, {})
     repo.set_chat_layer(chat, "llm", True)
     repo.set_layer_defaults({"ner": True, "llm": False})
     assert (repo.chat_layers(chat), repo.layer_defaults()) == ({"llm": True}, {"ner": True, "llm": False})

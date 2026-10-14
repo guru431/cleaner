@@ -72,3 +72,8 @@ def test_layer_5_goes_to_the_gateway_with_the_configured_model(repo, tmp_path):
     engines = Engines(repo, tmp_path, environ={"CLEANER_GATEWAY_KEY": "k"}, transport=httpx.MockTransport(handler))
     assert engines.llm().find("текст", "текст", ChatState("c", bytes(32))) == []
     assert bodies[0]["model"] == "qwen-27b-fast" and bodies[0]["response_format"]["json_schema"]["schema"] == SCHEMA
+
+
+def test_layer_4_needs_its_models(repo, tmp_path):
+    with pytest.raises(DetectorError, match="модели не загружены"):
+        Engines(repo, tmp_path, environ={}).ner()

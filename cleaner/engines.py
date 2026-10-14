@@ -16,6 +16,7 @@ from cleaner import models
 from cleaner.core import risk
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.llm import LlmLayer
+from cleaner.core.detect.ner_models import NerModels
 from cleaner.ingest.documents import Docling
 from cleaner.ingest.extract import Extractor
 from cleaner.local_llm import LocalLLM, LocalLLMConfig, check_address
@@ -63,6 +64,7 @@ class Engines:
         self._client: LocalLLM | None = None
         self._lock = threading.Lock()
         self._documents = Docling(models_dir / models.DOCLING_DIR)
+        self._ner = NerModels(models_dir)
 
     def status(self) -> dict[str, object]:
         """Для страницы настроек: задан ли ключ (значение не показывается) и какие модели на диске."""
@@ -90,7 +92,8 @@ class Engines:
         return Extractor(self._documents, lambda image, mime: self.client().ocr_page(image, mime))
 
     def ner(self):
-        raise DetectorError("Слой 4 недоступен: модели распознавания имён ещё не подключены")
+        """Слой 4: модели грузятся при первом обращении (несколько секунд), дальше — из памяти."""
+        return self._ner.layer()
 
     def llm(self) -> LlmLayer:
         """Слой 5 через шлюз; схема ответа — параметром или текстом запроса, по настройке (проверка E задачи 3)."""
