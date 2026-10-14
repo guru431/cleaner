@@ -154,3 +154,17 @@ def test_spaced_profile_name_before_a_quote_punctuation_or_line_end(text, name):
 def test_profile_name_followed_by_prose_is_one_word():
     assert accounts(r"профиль C:\Users\ivanov лежит на диске") == {"ivanov"}
     assert accounts(r'cd "C:\Users\ivanov" && dir') == {"ivanov"}
+
+
+def test_host_after_a_url_login_is_found_before_punctuation():
+    """FINDINGS P1 «Logins and hosts in URLs…»: хост после «user@» со знаком препинания за ним оставался открытым."""
+    for text in (
+        "Подключись: ssh://ivanov@srv-db01.corp.contoso.ru, пароль спроси",
+        "(ssh://ivanov@srv-db01.corp.contoso.ru)",
+        "ssh://ivanov@srv-db01.corp.contoso.ru; дальше",
+    ):
+        assert (T.HOST, "srv-db01.corp.contoso.ru") in found(text), text
+
+
+def test_hyphenated_spaced_profile_name_is_taken_whole():
+    assert accounts(r"C:\Users\Ivan Petrov-Vodkin\Documents") == {"Ivan Petrov-Vodkin"}

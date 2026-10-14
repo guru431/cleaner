@@ -128,3 +128,9 @@ def test_standard_and_service_logins_in_a_url_are_not_masked():
         "https://oauth2@git.contoso.ru/team/repo.git",
     ):
         assert found(text) == set(), text
+
+
+def test_login_before_a_url_password_is_masked():
+    """FINDINGS P1 «Logins and hosts in URLs…»: в «схема://логин:пароль@хост» логин оставался открытым."""
+    assert found("REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru/app") == {(T.ACCOUNT, "petrov")}
+    assert found("REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru:5432/app") == set()

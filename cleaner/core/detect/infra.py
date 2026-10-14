@@ -48,7 +48,8 @@ _FILE_EXT = re.compile(
 # а знак препинания в конце отрезается.
 _PROFILE = re.compile(
     r"(?:\b[a-z]:\\{1,2}Users\\{1,2}|(?<![\w.\\])\\{1,2}Users\\{1,2}|(?<![\w.])/home/|(?<![\w.])/Users/)"
-    r"(?:(?P<spaced>[^\W\d_]+(?: [^\W\d_]+){1,2})(?=[\\/\"'`]|[.,;:!?)]+(?:\s|$)|[ \t]*(?:\r?\n|$))"
+    r"(?:(?P<spaced>[^\W\d_]+(?:-[^\W\d_]+)*(?: [^\W\d_]+(?:-[^\W\d_]+)*){1,2})"
+    r"(?=[\\/\"'`]|[.,;:!?)]+(?:\s|$)|[ \t]*(?:\r?\n|$))"
     r"|(?P<login>[^\\/\s:*?\"<>|]+))",
     re.IGNORECASE,
 )
@@ -136,7 +137,7 @@ def _plausible(value: str, text: str, end: int, ctx: DetectContext) -> bool:
 def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
     for pattern in (_URL_HOST, _UNC_HOST, _PARAM_HOST):
         for m in pattern.finditer(text):
-            value = m.group("host").rstrip(".")
+            value = m.group("host").rstrip(".,;!)")     # «…contoso.ru, пароль спроси»
             if not re.fullmatch(r"[\w.-]+", value) or _is_address(value) or well_known(value, ctx):
                 continue
             start = m.start("host")

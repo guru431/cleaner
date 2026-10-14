@@ -36,3 +36,6 @@ ec2-user
 x-access-token
 x-oauth-basic
 gitlab-ci-token
+app
+user
+sa
