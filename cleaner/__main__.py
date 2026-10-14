@@ -178,6 +178,31 @@ def cmd_models(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    """FR-12.5: полнота и точность по типам на эталонном наборе или наборе JSONL; QA-5 — по слоям, QA-6 — сравнение."""
+    _offline()
+    from cleaner.engines import Engines
+    from cleaner.eval import runner
+
+    cfg = _config(args)
+    with _repository(cfg) as repo:
+        examples = runner.jsonl_examples(Path(args.jsonl)) if args.jsonl else runner.gold_examples(repo)
+        if not examples:
+            raise ValueError("эталонный набор пуст: примеры сохраняются кнопкой «Сохранить как эталон» на экране проверки")
+        results = runner.run(examples, repo.settings(), args.layers, Engines(repo, cfg.models_dir))
+        print(runner.format_results(results, len(examples)))
+        drops = [] if args.jsonl else runner.compare(results, runner.load_baseline(repo))
+        for drop in drops:
+            print(f"ПОЛНОТА УПАЛА: {drop}")
+        if args.save_baseline and not args.jsonl:
+            if drops:
+                print("Замер не сохранён как базовый: полнота упала.")
+            else:
+                runner.save_baseline(repo, results)
+                print("Замер сохранён как базовый для следующих сравнений (QA-6).")
+    return 1 if drops else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cleaner", description="Очистка данных перед облачными LLM")
     parser.add_argument("--config", help=f"путь к cleaner.toml; по умолчанию ${CONFIG_ENV}")
@@ -211,6 +236,11 @@ def main(argv: list[str] | None = None) -> int:
     models.add_argument("action", choices=("download", "verify"))
     models.add_argument("--only", choices=("rubert-base-pii-ner", "gliner-pii-base-v1.0", "docling"))
 
+    evaluate = commands.add_parser("eval", help="измерение качества на эталонном наборе (FR-12.5)")
+    evaluate.add_argument("--layers", nargs="+", choices=("1-3", "1-4", "1-5"), default=["1-3", "1-4"])
+    evaluate.add_argument("--jsonl", help="вместо эталонного набора — файл JSONL (открытые наборы, QA-4)")
+    evaluate.add_argument("--save-baseline", action="store_true", help="сохранить замер как базовый, если полнота не упала")
+
     args = parser.parse_args(argv)
     if args.command == "verify":
         from cleaner import selfcheck
@@ -218,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         return selfcheck.run(print)
     handlers = {
         "init": cmd_init, "serve": cmd_serve, "user": cmd_user, "key": cmd_key, "backup": cmd_backup, "models": cmd_models,
+        "eval": cmd_eval,
     }
     try:
         return handlers[args.command](args)

@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -88,3 +89,26 @@ def test_models_verify_names_what_is_missing(home, capsys):
     )
     assert main(["models", "verify", "--only", "docling"]) == 1
     assert "docling: нет каталога" in capsys.readouterr().out
+
+
+def test_eval_measures_the_gold_set_and_guards_against_a_drop(home, monkeypatch, capsys, clock):
+    """FR-12.5, QA-6."""
+    key = init(home)
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY", "DO_NOT_TRACK", "TOKENIZERS_PARALLELISM"):
+        monkeypatch.setenv(name, "")
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    repo.add_gold(None, "почта a@x.example", [{"start": 6, "end": 17, "type": "EMAIL", "entity": 0, "origin": "detector"}])
+    repo.set_setting("eval.baseline", json.dumps({"1-3": {"ФИО": 1.0}}, ensure_ascii=False))
+    repo.conn.close()
+    assert main(["eval", "--layers", "1-3"]) == 0
+    assert "EMAIL | 1.000 (1/1)" in capsys.readouterr().out
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    repo.add_gold(None, "звонил Петров", [{"start": 7, "end": 13, "type": "PERSON", "entity": 0, "origin": "detector"}])
+    repo.conn.close()
+    assert main(["eval", "--layers", "1-3", "--save-baseline"]) == 1
+    out = capsys.readouterr().out
+    assert "ПОЛНОТА УПАЛА: слои 1-3, «ФИО»: 1.000 → 0.000" in out and "не сохранён" in out
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    assert json.loads(repo.setting("eval.baseline")) == {"1-3": {"ФИО": 1.0}}
+    repo.conn.close()
