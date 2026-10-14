@@ -10,7 +10,8 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-from cleaner.storage.repo import Repository, Session, User
+from cleaner.service import ChatService
+from cleaner.storage.repo import Chat, Repository, Session, User
 from cleaner.web import auth
 
 SESSION_COOKIE = "cleaner_session"
@@ -43,6 +44,18 @@ class Viewer:
 
 def repo_of(request: Request) -> Repository:
     return request.app.state.repo
+
+
+def service_of(request: Request) -> ChatService:
+    return request.app.state.service
+
+
+def own_chat(request: Request, chat_id: str, viewer: Viewer) -> Chat:
+    """Чат вошедшего пользователя. Чужой и несуществующий неотличимы — 404 (FR-1.5)."""
+    chat = repo_of(request).chat(chat_id)
+    if chat is None or chat.user_id != viewer.user.id:
+        raise HTTPException(404, "Чат не найден")
+    return chat
 
 
 def get_viewer(request: Request) -> Viewer:

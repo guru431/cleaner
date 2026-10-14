@@ -1,0 +1,20 @@
+<aside class="sidebar">
+  <form method="post" action="/chats">
+    {% include "_csrf.html" %}
+    <input name="title" placeholder="Название (необязательно)" maxlength="200">
+    <button>Новый чат</button>
+  </form>
+  <form method="get" action="/chats">
+    <input name="q" value="{{ q }}" placeholder="Поиск по названию">
+  </form>
+  <ul>
+    {% for c in chats %}
+    <li{% if chat and chat.id == c.id %} class="current"{% endif %}>
+      <a href="/chats/{{ c.id }}">{{ c.title }}</a>
+      <small>{{ c.updated_at | local(tz) }}</small>
+    </li>
+    {% else %}
+    <li>Чатов нет</li>
+    {% endfor %}
+  </ul>
+</aside>

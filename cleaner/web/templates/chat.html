@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}{{ chat.title }} — Cleaner{% endblock %}
+{% block main %}
+<div class="layout">
+  {% include "_sidebar.html" %}
+  <section>
+    <header class="chat-head">
+      <form method="post" action="/chats/{{ chat.id }}/rename">
+        {% include "_csrf.html" %}
+        <input name="title" value="{{ chat.title }}" maxlength="200" required>
+        <button>Переименовать</button>
+      </form>
+      <a href="/chats/{{ chat.id }}/entities">Таблица замен</a>
+    </header>
+
+    {% for e in entries %}
+    <article class="item" id="item-{{ e.id }}">
+      {% if e.kind == "input" %}
+      <h3>Текст {{ e.seq }} · <a href="/chats/{{ chat.id }}/items/{{ e.id }}">проверка</a></h3>
+      {% if e.exposed %}
+      <p class="warn">Прежний вариант этого текста содержал открытым значение, которое теперь скрывается: {{ e.exposed | join("; ") }}. Если текст уже был передан, значение ушло открытым.</p>
+      {% endif %}
+      {% if not e.deliverable %}
+      <p class="error">Выдача заблокирована:{% if e.leaks %} найдено оригиналов — {{ e.leaks }};{% endif %}{% if e.blocked %} фрагментов запрещённого типа — {{ e.blocked }};{% endif %} откройте проверку.</p>
+      {% endif %}
+      <pre id="text-{{ e.id }}">
+{{ e.html }}</pre>
+      {% if e.deliverable %}
+      <button type="button" data-copy="text-{{ e.id }}">Скопировать</button>
+      <a href="/chats/{{ chat.id }}/items/{{ e.id }}/download">Скачать .txt</a>
+      {% endif %}
+      {% else %}
+      <h3>Ответ модели {{ e.seq }}</h3>
+      <p class="counters">Восстановлено: {{ e.counters.restored }}, из искажённой записи: {{ e.counters.altered }}, выведено: {{ e.counters.derived }}, неизвестных меток: {{ e.counters.unknown }}, оставлено по политике: {{ e.counters.kept }}, посторонних ссылок: {{ e.counters.foreign_links }}.</p>
+      <pre id="text-{{ e.id }}">
+{{ e.html }}</pre>
+      <button type="button" data-copy="text-{{ e.id }}">Скопировать</button>
+      <details><summary>Как получено</summary><pre>
+{{ e.raw }}</pre></details>
+      {% endif %}
+    </article>
+    {% endfor %}
+
+    <form method="post" action="/chats/{{ chat.id }}/input">
+      {% include "_csrf.html" %}
+      <label>Текст для очистки <textarea name="text" rows="8" required></textarea></label>
+      <button>Очистить</button>
+    </form>
+    <form method="post" action="/chats/{{ chat.id }}/answer">
+      {% include "_csrf.html" %}
+      <label>Ответ модели <textarea name="answer" rows="6" required></textarea></label>
+      <button>Восстановить</button>
+    </form>
+    <form method="post" action="/chats/{{ chat.id }}/delete" class="danger">
+      {% include "_csrf.html" %}
+      <label><input type="checkbox" name="confirm" value="yes" required> Удалить чат безвозвратно, вместе с таблицей замен и ключом</label>
+      <button>Удалить</button>
+    </form>
+  </section>
+</div>
+{% endblock %}
