@@ -57,9 +57,9 @@ def test_ac_1_10_deleted_chat_is_gone_from_the_interface_and_the_file(ivan, repo
         assert ivan.get(path).status_code == 404, path
     with pytest.raises(KeyError):
         repo.load_state(chat_id)
-    repo.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     raw = raw_database(tmp_path)
-    # Обёрнутый ключ чата и шифртексты стёрты из файла (secure_delete): даже главный ключ их не вернёт.
+    # Обёрнутый ключ чата и шифртексты стёрты из файла и журнала WAL сразу при удалении, без
+    # отдельной контрольной точки: даже главный ключ их не вернёт.
     for blob in (bytes(wrapped), bytes(state)[:64], bytes(original)[:64]):
         assert blob not in raw
 

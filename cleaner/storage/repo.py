@@ -229,8 +229,14 @@ class Repository:
         )
 
     def delete_chat(self, chat_id: str) -> None:
-        """Строки чата и его ключ удаляются; secure_delete перезаписывает их на диске (FR-1.4)."""
-        self._run("DELETE FROM chats WHERE id = ?", chat_id)
+        """Строки чата и его ключ удаляются; secure_delete перезаписывает их на диске (FR-1.4).
+
+        Копии страниц с ключом чата остаются в файле журнала WAL до контрольной точки, а соединение
+        службы живёт долго: контрольная точка с усечением журнала выполняется сразу.
+        """
+        with self.lock:
+            self.conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def load_state(self, chat_id: str) -> tuple[ChatState, int]:
         row = self._one("SELECT state_enc, version FROM chats WHERE id = ?", chat_id)

@@ -61,6 +61,18 @@ def test_deleting_a_chat_removes_its_key_and_items(repo):
     assert repo.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
 
 
+def test_deleted_chat_key_is_gone_from_the_wal_file(tmp_path, repo):
+    """FR-1.4: служба держит соединение открытым, поэтому журнал WAL не должен хранить ключ чата."""
+    user, chat = new_chat(repo)
+    state, version = repo.load_state(chat)
+    repo.commit_chat(chat, state, version, [input_item("текст", "очищено")])
+    [wrapped] = repo.conn.execute("SELECT dek_wrapped FROM chats WHERE id = ?", (chat,)).fetchone()
+    assert bytes(wrapped) in (tmp_path / "cleaner.db-wal").read_bytes()
+    repo.delete_chat(chat)
+    raw = b"".join(path.read_bytes() for path in tmp_path.glob("cleaner.db*"))
+    assert bytes(wrapped) not in raw
+
+
 def test_wrong_master_key_stops_the_start(tmp_path, repo, clock):
     conn = db.connect(tmp_path / "cleaner.db")
     with pytest.raises(crypto.CryptoError):
