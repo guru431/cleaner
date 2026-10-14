@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -122,3 +123,92 @@ def test_backup_opens_with_the_same_key(tmp_path, repo, clock):
     repo.backup(tmp_path / "copy.db")
     copy = Repository(db.connect(tmp_path / "copy.db"), bytes(range(32)), clock)
     assert [c.title for c in copy.chats(user)] == ["Копия"]
+
+
+def raw_database(tmp_path) -> bytes:
+    return b"".join(path.read_bytes() for path in tmp_path.glob("cleaner.db*"))
+
+
+def test_queued_item_is_processed_and_its_fields_round_trip(repo):
+    user, chat = new_chat(repo)
+    queued = repo.add_item(chat, Item(uuid.uuid4().hex, 0, "input", "оригинал", None, source="file", status="queued"))
+    assert (queued.seq, queued.status, queued.source) == (1, "queued", "file")
+    repo.set_item_status(chat, queued.id, "running")
+    repo.set_item_progress(chat, queued.id, "2/5")
+    assert repo.item(chat, queued.id).meta == {"progress": "2/5"}
+    state, version = repo.load_state(chat)
+    done = replace(
+        repo.item(chat, queued.id), sanitized="очищено", status="done", meta={"kind": "pdf", "layers": ["ner"]},
+        model_spans=[{"start": 0, "end": 3, "type": "PERSON", "source": "ner", "score": 0.9}],
+    )
+    repo.commit_chat(chat, state, version, updated_items=[done])
+    [stored] = repo.items(chat)
+    assert (stored.status, stored.sanitized, stored.meta, stored.model_spans) == (
+        "done", "очищено", {"kind": "pdf", "layers": ["ner"]}, done.model_spans,
+    )
+    assert repo.item(chat, "0" * 32) is None
+    with pytest.raises(KeyError):
+        repo.set_item_status(chat, "0" * 32, "failed", "причина")
+
+
+def test_failure_reason_is_kept_and_cleared(repo):
+    user, chat = new_chat(repo)
+    item = repo.add_item(chat, Item(uuid.uuid4().hex, 0, "input", "текст", None, status="queued"))
+    repo.set_item_status(chat, item.id, "failed", "Файл защищён паролем")
+    assert repo.item(chat, item.id).meta == {"error": "Файл защищён паролем"}
+    repo.set_item_status(chat, item.id, "queued")
+    assert repo.item(chat, item.id).meta == {}
+
+
+def test_interrupted_processing_fails_at_start(repo):
+    user, chat = new_chat(repo)
+    repo.add_item(chat, Item("a" * 32, 0, "input", "x", None, status="running"))
+    repo.add_item(chat, Item("b" * 32, 0, "input", "y", None, status="queued"))
+    repo.add_item(chat, Item("c" * 32, 0, "input", "z", "z"))
+    repo.set_item_risk_status(chat, "c" * 32, "running")
+    assert repo.fail_interrupted("прервано") == 2
+    assert [(i.status, i.meta.get("error"), i.risk_status) for i in repo.items(chat)] == [
+        ("failed", "прервано", ""), ("failed", "прервано", ""), ("done", None, "failed"),
+    ]
+
+
+def test_extracted_text_and_risk_are_stored_encrypted(tmp_path, repo):
+    user, chat = new_chat(repo)
+    item = repo.add_item(chat, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="running"))
+    repo.set_item_original(chat, item.id, "извлечено Kk41", {"kind": "docx"})
+    repo.set_item_risk(chat, item.id, {"guesses": [{"kind": "org", "guess": "Ромашка Gg52", "clue": ""}]})
+    stored = repo.item(chat, item.id)
+    assert (stored.original, stored.meta, stored.risk_status) == ("извлечено Kk41", {"kind": "docx"}, "done")
+    assert repo.item_risk(chat, item.id)["guesses"][0]["guess"] == "Ромашка Gg52"
+    repo.conn.execute("PRAGMA wal_checkpoint(FULL)")
+    raw = raw_database(tmp_path)
+    for secret in ("Kk41", "Gg52"):
+        assert secret.encode("utf-8") not in raw and secret.encode("utf-16-le") not in raw, secret
+
+
+def test_chat_layers_follow_the_default_until_chosen(repo):
+    user, chat = new_chat(repo)
+    assert (repo.layer_defaults(), repo.chat_layers(chat)) == ({"ner": False, "llm": False}, {})
+    repo.set_chat_layer(chat, "llm", True)
+    repo.set_layer_defaults({"ner": True, "llm": False})
+    assert (repo.chat_layers(chat), repo.layer_defaults()) == ({"llm": True}, {"ner": True, "llm": False})
+    with pytest.raises(KeyError):
+        repo.set_chat_layer("0" * 32, "ner", False)
+
+
+def test_settings_are_stored_by_key(repo):
+    assert repo.setting("local_llm.url") is None
+    repo.set_setting("local_llm.url", "http://127.0.0.1:30000/v1")
+    repo.set_setting("local_llm.url", "http://example:30000/v1")
+    assert repo.setting("local_llm.url") == "http://example:30000/v1"
+
+
+def test_gold_examples_are_encrypted_and_deleted(tmp_path, repo):
+    user = repo.create_user("ivan", "hash", "user")
+    spans = [{"start": 0, "end": 6, "type": "TERM", "entity": 0, "origin": "manual"}]
+    gold_id = repo.add_gold(user, "эталон Ee61", spans)
+    [row] = repo.gold()
+    assert (row.id, row.user_id, row.text, row.spans) == (gold_id, user, "эталон Ee61", spans)
+    repo.conn.execute("PRAGMA wal_checkpoint(FULL)")
+    assert b"Ee61" not in raw_database(tmp_path)
+    assert repo.delete_gold(gold_id) and repo.gold() == [] and not repo.delete_gold(gold_id)
