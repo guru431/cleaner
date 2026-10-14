@@ -17,6 +17,7 @@ tests:
 
 ```bash
 .venv/Scripts/python.exe -m cleaner init --admin dev --env-file data/cleaner.env
+.venv/Scripts/python.exe -m cleaner models download   # модели слоя 4 и Docling в models/ (нужен интернет, около 2 ГБ)
 set -a; . data/cleaner.env; set +a          # главный ключ — в окружение, как его передаёт systemd
 .venv/Scripts/python.exe -m cleaner serve    # http://127.0.0.1:5464
 ```

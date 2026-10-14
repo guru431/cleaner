@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import shutil
 import sqlite3
 import sys
 from collections.abc import Iterator
@@ -139,6 +140,28 @@ def cmd_backup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_models(args: argparse.Namespace) -> int:
+    from cleaner import models
+
+    cfg = _config(args)
+    specs = [spec for spec in models.SPECS if args.only in (None, spec.directory)]
+    if args.action == "download":
+        cache = models.prepare_download(cfg.models_dir)
+        try:
+            for spec in specs:
+                print(f"загрузка {spec.directory} ({spec.source} @ {spec.revision()})…")
+                print(f"готово: {models.install(cfg.models_dir, spec)}")
+        finally:
+            shutil.rmtree(cache, ignore_errors=True)
+        return 0
+    failures = 0
+    for spec in specs:
+        problems = models.verify(cfg.models_dir, spec)
+        print(f"{spec.directory}: {'OK' if not problems else '; '.join(problems)}")
+        failures += bool(problems)
+    return 1 if failures else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cleaner", description="Очистка данных перед облачными LLM")
     parser.add_argument("--config", help=f"путь к cleaner.toml; по умолчанию ${CONFIG_ENV}")
@@ -168,12 +191,18 @@ def main(argv: list[str] | None = None) -> int:
 
     commands.add_parser("verify", help="самопроверка очистки и восстановления на подложенных значениях")
 
+    models = commands.add_parser("models", help="модели слоя 4 и разбора документов: загрузка (нужен интернет) и сверка")
+    models.add_argument("action", choices=("download", "verify"))
+    models.add_argument("--only", choices=("rubert-base-pii-ner", "gliner-pii-base-v1.0", "docling"))
+
     args = parser.parse_args(argv)
     if args.command == "verify":
         from cleaner import selfcheck
 
         return selfcheck.run(print)
-    handlers = {"init": cmd_init, "serve": cmd_serve, "user": cmd_user, "key": cmd_key, "backup": cmd_backup}
+    handlers = {
+        "init": cmd_init, "serve": cmd_serve, "user": cmd_user, "key": cmd_key, "backup": cmd_backup, "models": cmd_models,
+    }
     try:
         return handlers[args.command](args)
     except (ValueError, OSError, sqlite3.Error, crypto.CryptoError) as exc:

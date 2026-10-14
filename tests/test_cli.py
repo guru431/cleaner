@@ -73,3 +73,13 @@ def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monk
     assert main(["serve"]) == 0
     [kwargs] = calls
     assert (kwargs["host"], kwargs["ssl_certfile"], kwargs["access_log"]) == ("example", "c.pem", False)
+
+
+def test_models_verify_names_what_is_missing(home, capsys):
+    config = home / "cleaner.toml"
+    config.write_text(
+        f'[paths]\ndata_dir = "{(home / "data").as_posix()}"\nmodels_dir = "{(home / "models").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    assert main(["models", "verify", "--only", "docling"]) == 1
+    assert "docling: нет каталога" in capsys.readouterr().out

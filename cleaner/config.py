@@ -14,7 +14,9 @@ class Config:
     tls_cert: str = ""
     tls_key: str = ""
     data_dir: Path = Path("data")
+    models_dir: Path = Path("models")         # модели слоя 4 и Docling (раздел 15); на сервере /opt/cleaner/models
     max_text_chars: int = 500_000
+    max_file_mb: int = 50                     # предел загружаемого файла (FR-2.2)
     utc_offset_hours: int = 3
 
     @property
@@ -32,7 +34,9 @@ def load(path: Path) -> Config:
         tls_cert=str(server.get("tls_cert", "")),
         tls_key=str(server.get("tls_key", "")),
         data_dir=Path(paths.get("data_dir", defaults.data_dir)),
+        models_dir=Path(paths.get("models_dir", defaults.models_dir)),
         max_text_chars=int(limits.get("max_text_chars", defaults.max_text_chars)),
+        max_file_mb=int(limits.get("max_file_mb", defaults.max_file_mb)),
         utc_offset_hours=int(ui.get("utc_offset_hours", defaults.utc_offset_hours)),
     )
 

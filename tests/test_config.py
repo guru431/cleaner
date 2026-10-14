@@ -33,3 +33,11 @@ def test_tls_is_required_outside_loopback():
     config.check_transport(Config(host="127.0.0.1"))
     config.check_transport(Config(host="localhost"))
     config.check_transport(Config(host="example", tls_cert="c.pem", tls_key="k.pem"))
+
+
+def test_models_directory_and_file_limit(tmp_path):
+    path = tmp_path / "cleaner.toml"
+    path.write_text('[paths]\nmodels_dir = "/opt/cleaner/models"\n[limits]\nmax_file_mb = 20\n', encoding="utf-8")
+    cfg = config.load(path)
+    assert (cfg.models_dir, cfg.max_file_mb) == (Path("/opt/cleaner/models"), 20)
+    assert (Config().models_dir, Config().max_file_mb) == (Path("models"), 50)
