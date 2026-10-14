@@ -63,6 +63,7 @@ class Resolver:
     def __init__(self, state: ChatState, settings: Settings, text: str, generic_labels: frozenset[str]):
         self.state = state
         self.settings = settings
+        self.text = text
         self.text_lower = text.lower()
         self.generic = generic_labels
         self.index = {(e.type, e.key): e for e in state.entities.values()}
@@ -146,8 +147,18 @@ class Resolver:
 
     # --- метки ------------------------------------------------------------
 
+    def _label_taken(self, type_: EntityType, number: int) -> bool:
+        """Метка с этим номером уже встречалась как посторонняя или стоит в тексте (в любом виде)."""
+        for style in ("angle", "square"):
+            label = labels.format_label(style, type_, number)
+            if label in self.state.foreign_labels or label in self.text:
+                return True
+        return False
+
     def _label(self, entity: Entity) -> str:
         def make() -> str:
+            while self._label_taken(entity.type, entity.number):
+                entity.number = self._next(entity.type)
             label = labels.format_label(self.state.label_style, entity.type, entity.number)
             self.state.surrogates[label] = Surrogate(entity.id)
             return label
@@ -167,13 +178,29 @@ class Resolver:
 
         def make() -> str:
             fake = netmap.fake_ip(canonical, self.state)
-            collides = fake in self.real_ips or (T.IP, fake) in self.index or fake in self.open_values
+            # Публичным адресам и IPv6 подмены выдаются по порядку: занятую текстом можно пропустить.
+            # Частный адрес переставляется однозначно — при совпадении остаётся только метка.
+            while fake is not None and self._address_in_text(fake) and netmap.private_bits(ip) is None:
+                fake = netmap.fake_ip(canonical, self.state)
+            collides = (
+                fake in self.real_ips or (T.IP, fake) in self.index or fake in self.open_values
+                or (fake is not None and self._address_in_text(fake))
+            )
             if fake is None or collides:
                 return self._label(entity)
-            self.state.surrogates[fake] = Surrogate(entity.id, canonical, "ip6" if ":" in fake else "ip")
+            kind = "ip6" if ":" in fake else "ip"
+            self.state.surrogates[fake] = Surrogate(entity.id, canonical, kind)
+            if "/" in fake:
+                # Модель может написать адрес сети без длины префикса.
+                bare = Surrogate(entity.id, canonical.split("/")[0], kind)
+                self.state.surrogates.setdefault(fake.split("/")[0], bare)
             return fake
 
+        ip = netmap.parse(canonical)[0]
         return entity, self._issue(entity, "ip", make)
+
+    def _address_in_text(self, address: str) -> bool:
+        return re.search(rf"(?<![\w.:]){re.escape(address)}(?![\w:]|\.\d)", self.text) is not None
 
     def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str]:
         key = macsid.mac_key(value)

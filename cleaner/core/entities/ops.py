@@ -39,4 +39,7 @@ def merge_entities(state: ChatState, keep_id: str, drop_id: str) -> None:
         raise ValueError("объединять можно только сущности одного типа")
     keep.forms += [form for form in drop.forms if form not in keep.forms]
     drop.forms = []
+    for key, target in state.key_alias.items():
+        if target == drop.id:
+            state.key_alias[key] = keep.id      # прежние объединения ведут туда же
     state.key_alias[f"{drop.type.value}:{drop.key}"] = keep.id

@@ -15,6 +15,9 @@ _BEFORE = 40
 _AFTER = 15
 
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# «схема://пользователь:» прямо перед «…@хост» — это учётные данные адреса, а не e-mail.
+_USERINFO_BEFORE = re.compile(r"[a-z][a-z0-9+.-]{0,31}://[^\s/@]*$", re.IGNORECASE)
+_IPV4_DOMAIN = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 # +7 или 8 и ровно десять цифр с любыми разделителями: «8 (4852) 12-34-56», «+7 916 1234567».
 _PHONE_RU = re.compile(r"(?<![\w+])(?:\+7|8)(?:[\s()-]{0,3}\d){10}(?!\d)")
 # «8 2024-10-14 12:00» — дата в журнале, а не телефон.
@@ -121,6 +124,12 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         spans.append(Span(start, end, type_, name, validated=validated))
 
     for m in _EMAIL.finditer(text):
+        local, _, domain = m.group().rpartition("@")
+        if _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()]):
+            continue        # пароль из адреса найдёт слой секретов, хост — слой инфраструктуры
+        if _IPV4_DOMAIN.fullmatch(domain):
+            add(m.start(), m.start() + len(local), EntityType.ACCOUNT)     # вход вида ivanov@10.1.2.5
+            continue
         add(m.start(), m.end(), EntityType.EMAIL, True)
     for pattern in (_PHONE_RU, _PHONE_INTL):
         for m in pattern.finditer(text):

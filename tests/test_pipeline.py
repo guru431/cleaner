@@ -2,7 +2,9 @@ import pytest
 
 from cleaner.core import leakcheck
 from cleaner.core.detect import infra
+from cleaner.core.entities import ops
 from cleaner.core.pipeline import sanitize
+from cleaner.core.restore import restore
 from cleaner.core.types import ChatRule, DictEntry, Policy, Settings, default_policies
 from cleaner.core.types import EntityType as T
 
@@ -59,6 +61,49 @@ def test_dictionary_value_is_one_entity_whatever_the_spacing_and_spelling(state)
     result = sanitize(state, "Иванов Иван  Иванович, он же Семенов", settings)
     assert result.sanitized == "<PERSON_1>, он же <PERSON_1>"
     assert result.deliverable
+
+
+def test_url_credentials_keep_the_host_mapping(state, settings):
+    """Обзор 1А, P2: правило e-mail не должно захватывать «пароль@хост» из адреса."""
+    result = sanitize(state, "REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru:5432/crm", settings)
+    assert result.sanitized == "postgres://app:<SECRET_1>@host-1.domain-1.example:5432/crm"
+
+
+def test_login_at_an_address_is_an_account_and_the_address_keeps_its_mapping(state, settings):
+    result = sanitize(state, "ssh ivanov@10.1.2.5", settings)
+    ip = next(s.surrogate for s in result.spans if state.entities[s.entity_id].type is T.IP)
+    assert result.sanitized == f"ssh <ACCOUNT_1>@{ip}"
+
+
+def test_new_label_skips_the_number_of_a_foreign_one(state, settings):
+    """Обзор 1А, P2: метка из другого чата и новая метка не должны совпасть."""
+    result = sanitize(state, "Коллега <EMAIL_1> просил написать на b@x.example", settings)
+    assert result.sanitized == "Коллега <EMAIL_1> просил написать на <EMAIL_2>"
+    assert restore(state, result.sanitized, settings).text == "Коллега <EMAIL_1> просил написать на b@x.example"
+
+
+def test_opened_value_does_not_block_delivery(state, settings):
+    """Обзор 1А, P2: после «открыть» проверка утечек не должна находить части открытого значения."""
+    sanitize(state, "узел srv-dc01.corp.contoso.ru", settings)
+    ops.unmask(state, "srv-dc01.corp.contoso.ru")
+    result = sanitize(state, "узел srv-dc01.corp.contoso.ru", settings)
+    assert result.sanitized == "узел srv-dc01.corp.contoso.ru"
+    assert result.deliverable
+
+
+def test_network_surrogate_written_without_its_prefix_restores_to_the_network(state, settings):
+    """Обзор 1А, P2."""
+    fake = sanitize(state, "сеть 10.1.0.0/16", settings).spans[0].surrogate.split("/")[0]
+    restored = restore(state, f"сеть {fake} маска 255.255.0.0", settings)
+    assert restored.text == "сеть 10.1.0.0 маска 255.255.0.0"
+
+
+def test_public_surrogate_does_not_repeat_an_address_of_the_text(state, settings):
+    """Обзор 1А, P2 (FR-5.7): документационный адрес в тексте и подмена не совпадают."""
+    text = "Пример из документации: 203.0.113.1. Наш адрес 85.143.10.20."
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "Пример из документации: 203.0.113.1. Наш адрес 203.0.113.2."
+    assert restore(state, result.sanitized, settings).text == text
 
 
 def test_foreign_label_is_reported_and_left_alone(state, settings):
