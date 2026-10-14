@@ -9,9 +9,11 @@ tls_key = "/etc/cleaner/tls/key.pem"
 
 [paths]
 data_dir = "/var/lib/cleaner"
+models_dir = "/opt/cleaner/models"     # модели слоя 4 и Docling: пишет только models download
 
 [limits]
 max_text_chars = 500000
+max_file_mb = 50
 
 [ui]
 utc_offset_hours = 3

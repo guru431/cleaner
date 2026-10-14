@@ -173,6 +173,19 @@ PY
     if grep -qF -- "$CANARY" <<< "$journal"; then bad "канарейка в журнале службы"; else ok "канарейки нет в журнале службы"; fi
 fi
 
+echo "8. Этапы 2 и 4: ключ шлюза и модели"
+# Значение ключа не выводится: проверяется только, что строка есть и не пустая.
+if grep -q '^CLEANER_GATEWAY_KEY=..*' "$ETC/cleaner.env"; then
+    ok "ключ шлюза задан"
+else
+    bad "в $ETC/cleaner.env нет CLEANER_GATEWAY_KEY"
+fi
+if (cd "$APP" && runuser -u cleaner -- env HOME="$DATA" "$APP/.venv/bin/python" -m cleaner --config "$ETC/cleaner.toml" models verify) >"$WORK/models.txt" 2>&1; then
+    ok "модели совпадают с манифестом"
+else
+    bad "models verify: $(tr '\n' ' ' < "$WORK/models.txt")"
+fi
+
 echo
 echo "Отпечаток сертификата (SHA-256): ${fingerprint:-не прочитан}"
 if [[ $fails -gt 0 ]]; then

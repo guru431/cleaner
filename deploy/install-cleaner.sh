@@ -71,6 +71,7 @@ FIRST_INSTALL=1
 id -u cleaner >/dev/null 2>&1 || useradd --system --no-create-home --home-dir "$DATA" --shell /usr/sbin/nologin cleaner
 install -d -o root -g cleaner -m 0750 "$APP" "$ETC" "$TLS"
 install -d -o cleaner -g cleaner -m 0700 "$DATA"
+install -d -o cleaner -g cleaner -m 0750 "$APP/models"     # модели слоя 4 и Docling: пишет только models download
 
 # --- настройки: ставятся один раз ------------------------------------------------
 if [[ ! -f "$CONF" ]]; then
@@ -180,6 +181,9 @@ if [[ ! -f "$ENVF" && ! -f "$DATA/cleaner.db" ]]; then
     chmod 0600 "$DATA"/cleaner.db*
 elif [[ ! -f "$ENVF" || ! -f "$DATA/cleaner.db" ]]; then
     rollback "есть только одно из двух — $ENVF или $DATA/cleaner.db; верните второе (key import или копия базы)"
+fi
+if ! grep -q '^CLEANER_GATEWAY_KEY=..*' "$ENVF"; then
+    log "Ключа шлюза нет: выпустите его (sudo ai-ctl gateway-key create cleaner) и допишите строку CLEANER_GATEWAY_KEY=… в $ENVF через sudoedit"
 fi
 
 # --- самопроверка и запуск ------------------------------------------------------------
