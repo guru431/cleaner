@@ -221,3 +221,16 @@ def boss(browser) -> Browser:
     b.user("boss", "admin")
     b.login("boss")
     return b
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Любая попытка соединения — ошибка: работа без сети проверяется фактом (NFR-2), а не настройкой."""
+    import socket
+
+    def refuse(*args, **kwargs):
+        raise OSError("сеть запрещена в этом тесте")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)

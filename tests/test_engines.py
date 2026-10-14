@@ -1,8 +1,10 @@
+import httpx
 import pytest
 
 from cleaner import models
 from cleaner.core.detect.base import DetectorError
 from cleaner.engines import Engines, LocalSettings, local_settings, save_local_settings
+from cleaner.ingest.extract import ExtractError
 
 
 def test_local_settings_have_defaults_and_round_trip(repo):
@@ -36,3 +38,20 @@ def test_status_says_whether_the_key_is_set_but_not_its_value(repo, tmp_path):
     status = Engines(repo, tmp_path, environ={"CLEANER_GATEWAY_KEY": "k-secret"}).status()
     assert status["key"] is True and "k-secret" not in repr(status)
     assert status["models"][models.RUBERT_DIR] is True and status["models"][models.GLINER_DIR] is False
+
+
+def test_extractor_sends_scans_to_the_gateway(repo, tmp_path):
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"markdown": "распознано", "chars": 10})
+
+    engines = Engines(repo, tmp_path, environ={"CLEANER_GATEWAY_KEY": "k"}, transport=httpx.MockTransport(handler))
+    result = engines.extractor().extract("scan.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    assert (result.text, result.ocr_pages, seen) == ("распознано", (1,), ["/pages/ocr"])
+
+
+def test_documents_need_their_models(repo, tmp_path):
+    with pytest.raises(ExtractError, match="модели Docling не загружены"):
+        Engines(repo, tmp_path, environ={}).extractor().extract("a.docx", b"PK\x03\x04" + b"\x00" * 8)

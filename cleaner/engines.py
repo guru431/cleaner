@@ -14,6 +14,8 @@ from pathlib import Path
 
 from cleaner import models
 from cleaner.core.detect.base import DetectorError
+from cleaner.ingest.documents import Docling
+from cleaner.ingest.extract import Extractor
 from cleaner.local_llm import LocalLLM, LocalLLMConfig, check_address
 from cleaner.storage.repo import Repository
 
@@ -58,6 +60,7 @@ class Engines:
         self._transport = transport          # только для тестов: httpx.MockTransport
         self._client: LocalLLM | None = None
         self._lock = threading.Lock()
+        self._documents = Docling(models_dir / models.DOCLING_DIR)
 
     def status(self) -> dict[str, object]:
         """Для страницы настроек: задан ли ключ (значение не показывается) и какие модели на диске."""
@@ -79,6 +82,10 @@ class Engines:
             if self._client is None or self._client.config != config:
                 self._client = LocalLLM(config, self._transport)
             return self._client
+
+    def extractor(self) -> Extractor:
+        """Разбор файлов; страницы сканов — в ocr-ru через шлюз (раздел 9)."""
+        return Extractor(self._documents, lambda image, mime: self.client().ocr_page(image, mime))
 
     def ner(self):
         raise DetectorError("Слой 4 недоступен: модели распознавания имён ещё не подключены")
