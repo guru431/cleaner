@@ -1,5 +1,7 @@
 import re
 
+from cleaner import service
+from cleaner.core.pipeline import SanitizeResult
 from cleaner.core.types import EntityType as T
 
 
@@ -71,3 +73,14 @@ def test_copy_and_download_are_blocked_while_a_leak_is_found(ivan, repo):
     page = ivan.get(f"/chats/{chat_id}").text
     assert "data-copy" not in page and "Выдача заблокирована" in page       # SEC-2
     assert ivan.get(f"/chats/{chat_id}/items/{item_id}/download").status_code == 409
+
+
+def test_largest_allowed_text_is_accepted(ivan, repo, monkeypatch):
+    """FR-2.1, финальный обзор 1В: 500 000 знаков, даже четырёхбайтных, принимаются целиком — без отказа
+    библиотеки форм (Starlette по умолчанию ограничивает поле одним мегабайтом). Очистка подменена:
+    здесь проверяется приём формы, скорость очистки длинного текста — тесты NFR-4."""
+    monkeypatch.setattr(service, "sanitize", lambda state, text, settings: SanitizeResult(text, []))
+    chat_id = ivan.chat()
+    response = ivan.post(f"/chats/{chat_id}/input", text="😀" * 500_000)
+    assert response.status_code == 303, response.text[:200]
+    assert len(repo.items(chat_id)[0].original) == 500_000

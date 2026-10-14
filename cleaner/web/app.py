@@ -16,7 +16,7 @@ from cleaner.clock import Clock
 from cleaner.service import ChatService
 from cleaner.storage.repo import Repository
 from cleaner.web import auth, routes_auth, routes_chats, routes_review, routes_settings
-from cleaner.web.deps import LoginRequired, page
+from cleaner.web.deps import MAX_BODY_BYTES, LoginRequired, page
 
 log = logging.getLogger("cleaner.web")
 
@@ -31,7 +31,6 @@ SECURITY_HEADERS = {
 }
 # Только по TLS: браузер запомнит, что этот узел открывается лишь по HTTPS. Без includeSubDomains.
 HSTS = "max-age=31536000"
-MAX_BODY_BYTES = 8 * 1024 * 1024     # 500 000 знаков кириллицы в закодированной форме — около 3 МБ
 _STATUS_TEXT = {404: "Страница не найдена", 405: "Такое действие здесь не поддерживается"}
 
 

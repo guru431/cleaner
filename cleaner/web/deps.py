@@ -16,6 +16,9 @@ from cleaner.web import auth
 
 SESSION_COOKIE = "cleaner_session"
 IDLE = timedelta(hours=8)
+# Предел тела запроса (app.BodyLimit) и одного поля формы: 500 000 знаков даже четырёхбайтных —
+# около 6 МБ в закодированной форме. У Starlette поле формы по умолчанию не больше 1 МБ.
+MAX_BODY_BYTES = 8 * 1024 * 1024
 
 templates = Jinja2Templates(directory=Path(__file__).with_name("templates"))
 
@@ -81,7 +84,7 @@ def get_admin(viewer: Viewer = Depends(get_viewer)) -> Viewer:
 async def get_form(request: Request, viewer: Viewer = Depends(get_viewer)) -> dict[str, str]:
     """Поля формы POST. Без верного токена формы — отказ: запрос пришёл не с нашей страницы.
     Размер тела ограничивает app.BodyLimit."""
-    form = await request.form()
+    form = await request.form(max_part_size=MAX_BODY_BYTES)
     # Байты, а не строки: compare_digest не сравнивает строки с не-ASCII знаками (TypeError).
     if not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), viewer.session.csrf.encode("utf-8")):
         raise HTTPException(403, "Форма устарела — обновите страницу")
