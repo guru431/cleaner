@@ -1,23 +1,37 @@
 """Действия пользователя над чатами: ядро очистки плюс хранилище."""
 from __future__ import annotations
 
+import logging
 import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Any
 
 from cleaner.core import leakcheck
+from cleaner.core.detect.base import DetectorError
 from cleaner.core.entities import ops
 from cleaner.core.leakcheck import Leak
 from cleaner.core.match import normalize
-from cleaner.core.pipeline import SanitizeResult, sanitize
+from cleaner.core.pipeline import Layers, SanitizeResult, sanitize
 from cleaner.core.restore import RestoreResult, restore
-from cleaner.core.types import ChatState, EntityType, Policy, Settings
+from cleaner.core.types import ChatState, EntityType, Policy, Settings, Span
 from cleaner.storage.repo import Item, Repository, StaleState
 
+log = logging.getLogger("cleaner.service")
+
 _ATTEMPTS = 3
+LAYERS = ("ner", "llm")          # слой 4 и слой 5; совпадают с источником их фрагментов
+_INTERNAL = "Внутренняя ошибка очистки: текст не обработан и никуда не передан"
+_BUSY = "Чат меняли одновременно, текст не обработан — запустите его ещё раз"
 
 Work = Callable[[ChatState, list[Item], Settings], tuple[list[Item], list[Item]]]
+Submit = Callable[..., None]
+
+
+def run_now(fn: Callable[..., None], *args: Any) -> None:
+    """Задание выполняется сразу, в том же потоке: для команд и тестов. Приложение передаёт Jobs.submit."""
+    fn(*args)
 
 
 class TextTooLong(ValueError):
@@ -36,7 +50,7 @@ class InputView:
 
     @property
     def deliverable(self) -> bool:
-        return not self.leaks and not self.blocked
+        return self.item.status == "done" and not self.leaks and not self.blocked
 
 
 @dataclass
@@ -63,10 +77,32 @@ def _notices(result: SanitizeResult) -> list[dict]:
     return [{"code": n.code, "start": n.start, "end": n.end} for n in result.notices]
 
 
+def _model_spans(result: SanitizeResult) -> list[dict]:
+    """Находки слоёв 4–5 — позиции и тип, без значений: хранятся открыто, как spans."""
+    return [
+        {"start": s.start, "end": s.end, "type": s.type.value, "source": s.source, "score": round(s.score, 4)}
+        for s in result.model_spans
+    ]
+
+
+def _cached_layers(item: Item, on: dict[str, bool]) -> tuple[Layers, list[str]]:
+    """Для повторной очистки после правки: находки слоёв, которые работали и всё ещё включены, — без моделей."""
+    ran = [name for name in item.meta.get("layers", []) if on.get(name)]
+    spans = tuple(
+        Span(s["start"], s["end"], EntityType(s["type"]), s["source"], float(s.get("score", 1.0)))
+        for s in item.model_spans if s["source"] in ran
+    )
+    return Layers(cached=spans), ran
+
+
 class ChatService:
-    def __init__(self, repo: Repository, max_text_chars: int = 500_000):
+    def __init__(
+        self, repo: Repository, max_text_chars: int = 500_000, engines: Any = None, submit: Submit = run_now,
+    ):
         self.repo = repo
         self.max_text_chars = max_text_chars
+        self.engines = engines          # cleaner.engines.Engines или заглушка тестов; None — без слоёв 4–5
+        self.submit = submit
 
     def _check_length(self, text: str) -> None:
         if len(text) > self.max_text_chars:
@@ -88,23 +124,113 @@ class ChatService:
             return new_items
         raise StaleState(chat_id)
 
+    # --- слои 4 и 5 (FR-3.8) ---------------------------------------------------------
+
+    def layers(self, chat_id: str) -> dict[str, bool]:
+        """Слои 4 и 5 чата: явное решение пользователя, иначе умолчание администратора."""
+        chosen = self.repo.chat_layers(chat_id)
+        return {name: chosen.get(name, default) for name, default in self.repo.layer_defaults().items()}
+
+    def _enabled(self, chat_id: str) -> dict[str, bool]:
+        return self.layers(chat_id) if self.engines is not None else {name: False for name in LAYERS}
+
+    def set_layer(self, chat_id: str, user_id: str, layer: str, enabled: bool) -> None:
+        if layer not in LAYERS:
+            raise EditRefused("отключать можно только слои 4 и 5")
+        self.repo.set_chat_layer(chat_id, layer, enabled)
+        self.repo.audit("layer_changed", user_id, chat_id, layer=layer, enabled=enabled)
+
+    def _live_layers(self, chat_id: str) -> tuple[Layers, list[str]]:
+        """Слои для новой очистки: модели вызываются. Включённый, но недоступный слой — DetectorError (FR-3.7)."""
+        on = self._enabled(chat_id)
+        ner = self.engines.ner() if on["ner"] else None
+        llm = self.engines.llm() if on["llm"] else None
+        return Layers(ner=ner, llm=llm), [name for name in LAYERS if on[name]]
+
+    # --- входные тексты: очередь и задание (раздел 14) ----------------------------
+
     def add_input(self, chat_id: str, user_id: str, text: str) -> Item:
         self._check_length(text)
-        report: dict[str, object] = {}
+        item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", text, None, source="paste", status="queued"))
+        self.submit(self.process, chat_id, item.id, user_id)
+        return self.repo.item(chat_id, item.id) or item
 
-        def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
-            result = sanitize(state, text, settings)
-            report.update(
-                replaced=dict(Counter(state.entities[s.entity_id].type.value for s in result.spans)),
-                notices=len(result.notices), leaks=len(result.leaks), blocked=len(result.blocked),
-            )
-            return [Item(uuid.uuid4().hex, 0, "input", text, result.sanitized, _spans(result), _notices(result))], []
-
-        [item] = self._apply(chat_id, work)
+    def process(self, chat_id: str, item_id: str, user_id: str) -> None:
+        """Задание: очистить элемент всеми включёнными слоями и записать. Отказ — элемент failed с причиной."""
+        try:
+            item = self.repo.item(chat_id, item_id)
+            if item is None:
+                return                                  # чат удалили, пока задание ждало очереди
+            self.repo.set_item_status(chat_id, item_id, "running")
+            self._check_length(item.original)
+            layers, ran = self._live_layers(chat_id)
+            report = self._sanitize_item(chat_id, item, layers, ran)
+        except KeyError:
+            return
+        except Exception as exc:
+            self._failed(chat_id, item_id, user_id, exc)
+            return
         self.repo.audit("sanitize", user_id, chat_id, **report)
         if report["leaks"]:
             self.repo.audit("leak", user_id, chat_id, count=report["leaks"])
-        return item
+
+    def _sanitize_item(self, chat_id: str, item: Item, layers: Layers, ran: list[str]) -> dict[str, object]:
+        report: dict[str, object] = {}
+        cache: tuple[Span, ...] | None = None
+
+        def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
+            nonlocal cache
+            # Модели — один раз: при повторе на свежем состоянии (StaleState) их находки берутся из первого прогона.
+            result = sanitize(state, item.original, settings, layers if cache is None else Layers(cached=cache))
+            cache = tuple(result.model_spans)
+            report.clear()
+            report.update(
+                replaced=dict(Counter(state.entities[s.entity_id].type.value for s in result.spans)),
+                notices=len(result.notices), leaks=len(result.leaks), blocked=len(result.blocked),
+                source=item.source, layers=ran,
+            )
+            if item.meta.get("kind"):
+                report["kind"] = item.meta["kind"]
+            done = replace(
+                item, sanitized=result.sanitized, spans=_spans(result), notices=_notices(result), status="done",
+                meta={k: v for k, v in item.meta.items() if k not in ("error", "progress")} | {"layers": ran},
+                model_spans=_model_spans(result),
+            )
+            return [], [done]
+
+        self._apply(chat_id, work)
+        return report
+
+    def _failed(self, chat_id: str, item_id: str, user_id: str, exc: Exception) -> None:
+        """Причина для пользователя — только из своих исключений: в чужих может оказаться его текст (SEC-11)."""
+        from cleaner.ingest.extract import ExtractError
+
+        if isinstance(exc, (ExtractError, DetectorError, TextTooLong)):
+            reason = str(exc)
+        elif isinstance(exc, StaleState):
+            reason = _BUSY
+        else:
+            reason = _INTERNAL
+        log.error("обработка текста: %s", type(exc).__name__)
+        try:
+            self.repo.set_item_status(chat_id, item_id, "failed", reason)
+        except KeyError:
+            return
+        self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="process")
+
+    def retry(self, chat_id: str, user_id: str, item_id: str) -> None:
+        """Очистить заново всеми включёнными слоями: после отказа, перезапуска или включения слоя."""
+        item = self.repo.item(chat_id, item_id)
+        if item is None or item.kind != "input":
+            raise KeyError(item_id)
+        if item.status in ("queued", "running"):
+            raise EditRefused("текст ещё обрабатывается")
+        if not item.original:
+            raise EditRefused("текст файла не был извлечён, а сам файл не хранится: загрузите его ещё раз")
+        self.repo.set_item_status(chat_id, item_id, "queued")
+        self.submit(self.process, chat_id, item_id, user_id)
+
+    # --- ответы модели и вид чата ----------------------------------------------------
 
     def add_answer(self, chat_id: str, user_id: str, text: str) -> Item:
         self._check_length(text)
@@ -112,7 +238,7 @@ class ChatService:
 
         def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
             counters.update(restore(state, text, settings).counters)
-            return [Item(uuid.uuid4().hex, 0, "answer", text, None)], []
+            return [Item(uuid.uuid4().hex, 0, "answer", text, None, source="pasted_answer")], []
 
         [item] = self._apply(chat_id, work)
         self.repo.audit("restore", user_id, chat_id, **counters)
@@ -124,6 +250,9 @@ class ChatService:
         views: list[InputView | AnswerView] = []
         for item in self.repo.items(chat_id):
             if item.kind == "input":
+                if item.status != "done":
+                    views.append(InputView(item, [], []))
+                    continue
                 leaks = leakcheck.check(item.sanitized or "", state, settings)
                 blocked = [
                     span for span in item.spans
@@ -135,21 +264,28 @@ class ChatService:
                 views.append(AnswerView(item, restore(state, item.original, settings)))
         return ChatView(state, settings, views)
 
+    # --- правки (FR-6) -------------------------------------------------------------
+
     def _edit(self, chat_id: str, user_id: str, action: str, change: Callable[[ChatState, list[Item]], None]) -> None:
-        """Правка состояния и повторная очистка входных текстов чата (FR-6.5, FR-6.8)."""
+        """Правка состояния и повторная очистка входных текстов чата (FR-6.5, FR-6.8). Модели не вызываются."""
         leaks = Counter()
+        on = self._enabled(chat_id)
 
         def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
             change(state, items)
             leaks.clear()                       # при повторе на свежем состоянии считаем заново
             pairs = []
             for item in items:
-                if item.kind != "input":
+                if item.kind != "input" or item.status != "done":
                     continue
-                result = sanitize(state, item.original, settings)
+                layers, ran = _cached_layers(item, on)
+                result = sanitize(state, item.original, settings, layers)
                 leaks["count"] += len(result.leaks)
-                if result.sanitized != item.sanitized:
-                    fresh = Item(item.id, item.seq, "input", item.original, result.sanitized, _spans(result), _notices(result))
+                if result.sanitized != item.sanitized or ran != item.meta.get("layers"):
+                    fresh = replace(
+                        item, sanitized=result.sanitized, spans=_spans(result), notices=_notices(result),
+                        meta=item.meta | {"layers": ran},
+                    )
                     pairs.append((item, fresh))
             for old, fresh in pairs:
                 opened = {leak.entity_id for leak in leakcheck.check(old.sanitized or "", state, settings) if leak.entity_id}
@@ -166,7 +302,7 @@ class ChatService:
 
     def mask_value(self, chat_id: str, user_id: str, item_id: str, value: str, type_: EntityType) -> None:
         def change(state: ChatState, items: list[Item]) -> None:
-            item = next((i for i in items if i.id == item_id and i.kind == "input"), None)
+            item = next((i for i in items if i.id == item_id and i.kind == "input" and i.status == "done"), None)
             cleaned = value.strip()
             if item is None or not cleaned:
                 raise EditRefused("выделите фрагмент текста")

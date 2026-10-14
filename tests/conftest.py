@@ -5,7 +5,10 @@ import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 
+from cleaner.core.detect.base import DetectorError
 from cleaner.core.types import ChatState, Settings
+from cleaner.core.types import EntityType as T
+from cleaner.core.types import Span
 from cleaner.storage import db
 from cleaner.storage.repo import Repository
 from cleaner.web import auth
@@ -23,6 +26,64 @@ def state() -> ChatState:
 @pytest.fixture
 def settings() -> Settings:
     return Settings()
+
+
+class FakeNer:
+    """Слой 4 для тестов: помечает заданные строки и считает вызовы."""
+
+    name = "ner"
+
+    def __init__(self) -> None:
+        self.marks: dict[str, T] = {}
+        self.calls = 0
+
+    def detect(self, text: str, ctx=None) -> list[Span]:
+        self.calls += 1
+        return [
+            Span(m.start(), m.end(), type_, "ner", 0.9)
+            for value, type_ in self.marks.items() for m in re.finditer(re.escape(value), text)
+        ]
+
+
+class FakeSecondPass:
+    """Слой 5 для тестов: запоминает очищенный слоями 1–4 текст, помечает заданные строки в оригинале."""
+
+    def __init__(self) -> None:
+        self.marks: dict[str, T] = {}
+        self.seen: list[str] = []
+
+    def find(self, text: str, sanitized: str, state) -> list[Span]:
+        self.seen.append(sanitized)
+        return [
+            Span(m.start(), m.end(), type_, "llm")
+            for value, type_ in self.marks.items() for m in re.finditer(re.escape(value), text)
+        ]
+
+
+class FakeEngines:
+    """Тяжёлые и сетевые части для тестов: модели и локальная модель подменены, сети нет."""
+
+    def __init__(self) -> None:
+        self.ner_layer = FakeNer()
+        self.second = FakeSecondPass()
+        self.unavailable: str | None = None     # причина, по которой включённый слой недоступен
+
+    def _check(self) -> None:
+        if self.unavailable:
+            raise DetectorError(self.unavailable)
+
+    def ner(self):
+        self._check()
+        return self.ner_layer
+
+    def llm(self):
+        self._check()
+        return self.second
+
+
+@pytest.fixture
+def engines() -> FakeEngines:
+    return FakeEngines()
 
 
 class FakeClock:

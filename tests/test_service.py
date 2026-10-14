@@ -6,7 +6,7 @@ from cleaner.core.leakcheck import Leak
 from cleaner.core.types import EntityType as T
 from cleaner.service import AnswerView, ChatService, EditRefused, InputView, TextTooLong
 from cleaner.storage.codec import state_to_json
-from cleaner.storage.repo import StaleState
+from cleaner.storage.repo import Item, StaleState
 
 
 @pytest.fixture
@@ -21,24 +21,27 @@ def test_input_is_sanitized_stored_and_logged_without_the_text(repo, chat):
     assert item.sanitized == "почта <EMAIL_1>"
     assert [i.sanitized for i in repo.items(chat_id)] == ["почта <EMAIL_1>"]
     [event] = repo.audit_events("sanitize")
-    assert event.details == {"replaced": {"EMAIL": 1}, "notices": 0, "leaks": 0, "blocked": 0}
+    assert event.details == {
+        "replaced": {"EMAIL": 1}, "notices": 0, "leaks": 0, "blocked": 0, "source": "paste", "layers": [],
+    }
 
 
-def test_failing_layer_leaves_the_chat_untouched(repo, chat, monkeypatch):
+def test_failing_layer_fails_the_text_and_leaves_the_chat_untouched(repo, chat, monkeypatch):
     user, chat_id = chat
     service = ChatService(repo)
     service.add_input(chat_id, user, "почта a@x.example")
     state_before = state_to_json(repo.load_state(chat_id)[0])
-    items_before = repo.items(chat_id)
 
     def broken(text, ctx):
-        raise RuntimeError("слой сломан")
+        raise RuntimeError("слой сломан: a@x.example")
 
     monkeypatch.setattr(infra, "detect", broken)
-    with pytest.raises(RuntimeError):
-        service.add_input(chat_id, user, "узел 10.1.2.5")
+    item = service.add_input(chat_id, user, "узел 10.1.2.5")
+    assert (item.status, item.sanitized) == ("failed", None)
+    assert item.meta["error"].startswith("Внутренняя ошибка очистки")
     assert state_to_json(repo.load_state(chat_id)[0]) == state_before
-    assert repo.items(chat_id) == items_before
+    [event] = repo.audit_events("error")
+    assert event.details == {"kind": "RuntimeError", "stage": "process"}
 
 
 def test_concurrent_change_is_retried_on_fresh_state(repo, chat, monkeypatch):
@@ -59,15 +62,17 @@ def test_concurrent_change_is_retried_on_fresh_state(repo, chat, monkeypatch):
     assert [i.sanitized for i in repo.items(chat_id)] == ["почта <EMAIL_1>"]
 
 
-def test_endless_conflict_gives_up(repo, chat, monkeypatch):
+def test_endless_conflict_fails_the_text(repo, chat, monkeypatch):
     user, chat_id = chat
 
     def always_stale(*args, **kwargs):
         raise StaleState(chat_id)
 
     monkeypatch.setattr(repo, "commit_chat", always_stale)
-    with pytest.raises(StaleState):
-        ChatService(repo).add_input(chat_id, user, "текст")
+    item = ChatService(repo).add_input(chat_id, user, "текст")
+    assert (item.status, item.meta["error"]) == (
+        "failed", "Чат меняли одновременно, текст не обработан — запустите его ещё раз",
+    )
 
 
 def test_answer_is_restored_in_the_view(repo, chat):
@@ -147,3 +152,94 @@ def test_refresh_applies_a_new_dictionary_value(repo, chat):
     service.refresh(chat_id, user)
     assert repo.items(chat_id)[0].sanitized == "клиент <ORG_1>"
     assert service.view(chat_id).items[0].deliverable
+
+
+@pytest.fixture
+def with_ner(repo):
+    repo.set_layer_defaults({"ner": True, "llm": False})
+
+
+def test_input_waits_in_the_queue_until_the_job_runs(repo, chat, engines, with_ner):
+    user, chat_id = chat
+    queue = []
+    service = ChatService(repo, engines=engines, submit=lambda fn, *args: queue.append((fn, args)))
+    item = service.add_input(chat_id, user, "почта a@x.example")
+    assert (item.status, item.sanitized) == ("queued", None)
+    fn, args = queue.pop()
+    fn(*args)
+    [stored] = repo.items(chat_id)
+    assert (stored.status, stored.sanitized, stored.meta) == ("done", "почта <EMAIL_1>", {"layers": ["ner"]})
+
+
+def test_editing_reuses_layer_4_findings_without_calling_the_model(repo, chat, engines, with_ner):
+    """Обзор плана 2+4, пункт 5: правка — секунды, а не минуты ожидания модели."""
+    user, chat_id = chat
+    engines.ner_layer.marks = {"Петров": T.PERSON}
+    service = ChatService(repo, engines=engines)
+    item = service.add_input(chat_id, user, "Петров, проект Заря")
+    service.mask_value(chat_id, user, item.id, "Заря", T.TERM)
+    assert engines.ner_layer.calls == 1
+    assert repo.items(chat_id)[0].sanitized == "<PERSON_1>, проект <TERM_1>"
+
+
+def test_unavailable_enabled_layer_fails_the_text(repo, chat, engines, with_ner):
+    """FR-3.7: включённый слой недоступен — результата нет, состояние чата прежнее."""
+    user, chat_id = chat
+    engines.unavailable = "Слой 4 недоступен: модели не загружены"
+    service = ChatService(repo, engines=engines)
+    state_before = state_to_json(repo.load_state(chat_id)[0])
+    item = service.add_input(chat_id, user, "почта a@x.example")
+    assert (item.status, item.sanitized, item.meta["error"]) == ("failed", None, "Слой 4 недоступен: модели не загружены")
+    assert state_to_json(repo.load_state(chat_id)[0]) == state_before
+
+
+def test_disabled_layer_is_skipped_and_recorded(repo, chat, engines, with_ner):
+    user, chat_id = chat
+    engines.ner_layer.marks = {"Петров": T.PERSON, "Сидоров": T.PERSON}
+    service = ChatService(repo, engines=engines)
+    service.add_input(chat_id, user, "Петров")
+    service.set_layer(chat_id, user, "ner", False)
+    service.refresh(chat_id, user)
+    first = repo.items(chat_id)[0]
+    # Известное значение чата ищется и без слоя 4 (FR-3.4), а отметка о слоях — честная.
+    assert (first.sanitized, first.meta["layers"]) == ("<PERSON_1>", [])
+    second = service.add_input(chat_id, user, "Сидоров")
+    assert (second.sanitized, second.meta["layers"], engines.ner_layer.calls) == ("Сидоров", [], 1)
+    assert service.layers(chat_id) == {"ner": False, "llm": False}
+    assert [e.details for e in repo.audit_events("layer_changed")] == [{"layer": "ner", "enabled": False}]
+    with pytest.raises(EditRefused):
+        service.set_layer(chat_id, user, "rules", False)
+
+
+def test_layer_5_reads_the_text_cleaned_by_the_other_layers(repo, chat, engines, with_ner):
+    user, chat_id = chat
+    engines.second.marks = {"sunflower77": T.SECRET}
+    service = ChatService(repo, engines=engines)
+    service.set_layer(chat_id, user, "llm", True)
+    item = service.add_input(chat_id, user, "a@x.example, на стикере sunflower77")
+    assert engines.second.seen == ["<EMAIL_1>, на стикере sunflower77"]
+    assert (item.sanitized, item.meta["layers"]) == ("<EMAIL_1>, на стикере <SECRET_1>", ["ner", "llm"])
+
+
+def test_failed_text_can_be_run_again(repo, chat, engines, with_ner):
+    user, chat_id = chat
+    engines.unavailable = "Слой 4 недоступен"
+    service = ChatService(repo, engines=engines)
+    item = service.add_input(chat_id, user, "почта a@x.example")
+    engines.unavailable = None
+    service.retry(chat_id, user, item.id)
+    assert repo.item(chat_id, item.id).sanitized == "почта <EMAIL_1>"
+    with pytest.raises(KeyError):
+        service.retry(chat_id, user, "0" * 32)
+
+
+def test_text_in_progress_cannot_be_retried_or_edited(repo, chat):
+    user, chat_id = chat
+    service = ChatService(repo)
+    item = repo.add_item(chat_id, Item("a" * 32, 0, "input", "проект Заря", None, status="running"))
+    with pytest.raises(EditRefused):
+        service.retry(chat_id, user, item.id)
+    with pytest.raises(EditRefused):
+        service.mask_value(chat_id, user, item.id, "Заря", T.TERM)
+    [entry] = service.view(chat_id).items
+    assert not entry.deliverable
