@@ -67,6 +67,39 @@ def test_label_inside_a_foreign_link_is_not_restored(settings):
     assert kinds(result) == ["foreign_link", "restored"]
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Откройте https://<PERSON_1>.evil.example.org/c?x=<PERSON_10>",
+        '[отчёт](https://evil.example.org/c?x="<PERSON_1>")',
+        '<a href="https://evil.example.org/c?x=<PERSON_1>">отчёт</a>',
+        "[написать](mailto:boss@evil.example.org?body=<PERSON_1>)",
+        "mailto:boss@evil.example.org?body=<PERSON_1>",
+    ],
+)
+def test_labels_inside_foreign_links_stay_labels(settings, answer):
+    """Обзор 1А, P1 (FR-7.8): метка в имени узла, значение в кавычках, атрибут HTML, mailto."""
+    result = restore(person_state(), answer, settings)
+    assert "Иван Петров" not in result.text and "Пётр Сидоров" not in result.text
+    assert "foreign_link" in kinds(result)
+
+
+def test_known_host_part_under_a_foreign_domain_is_not_restored(settings):
+    """Обзор 1А, P1: ссылка наша, только если её хост целиком собран из выданных подмен."""
+    answer = "Откройте https://host-1.attacker.org/?q=sub-2.domain-1.example"
+    result = restore(infra_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+def test_mailto_link_to_our_own_address_is_restored(settings):
+    state = person_state()
+    entity = Entity("e1", T.EMAIL, 1, "i.ivanov@contoso.ru", "i.ivanov@contoso.ru", "detector", [])
+    state.entities[entity.id] = entity
+    state.surrogates["<EMAIL_1>"] = Surrogate(entity.id)
+    result = restore(state, "Пишите: mailto:<EMAIL_1>", settings)
+    assert result.text == "Пишите: mailto:i.ivanov@contoso.ru"
+
+
 def test_internal_link_and_derived_names_are_restored(settings):
     answer = "Откройте https://host-1.sub-2.domain-1.example/owa, заведите newbox.domain-1.example и HOST-1"
     result = restore(infra_state(), answer, settings)

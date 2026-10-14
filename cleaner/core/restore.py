@@ -13,9 +13,16 @@ from cleaner.core.types import ChatState, EntityType, Policy, Settings
 Piece = tuple[str, str | None]      # текст и вид выделения; None — кусок ещё не обработан
 Handler = Callable[[re.Match[str]], Piece | None]
 
-# Адрес ссылки тянется до пробела или кавычки и не заканчивается знаком препинания.
-_URL = re.compile(r"(?:[a-z][a-z0-9+.-]*:)?//[^\s\"'`]*[^\s\"'`.,;:!?)\]}]", re.IGNORECASE)
-_URL_HOST = re.compile(r"(?:[a-z][a-z0-9+.-]*:)?//(?:[^/@\s]*@)?(\[[^\]]+\]|[^/:?#\s]+)", re.IGNORECASE)
+# Всё, что может стать ссылкой. Цель ссылки Markdown и атрибут HTML берутся целиком, вместе
+# с кавычками внутри; голый адрес тянется до пробела или кавычки и не кончается знаком препинания.
+_LINK = re.compile(
+    r"\]\((?P<md>[^)\r\n]*)\)"
+    r"|(?:href|src)\s*=\s*(?P<quote>[\"'])(?P<attr>.*?)(?P=quote)"
+    r"|(?P<mailto>mailto:[^\s\"'`]*[^\s\"'`.,;:!?)\]}])"
+    r"|(?P<url>(?:[a-z][a-z0-9+.-]{0,31}:)?//[^\s\"'`]*[^\s\"'`.,;:!?)\]}])",
+    re.IGNORECASE,
+)
+_URL_HOST = re.compile(r"(?:[a-z][a-z0-9+.-]{0,31}:)?//(?:[^/@\s]*@)?(\[[^\]]+\]|[^/:?#\s]+)", re.IGNORECASE)
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 _MAC = re.compile(
     r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
@@ -81,6 +88,10 @@ class _Restorer:
         self.caseless = surrogates.caseless(state)
         self.fake_nets: set[int] = set()
         self.macs = {}
+        self.own_hosts = {
+            text.lower() for text, surrogate in state.surrogates.items()
+            if surrogate.kind in ("host", "ip", "ip6")
+        }
         for text, surrogate in state.surrogates.items():
             if surrogate.kind == "ip":
                 self.fake_nets.add(int(ipaddress.IPv4Address(text.split("/")[0])) >> 8)
@@ -92,7 +103,7 @@ class _Restorer:
 
     def run(self, pieces: list[Piece], links: bool) -> list[Piece]:
         if links:
-            pieces = _split(pieces, _URL, self._link)
+            pieces = _split(pieces, _LINK, self._link)
         if self.exact:
             pieces = _split(pieces, self.exact, self._exact)
         pieces = _split(pieces, _TOLERANT, self._label)
@@ -109,15 +120,34 @@ class _Restorer:
     def _hidden(self, type_: EntityType) -> bool:
         return self.settings.policies.get(type_) is Policy.HIDE
 
+    def _host_is_ours(self, host: str) -> bool:
+        """Хост целиком — выданная подмена или собран только из её частей (host-1.sub-2.domain-1.example)."""
+        labels_ = host.strip("[]").lower().split(".")
+        reachable = {0}
+        for first in range(len(labels_)):
+            if first not in reachable:
+                continue
+            for last in range(first + 1, len(labels_) + 1):
+                if ".".join(labels_[first:last]) in self.own_hosts:
+                    reachable.add(last)
+        return len(labels_) in reachable
+
+    def _is_own(self, target: str) -> bool:
+        """Ведёт ли ссылка на наш узел или наш адрес. Всё остальное — чужая ссылка."""
+        if target.lower().startswith("mailto:"):
+            address = target[len("mailto:"):]
+            return address in self.state.surrogates          # без параметров: в них может быть что угодно
+        host = _URL_HOST.match(target.strip())
+        return bool(host) and self._host_is_ours(host.group(1))
+
     def _link(self, m: re.Match[str]) -> Piece | None:
-        url = m.group()
-        host = _URL_HOST.match(url)
-        if host and self._inner(host.group(1)) != host.group(1):
+        target = m.group("md") or m.group("attr") or m.group("mailto") or m.group("url") or ""
+        if self._is_own(target):
             return None         # ссылка на наш же узел восстанавливается как обычный текст
-        if self._inner(url) == url:
+        if self._inner(m.group()) == m.group():
             return None         # восстанавливать в ней нечего
         self.counters["foreign_links"] += 1
-        return url, "foreign_link"
+        return m.group(), "foreign_link"
 
     def _exact(self, m: re.Match[str]) -> Piece:
         text = m.group()
