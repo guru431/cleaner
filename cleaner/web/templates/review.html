@@ -92,6 +92,25 @@
   <button>Сохранить как эталон</button>
   <span class="muted">Сначала проверьте замены. Копия текста с текущей разметкой попадёт в набор для измерения качества и останется в нём после удаления чата.</span>
 </form>
+
+<h2>Остаточный риск</h2>
+<p class="muted">Локальная модель пробует по очищенному тексту назвать организацию, людей и место. Верная догадка подсказывает, что ещё стоит скрыть.</p>
+{% if item.risk_status in ("queued", "running") %}
+<p class="muted" data-poll="/chats/{{ chat.id }}/items/{{ item.id }}/status" data-poll-field="risk">Локальная модель проверяет текст…</p>
+{% elif item.risk_status == "failed" %}
+<p class="error">Проверка не выполнена: локальная модель недоступна или ответила не по правилам.</p>
+{% elif risk is not none %}
+<ul>
+  {% for guess in risk.guesses %}
+  <li>{{ risk_kinds[guess.kind] }}: «{{ guess.guess }}»{% if guess.clue %} — по фрагменту «{{ guess.clue }}»{% endif %}</li>
+  {% else %}
+  <li>Модель не смогла определить ни организацию, ни людей, ни место.</li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% if item.risk_status not in ("queued", "running") %}
+<form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/risk">{% include "_csrf.html" %}<button>Проверить остаточный риск</button></form>
+{% endif %}
 {% endif %}
 
 {% if retry %}

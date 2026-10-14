@@ -8,11 +8,12 @@ from __future__ import annotations
 import json
 import os
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from cleaner import models
+from cleaner.core import risk
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.llm import LlmLayer
 from cleaner.ingest.documents import Docling
@@ -94,3 +95,7 @@ class Engines:
     def llm(self) -> LlmLayer:
         """Слой 5 через шлюз; схема ответа — параметром или текстом запроса, по настройке (проверка E задачи 3)."""
         return LlmLayer(self.client(), send_schema=local_settings(self.repo).schema)
+
+    def risk(self) -> Callable[[str], list[risk.Guess]]:
+        client, schema = self.client(), local_settings(self.repo).schema
+        return lambda sanitized: risk.check(client, sanitized, schema)

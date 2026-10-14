@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from cleaner.core import leakcheck
+from cleaner.core import leakcheck, risk
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.entities import ops
 from cleaner.core.leakcheck import Leak
@@ -256,6 +256,42 @@ class ChatService:
             raise EditRefused("текст файла не был извлечён, а сам файл не хранится: загрузите его ещё раз")
         self.repo.set_item_status(chat_id, item_id, "queued")
         self.submit(self.process, chat_id, item_id, user_id)
+
+    # --- проверка остаточного риска (FR-9.3) ------------------------------------------
+
+    def check_risk(self, chat_id: str, user_id: str, item_id: str) -> None:
+        item = self.repo.item(chat_id, item_id)
+        if item is None or item.kind != "input":
+            raise KeyError(item_id)
+        if item.status != "done":
+            raise EditRefused("текст ещё не очищен")
+        if item.risk_status in ("queued", "running"):
+            raise EditRefused("проверка уже идёт")
+        if self.engines is None:
+            raise EditRefused("локальная модель не подключена")
+        self.repo.set_item_risk_status(chat_id, item_id, "queued")
+        self.submit(self.run_risk, chat_id, item_id, user_id)
+
+    def run_risk(self, chat_id: str, item_id: str, user_id: str) -> None:
+        """Задание: только очищенный текст и только локальной модели (FR-9.5)."""
+        try:
+            item = self.repo.item(chat_id, item_id)
+            if item is None:
+                return
+            self.repo.set_item_risk_status(chat_id, item_id, "running")
+            guesses = self.engines.risk()(item.sanitized or "")
+            self.repo.set_item_risk(chat_id, item_id, risk.to_dict(guesses))
+        except KeyError:
+            return
+        except Exception as exc:
+            log.error("проверка риска: %s", type(exc).__name__)
+            try:
+                self.repo.set_item_risk_status(chat_id, item_id, "failed")
+            except KeyError:
+                return
+            self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="risk")
+            return
+        self.repo.audit("risk_check", user_id, chat_id, guesses=len(guesses))
 
     # --- ответы модели и вид чата ----------------------------------------------------
 

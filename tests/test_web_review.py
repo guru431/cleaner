@@ -1,3 +1,4 @@
+import json
 import re
 
 from cleaner.core.types import EntityType as T
@@ -115,3 +116,28 @@ def test_reviewed_text_is_saved_as_a_gold_example(ivan, repo):
         ("EMAIL", 0, "detector"), ("EMAIL", 0, "detector"), ("TERM", 1, "manual"),
     ]
     assert [e.details for e in repo.audit_events("gold_added")] == [{"spans": 3}]
+
+
+def test_residual_risk_guesses_are_shown_and_stored_encrypted(ivan, repo, engines, tmp_path):
+    """FR-9.3: догадки — подсказка на экране проверки; верная догадка — оригинал, поэтому зашифрована."""
+    engines.completer.answers = [json.dumps({"guesses": [{"kind": "org", "guess": "Ромашка Rk17", "clue": ""}]}, ensure_ascii=False)]
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    item_id = first_item(repo, chat_id)
+    assert ivan.post(f"/chats/{chat_id}/items/{item_id}/risk").status_code == 303
+    page = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    assert "организация: «Ромашка Rk17»" in page
+    assert [e.details for e in repo.audit_events("risk_check")] == [{"guesses": 1}]
+    repo.conn.execute("PRAGMA wal_checkpoint(FULL)")
+    raw = b"".join(path.read_bytes() for path in tmp_path.glob("cleaner.db*"))
+    assert "Rk17".encode("utf-8") not in raw
+
+
+def test_failed_residual_risk_check_says_so(ivan, repo, engines):
+    engines.completer.answers = ["не JSON"]
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    item_id = first_item(repo, chat_id)
+    ivan.post(f"/chats/{chat_id}/items/{item_id}/risk")
+    assert "Проверка не выполнена" in ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    assert [e.details for e in repo.audit_events("error")] == [{"kind": "DetectorError", "stage": "risk"}]

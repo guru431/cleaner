@@ -32,7 +32,7 @@ EVENTS = (
     "login", "login_failed", "logout", "chat_created", "chat_deleted", "sanitize", "restore", "edit", "leak",
     "dictionary_changed", "dictionary_import", "pattern_changed", "policy_changed",
     "user_created", "user_disabled", "user_enabled", "password_changed", "error", "jobs_interrupted",
-    "settings_changed", "gold_added", "gold_deleted",
+    "settings_changed", "gold_added", "gold_deleted", "risk_check",
 )
 _SHOWN = 50
 

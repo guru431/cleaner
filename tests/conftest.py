@@ -7,6 +7,7 @@ from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 
 from cleaner.core.detect.base import DetectorError
+from cleaner.core.risk import check as risk_check
 from cleaner.core.types import ChatState, Settings
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Span
@@ -123,6 +124,10 @@ class FakeEngines:
 
     def extractor(self) -> Extractor:
         return Extractor(self.documents, lambda image, mime: self.ocr_text)
+
+    def risk(self):
+        self._check()
+        return lambda sanitized: risk_check(self.completer, sanitized)
 
 
 @pytest.fixture
