@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import logging
 import os
 import shutil
 import sqlite3
@@ -71,6 +72,19 @@ def _offline() -> None:
     os.environ.update(OFFLINE)
 
 
+# Библиотеки разбора и моделей пишут предупреждения с фрагментами документа («Could not extract chart data: …»
+# с текстом ячейки), а журнал службы — systemd: их записи ниже CRITICAL не выводятся (SEC-11).
+QUIET_LIBRARIES = (
+    "docling", "docling_core", "docling_parse", "docling_ibm_models", "transformers", "gliner",
+    "huggingface_hub", "pypdfium2", "PIL",
+)
+
+
+def _quiet_libraries() -> None:
+    for name in QUIET_LIBRARIES:
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     cfg, env_file = _config(args), Path(args.env_file)
     if cfg.db_path.exists():
@@ -91,6 +105,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     _offline()
+    _quiet_libraries()
     import uvicorn
 
     from cleaner.engines import Engines

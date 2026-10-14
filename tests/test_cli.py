@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 
 import pytest
@@ -79,6 +80,8 @@ def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monk
     [kwargs] = calls
     assert (kwargs["host"], kwargs["ssl_certfile"], kwargs["access_log"]) == ("example", "c.pem", False)
     assert os.environ["HF_HUB_OFFLINE"] == "1" and os.environ["TRANSFORMERS_OFFLINE"] == "1"
+    # Обзор плана 2+4, m-7: предупреждения Docling бывают с текстом ячеек документа — в журнал службы они не идут.
+    assert all(logging.getLogger(name).level == logging.CRITICAL for name in ("docling", "transformers", "gliner"))
 
 
 def test_models_verify_names_what_is_missing(home, capsys):

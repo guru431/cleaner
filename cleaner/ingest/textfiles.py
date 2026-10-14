@@ -56,16 +56,47 @@ def decode(data: bytes) -> str:
         raise NotText("это двоичный файл")
     try:
         return data.decode("utf-8")
-    except UnicodeDecodeError:
-        pass
-    # Однобайтовые кодировки декодируют любой файл: выбирает доля русских букв среди не-ASCII знаков.
+    except UnicodeDecodeError as exc:
+        if exc.reason == "unexpected end of data":
+            return data[:exc.start].decode("utf-8")      # файл обрезан посреди знака: последний знак неполный
+    mixed = _utf8_with_foreign_lines(data)
+    if mixed is not None:
+        return mixed
+    return _single_byte(data)[1]
+
+
+def _single_byte(data: bytes) -> tuple[str, str]:
+    """Однобайтовые кодировки декодируют любой файл: выбирает доля русских букв среди не-ASCII знаков."""
     candidates = []
     for codec in ("cp1251", "cp866"):
         try:
             text = data.decode(codec)
         except UnicodeDecodeError:
             continue
-        candidates.append((_russian_share(text), codec == "cp1251", text))
+        candidates.append((_russian_share(text), codec == "cp1251", codec, text))
     if not candidates:
         raise NotText("кодировку определить не удалось")
-    return max(candidates)[2]
+    _, _, codec, text = max(candidates)
+    return codec, text
+
+
+def _utf8_with_foreign_lines(data: bytes) -> str | None:
+    """Журнал в UTF-8, в который дописаны строки в Windows-1251 или CP866: каждая такая строка — своей кодировкой.
+
+    Иначе одна чужая строка сделала бы однобайтовым весь файл, и русские слова остальных строк стали бы
+    «кракозябрами», которых не находит ни один слой. None — строк UTF-8 с не-ASCII знаками нет.
+    """
+    lines = data.splitlines(keepends=True)
+    decoded: list[str | None] = []
+    utf8_seen = False
+    for line in lines:
+        try:
+            decoded.append(line.decode("utf-8"))
+        except UnicodeDecodeError:
+            decoded.append(None)
+            continue
+        utf8_seen = utf8_seen or not line.isascii()
+    if not utf8_seen:
+        return None
+    codec, _ = _single_byte(b"".join(line for line, text in zip(lines, decoded) if text is None))
+    return "".join(text if text is not None else line.decode(codec, "replace") for line, text in zip(lines, decoded))

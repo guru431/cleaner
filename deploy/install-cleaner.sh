@@ -105,6 +105,13 @@ fi
 PREV_CODE=""
 PREV_VENV=""
 PREV_UNIT=""
+DB_BACKUP=""
+SCHEMA_BEFORE=""
+schema_version() {  # номер схемы базы; читается от cleaner, чтобы файлы журнала WAL не стали чужими
+    runuser -u cleaner -- python3 -c \
+        'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA user_version").fetchone()[0])' \
+        "$DATA/cleaner.db"
+}
 rollback() {
     trap - ERR
     log "ОТКАТ: $1"
@@ -113,6 +120,13 @@ rollback() {
     if [[ -n "$PREV_VENV" ]]; then rm -rf "$APP/.venv"; mv "$PREV_VENV" "$APP/.venv"; swapped=1; fi
     if [[ -n "$PREV_UNIT" ]]; then cp -a "$PREV_UNIT" "$UNIT"; swapped=1; fi
     rm -rf "$APP/.venv.new" "$APP/cleaner.new"
+    # Новая версия могла успеть поднять схему базы при старте: прежний код такую базу не откроет.
+    if [[ -n "$DB_BACKUP" && "$(schema_version 2>/dev/null || echo '?')" != "$SCHEMA_BEFORE" ]]; then
+        systemctl stop cleaner.service || true
+        rm -f "$DATA/cleaner.db-wal" "$DATA/cleaner.db-shm"
+        install -o cleaner -g cleaner -m 0600 "$DB_BACKUP" "$DATA/cleaner.db"
+        log "база возвращена из копии $DB_BACKUP: новая версия успела изменить её схему"
+    fi
     systemctl daemon-reload || true
     if [[ $FIRST_INSTALL -eq 1 ]]; then
         systemctl disable --now cleaner.service >/dev/null 2>&1 || true
@@ -184,6 +198,27 @@ elif [[ ! -f "$ENVF" || ! -f "$DATA/cleaner.db" ]]; then
 fi
 if ! grep -q '^CLEANER_GATEWAY_KEY=..*' "$ENVF"; then
     log "Ключа шлюза нет: выпустите его (sudo ai-ctl gateway-key create cleaner) и допишите строку CLEANER_GATEWAY_KEY=… в $ENVF через sudoedit"
+fi
+
+# --- копия базы: новая версия мигрирует схему при старте, а прежний код базу новой версии не откроет ----
+if [[ $FIRST_INSTALL -eq 0 ]]; then
+    SCHEMA_BEFORE=$(schema_version)
+    DB_BACKUP="$DATA/cleaner.db.bak-$STAMP"
+    runuser -u cleaner -- python3 - "$DATA/cleaner.db" "$DB_BACKUP" <<'PY'
+import sqlite3
+import sys
+
+source, target = sqlite3.connect(sys.argv[1]), sqlite3.connect(sys.argv[2])
+source.backup(target)
+target.close()
+source.close()
+PY
+    chmod 0600 "$DB_BACKUP"
+    mapfile -t copies < <(ls -1t "$DATA"/cleaner.db.bak-* 2>/dev/null || true)
+    for old in "${copies[@]:3}"; do
+        rm -f "$old"                   # хранятся три последние копии
+    done
+    log "копия базы до обновления: $DB_BACKUP (схема версии $SCHEMA_BEFORE)"
 fi
 
 # --- самопроверка и запуск ------------------------------------------------------------

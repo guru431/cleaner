@@ -261,3 +261,43 @@ def test_extracted_text_is_kept_when_cleaning_fails_so_it_can_be_retried(repo, c
     engines.ner = original_ner
     service.retry(chat_id, user, item.id)
     assert repo.item(chat_id, item.id).sanitized == "Документ: почта <EMAIL_1>"
+
+
+def test_file_text_over_the_limit_is_refused_before_it_is_stored(repo, chat, engines, monkeypatch):
+    """Обзор плана 2+4, I-6: длинный текст файла не сохраняется, «Повторить» не предлагается; огромный журнал
+    отклоняется по размеру, не тратя время на определение кодировки."""
+    from cleaner.ingest import textfiles
+    from cleaner.web.routes_chats import can_retry
+
+    user, chat_id = chat
+    service = ChatService(repo, max_text_chars=20, engines=engines)
+    item = service.add_file(chat_id, user, "big.log", ("строка " * 5).encode("utf-8"))
+    stored = repo.item(chat_id, item.id)
+    assert (stored.status, stored.original, stored.meta["error"]) == ("failed", "", "текст длиннее 20 знаков")
+    assert not can_retry(stored)
+
+    def never(data):
+        raise AssertionError("кодировка огромного файла не определяется")
+
+    monkeypatch.setattr(textfiles, "decode", never)
+    huge = service.add_file(chat_id, user, "huge.log", b"x" * 81)
+    assert repo.item(chat_id, huge.id).meta["error"] == "текст длиннее 20 знаков"
+
+
+def test_key_error_from_a_layer_fails_the_text_instead_of_leaving_it_running(repo, chat, engines, with_ner):
+    """Обзор плана 2+4, m-1: KeyError слоя — не «чат удалён»: элемент не висит «в работе», ошибка в журнале."""
+    user, chat_id = chat
+
+    def broken(text, ctx=None):
+        raise KeyError("ner")
+
+    engines.ner_layer.detect = broken
+    service = ChatService(repo, engines=engines)
+    item = service.add_input(chat_id, user, "почта a@x.example")
+    assert (item.status, item.meta["error"]) == ("failed", "Внутренняя ошибка очистки: текст не обработан и никуда не передан")
+    assert [e.details for e in repo.audit_events("error")] == [{"kind": "KeyError", "stage": "process"}]
+    engines.ner_layer = type(engines.ner_layer)()
+    done = service.add_input(chat_id, user, "почта b@x.example")
+    engines.completer.error = KeyError("guesses")
+    service.check_risk(chat_id, user, done.id)
+    assert repo.item(chat_id, done.id).risk_status == "failed"

@@ -1,7 +1,7 @@
 import json
 import logging
 
-OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 32
+OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 32 + "EncryptedPackage".encode("utf-16-le")
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 
 
@@ -57,10 +57,10 @@ def test_oversized_and_empty_uploads_are_refused(ivan, repo, app):
 def test_file_above_the_form_body_limit_but_within_max_file_mb_is_accepted(ivan, repo):
     """Предел тела запроса (8 МиБ, план 1В) не урезает предел файла: max_file_mb по умолчанию — 50 МБ (FR-2.2)."""
     chat_id = ivan.chat()
-    response = ivan.upload(f"/chats/{chat_id}/upload", "big.log", b"line of a log\n" * (9 * 1024 * 1024 // 14))
+    response = ivan.upload(f"/chats/{chat_id}/upload", "big.png", PNG + b"\x00" * (9 * 1024 * 1024))
     assert response.status_code == 303
     [item] = repo.items(chat_id)
-    assert item.meta["kind"] == "text"
+    assert (item.status, item.meta["kind"]) == ("done", "image")
 
 
 def test_upload_needs_the_form_token_and_an_own_chat(browser, ivan, repo):

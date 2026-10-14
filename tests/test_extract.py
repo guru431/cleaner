@@ -7,6 +7,9 @@ from cleaner.ingest.extract import ExtractError, Extractor, detect_kind
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16
 OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 16
+# Зашифрованный OOXML — контейнер OLE с потоками EncryptionInfo и EncryptedPackage (имена в UTF-16LE).
+ENCRYPTED = OLE + "EncryptionInfo".encode("utf-16-le") + b"\x00" * 8 + "EncryptedPackage".encode("utf-16-le")
+RTF = rb"{\rtf1\ansi\ansicpg1251 \'cf\'e5\'f2\'f0\'ee\'e2}"
 ZIP = b"PK\x03\x04" + b"\x00" * 16
 TEXT_PAGE = "Contact petrov.test@kontora-test.ru for access"
 
@@ -51,8 +54,10 @@ def test_kind_comes_from_the_content_and_the_extension(name, data, kind):
 
 
 @pytest.mark.parametrize(("name", "data", "reason"), [
-    ("secret.docx", OLE, "защищён паролем"),
+    ("secret.docx", ENCRYPTED, "защищён паролем"),
     ("old.doc", OLE, "Старые форматы Office"),
+    ("old-renamed.docx", OLE + "WordDocument".encode("utf-16-le"), "Старые форматы Office"),
+    ("letter.rtf", RTF, "не поддерживается"), ("letter.txt", RTF, "не поддерживается"),
     ("fake.docx", b"not a zip", "не соответствует содержимому"),
     ("fake.pdf", ZIP, "не соответствует содержимому"),
     ("fake.png", b"GIF89a", "не соответствует содержимому"),
@@ -140,3 +145,11 @@ def test_large_image_is_refused_before_recognition():
     with pytest.raises(ExtractError, match="больше 20 МБ"):
         Extractor(Documents(), ocr).extract("huge.png", PNG + b"\x00" * (20 * 1024 * 1024))
     assert ocr.calls == []
+
+
+def test_huge_page_is_rendered_within_the_recognition_limit():
+    """Обзор плана 2+4, m-5: страница огромного размера не рисуется картинкой в гигабайты — не больше, чем примет ocr-ru."""
+    from cleaner.ingest.extract import OCR_DPI, _scale
+
+    assert _scale(612, 792) == OCR_DPI / 72                      # A4 и Letter — как прежде, 200 точек на дюйм
+    assert 100_000 * _scale(100_000, 50_000) <= 12_000

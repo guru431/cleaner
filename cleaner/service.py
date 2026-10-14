@@ -173,7 +173,9 @@ class ChatService:
             self._check_length(item.original)
             layers, ran = self._live_layers(chat_id)
             report = self._sanitize_item(chat_id, item, layers, ran)
-        except KeyError:
+        except KeyError as exc:
+            if self.repo.chat(chat_id) is not None:       # чат на месте: KeyError пришёл из слоя или библиотеки
+                self._failed(chat_id, item_id, user_id, exc)
             return
         except Exception as exc:
             self._failed(chat_id, item_id, user_id, exc)
@@ -184,13 +186,17 @@ class ChatService:
 
     def _extract(self, chat_id: str, item: Item, data: bytes, filename: str) -> Item:
         """Текст из файла записывается сразу: если очистка не удастся, его можно очистить заново без файла."""
-        from cleaner.ingest.extract import ExtractError
+        from cleaner.ingest.extract import ExtractError, detect_kind
 
         if self.engines is None:
             raise ExtractError("Разбор файлов не подключён")
+        if detect_kind(filename, data) == "text" and len(data) > 4 * self.max_text_chars:
+            self._check_length(" " * (self.max_text_chars + 1))    # знак UTF-8 — не больше 4 байт: заведомо длиннее
         extracted = self.engines.extractor().extract(
             filename, data, lambda done, total: self.repo.set_item_progress(chat_id, item.id, f"{done}/{total}"),
         )
+        # До записи: текст, который всё равно не очистить, не хранится, и повторить нечего (файл не хранится).
+        self._check_length(extracted.text)
         meta: dict[str, object] = {"kind": extracted.kind}
         if extracted.pages:
             meta["pages"] = extracted.pages
@@ -281,9 +287,9 @@ class ChatService:
             self.repo.set_item_risk_status(chat_id, item_id, "running")
             guesses = self.engines.risk()(item.sanitized or "")
             self.repo.set_item_risk(chat_id, item_id, risk.to_dict(guesses))
-        except KeyError:
-            return
         except Exception as exc:
+            if isinstance(exc, KeyError) and self.repo.chat(chat_id) is None:
+                return                                    # чат удалили, пока шла проверка
             log.error("проверка риска: %s", type(exc).__name__)
             try:
                 self.repo.set_item_risk_status(chat_id, item_id, "failed")

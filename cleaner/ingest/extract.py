@@ -16,7 +16,10 @@ from cleaner.ingest import textfiles
 OCR_DPI = 200                       # страница A4 — около 1650×2340 точек, в пределах ocr-ru
 _SCANNED_BELOW = 20                 # меньше стольких знаков в слое текста — страница считается сканом
 _OCR_LIMIT = 20 * 1024 * 1024       # предел ocr-ru на одно изображение
+_OCR_SIDE = 12_000                  # предел ocr-ru по стороне изображения, точек
 _OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"      # контейнер OLE: MSG, старый Office и зашифрованный OOXML
+_ENCRYPTED = "EncryptedPackage".encode("utf-16-le")   # поток зашифрованного OOXML в каталоге OLE
+_RTF = b"{\\rtf"
 _ZIP = b"PK\x03\x04"
 _PNG = b"\x89PNG\r\n\x1a\n"
 _JPEG = b"\xff\xd8\xff"
@@ -24,6 +27,7 @@ _OFFICE = frozenset({"docx", "xlsx", "pptx"})
 _LEGACY = frozenset({"doc", "xls", "ppt"})
 _MISMATCH = "Файл повреждён или его расширение не соответствует содержимому"
 _LOCKED = "Файл защищён паролем: снимите защиту и загрузите его снова"
+_LEGACY_REFUSED = "Старые форматы Office (.doc, .xls, .ppt) не поддерживаются: сохраните файл как .docx, .xlsx или .pptx"
 
 
 class ExtractError(Exception):
@@ -57,12 +61,16 @@ def detect_kind(filename: str, data: bytes) -> str:
     if not data:
         raise ExtractError("Файл пустой")
     if ext in _LEGACY:
-        raise ExtractError("Старые форматы Office (.doc, .xls, .ppt) не поддерживаются: сохраните файл как .docx, .xlsx или .pptx")
+        raise ExtractError(_LEGACY_REFUSED)
+    if ext == "rtf" or data.lstrip()[:5] == _RTF:
+        # Русские буквы RTF записывает кодами \'cf\'e5…: как текст его не прочитать ни человеку, ни слоям.
+        raise ExtractError("Формат файла не поддерживается: RTF сохраните как .docx или .txt")
     pdf = b"%PDF-" in data[:1024]
     image = data.startswith((_PNG, _JPEG))
     if ext in _OFFICE:
         if data.startswith(_OLE):
-            raise ExtractError(_LOCKED)          # зашифрованный OOXML лежит в контейнере OLE, а не в ZIP
+            # Зашифрованный OOXML лежит в контейнере OLE, а не в ZIP; без потока EncryptedPackage это старый .doc.
+            raise ExtractError(_LOCKED if _ENCRYPTED in data else _LEGACY_REFUSED)
         if not data.startswith(_ZIP):
             raise ExtractError(_MISMATCH)
         return ext
@@ -116,11 +124,18 @@ def _scanned_pages(data: bytes) -> list[bool]:
         pdf.close()
 
 
+def _scale(width: float, height: float) -> float:
+    """200 точек на дюйм, но не больше 12 000 точек по стороне — предел ocr-ru. Иначе страница огромного
+    размера стала бы картинкой в гигабайты и упёрлась бы в предел памяти службы."""
+    return min(OCR_DPI / 72, _OCR_SIDE / max(width, height, 1))
+
+
 def _render(data: bytes, number: int) -> bytes:
     """Страница скана — PNG для ocr-ru."""
     pdf = _open_pdf(data)
     try:
-        image = pdf[number - 1].render(scale=OCR_DPI / 72).to_pil()
+        page = pdf[number - 1]
+        image = page.render(scale=_scale(*page.get_size())).to_pil()
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         return buffer.getvalue()

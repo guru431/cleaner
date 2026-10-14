@@ -9,7 +9,7 @@ from cleaner.core.detect.llm import LlmLayer
 from cleaner.core.types import EntityType as T
 from cleaner.local_llm import LocalLLMError
 
-OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64
+OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64 + "EncryptedPackage".encode("utf-16-le")
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 
 

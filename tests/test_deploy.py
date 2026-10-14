@@ -76,3 +76,12 @@ def test_server_dependencies_take_torch_without_cuda():
     pins = _pins(ROOT / "requirements-linux.txt")
     assert pins["torch"].endswith("+cpu")
     assert not [name for name in pins if name.startswith(("nvidia-", "cuda-")) or name == "triton"]
+
+
+def test_installer_copies_the_database_before_the_new_version_and_rollback_restores_it():
+    """Обзор плана 2+4, I-4: новая версия мигрирует схему при старте, а прежний код базу новой версии не откроет.
+    Копия снимается до перезапуска службы, откат возвращает её, если схема успела измениться."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    rollback = text[text.index("rollback() {"):text.index("trap 'rollback")]
+    assert 'install -o cleaner -g cleaner -m 0600 "$DB_BACKUP" "$DATA/cleaner.db"' in rollback
+    assert text.index('DB_BACKUP="$DATA/cleaner.db.bak-$STAMP"') < text.index("systemctl restart cleaner.service\ncode=")
