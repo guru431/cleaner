@@ -72,6 +72,9 @@ class Entity:
     restore_value: str         # что подставляется при восстановлении метки
     origin: str                # detector | manual | dictionary
     forms: list[str] = field(default_factory=list)   # написания, которые ищутся в текстах чата
+    parts: dict[str, str] = field(default_factory=dict)     # части ФИО: last, first, middle -> начальная форма
+    words: list[str] = field(default_factory=list)          # прочие слова имени: латиница, нераспознанные
+    restore_rank: int = 0                                   # полнота значения для восстановления (раздел 5.9)
 
 
 @dataclass(frozen=True)

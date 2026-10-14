@@ -17,10 +17,11 @@ def test_every_field_of_the_chat_state_is_stored():
 def test_state_after_sanitizing_survives_the_round_trip(state):
     state.rules.append(ChatRule("mask", "Заря", T.TERM))
     state.rules.append(ChatRule("unmask", "a@x.example"))
+    state.rules.append(ChatRule("mask", "Иванову Ивану", T.PERSON))
     state.foreign_labels.add("<PERSON_9>")
     text = (
         "Заря: <PERSON_9>, CONTOSO\\ivanov, srv-dc01.corp.contoso.ru, 10.1.2.5, 2a00:1450:4010::65, "
-        "MAC 00:1A:2B:3C:4D:5E, S-1-5-21-1-2-3-500, пароль: Qwerty123!"
+        "MAC 00:1A:2B:3C:4D:5E, S-1-5-21-1-2-3-500, пароль: Qwerty123!, Иванову Ивану"
     )
     sanitize(state, text, Settings())
     assert codec.state_from_json(codec.state_to_json(state)) == state

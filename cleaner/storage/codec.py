@@ -22,6 +22,7 @@ def state_to_json(state: ChatState) -> bytes:
             {
                 "id": e.id, "type": e.type.value, "number": e.number, "key": e.key,
                 "restore_value": e.restore_value, "origin": e.origin, "forms": e.forms,
+                "parts": e.parts, "words": e.words, "restore_rank": e.restore_rank,
             }
             for e in state.entities.values()
         ],
@@ -40,7 +41,8 @@ def state_from_json(raw: bytes) -> ChatState:
     data = json.loads(raw.decode("utf-8"))
     entities = {
         e["id"]: Entity(
-            e["id"], EntityType(e["type"]), e["number"], e["key"], e["restore_value"], e["origin"], list(e["forms"])
+            e["id"], EntityType(e["type"]), e["number"], e["key"], e["restore_value"], e["origin"], list(e["forms"]),
+            dict(e.get("parts", {})), list(e.get("words", [])), int(e.get("restore_rank", 0)),
         )
         for e in data["entities"]
     }

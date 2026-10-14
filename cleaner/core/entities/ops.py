@@ -1,6 +1,7 @@
 """Правки пользователя над состоянием чата. Действуют при следующей очистке."""
 from __future__ import annotations
 
+from cleaner.core.entities.names import FIXED_RANK
 from cleaner.core.types import ChatRule, ChatState, EntityType
 
 
@@ -21,7 +22,9 @@ def unmask(state: ChatState, value: str) -> None:
 
 
 def set_restore_value(state: ChatState, entity_id: str, value: str) -> None:
-    state.entities[entity_id].restore_value = value
+    entity = state.entities[entity_id]
+    entity.restore_value = value
+    entity.restore_rank = FIXED_RANK        # разбор имён больше не меняет значение, заданное пользователем
 
 
 def retype(state: ChatState, entity_id: str, new_type: EntityType) -> None:
@@ -39,6 +42,9 @@ def merge_entities(state: ChatState, keep_id: str, drop_id: str) -> None:
         raise ValueError("объединять можно только сущности одного типа")
     keep.forms += [form for form in drop.forms if form not in keep.forms]
     drop.forms = []
+    for value in [*drop.parts.values(), *drop.words]:
+        if value not in keep.words and value not in keep.parts.values():
+            keep.words.append(value)        # упоминания обоих написаний находят оставленную сущность (5.9)
     for key, target in state.key_alias.items():
         if target == drop.id:
             state.key_alias[key] = keep.id      # прежние объединения ведут туда же

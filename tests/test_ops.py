@@ -42,13 +42,13 @@ def test_merged_entities_share_one_label(state, settings):
 
 def test_chained_merges_end_in_one_label(state, settings):
     """Обзор 1А, P2: после второго объединения все три написания ведут к одной сущности."""
-    for name in ("Иванов", "Ivanov", "Иванов И."):
+    for name in ("Иванов", "Ivanov", "Сидоров"):
         ops.mask(state, name, T.PERSON)
-    sanitize(state, "Иванов, Ivanov, Иванов И.", settings)
+    sanitize(state, "Иванов, Ivanov, Сидоров", settings)
     first, second, third = sorted(state.entities.values(), key=lambda entity: entity.number)
     ops.merge_entities(state, first.id, second.id)
     ops.merge_entities(state, third.id, first.id)
-    result = sanitize(state, "Иванов, Ivanov, Иванов И.", settings)
+    result = sanitize(state, "Иванов, Ivanov, Сидоров", settings)
     assert result.sanitized == "<PERSON_3>, <PERSON_3>, <PERSON_3>"
 
 

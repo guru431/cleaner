@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from cleaner.core.detect.merge import MergedSpan
-from cleaner.core.entities import hostmap, labels, macsid, netmap
+from cleaner.core.entities import hostmap, labels, macsid, names, netmap
 from cleaner.core.match import normalize
 from cleaner.core.types import ChatState, Entity, EntityType, Settings, Surrogate
 
@@ -173,8 +173,36 @@ class Resolver:
 
     def _labelled(self, type_: EntityType, value: str, origin: str) -> tuple[Entity, str]:
         key = self.alias.get((type_, normalize(value))) or canonical_key(type_, value)
-        entity = self._entity(type_, key, value, origin)
+        entity = self._person(key, value, origin) if type_ is T.PERSON else self._entity(type_, key, value, origin)
         return entity, self._label(entity)
+
+    def _person(self, key: str, value: str, origin: str) -> Entity:
+        """Человек: тот же ключ (словарь, объединение, прежнее написание) или единственная совместимая сущность (5.9)."""
+        mention = names.parse(value)
+        merged_into = self.state.key_alias.get(f"{T.PERSON.value}:{key}")
+        entity = self.state.entities.get(merged_into) if merged_into else self.index.get((T.PERSON, key))
+        if entity is None:
+            # Написание, уже отнесённое к сущности, за ней и остаётся: иначе на следующем проходе (5.10) или в
+            # следующем тексте появившийся тёзка сделал бы его неоднозначным и выдал новую метку.
+            folded = normalize(value)
+            entity = next((
+                e for e in self.state.entities.values()
+                if e.type is T.PERSON and any(normalize(form) == folded for form in e.forms)
+            ), None)
+        if entity is None and mention:
+            fitting = [
+                e for e in self.state.entities.values()
+                if e.type is T.PERSON and e.forms and names.compatible(mention, e)
+            ]
+            if len(fitting) == 1:
+                entity = fitting[0]
+                self.index[(T.PERSON, key)] = entity
+        if entity is None:
+            entity = self._entity(T.PERSON, key, value, origin)
+        elif value not in entity.forms:
+            entity.forms.append(value)
+        names.absorb(entity, mention, value)
+        return entity
 
     # --- подмены ----------------------------------------------------------
 
