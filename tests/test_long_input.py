@@ -35,3 +35,12 @@ def test_restore_is_fast_on_a_host_name_of_many_parts():
     started = time.perf_counter()
     restore(state, "https://" + "a." * 20000 + "x", Settings())
     assert time.perf_counter() - started < 0.5
+
+
+def test_restore_is_fast_on_many_reference_brackets():
+    """Обзор партии P1: «]: <» по всей строке давал квадратичное время восстановления."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "почта ivanov@contoso.ru", Settings())
+    started = time.perf_counter()
+    restore(state, "]: <" * 25000, Settings())
+    assert time.perf_counter() - started < 0.5

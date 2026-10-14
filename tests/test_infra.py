@@ -168,3 +168,15 @@ def test_host_after_a_url_login_is_found_before_punctuation():
 
 def test_hyphenated_spaced_profile_name_is_taken_whole():
     assert accounts(r"C:\Users\Ivan Petrov-Vodkin\Documents") == {"Ivan Petrov-Vodkin"}
+
+
+@pytest.mark.parametrize("domain", ["SA", "APP", "USER", "GIT"])
+def test_domain_login_is_found_whatever_the_domain_name(domain):
+    """Обзор партии P1: общий список стандартных учётных записей прятал «SA\petrov»."""
+    assert accounts(f"учётка {domain}\petrov") == {"petrov"}
+
+
+@pytest.mark.parametrize("closer", ["»", "”", "**", "}", "…"])
+def test_host_after_a_url_login_is_found_before_any_closer(closer):
+    text = f"«ssh://ivanov@srv-db01.corp.contoso.ru{closer} дальше"
+    assert (T.HOST, "srv-db01.corp.contoso.ru") in found(text), text

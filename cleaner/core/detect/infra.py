@@ -29,6 +29,7 @@ _URL_HOST = re.compile(
 )
 # Двоеточие перед «\\» — это «C:\\Users» из журнала JSON, а не сетевой путь; путь из JSON — «\\\\host».
 _UNC_HOST = re.compile(r"(?<![\\\w:])\\\\(?:\\\\)?(?P<host>[\w.-]+)(?=\\)")
+_HOST_PREFIX = re.compile(r"[\w.-]*")     # имя узла без знаков за ним: «», «”», «**», «}», «…»
 _PARAM_HOST = re.compile(r"(?<![\w-])(?:-ComputerName|-Server|-cn|/S)[ \t]+(?P<host>[\w.-]+)", re.IGNORECASE)
 _MACHINE = re.compile(r"(?<![\w.$-])(?P<host>(?=[A-Za-z-]*\d)[A-Za-z0-9][A-Za-z0-9-]{1,14})\$(?![\w$])")
 _DOTTED = re.compile(r"(?<![\w.$@-])(?:\w(?:[\w-]{0,61}\w)?\.)+[^\W\d_][\w-]{1,62}(?![\w-]|\.\w)")
@@ -137,7 +138,7 @@ def _plausible(value: str, text: str, end: int, ctx: DetectContext) -> bool:
 def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
     for pattern in (_URL_HOST, _UNC_HOST, _PARAM_HOST):
         for m in pattern.finditer(text):
-            value = m.group("host").rstrip(".,;!)")     # «…contoso.ru, пароль спроси»
+            value = _HOST_PREFIX.match(m.group("host")).group().rstrip(".")     # «…contoso.ru», «…ru,»
             if not re.fullmatch(r"[\w.-]+", value) or _is_address(value) or well_known(value, ctx):
                 continue
             start = m.start("host")

@@ -193,3 +193,8 @@ def test_long_key_names_still_hold_secrets():
 
 def test_pair_inside_another_value_is_still_found():
     assert found("id:token=Zx81kLmN02pQ") == {"Zx81kLmN02pQ"}
+
+
+def test_password_without_a_login_in_a_url_is_found():
+    """Обзор партии P1: стандартная запись Redis «redis://:пароль@хост»."""
+    assert found("redis://:Qwerty12@cache.contoso.ru") == {"Qwerty12"}

@@ -24,18 +24,3 @@ builtin
 authority
 workgroup
 service
-# Служебные входы в адресах и сервисах: не выдают человека (ssh://git@…, ftp://anonymous@…)
-git
-anonymous
-ftp
-oauth2
-postgres
-mysql
-ubuntu
-ec2-user
-x-access-token
-x-oauth-basic
-gitlab-ci-token
-app
-user
-sa

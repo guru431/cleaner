@@ -75,7 +75,8 @@ _XML = re.compile(
     re.IGNORECASE,
 )
 # Длина схемы ограничена: без предела цепочка «a.b.a.b…» без «://» даёт квадратичный перебор.
-_URL = re.compile(r"\b[a-z][a-z0-9+.-]{0,31}://[^\s:/@]+:(?P<bare>[^\s@/]+)@", re.IGNORECASE)
+# Логина может не быть: «redis://:пароль@хост» — стандартная запись Redis.
+_URL = re.compile(r"\b[a-z][a-z0-9+.-]{0,31}://[^\s:/@]*:(?P<bare>[^\s@/]+)@", re.IGNORECASE)
 _CLI = re.compile(
     r"(?<![\w-])(?:--?(?:password|passwd|pwd|pass|secret|token|api-key)(?:\s+|=)|/p(?:assword)?:)" + _VALUE,
     re.IGNORECASE,

@@ -1,3 +1,5 @@
+import pytest
+
 from cleaner.core.detect import rules
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.types import EntityType as T
@@ -134,3 +136,25 @@ def test_login_before_a_url_password_is_masked():
     """FINDINGS P1 «Logins and hosts in URLs…»: в «схема://логин:пароль@хост» логин оставался открытым."""
     assert found("REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru/app") == {(T.ACCOUNT, "petrov")}
     assert found("REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru:5432/app") == set()
+
+
+@pytest.mark.parametrize(
+    "text, login",
+    [
+        ("mongodb://petrov:Qwerty123!@db01.contoso.ru/app", "petrov"),
+        ("mongodb://petrov:Pa$$w0rd$@db01.contoso.ru/app", "petrov"),
+        ("redis://petrov:YWJjZGVm==@cache.contoso.ru", "petrov"),
+        ("https://petrov:abc=def@git.contoso.ru", "petrov"),
+        ("ftp://petrov:@files.contoso.ru", "petrov"),
+        ("ssh://ivanov@srv-db01", "ivanov"),
+    ],
+)
+def test_url_login_is_masked_whatever_the_password_and_host(text, login):
+    """Обзор партии P1: вход в адресе находится сам, а не через шаблон e-mail."""
+    assert (T.ACCOUNT, login) in found(text), text
+
+
+def test_placeholder_logins_in_a_url_are_not_masked():
+    for text in ("https://имя:пароль@host.contoso.ru/", "https://login:password@host.contoso.ru/",
+                 "https://username:secret@host.contoso.ru/"):
+        assert T.ACCOUNT not in types(text), text
