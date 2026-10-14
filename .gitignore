@@ -9,3 +9,6 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# local data: development database and master key
+/data/
