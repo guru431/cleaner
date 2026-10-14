@@ -117,3 +117,14 @@ def test_login_in_a_url_is_an_account_not_an_email():
 def test_address_in_url_parameters_is_an_email_and_url_credentials_are_not():
     assert found("https://portal.contoso.ru?mail=ivanov@contoso.ru") == {(T.EMAIL, "ivanov@contoso.ru")}
     assert found("REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru:5432/app") == set()
+
+
+def test_standard_and_service_logins_in_a_url_are_not_masked():
+    """Финальный обзор 1В: «ssh://git@…» и «ssh://root@…» не выдают человека (раздел 5.4)."""
+    for text in (
+        "ssh://git@gitlab.contoso.ru/team/repo.git",
+        "ssh://root@srv-db01.contoso.ru",
+        "ftp://anonymous@files.contoso.ru",
+        "https://oauth2@git.contoso.ru/team/repo.git",
+    ):
+        assert found(text) == set(), text

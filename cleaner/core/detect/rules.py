@@ -141,8 +141,9 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         url = _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()])
         user = url.group("user") + local if url else ""
         if url and not _NOT_USERINFO.search(user):
-            if ":" not in user:
-                add(m.start(), m.start() + len(local), EntityType.ACCOUNT)    # вход: https://ivanov@git…
+            # Вход: https://ivanov@git… Стандартные и служебные входы (root, git) человека не выдают.
+            if ":" not in user and local.lower() not in ctx.builtin.builtin_accounts:
+                add(m.start(), m.start() + len(local), EntityType.ACCOUNT)
             continue        # пароль из адреса найдёт слой секретов, хост — слой инфраструктуры
         if _IPV4_DOMAIN.fullmatch(domain):
             add(m.start(), m.start() + len(local), EntityType.ACCOUNT)     # вход вида ivanov@10.1.2.5
