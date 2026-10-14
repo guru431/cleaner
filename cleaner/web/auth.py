@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
 from datetime import datetime
 
 from argon2 import PasswordHasher
@@ -41,7 +42,10 @@ def token_hash(token: str) -> str:
 
 
 class Throttle:
-    """После пяти неудач подряд вход по логину откладывается: 1, 2, 4… секунды, не больше 5 минут."""
+    """После пяти неудач подряд вход по логину откладывается: 1, 2, 4… секунды, не больше 5 минут.
+
+    Вход выполняется в пуле потоков, поэтому записи меняются под замком.
+    """
 
     FREE = 5
     LIMIT = 300.0
@@ -50,19 +54,36 @@ class Throttle:
     def __init__(self, clock: Clock):
         self.clock = clock
         self.failures: dict[str, tuple[int, datetime]] = {}
+        self.lock = threading.Lock()
 
-    def wait(self, login: str) -> float:
-        count, last = self.failures.get(login.lower(), (0, None))
+    def _wait(self, key: str) -> float:
+        count, last = self.failures.get(key, (0, None))
         if count < self.FREE or last is None:
             return 0.0
         delay = min(2.0 ** (count - self.FREE), self.LIMIT)
         return max(0.0, delay - (self.clock.now() - last).total_seconds())
 
+    def wait(self, login: str) -> float:
+        with self.lock:
+            return self._wait(login.lower())
+
     def failed(self, login: str) -> None:
-        count, _ = self.failures.pop(login.lower(), (0, None))
-        if len(self.failures) >= self._KEEP:
+        with self.lock:
+            count, _ = self.failures.pop(login.lower(), (0, None))
+            if len(self.failures) >= self._KEEP:
+                self._forget()
+            self.failures[login.lower()] = (count + 1, self.clock.now())
+
+    def _forget(self) -> None:
+        """Место под новый логин. Забываются записи без действующей паузы: иначе перебор случайных
+        логинов вытеснил бы запись атакуемой учётной записи и обнулил её счёт. Если пауза действует
+        у всех, уходит самая старая запись."""
+        expired = [key for key in self.failures if not self._wait(key)]
+        for key in expired:
+            del self.failures[key]
+        if not expired:
             self.failures.pop(next(iter(self.failures)))
-        self.failures[login.lower()] = (count + 1, self.clock.now())
 
     def succeeded(self, login: str) -> None:
-        self.failures.pop(login.lower(), None)
+        with self.lock:
+            self.failures.pop(login.lower(), None)

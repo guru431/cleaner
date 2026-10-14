@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from cleaner.clock import Clock
 from cleaner.service import ChatService
@@ -28,7 +29,35 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-store",
 }
+# Только по TLS: браузер запомнит, что этот узел открывается лишь по HTTPS. Без includeSubDomains.
+HSTS = "max-age=31536000"
+MAX_BODY_BYTES = 8 * 1024 * 1024     # 500 000 знаков кириллицы в закодированной форме — около 3 МБ
 _STATUS_TEXT = {404: "Страница не найдена", 405: "Такое действие здесь не поддерживается"}
+
+
+class BodyLimit:
+    """Предел тела запроса для всех маршрутов, вход тоже. Считаются принятые байты, а не заголовок
+    Content-Length: у тела, присланного частями (chunked), этого заголовка нет."""
+
+    def __init__(self, app: ASGIApp, limit: int = MAX_BODY_BYTES):
+        self.app = app
+        self.limit = limit
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        received = 0
+
+        async def limited() -> Message:
+            nonlocal received
+            message = await receive()
+            received += len(message.get("body", b""))
+            if received > self.limit:
+                raise StarletteHTTPException(413, "Слишком большой запрос")
+            return message
+
+        await self.app(scope, limited, send)
 
 
 def create_app(
@@ -61,6 +90,9 @@ def create_app(
         # Стандартный ответ FastAPI повторяет присланные значения — здесь их нет.
         return page(request, "error.html", None, status_code=400, code=400, message="Неверный запрос")
 
+    # Раньше guard: так предел оказывается внутри него, и отказ 413 доходит до обработчика ошибок.
+    app.add_middleware(BodyLimit)
+
     @app.middleware("http")
     async def guard(request: Request, call_next) -> Response:
         try:
@@ -74,6 +106,8 @@ def create_app(
                 message="Внутренняя ошибка. Текст не обработан и никуда не передан.",
             )
         response.headers.update(SECURITY_HEADERS)
+        if secure_cookies:
+            response.headers["Strict-Transport-Security"] = HSTS
         return response
 
     return app

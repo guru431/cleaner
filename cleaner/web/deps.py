@@ -16,7 +16,6 @@ from cleaner.web import auth
 
 SESSION_COOKIE = "cleaner_session"
 IDLE = timedelta(hours=8)
-MAX_FORM_BYTES = 8 * 1024 * 1024     # 500 000 знаков кириллицы в закодированной форме — около 3 МБ
 
 templates = Jinja2Templates(directory=Path(__file__).with_name("templates"))
 
@@ -80,9 +79,8 @@ def get_admin(viewer: Viewer = Depends(get_viewer)) -> Viewer:
 
 
 async def get_form(request: Request, viewer: Viewer = Depends(get_viewer)) -> dict[str, str]:
-    """Поля формы POST. Без верного токена формы — отказ: запрос пришёл не с нашей страницы."""
-    if int(request.headers.get("content-length") or 0) > MAX_FORM_BYTES:
-        raise HTTPException(413, "Слишком большой запрос")
+    """Поля формы POST. Без верного токена формы — отказ: запрос пришёл не с нашей страницы.
+    Размер тела ограничивает app.BodyLimit."""
     form = await request.form()
     # Байты, а не строки: compare_digest не сравнивает строки с не-ASCII знаками (TypeError).
     if not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), viewer.session.csrf.encode("utf-8")):

@@ -27,9 +27,15 @@ def login_form(request: Request) -> Response:
     return _login_page(request, auth.new_token())
 
 
-@router.post("/login")
-async def login(request: Request) -> Response:
+async def _login_fields(request: Request) -> dict[str, str]:
     form = await request.form()
+    return {key: value for key, value in form.items() if isinstance(value, str)}
+
+
+# Обычная функция, а не async: FastAPI выполняет её в пуле потоков, и Argon2 (десятки миллисекунд
+# и 64 МБ на попытку) не останавливает остальные запросы.
+@router.post("/login")
+def login(request: Request, form: dict[str, str] = Depends(_login_fields)) -> Response:
     repo, throttle = repo_of(request), request.app.state.throttle
     expected = request.cookies.get(LOGIN_COOKIE, "")
     if not expected or not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), expected.encode("utf-8")):
