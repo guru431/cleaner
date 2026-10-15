@@ -119,7 +119,36 @@ def test_card_window_inside_a_list_of_four_digit_numbers_needs_card_words():
     assert (T.CARD, "4111 1111 1111 1111") in found("Visa 4111 1111 1111 1111 3306")
 
 
-@pytest.mark.parametrize("card", ["5859 - 0413 - 9685 - 9907", "5859.0413.9685.9907", "5859/0413/9685/9907"])
+@pytest.mark.parametrize(
+    "text, cards",
+    [
+        ("4111 1111 1111 1111 5500 0000 0000 0004", ["4111 1111 1111 1111", "5500 0000 0000 0004"]),
+        ("от 2024 4111 1111 1111 1111 5500 0000 0000 0004 12/27", ["4111 1111 1111 1111", "5500 0000 0000 0004"]),
+        ("4111 1111 1111 1111 5500 0000 0000 0004 2222 4000 7000 0005",
+         ["4111 1111 1111 1111", "5500 0000 0000 0004", "2222 4000 7000 0005"]),
+        ("4111 - 1111 - 1111 - 1111 - 5500 - 0000 - 0000 - 0004",
+         ["4111 - 1111 - 1111 - 1111", "5500 - 0000 - 0000 - 0004"]),
+        ("4111.1111.1111.1111.5500.0000.0000.0004", ["4111.1111.1111.1111", "5500.0000.0000.0004"]),
+        ("4111/1111/1111/1111/5500/0000/0000/0004", ["4111/1111/1111/1111", "5500/0000/0000/0004"]),
+        ("3782 822463 10005 4111 1111 1111 1111", ["3782 822463 10005", "4111 1111 1111 1111"]),
+    ],
+)
+def test_cards_in_a_row_are_all_found_without_card_words(text, cards):
+    """Финальный обзор партии: после правки списка портов две карты подряд без слов о карте не находились вовсе."""
+    assert {(T.CARD, card) for card in cards} <= found(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["порты: 1521 3306 5432 6379 1433 1434 8080 8443", "коды 1433 1521 3306 5432 6379 5500 0000 0000 0004"],
+)
+def test_chain_of_card_windows_inside_a_longer_list_needs_card_words(text):
+    """Цепочка окон с проверкой Луна принимается, только если с обеих сторон за ней нет чужой четырёхзначной группы."""
+    assert T.CARD not in types(text)
+    assert T.CARD in types("карты: " + text.split(" ", 1)[1])
+
+
+@pytest.mark.parametrize("card",["5859 - 0413 - 9685 - 9907", "5859.0413.9685.9907", "5859/0413/9685/9907"])
 def test_card_groups_after_a_spaced_dash_a_dot_or_a_slash(card):
     """FINDINGS P3 «valid numbers in spaced notations…»."""
     assert (T.CARD, card) in found("оплата " + card)
@@ -244,6 +273,17 @@ def test_login_before_a_url_password_is_masked():
 def test_url_login_is_masked_whatever_the_password_and_host(text, login):
     """Обзор партии P1: вход в адресе находится сам, а не через шаблон e-mail."""
     assert (T.ACCOUNT, login) in found(text), text
+
+
+@pytest.mark.parametrize("login", ["user", "root", "git", "Administrator", "ubuntu"])
+def test_service_login_on_an_address_is_left_open(login):
+    """Финальный обзор партии: в «user@10.1.2.5» скрывался «user», хотя в «ssh://user@…» он открыт.
+    Адрес скрывает слой 3."""
+    assert found(f"ssh {login}@10.1.2.5 -p 22") == set()
+
+
+def test_personal_login_on_an_address_is_masked():
+    assert found("ssh ivanov@10.1.2.5 -p 22") == {(T.ACCOUNT, "ivanov")}
 
 
 def test_placeholder_logins_in_a_url_are_not_masked():

@@ -51,7 +51,8 @@ _PHONE_LOCAL = re.compile(
 _DIGIT_RUN = re.compile(r"(?<![\w-])\d+(?:(?: - |[ ./\u2011-])\d+)*(?![\w-])")
 _DIGIT_GROUP = re.compile(r"\d+")
 # Окно номера карты среди других четырёхзначных групп — список (порты, коды), а не карта: в нём каждое
-# десятое окно проходит проверку Луна. Такое окно принимается только при словах о карте рядом.
+# десятое окно проходит проверку Луна. Такое окно принимается только при словах о карте рядом
+# или если соседние группы сами складываются в карты (_unlisted).
 _CARD_WORDS = re.compile(r"карт|кредитк|card|visa|master|maestro|amex|cvv|cvc|\bмир\b", re.IGNORECASE)
 _YEAR = re.compile(r"(?:19|20)\d\d")
 # Запятая рядом с номером — разделитель CSV, а не десятичная дробь: отсеивают контрольные разряды.
@@ -117,12 +118,28 @@ def _phone_groups(value: str) -> bool:
     return len(groups[0]) >= 3 and ("(" in value or min(len(group) for group in groups) >= 2)
 
 
-def _listed(groups: list[tuple[int, int, str]], first: int, last: int) -> bool:
-    """Стоит ли окно из нескольких групп среди других четырёхзначных групп цепочки, кроме года («от 2024 …»)."""
-    if first == last:
-        return False                                    # 13–19 цифр слитно — номер сам по себе
-    neighbours = [groups[i][2] for i in (first - 1, last + 1) if 0 <= i < len(groups)]
-    return any(len(group) == 4 and not _YEAR.fullmatch(group) for group in neighbours)
+def _unlisted(groups: list[tuple[int, int, str]], windows: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Окна, которые не стоят среди чужих четырёхзначных групп цепочки.
+
+    Окно принимается, если с каждой стороны от него — край цепочки, группа другой длины или год
+    («от 2024 …»), либо подряд идущие окна с проверкой Луна до такого края: две карты подряд
+    («4111 1111 1111 1111 5500 0000 0000 0004») — цепочка из двух окон, а в списке портов два
+    соседних окна проходят проверку разом лишь в одном случае из ста. Окна идут по возрастанию начала.
+    """
+    edge = [len(group) != 4 or bool(_YEAR.fullmatch(group)) for _, _, group in groups]
+    count = len(groups)
+    open_before = [i == 0 or edge[i - 1] for i in range(count + 1)]    # окно с начала в i открыто слева
+    for first, last in windows:
+        if open_before[first]:
+            open_before[last + 1] = True
+    open_after = [i == count - 1 or edge[i + 1] for i in range(count)]  # окно с концом в i открыто справа
+    for first, last in reversed(windows):
+        if open_after[last] and first > 0:
+            open_after[first - 1] = True
+    return [
+        (first, last) for first, last in windows
+        if first == last or (open_before[first] and open_after[last])     # 13–19 цифр слитно — номер сам по себе
+    ]
 
 
 def _card_shape(parts: list[str]) -> bool:
@@ -146,6 +163,7 @@ def _cards(text: str, m: re.Match[str], add: Add) -> None:
     чисел («8 8 8 …») перебирала бы по девятнадцать окон на каждую группу.
     """
     groups = [(g.start() + m.start(), g.end() + m.start(), g.group()) for g in _DIGIT_GROUP.finditer(m.group())]
+    windows: list[tuple[int, int]] = []
     for first in range(len(groups)):
         digits = ""
         for last in range(first, len(groups)):
@@ -153,15 +171,16 @@ def _cards(text: str, m: re.Match[str], add: Add) -> None:
             if len(digits) > 19:
                 break
             parts = [group[2] for group in groups[first:last + 1]]
-            if (
-                len(digits) >= 13 and _card_shape(parts) and validators.luhn(digits)
-                and (not _listed(groups, first, last) or _CARD_WORDS.search(
-                    text[max(0, m.start() - _BEFORE):m.start()] + " " + text[m.end():m.end() + _AFTER]
-                ))
-            ):
-                add(groups[first][0], groups[last][1], EntityType.CARD, True)
+            if len(digits) >= 13 and _card_shape(parts) and validators.luhn(digits):
+                windows.append((first, last))
             if not _extendable(parts):
                 break
+    if windows and not _CARD_WORDS.search(
+        text[max(0, m.start() - _BEFORE):m.start()] + " " + text[m.end():m.end() + _AFTER]
+    ):
+        windows = _unlisted(groups, windows)
+    for first, last in windows:
+        add(groups[first][0], groups[last][1], EntityType.CARD, True)
 
 
 def _grouped(text: str, m: re.Match[str], add: Add) -> None:
@@ -212,16 +231,18 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
     def add(start: int, end: int, type_: EntityType, validated: bool = False) -> None:
         spans.append(Span(start, end, type_, name, validated=validated))
 
+    skip = ctx.builtin.builtin_accounts | _URL_SERVICE_LOGINS
     for m in _EMAIL.finditer(text):
         local, _, domain = m.group().rpartition("@")
         url = _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()])
         if url and not _NOT_USERINFO.search(url.group("user") + local):
             continue        # пользователь адреса, а не e-mail: вход — правило _URL_LOGIN ниже
         if _IPV4_DOMAIN.fullmatch(domain):
-            add(m.start(), m.start() + len(local), EntityType.ACCOUNT)     # вход вида ivanov@10.1.2.5
+            # Вход вида ivanov@10.1.2.5; служебный («user@», «root@») человека не выдаёт, как и в адресе.
+            if local.lower() not in skip:
+                add(m.start(), m.start() + len(local), EntityType.ACCOUNT)
             continue
         add(m.start(), m.end(), EntityType.EMAIL, True)
-    skip = ctx.builtin.builtin_accounts | _URL_SERVICE_LOGINS
     for m in _URL_LOGIN.finditer(text):
         login = m.group("login")
         if login and login.lower() not in skip:

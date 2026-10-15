@@ -1,3 +1,5 @@
+import pytest
+
 from cleaner.core.detect.base import load_builtin
 from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities.resolve import Resolver, canonical_key
@@ -139,6 +141,27 @@ def test_address_colliding_with_an_open_value_gets_a_label(state):
     other = ChatState(chat_id="other", net_key=state.net_key)
     settings = Settings(never=frozenset({fake}))
     assert resolve(other, "10.1.2.5", ("10.1.2.5", T.IP), settings=settings) == ["<IP_1>"]
+
+
+@pytest.mark.parametrize(
+    "text, real, fake",
+    [
+        ("Source:2001:db8:1::1, узел 2a00:1450:4010::65", "2a00:1450:4010::65", "2001:db8:1::2"),
+        ("IPv6:2001:db8:1::1 и 2a00:1450:4010::65", "2a00:1450:4010::65", "2001:db8:1::2"),
+        ("адрес 2001:db8:1::1: занят, 2a00:1450:4010::65", "2a00:1450:4010::65", "2001:db8:1::2"),
+        ("Source:203.0.113.1, DNS 8.8.8.8", "8.8.8.8", "203.0.113.2"),
+    ],
+)
+def test_surrogate_written_after_a_label_and_a_colon_is_taken(state, text, real, fake):
+    """Финальный обзор партии: проверка совпадения с адресом в тексте не видела «Source:2001:db8:1::1»
+    (адрес сразу за подписью и двоеточием), хотя слой 3 и восстановление его находят."""
+    assert resolve(state, text, (real, T.IP)) == [fake]
+
+
+def test_address_inside_a_longer_colon_chain_is_not_taken(state):
+    assert resolve(state, "ab:cd:2001:db8:1::1 и 2a00:1450:4010::65", ("2a00:1450:4010::65", T.IP)) == [
+        "2001:db8:1::1"
+    ]
 
 
 def test_merged_key_points_to_the_kept_entity(state):

@@ -99,6 +99,33 @@ def test_host_after_a_server_switch_is_still_found():
     assert values("schtasks /S srv01 /query, systeminfo /s SRV02") == {"srv01", "SRV02"}
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "dir /s logs", "xcopy /s src dst", "findstr /s error *.log", "del /S temp", "robocopy src dst /S logs",
+        "attrib +r /s docs", "tasklist /v | findstr /s chrome", "schtasks /query\ndir /s logs",
+    ],
+)
+def test_subdirectory_switch_takes_no_host(text):
+    """Финальный обзор партии: «/S» у dir, xcopy, findstr — ключ подкаталогов, слово за ним — не узел."""
+    assert values(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, host",
+    [
+        ("schtasks /query /fo list /s srv-app01", "srv-app01"),
+        ('schtasks /create /tn "Backup job" /sc daily /S SRV01 /u admin', "SRV01"),
+        ("tasklist /s srv01", "srv01"), ("taskkill /S srv01 /im app.exe", "srv01"), ("gpresult /s ws-0142 /r", "ws-0142"),
+        ("getmac /s srv01", "srv01"), ("driverquery /s srv01", "srv01"), ("eventcreate /s srv01 /t error /id 100", "srv01"),
+        ("openfiles /query /s srv01", "srv01"), ("waitfor /s srv01 /si done", "srv01"), ("setx /s srv01 X 1", "srv01"),
+        ("takeown /s srv01 /f a.txt", "srv01"), (r"C:\Windows\System32\SYSTEMINFO.EXE /S srv01", "srv01"),
+    ],
+)
+def test_server_switch_of_a_remote_command_names_a_host(text, host):
+    assert (T.HOST, host) in found(text)
+
+
 def test_zero_padded_address_is_found():
     result = found("узлы 010.001.002.005 и 192.168.001.010")
     assert {(T.IP, "010.001.002.005"), (T.IP, "192.168.001.010")} <= result

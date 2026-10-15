@@ -13,10 +13,12 @@ from cleaner.core.types import ChatState, Entity, EntityType, Settings, Surrogat
 
 T = EntityType
 _DIGIT_TYPES = frozenset({T.INN, T.SNILS, T.OGRN, T.KPP, T.OMS, T.CARD, T.PASSPORT})
-# Записи адресов в тексте: IPv4 с длиной префикса и без, IPv6.
+# Записи адресов в тексте: IPv4 с длиной префикса и без, IPv6. Как в слое 3 и при восстановлении, адрес
+# может стоять сразу за подписью («Source:2001:db8:1::1», «Source:203.0.113.1»); подпись в запись не входит.
 _ADDRESS_TOKEN = re.compile(
-    r"(?<![\w.:])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\w|\.\d)"
-    r"|(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])"
+    r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\w|\.\d)"
+    r"|(?<![\w:.])(?:(?=\w*[^\W\dA-Fa-f])\w+:|\w{5,}:)?"
+    r"(?P<v6>(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![\w:])"
 )
 _LEGAL_FORMS = frozenset(
     {"ооо", "зао", "оао", "пао", "ао", "ип", "нко", "гуп", "муп", "фгуп", "llc", "inc", "ltd", "gmbh", "corp", "co"}
@@ -248,7 +250,11 @@ class Resolver:
 
     def _address_in_text(self, address: str) -> bool:
         if self._text_addresses is None:      # собирается один раз на текст: проверок — тысячи
-            self._text_addresses = {m.group().lower() for m in _ADDRESS_TOKEN.finditer(self.text)}
+            tokens = (m.group("v6") or m.group() for m in _ADDRESS_TOKEN.finditer(self.text))
+            # Двоеточие после адреса IPv6 — знак препинания («2001:db8:1::1: занят»).
+            self._text_addresses = {
+                (token[:-1] if token.endswith(":") and not token.endswith("::") else token).lower() for token in tokens
+            }
         return address.lower() in self._text_addresses
 
     def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
