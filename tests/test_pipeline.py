@@ -393,6 +393,23 @@ def test_email_with_a_retyped_host_part_stays_an_email(state, settings):
     assert sanitize(state, "почта ivanov@srv01.contoso.ru", settings).sanitized == "почта <TERM_2>"
 
 
+@pytest.mark.parametrize("policy", [Policy.BLOCK, Policy.HIDE])
+def test_email_keeps_the_stricter_policy_of_a_retyped_host_part(state, policy):
+    """Обзор пакета, Important: после смены типа srv01 на SECRET адрес ivanov@srv01.contoso.ru оставался <EMAIL_1> —
+    выдача не блокировалась, а при «скрывать без восстановления» метка восстанавливалась в адрес вместе с srv01. Часть
+    со строже политикой поглощает адрес, как до пакета; у имени узла политика части и так держит всё имя."""
+    settings = Settings(policies=default_policies() | {T.SECRET: policy})
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.SECRET)
+    result = sanitize(state, "почта ivanov@srv01.contoso.ru", settings)
+    assert result.sanitized == "почта <SECRET_1>"
+    assert [state.entities[s.entity_id].type for s in result.blocked] == ([T.SECRET] if policy is Policy.BLOCK else [])
+    restored = restore(state, result.sanitized, settings)
+    assert restored.text == ("почта ivanov@srv01.contoso.ru" if policy is Policy.BLOCK else "почта <SECRET_1>")
+    host = sanitize(state, "узел srv01.contoso.ru", settings)     # у имени узла — так же
+    assert host.sanitized == "узел <SECRET_2>.domain-1.example" and host.deliverable is (policy is Policy.HIDE)
+
+
 @pytest.mark.parametrize("text, expected", [
     ("почта ivanov@<TERM_1>.northwind.ru", "почта <ACCOUNT_1>@<TERM_1>.domain-3.example"),
     ("почта ivanov@host-1.<ORG_1>", "почта <ACCOUNT_1>@host-1.<ORG_1>"),

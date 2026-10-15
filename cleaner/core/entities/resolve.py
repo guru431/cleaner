@@ -10,7 +10,7 @@ from uuid import uuid4
 from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities import hostmap, labels, macsid, names, netmap
 from cleaner.core.match import has_invisible, normalize
-from cleaner.core.types import ChatState, Entity, EntityType, Policy, Settings, Surrogate
+from cleaner.core.types import STRICTNESS, ChatState, Entity, EntityType, Settings, Surrogate
 
 T = EntityType
 _DIGIT_TYPES = frozenset({T.INN, T.SNILS, T.OGRN, T.KPP, T.OMS, T.CARD, T.PASSPORT})
@@ -28,7 +28,6 @@ _NAME = re.compile(r"[\w-]+(?:\.[\w-]+)*")
 # Подмена имени в тексте. Номера длиннее двадцати цифр счётчик не выдаст, и дальше цепочка цифр не берётся: все её
 # начала собирались бы квадратичное время.
 _ISSUED_NAME = re.compile(r"(host|sub|domain)-([0-9]{1,20})")
-_STRICTNESS = {Policy.BLOCK: 2, Policy.HIDE: 1}         # прочие политики — 0
 
 
 @dataclass(frozen=True)
@@ -424,7 +423,7 @@ class Resolver:
         # чата (FR-4.2). При равных — часть, которой пользователь дал другой тип: блокировка её типа, заданная позже,
         # тоже видна на экране; затем — первая слева, как прежде. Восстановление проверяет политики всех частей.
         policies = self.settings.policies
-        primary = max(owners, key=lambda owner: (_STRICTNESS.get(policies.get(owner[0].type), 0), owner[1]))[0]
+        primary = max(owners, key=lambda owner: (STRICTNESS.get(policies.get(owner[0].type), 0), owner[1]))[0]
         surrogate = ".".join(fakes)
         # Имя длиннее имени DNS (253 знака) — цепочка вроде «a.a.a….ru» — целиком не записывается: поиск замен и
         # проверка ссылок перебирают цепочки частей до длины самой длинной записанной, и имя из тысяч частей делало бы

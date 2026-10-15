@@ -42,6 +42,21 @@ def test_manual_rule_on_a_whole_part_of_an_email_domain_keeps_the_email():
         assert merge(text, spans, CTX)[0].type is expected, manual
 
 
+def test_rule_on_a_part_of_an_email_with_a_stricter_policy_swallows_the_email():
+    """Обзор пакета, Important: адрес, оставшийся адресом при правиле на целой части имени, терял политику этой части —
+    метка EMAIL не блокировала выдачу и восстанавливалась целиком. Правило типа со строже политикой адрес поглощает,
+    как прежде; с той же или мягче — адрес остаётся адресом (5.7, шаг 4)."""
+    text = "ivanov@srv01.contoso.ru"
+    strict = default_policies() | {T.SECRET: Policy.BLOCK}
+    for rule, policies, expected in (
+        (T.SECRET, default_policies(), T.SECRET), (T.SECRET, strict, T.SECRET), (T.TERM, strict, T.EMAIL),
+        (T.SECRET, default_policies() | {T.EMAIL: Policy.HIDE}, T.EMAIL),
+        (T.SECRET, strict | {T.EMAIL: Policy.BLOCK}, T.EMAIL),
+    ):
+        spans = [Span(0, 23, T.EMAIL, "rules", validated=True), Span(7, 12, rule, "manual")]
+        assert merge(text, spans, DetectContext(Settings(policies=policies)))[0].type is expected, (rule, policies)
+
+
 def test_rule_swallowing_a_name_records_where_it_lies():
     """Конвейер оставит выданную замену в имени и отдаст правилу только задетые им части (5.10)."""
     [merged] = merge("host-1.fabrikam.ru", [Span(0, 18, T.HOST, "infra"), Span(7, 15, T.TERM, "manual")], CTX)

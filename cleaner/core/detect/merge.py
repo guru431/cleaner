@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities import hostmap, netmap
-from cleaner.core.types import EntityType, Policy, Span
+from cleaner.core.types import STRICTNESS, EntityType, Policy, Span
 
 
 @dataclass(frozen=True)
@@ -86,15 +86,22 @@ _DOTTED_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
 _NAME_TYPES = (EntityType.HOST, EntityType.DOMAIN)
 
 
-def _name_kept(text: str, group: list[Span], start: int, end: int) -> EntityType | None:
+def _name_kept(
+    text: str, group: list[Span], start: int, end: int, policies: Mapping[EntityType, Policy],
+) -> EntityType | None:
     """Тип имени узла, домена или адреса e-mail, если правила пользователя в нём легли на целые части имени (раздел 6.4:
     каждая часть слева и домен; у адреса — имени после «@»). Такое правило имя не поглощает: часть получит его тип при
-    подмене (resolve._name), адрес — свою метку, в которой скрыта и часть."""
+    подмене (resolve._name), адрес — свою метку, в которой скрыта и часть. Правило типа со строже политикой, чем у
+    адреса, адрес поглощает: метка адреса не блокировала бы выдачу и восстанавливалась бы целиком (у имени узла политику
+    части держит resolve._name)."""
     name = next((
         s for s in group
         if s.source != "manual" and s.type in (*_NAME_TYPES, EntityType.EMAIL) and (s.start, s.end) == (start, end)
     ), None)
     if name is not None and name.type is EntityType.EMAIL:
+        own = STRICTNESS.get(policies.get(EntityType.EMAIL), 0)
+        if any(STRICTNESS.get(policies.get(s.type), 0) > own for s in group if s.source == "manual"):
+            return None
         start = text.rfind("@", start, end) + 1
     if name is None or not _DOTTED_NAME.fullmatch(text, start, end):
         return None
@@ -139,7 +146,7 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
                     opened = netmap.addresses(ctx.settings.never | ctx.unmask)
                 if netmap.canonical_forms(value) & opened:
                     continue
-        kept = senior.source == "manual" and _name_kept(text, group, start, end)
+        kept = senior.source == "manual" and _name_kept(text, group, start, end, policies)
         type_ = kept or senior.type
         # Искомым значение делает любая находка того же типа: слово после «Пароль —», которое нашли и словарём чата.
         searchable = any(s.searchable for s in group if s.type is senior.type)
