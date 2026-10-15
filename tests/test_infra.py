@@ -174,6 +174,33 @@ def test_ipv6_address_followed_by_a_colon():
     assert (T.IP, "2a00:1450:4010::65") in found("Адрес 2a00:1450:4010::65: не отвечает")
 
 
+@pytest.mark.parametrize(
+    "text, address",
+    [
+        ("Source:f54a:d0a2:e874:66d7:ad66:a1be:9367:6a02.", "f54a:d0a2:e874:66d7:ad66:a1be:9367:6a02"),
+        ("IPv6:2a00:1450:4010::65", "2a00:1450:4010::65"),
+        ("src:[2a00:1450:4010::65]:443", "2a00:1450:4010::65"),
+        ("Адрес:2a00:1450:4010::65:", "2a00:1450:4010::65"),
+    ],
+)
+def test_ipv6_right_after_a_label_and_a_colon(text, address):
+    """FINDINGS P3 «Detection: valid numbers in spaced notations are missed on the open sets»: полный адрес IPv6
+    сразу после «Source:» не находился — двоеточие перед адресом считалось частью другой записи."""
+    assert found(text) == {(T.IP, address)}
+
+
+def test_colon_chains_after_a_label_are_not_addresses():
+    assert values("Время:12:30:45, MAC:00:1A:2B:3C:4D:5E, ключ:1:2:3:4:5:6:7:8:9, ab:cd:ef:1:2:3:4:5:6") == set()
+
+
+def test_ipv6_after_a_label_is_masked_and_restored():
+    state = ChatState(chat_id="ipv6", net_key=bytes(32))
+    text = "Source:f54a:d0a2:e874:66d7:ad66:a1be:9367:6a02."
+    result = sanitize(state, text, Settings())
+    assert "f54a" not in result.sanitized
+    assert restore(state, result.sanitized, Settings()).text == text
+
+
 def test_profile_name_with_a_space_and_with_trailing_punctuation():
     """Обзор 1А, P1: имя с пробелом целиком, точка после имени — не часть имени."""
     assert accounts(r"Профиль C:\Users\Иван Петров\Desktop") == {"Иван Петров"}

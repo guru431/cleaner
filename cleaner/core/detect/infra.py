@@ -12,7 +12,13 @@ from cleaner.core.types import EntityType, Span
 name = "infra"
 
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\w|\.\d)")
-_IPV6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])")
+# Адрес не начинается внутри другой записи через двоеточие, но может стоять сразу за подписью
+# («Source:f54a:…», «IPv6:2a00:…»): за словом, которое не может быть группой адреса, — с буквой
+# не из 0-9a-f или длиннее четырёх знаков. Подпись во фрагмент не входит.
+_IPV6 = re.compile(
+    r"(?<![\w:.])(?:(?=\w*[^\W\dA-Fa-f])\w+:|\w{5,}:)?"
+    r"(?P<addr>(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![\w:])"
+)
 # Слово перед числом, по которому видно, что это номер версии; «ver» внутри «server» не считается.
 _VERSION_BEFORE = re.compile(
     r"(?<![^\W\d_])(?:version|верси[яию]|ver\.?|build|сборка|release|v)\s*[:=]?\s*$", re.IGNORECASE
@@ -93,7 +99,7 @@ def _ipv4(text: str) -> Iterator[Span]:
 
 def _ipv6(text: str) -> Iterator[Span]:
     for m in _IPV6.finditer(text):
-        candidate = m.group()
+        candidate = m.group("addr")
         if candidate.endswith(":") and not candidate.endswith("::"):
             candidate = candidate[:-1]      # двоеточие после адреса — знак препинания
         try:
@@ -101,7 +107,8 @@ def _ipv6(text: str) -> Iterator[Span]:
         except ValueError:
             continue
         if netmap.is_maskable(ip):
-            yield Span(m.start(), m.start() + len(candidate), EntityType.IP, name, validated=True)
+            start = m.start("addr")
+            yield Span(start, start + len(candidate), EntityType.IP, name, validated=True)
 
 
 def _mac(text: str) -> Iterator[Span]:
