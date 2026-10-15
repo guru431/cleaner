@@ -237,6 +237,10 @@ def test_restore_is_fast_on_unclosed_css_urls(text):
         "https://a\\x@" * 10000, "https:a\\" * 15000, "file:\\\\C:" * 12000,
         # Имя без схемы, с которого ссылка linkify-it не начинается: путь читается только у ссылки (4,7 с, квадратично).
         "/a.ru" * 20000,
+        # Ссылки linkify-it внутри пути прежней: путь у всех кончается на одном знаке, а неизвестные метки делят его на куски.
+        "a.ru/[" * 20000, "a.ru/[<PERSON_99>" * 6000,
+        # Хост за первым «@» ссылки linkify-it (_FIRST_AT): незакрытая «[» и длинный хост без второго «@».
+        "//a@[x" * 15000, "//a@" + "b" * 100000, "//<EMAIL_1>@a@" * 5000,
         # Голые адреса e-mail: у каждого оригинал в имени и чужой домен, «\@» в прочтении CommonMark, домен marked с отступом.
         "<EMAIL_1>@b.ru " * 2000, "a\\@b.c" * 10000, "a@" + "b.c-" * 25000,
     ],
@@ -246,6 +250,7 @@ def test_restore_is_fast_on_unclosed_css_urls(text):
         "file_backslashes", "at_signs", "schemes_with_at_signs", "empty_users",
         "spaced_user", "spaced_schemes_with_at_signs", "spaced_slashes",
         "encoded_backslashes", "schemes_with_backslashes", "drive_letters", "linkify_names",
+        "linkify_paths", "linkify_paths_with_labels", "first_at_brackets", "first_at_long_host", "first_at_labels",
         "foreign_emails", "escaped_emails", "marked_email_domains",
     ],
 )

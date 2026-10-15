@@ -126,11 +126,15 @@ _LINK = re.compile(
 # «file:////узел/…» — путь UNC, его хост находится как обычно); у «file://C:/…» и «file:\\C:\…» тоже: буква диска
 # с «:» или «|» перед косой — начало пути, а не хост (WHATWG URL, file host state). Имя пользователя не тянется через
 # начало адреса с особой схемой («//a:https:@…»): у того адреса свой хост, и поиск остаётся линейным на
-# «https:https:…»; любое другое начало адреса содержит «/» или «\», на которых имя пользователя тоже кончается.
+# «https:https:…»; любое другое начало адреса содержит «/» или «\», на которых имя пользователя тоже кончается. Хост в
+# квадратных скобках (IPv6) кончается и на «/», «\», «?», «#», как у браузера: незакрытая «[» иначе читалась бы до конца
+# цели с каждого «//» («//a@[x//a@[x…» — квадратичное время). Перед «:» хост бывает и пустым — нашим он не бывает: в записи
+# «https://:8080<EMAIL_1>evil…» адреса нет, а после восстановления «@» из оригинала делает «:8080…» именем пользователя, а
+# хостом — то, что за «@». Пустой хост перед «/», «?» и «#» браузер отвергает, и такой адрес никуда не ведёт.
 _URL_HOSTS = re.compile(
     r"file:[/\\]{2}(?:[/\\](?![/\\])|[a-z][:|](?![^/\\?#]))"
     rf"|(?:(?:{_AUTHORITY})[/\\]*+(?:(?:(?!{_SPECIAL})[^/?#\\])*@)?|(?=www\.))"
-    r"(\[[^\]]+\]|[^/\\:?#\s]+)",
+    r"(\[[^\]/\\?#\s]+\]|[^/\\:?#\s]+|(?=:))",
     re.IGNORECASE,
 )
 # Ссылка на знак HTML («&#47;», «&#x2F», «&sol;», «&nbsp» без «;») — так же, как её находит html.unescape.
@@ -270,7 +274,9 @@ _FUZZY_NAME = re.compile(
 _FUZZY_PREFIXES = "$+=^`|"      # буквы, после которых ссылка linkify-it может начаться, но с которых — нет
 # Путь ссылки — за «/», «?» или «#» сразу после имени или порта; без них ссылка — одно имя. Путь у linkify-it кончается не
 # дальше пробела, управляющего знака, «<», «>» и «｜» — до них он и берётся: знак препинания в конце, который linkify-it
-# в ссылку не берёт, — в сторону ссылки.
+# в ссылку не берёт, — в сторону ссылки. Но и раньше: на непарной скобке или кавычке («наш/[evil.ru/…», «наш/x"evil.ru/…»),
+# а markdown-it — на выделении и зачёркивании («наш/x*evil.ru/…*», «наш/x~~evil.ru/…~~»), и за ними начинается следующая
+# ссылка. Поэтому имена внутри пути проверяются как начала своих ссылок, как внутри ссылки со схемой.
 _FUZZY_PATH_START = re.compile(r"(?::\d++)?+[/?#]")
 _FUZZY_PATH = re.compile(rf"{_FUZZY_PATH_START.pattern}[^\s<>\uff5c\x00-\x1f\x7f-\x9f]*+")
 # Голый адрес e-mail делают ссылкой mailto cmark-gfm (GitHub), remark-gfm, micromark и marked: имя до «@» из букв и цифр
@@ -291,8 +297,18 @@ _EMAIL_FUZZY_DOMAIN = re.compile(rf"(?:{_FUZZY_LETTER}|-)++(?:\.(?:{_FUZZY_LETTE
 # Начало другой ссылки посреди домена обрывает его: remark-gfm делает ссылки из «www.» и «https://» после знака
 # препинания раньше адресов («…evil.dev.www.…» — домен «…evil.dev»), markdown-it — ссылку со схемой после не буквы ASCII
 # («…пример.рфhttps://…»). У markdown-it домен обрывает и код: «`» для linkify-it — буква, но кусок текста, где он ищет
-# адрес, кончается перед кодом («…~evil.example.org`;)`»); парная ли кавычка, видно только разбором Markdown.
+# адрес, кончается перед кодом («…~evil.example.org`;)`»); парная ли кавычка, видно только разбором Markdown. Так же — перед
+# зачёркиванием «~~» («~~<ACCOUNT_1>@пример.рф~~»: «~» для linkify-it — тоже буква).
 _LINK_START = re.compile(r"(?<![A-Za-z0-9])(?:www\.|(?:https?|ftp)://)", re.IGNORECASE)
+# Ссылка linkify-it со схемой или с «//» берёт в имя пользователя знаки только до первого «@» (src_auth: до 50, без пробелов
+# и «@/[]()») и кончается за хостом после него: у браузера хост такой ссылки — за первым «@», а у всего адреса, если в нём
+# дальше, до «/», «?», «#» или пробела, есть ещё «@», — за последним («https://petrova@ivanov@contoso.ru» — ссылка на узел
+# ivanov, «https://ivanov@contoso.rumailto:ivanov@contoso.ru» — на contoso.rumailto). Ищется в восстановленном тексте: «@»
+# бывает и в оригинале (<EMAIL_1>). Хост — до порта, шире, чем у linkify-it, — в сторону ссылки; хост в скобках — до «/» и
+# «@»: незакрытая «[» иначе читалась бы до конца ответа с каждого «//». Каждый просмотр кончается на ближайшей «/».
+_FIRST_AT = re.compile(
+    r"(?:(?:https?|ftp):)?//([^\s@/\[\]()]{1,50})@(\[[^\]\s/@\[]*\]|[^\s/\\:?#@\[\]<>]+)(?=[^/?#\\\s]*@)", re.IGNORECASE,
+)
 _RESTORED = frozenset({"restored", "altered", "derived"})
 _COUNTER = {
     "restored": "restored", "altered": "altered", "derived": "derived", "unknown": "unknown", "kept_by_policy": "kept",
@@ -378,7 +394,9 @@ def _fuzzy_host(text: str, start: int, dot: int) -> int | None:
     нём не начинается. Как у linkify-it — самое левое начало: начало имени, если перед ним не «:», «/», «\\», «@» и не
     «_» после буквы или цифры («test_evil.ru» — не ссылка; «__evil.ru/x__» — ссылка: «_» открывает выделение и с ним
     текстовый кусок markdown-it), иначе — после «$», «=» и подобных (_FUZZY_PREFIXES): «/a$b.ru/x» и «.py`b.ru/x» —
-    ссылки на b.ru, а «a$b.ru/x» — на «a$b.ru», «~~b.ru/x» — на «~~b.ru». С «.», «-» и этих знаков ссылка не начинается."""
+    ссылки на b.ru, а «a$b.ru/x» — на «a$b.ru», «~~b.ru/x» — на «~~b.ru». Так же — после «~~» внутри слова: зачёркивание
+    markdown-it начинает за ним новый кусок текста («/x~~b.ru/…~~» — ссылка на b.ru). С «.», «-» и этих знаков ссылка не
+    начинается."""
     before = text[start - 1] if start else ""
     valid = before not in (":", "/", "\\", "@")
     if before == "_":
@@ -388,7 +406,7 @@ def _fuzzy_host(text: str, start: int, dot: int) -> int | None:
         valid = not (first and text[first - 1].isalnum())
     for position in range(start, dot):
         char = text[position]
-        if char in _FUZZY_PREFIXES:
+        if char in _FUZZY_PREFIXES or char == "~" and position > start and text[position - 1] == "~":
             valid = True
         elif valid and char not in ".-":
             return position
@@ -425,6 +443,15 @@ def _joined(pieces: list[Piece]) -> tuple[str, list[int]]:
 def _at(starts: list[int], position: int) -> int:
     """Номер куска, в котором стоит знак position; starts — начала кусков в тексте и его длина в конце."""
     return bisect.bisect_right(starts, position) - 1
+
+
+def _restored_from(pieces: list[Piece]) -> list[int]:
+    """Для каждого куска — номер первого восстановленного куска не раньше него (len(pieces) — такого нет): есть ли
+    оригинал в отрезке кусков, видно сразу, сколько бы ссылок ни делили один путь."""
+    out = [len(pieces)] * (len(pieces) + 1)
+    for i in range(len(pieces) - 1, -1, -1):
+        out[i] = i if pieces[i][1] in _RESTORED else out[i + 1]
+    return out
 
 
 def _written(pieces: list[Piece], starts: list[int], start: int, end: int) -> str | None:
@@ -541,12 +568,13 @@ class _Restorer:
         if not any(kind in _RESTORED for _, kind, _ in pieces):
             return pieces
         text, starts = _joined(pieces)
-        if links := self._emails(pieces, starts, text):
+        if links := self._emails(pieces, starts, text) + self._first_at(pieces, starts, text):
             pieces = self._foreign_links(pieces, starts, sorted(links))
             text, starts = _joined(pieces)
-        links, position = [], 0
+        restored = _restored_from(pieces)
+        links, position, end = [], 0, 0
         while m := _FUZZY_NAME.search(text, position):
-            position = m.end()
+            position = m.end()      # имена в пути найденной ссылки — тоже начала ссылок (_FUZZY_PATH)
             name = m.group().rstrip(".")
             host_end = m.start() + len(name)
             if not _FUZZY_PATH_START.match(text, host_end):
@@ -555,22 +583,40 @@ class _Restorer:
             start = _fuzzy_host(text, m.start(), dot)
             if start is None or text[dot - 1] == "." or not _FUZZY_TLD.fullmatch(name, dot + 1 - m.start()):
                 continue        # путь читается только у ссылки: иначе «/a.ru/a.ru/…» читался бы с каждого имени
-            position = _FUZZY_PATH.match(text, host_end).end()      # имена в пути — часть ссылки, как у linkify-it
-            if self._fuzzy_foreign(pieces, starts, start, host_end, position):
-                links.append((start, position))
+            if end <= host_end:
+                # Путь кончается на том же знаке, что у прежней ссылки, если начался внутри её пути: иначе «a.ru/[a.ru/[…»
+                # перечитывался бы до конца с каждого имени.
+                end = _FUZZY_PATH.match(text, host_end).end()
+            if self._fuzzy_foreign(pieces, starts, restored, text, start, host_end, end):
+                links.append((start, end))
         return self._foreign_links(pieces, starts, links) if links else pieces
 
-    def _fuzzy_foreign(self, pieces: list[Piece], starts: list[int], start: int, host_end: int, end: int) -> bool:
+    def _fuzzy_foreign(
+        self, pieces: list[Piece], starts: list[int], restored: list[int], text: str, start: int, host_end: int, end: int,
+    ) -> bool:
         """Уйдёт ли оригинал по ссылке linkify-it text[start:end] с путём на чужой узел. Оригинал только в хосте
         («Петров.md/x», «newbox.contoso.ru» — имя, выведенное из частей, 7, шаг 4) запросом не уходит; ссылка, которую
         целиком дало одно значение, — запись пользователя. Иначе хост должен быть нашим, как у ссылки со схемой: его
-        запись в ответе проверяет _host_is_ours, а хост, граница которого делит замену, — чужой."""
+        запись в ответе проверяет _host_is_ours, а хост, граница которого делит замену, — чужой; хост, который восстановился
+        в имя узла из запроса, — наш, как домен адреса e-mail (_email_foreign). restored — _restored_from."""
         if _at(starts, start) == _at(starts, end - 1):
             return False
-        if not any(pieces[i][1] in _RESTORED for i in range(_at(starts, host_end), _at(starts, end - 1) + 1)):
+        if restored[_at(starts, host_end)] > _at(starts, end - 1):
+            return False
+        if text[start:host_end].lower() in self._original_hosts:
             return False
         host = _written(pieces, starts, start, host_end)
         return host is None or not self._host_is_ours(host)
+
+    def _first_at(self, pieces: list[Piece], starts: list[int], text: str) -> list[tuple[int, int]]:
+        """Ссылки linkify-it с хостом за первым «@» (_FIRST_AT), которые уводят оригинал из имени пользователя на узел не из
+        запроса, — начало и конец каждой в text. У браузера хост всего адреса — за последним «@», и его проверили _LINK и
+        правило узлов из запроса; у ссылки с одним «@» хосты совпадают, и её этот поиск не находит."""
+        found = [m for m in _FIRST_AT.finditer(text) if m.group(2).strip("[]").lower() not in self._original_hosts]
+        if not found:
+            return []
+        restored = _restored_from(pieces)
+        return [(m.start(), m.end(2)) for m in found if restored[_at(starts, m.start(1))] <= _at(starts, m.end(1) - 1)]
 
     def _emails(self, pieces: list[Piece], starts: list[int], text: str) -> list[tuple[int, int]]:
         """Голые адреса e-mail, которые уводят оригинал на чужой домен, — начало и конец каждого в text. Кроме самого текста
@@ -588,12 +634,15 @@ class _Restorer:
         links: list[tuple[int, int]] = []
 
         def reverted(position: int) -> bool:
-            """Оставит ли записью ответа восстановленный знак position уже найденный чужой адрес."""
-            if pieces[_at(starts, position)][1] not in _RESTORED:
+            """Оставит ли записью ответа восстановленный знак position уже найденный чужой адрес: обработанный кусок, который
+            адрес задел хоть краем, остаётся записью целиком (_foreign_links) — «<EMAIL_1>», домен которого дотянул прежний
+            адрес до её «@»."""
+            k = _at(starts, position)
+            if pieces[k][1] not in _RESTORED:
                 return False
             for spans in (decoded_links, links):        # начала адресов — по возрастанию
-                i = bisect.bisect_right(spans, (position + 1,)) - 1
-                if i >= 0 and spans[i][1] > position:
+                i = bisect.bisect_left(spans, (starts[k + 1],)) - 1
+                if i >= 0 and spans[i][1] > starts[k]:
                     return True
             return False
 
@@ -622,9 +671,10 @@ class _Restorer:
         found = [[pattern.match(text, at + 1) for pattern in domains]]
         reach = max((m.end() for m in found[0] if m), default=at)
         cuts = {m.start() for m in (_LINK_START.search(text, at + 1, reach + 3),) if m}
-        if (code := text.find("`", at + 1, reach)) > 0:
-            cuts.add(code)
-        for cut in sorted(cuts):        # домен, оборванный другой ссылкой или кодом
+        for mark in ("`", "~~"):
+            if (cut := text.find(mark, at + 1, reach)) > 0:
+                cuts.add(cut)
+        for cut in sorted(cuts):        # домен, оборванный другой ссылкой, кодом или зачёркиванием
             found.append([pattern.match(text, at + 1, cut) for pattern in domains])
         links = []
         for *gfm_domains, fuzzy_domain in found:
@@ -677,8 +727,9 @@ class _Restorer:
 
     @functools.cached_property
     def _original_hosts(self) -> frozenset[str]:
-        """Имена узлов и адреса из запроса так, как их восстановят: письмо на такой домен уходит на узел, который назвал сам
-        пользователь, и тогда, когда часть имени сменила тип и записана меткой. Нужны только адресам с оригиналом в имени."""
+        """Имена узлов и адреса из запроса так, как их восстановят: письмо на такой домен и ссылка на такой узел уходят на
+        узел, который назвал сам пользователь, и тогда, когда часть имени сменила тип и записана меткой. Нужны только
+        адресам с оригиналом в имени и ссылкам, чужим по записи в ответе."""
         return frozenset(
             self._original(text, surrogate).lower() for text, surrogate in self.state.surrogates.items()
             if surrogate.kind in ("host", "ip", "ip6")
@@ -789,6 +840,23 @@ class _Restorer:
             return False        # с <base href> адрес без узла уходит на узел из base — его не проверить
         return all(self._host_is_ours(host) for host in hosts if _ENCODED_BACKSLASH not in host)
 
+    def _to_request_hosts(self, restored: str, markdown: bool, css: bool) -> bool:
+        """Ведёт ли восстановленная цель ссылки при каждом прочтении (_readings) только на узлы, которые назвал сам
+        пользователь (_original_hosts), — как домен адреса e-mail (_email_foreign): «https://<SECRET_1>.domain-1.example/…»,
+        когда часть имени сменила тип, — это srv01.contoso.ru из запроса. Пустой хост («https://:8080petrov/…» — порт не
+        число) браузер отвергает, и он никуда не ведёт. Цель без узла, mailto: и CSS с «\\» так нашими не становятся
+        (_is_own, _foreign)."""
+        for reading in _readings(restored, markdown):
+            reading = re.sub(r"[\t\r\n]", "", reading.strip())
+            if reading.lower().startswith("mailto:") or (css and "\\" in reading):
+                return False
+            hosts = [m.group(1) for m in _URL_HOSTS.finditer(reading) if m.group(1) is not None]
+            if not hosts or not all(
+                not host or _ENCODED_BACKSLASH in host or host.strip("[]").lower() in self._original_hosts for host in hosts
+            ):
+                return False
+        return True
+
     def _outside_tags(self, text: str, position: int) -> bool:
         if self.tags is None or self.tags[0] is not text:
             first = text.find("<")
@@ -830,9 +898,14 @@ class _Restorer:
             return self._inner(m.group()) != m.group()
         # Цель ссылки Markdown и голый адрес читают и Markdown-читатели: голый адрес они делают ссылкой (_readings).
         markdown = any(m.group(name) is not None for name in ("md", "ref", "dest", "url", "dq", "sq"))
-        if self._is_own(target, markdown) and not (css and any("\\" in reading for reading in _readings(m.group()))):
+        checked = not (css and any("\\" in reading for reading in _readings(m.group())))
+        if checked and self._is_own(target, markdown):
             return False        # ссылка на наш же узел восстанавливается как обычный текст
         restored = self._inner(m.group())
+        if restored == m.group():
+            return False        # восстанавливать нечего — так у большинства чужих ссылок
+        if checked and self._to_request_hosts(restored if target == m.group() else self._inner(target), markdown, css):
+            return False        # и ссылка, чужая по записи, которая восстанавливается в узел из запроса
         if (
             target[:2] in ("//", "/\\", "\\/", "\\\\") and any(m.group("dq", "sq", "url"))
             and all(_nowhere(reading) for reading in _readings(restored))     # «&#46;» — тоже точка
@@ -856,7 +929,8 @@ class _Restorer:
             return None
         if len(_PROSE_START.findall(_md(word))) <= len(_PROSE_START.findall(word)):
             return None         # начало адреса записано как есть — такой адрес уже проверил _LINK
-        if self._inner(word) == word or self._is_own(word, markdown=True):
+        restored = self._inner(word)
+        if restored == word or self._is_own(word, markdown=True) or self._to_request_hosts(restored, True, False):
             return None         # восстанавливать нечего (так чаще всего) или ссылка наша
         self.counters["foreign_links"] += 1
         return word, "foreign_link"

@@ -553,6 +553,43 @@ def test_text_that_linkify_does_not_link_to_a_foreign_host_is_restored(settings,
     assert result.text == restored and "foreign_link" not in kinds(result)
 
 
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("domain-1.example/[evil.ru/<ACCOUNT_1>", "contoso.ru/[evil.ru/<ACCOUNT_1>"),
+        ("host-1.domain-1.example/@]evil.example.org/<ACCOUNT_1>", "srv-dc01.contoso.ru/@]evil.example.org/<ACCOUNT_1>"),
+        ("host-1.domain-1.example/x(evil.ru/<ACCOUNT_1>", "srv-dc01.contoso.ru/x(evil.ru/<ACCOUNT_1>"),
+        ("host-1.domain-1.example/x}evil.ru/<ACCOUNT_1>", "srv-dc01.contoso.ru/x}evil.ru/<ACCOUNT_1>"),
+        ('host-1.domain-1.example/x"evil.ru/<ACCOUNT_1>', 'srv-dc01.contoso.ru/x"evil.ru/<ACCOUNT_1>'),
+        ("host-1.domain-1.example/x*evil.ru/<ACCOUNT_1>*", "srv-dc01.contoso.ru/x*evil.ru/<ACCOUNT_1>*"),
+        ("host-1.domain-1.example/x~~evil.ru/<ACCOUNT_1>~~", "srv-dc01.contoso.ru/x~~evil.ru/<ACCOUNT_1>~~"),
+        ("x~~evil.ru/<ACCOUNT_1>~~", "x~~evil.ru/<ACCOUNT_1>~~"),
+    ],
+)
+def test_link_that_starts_where_linkify_ends_the_path_of_our_link_is_checked(settings, answer, restored):
+    """Наблюдение раунда 6, P2: путь ссылки без схемы читался до пробела, и имена в нём не проверялись, а linkify-it
+    кончает путь на непарной скобке или кавычке, markdown-it — на выделении и зачёркивании, и за ними начинается новая
+    ссылка: «contoso.ru/[evil.ru/petrov» — ссылка на evil.ru с оригиналом. Проверено 15.10.2026: markdown-it 14.1.0 с
+    linkify-it 5.0.2. Имена в пути проверяются как начала своих ссылок, и «~~» посреди слова — тоже их начало."""
+    result = restore(account_state(), answer, settings)
+    assert (result.text, kinds(result)[-1]) == (restored, "foreign_link")
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("host-1.domain-1.example/a(b)/<ACCOUNT_1>", "srv-dc01.contoso.ru/a(b)/petrov"),
+        ("host-1.domain-1.example/[host-1.domain-1.example/<ACCOUNT_1>", "srv-dc01.contoso.ru/[srv-dc01.contoso.ru/petrov"),
+        ("host-1.domain-1.example/x*host-1.domain-1.example/<ACCOUNT_1>*", "srv-dc01.contoso.ru/x*srv-dc01.contoso.ru/petrov*"),
+    ],
+)
+def test_link_inside_the_path_of_our_link_to_our_host_restores(settings, answer, restored):
+    """Та же находка с другой стороны: парные скобки linkify-it оставляет в пути, а ссылка за скобкой или выделением на
+    наш узел восстанавливается, как раньше."""
+    result = restore(account_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
 def test_link_that_linkify_finds_without_a_scheme_is_one_foreign_segment(settings):
     """Та же находка: чужая ссылка — один кусок foreign_link с записью ответа, счётчики вошедших в неё замен возвращаются,
     а текст рядом — и через пробел, и до ссылки в том же слове — восстанавливается."""
@@ -605,6 +642,8 @@ def account_state() -> ChatState:
         "x domain-1.example={ip}@evil.example.org",
         "<EMAIL_1>evil.dev,<ACCOUNT_1>@пример.рф",
         "x@_<ACCOUNT_1>@пример.рф_",
+        "~~<ACCOUNT_1>$@пример.рф~~",
+        "<EMAIL_1>$<ACCOUNT_1>host-1<EMAIL_1>;<ACCOUNT_1>@пример.рф",
     ],
 )
 def test_original_in_an_address_at_a_foreign_domain_stays_a_label(settings, answer):
@@ -616,7 +655,8 @@ def test_original_in_an_address_at_a_foreign_domain_stays_a_label(settings, answ
     отступает в домене до буквы («evil.dev_» — «evil.de»), домен бывает с точкой впереди, а markdown-it обрывает домен перед
     ссылкой со схемой («пример.рфhttps://…» — «пример.рф») и кодом. Запись ответа остаётся во всём имени, какое берёт
     любой читатель («contoso.ru=10.1.2.5@evil…» у markdown-it), а имя linkify-it начинается и за «@», которую оставил
-    меткой чужой адрес слева, и за «_» выделения."""
+    меткой чужой адрес слева (и тогда, когда его домен кончился у самой этой «@»), и за «_» выделения; домен у markdown-it
+    обрывает и зачёркивание «~~»."""
     state = account_state()
     answer = answer.replace("{ip}", fake_ip(state))
     result = restore(state, answer, settings)
@@ -648,24 +688,98 @@ def test_address_at_our_domain_or_from_one_value_restores(settings, answer, rest
     assert result.text == restored and "foreign_link" not in kinds(result)
 
 
+RETYPED = Settings(policies=default_policies() | {T.SECRET: Policy.BLOCK})
+
+
+def retyped_state() -> ChatState:
+    """Часть имени узла из запроса сменила тип: «srv01» — <SECRET_1>, и имя записано «<SECRET_1>.domain-1.example»;
+    у <SECRET_9> — другое значение."""
+    state = ChatState(chat_id="retyped", net_key=bytes(range(32)))
+    sanitize(state, "узел srv01.contoso.ru и srv01", RETYPED)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.SECRET)
+    assert sanitize(state, "почта ivanov@srv01.domain-1.example", RETYPED).sanitized == (
+        "почта <ACCOUNT_1>@<SECRET_1>.domain-1.example"
+    )
+    state.entities["s9"] = Entity("s9", T.SECRET, 9, "qwerty", "qwerty", "manual", ["qwerty"])
+    state.surrogates["<SECRET_9>"] = Surrogate("s9")
+    return state
+
+
 def test_address_at_a_host_from_the_request_written_with_a_retyped_part_restores():
     """Та же находка: домен «<SECRET_1>.domain-1.example» — не наш по записи (метка не узла), но восстанавливается в
     имя узла из запроса «srv01.contoso.ru», и письмо уходит на него; метка с другим значением даёт имя, которого в
     запросе не было, — чужой узел под нашим доменом, как «evil.domain-1.example»."""
-    settings = Settings(policies=default_policies() | {T.SECRET: Policy.BLOCK})
-    state = ChatState(chat_id="retyped", net_key=bytes(range(32)))
-    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
-    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.SECRET)
-    assert sanitize(state, "почта ivanov@srv01.domain-1.example", settings).sanitized == (
-        "почта <ACCOUNT_1>@<SECRET_1>.domain-1.example"
-    )
-    own = restore(state, "Пишите <ACCOUNT_1>@<SECRET_1>.domain-1.example", settings)
+    state = retyped_state()
+    own = restore(state, "Пишите <ACCOUNT_1>@<SECRET_1>.domain-1.example", RETYPED)
     assert own.text == "Пишите ivanov@srv01.contoso.ru" and "foreign_link" not in kinds(own)
-    state.entities["s9"] = Entity("s9", T.SECRET, 9, "qwerty", "qwerty", "manual", ["qwerty"])
-    state.surrogates["<SECRET_9>"] = Surrogate("s9")
     answer = "Пишите <ACCOUNT_1>@<SECRET_9>.domain-1.example"
-    foreign = restore(state, answer, settings)
+    foreign = restore(state, answer, RETYPED)
     assert (foreign.text, kinds(foreign)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("https://<SECRET_1>.domain-1.example/?q=<ACCOUNT_1>", "https://srv01.contoso.ru/?q=ivanov"),
+        ('<a href="//<SECRET_1>.domain-1.example/<ACCOUNT_1>">', '<a href="//srv01.contoso.ru/ivanov">'),
+        ("https&colon;//<SECRET_1>.domain-1.example/?q=<ACCOUNT_1>", "https&colon;//srv01.contoso.ru/?q=ivanov"),
+        ("<SECRET_1>.domain-1.example/?q=<ACCOUNT_1>", "srv01.contoso.ru/?q=ivanov"),
+        ("https://srv01.contoso.ru/?q=<ACCOUNT_1>", "https://srv01.contoso.ru/?q=ivanov"),
+    ],
+)
+def test_link_to_a_host_from_the_request_written_with_a_retyped_part_restores(answer, restored):
+    """Наблюдение раунда 6, P3: домен адреса e-mail, который восстанавливается в имя узла из запроса, — наш, а тот же узел
+    в ссылке был чужим: «https://<SECRET_1>.domain-1.example/?q=<ACCOUNT_1>» оставался метками. Теперь правило одно: ссылка
+    со схемой, адрес простого текста и ссылка linkify-it без схемы, чужие по записи, — наши, если после восстановления
+    при каждом прочтении ведут только на узлы из запроса, и имя из запроса, записанное как есть, — тоже."""
+    result = restore(retyped_state(), answer, RETYPED)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "https://<SECRET_9>.domain-1.example/?q=<ACCOUNT_1>",
+        "https://<SECRET_1>.domain-1.example.evil.ru/?q=<ACCOUNT_1>",
+        "[x](https://<SECRET_1>.domain-1.example/?q=<ACCOUNT_1>&next=//evil.ru/)",
+        "https://SECRET&#95;1.domain-1.example/?q=<ACCOUNT_1>",
+        "<SECRET_9>.domain-1.example/?q=<ACCOUNT_1>",
+    ],
+)
+def test_link_that_restores_to_another_host_stays_foreign(answer):
+    """Та же находка с другой стороны: метка с другим значением, узел из запроса внутри чужого имени, второй адрес в той же
+    ссылке и метка, записанная ссылкой на знак («SECRET&#95;1» браузер прочтёт как «SECRET_1.contoso.ru» — имени из
+    запроса нет), ссылку нашей не делают."""
+    result = restore(retyped_state(), answer, RETYPED)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("https://<ACCOUNT_1>a@<EMAIL_1>", "https://<ACCOUNT_1>a@<EMAIL_1>"),
+        ("http://x<EMAIL_1>evil.ru@domain-1.example/", "http://x<EMAIL_1>evil.ru@contoso.ru/"),
+        ('https://<EMAIL_1>evil.ru"x@domain-1.example/', 'https://<EMAIL_1>evil.ru"x@contoso.ru/'),
+        ("https://<EMAIL_1>mailto:<EMAIL_1>", "https://<EMAIL_1>mailto:ivanov@contoso.ru"),
+        ('https://x.py<ACCOUNT_1>`@пример.рф"><EMAIL_1> ', 'https://x.py<ACCOUNT_1>`@пример.рф">ivanov@contoso.ru '),
+        ("https://:8080<EMAIL_1>x.py10.90.233.5mailto:", "https://:8080<EMAIL_1>x.py10.90.233.5mailto:"),
+    ],
+)
+def test_host_after_the_first_at_sign_of_a_restored_link_is_checked(settings, answer, restored):
+    """Случайная проверка 16.10.2026 (markdown-it 14.1.0): браузер берёт хост за последним «@», а linkify-it — за первым и
+    кончает ссылку за ним, и «@» бывает в оригинале. «https://petrova@ivanov@contoso.ru» показывался ссылкой на узел
+    ivanov с «petrova», а «http://xivanov@contoso.ruevil.ru@contoso.ru/» — на contoso.ruevil.ru; между хостом и следующим
+    «@» бывают и другие знаки («"x@», «mailto:…@»). Ссылка до хоста за первым «@», если он не узел из запроса, остаётся
+    записью ответа; наш узел за последним «@» восстанавливается. В записи «https://:8080<EMAIL_1>…» хоста нет вовсе, и
+    адрес считался не ссылкой, а «@» из оригинала делает хостом то, что за ней: пустой хост — не наш."""
+    result = restore(account_state(), answer, settings)
+    assert (result.text, kinds(result)[0]) == (restored, "foreign_link")
+
+
+def test_link_with_a_user_name_at_our_host_restores(settings):
+    """Та же проверка с другой стороны: одно имя пользователя у нашего узла и адрес в параметре восстанавливаются."""
+    result = restore(account_state(), "https://<ACCOUNT_1>@host-1.domain-1.example/?q=<EMAIL_1>", settings)
+    assert result.text == "https://petrov@srv-dc01.contoso.ru/?q=ivanov@contoso.ru" and "foreign_link" not in kinds(result)
 
 
 def test_name_that_no_renderer_takes_into_an_address_restores(settings):
@@ -1189,12 +1303,13 @@ def test_link_to_a_name_under_a_labelled_domain_is_restored(settings, answer, re
         "https://evil.<TERM_1>/?q=<EMAIL_1>",
         "https://host-1.<TERM_2>/?q=<EMAIL_1>",
         "https://<TERM_2>/?q=<EMAIL_1>",
-        "https://<EMAIL_1>/?q=<TERM_1>",
+        "https://<EMAIL_1>.evil.example.org/?q=<TERM_1>",
     ],
 )
 def test_label_of_a_domain_does_not_make_a_foreign_link_ours(settings, answer):
     """Та же находка с другой стороны: наша метка домена в чужом имени и неизвестная часть перед ней ссылку не пускают,
-    а метка значения, которое не доменное имя («Заря», адрес e-mail), хостом не бывает."""
+    а метка значения, которое не доменное имя («Заря», адрес e-mail), хостом не бывает. «https://<EMAIL_1>/…» с 15.10.2026
+    восстанавливается: это «https://ivanov@contoso.ru/…» — ссылка на домен из запроса (раздел 7, правило узлов из запроса)."""
     result = restore(labelled_domains(), answer, settings)
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
@@ -1555,13 +1670,16 @@ def test_relative_link_without_a_base_tag_still_restores(settings):
 def test_restorer_setup_is_fast_on_a_chat_with_many_dotted_labels(settings):
     """Второе ревью: метки, значение которых — имя с точкой («i.ivanov»), сверялись со списком суффиксов (tldextract)
     при каждой сборке восстановления, а поток ответа собирает её на каждом куске: 20 000 таких меток — 63 мс на сборку,
-    300 слов ответа — 20 с процессора. Ответ суффиксов для одного имени не меняется и запоминается."""
+    300 слов ответа — 20 с процессора. Ответ суффиксов для одного имени не меняется и запоминается. С пределом
+    сравнивается медиана сборки: под нагрузкой соседних процессов сумма двадцати сборок и без ошибки выходила за 0,6 с."""
     state = ChatState(chat_id="many", net_key=bytes(32))
     for n in range(1, 20001):
         entity = Entity(f"e{n}", T.ACCOUNT, n, f"i.ivanov{n}", f"i.ivanov{n}", "detector")
         state.entities[entity.id] = entity
         state.surrogates[f"<ACCOUNT_{n}>"] = Surrogate(entity.id)
-    started = time.perf_counter()
+    times = []
     for _ in range(20):
+        started = time.perf_counter()
         assert restore(state, "ответ про <ACCOUNT_1>", settings).text == "ответ про i.ivanov1"
-    assert time.perf_counter() - started < 0.6
+        times.append(time.perf_counter() - started)
+    assert sorted(times)[10] * 20 < 0.6
