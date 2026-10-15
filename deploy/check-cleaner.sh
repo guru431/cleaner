@@ -148,7 +148,8 @@ if [[ -n "${INTERNAL:-}" ]]; then
 else
     ours=$(nets /usr/local/sbin/cleaner-egress.sh INTERNAL)
 fi
-guard=$(nets /usr/local/sbin/ai-egress-guard.sh INTERNAL)
+guard=""
+[[ "$SERVER_GUARD" == "1" ]] && guard=$(nets /usr/local/sbin/ai-egress-guard.sh INTERNAL 2>/dev/null)
 if [[ "$SERVER_GUARD" != "1" ]]; then
     skip "ai-egress-guard.sh на этом хосте нет — внутренние сети заданы профилем: ${ours}"
 elif [[ -z "$guard" ]]; then

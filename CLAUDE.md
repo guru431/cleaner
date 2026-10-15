@@ -75,3 +75,12 @@ ssh -i ~/.ssh/example -p 34012 -o BatchMode=yes example@example 'sudo bash /usr/
 доставка и установка — те же команды, что для example, с этим адресом (пароль администратора при первой
 установке — с клавиатуры, `ssh -t`). `ai-egress-guard.sh` и `check-egress.sh` на example нет — проверка их
 пропускает. Python там тоже 3.12, `requirements-linux.txt` общий.
+
+Интернет у example медленный (~0,1 МБ/с 2026-10-15): окружение, собранное `pip` с хоста, качалось бы часами. Колёса
+берутся на workstation — `.venv/Scripts/python.exe -m pip download --no-deps --require-hashes -r requirements-linux.txt -d <каталог>
+--only-binary=:all: --python-version 3.12 --implementation cp --abi cp312 --abi abi3 --abi none` плюс `--platform`
+для `manylinux_2_17/2014/2_27/2_28/2_31/2_34/2_35/2_39_x86_64` и `linux_x86_64` — переносятся в `/root/cleaner-wheels`
+(0700), а установщик запускается как `sudo env PIP_NO_INDEX=1 PIP_FIND_LINKS=/root/cleaner-wheels bash …/install-cleaner.sh …`;
+хэши сверяются по тому же файлу. Модели — копией `models/` с workstation (`tar` по SSH в `/opt/cleaner/models`,
+владелец `cleaner`, проверка — `models verify` в `check-cleaner.sh`). Настройки локальной модели на example в базе
+службы: `http://127.0.0.1:4000/v1`, `local-chat`, схема JSON параметром.
