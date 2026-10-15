@@ -19,6 +19,8 @@ set -euo pipefail
 
 USER_NAME=cleaner
 TABLE=cleaner_egress
+PORT=5464
+CLIENTS=example/19
 # Копия INTERNAL из ai-egress-guard.sh сервера: правило vLLM — менять все копии вместе. Тест vLLM видит
 # только свой репозиторий, поэтому совпадение списков сверяет check-cleaner.sh.
 INTERNAL="127.0.0.0/8 example/24 example/24 example/19 example/24 172.16.0.0/12"
@@ -48,6 +50,13 @@ table inet $TABLE {
         limit rate 6/minute log prefix "cleaner-egress: " level warn
         meta l4proto tcp reject with tcp reset
         reject
+    }
+    # Входящие на порт службы — только из сети клиентов и петли: второй слой за правилом ufw, как раньше
+    # IPAddressDeny= юнита (он ограничивал оба направления и снят ради выхода на 443).
+    chain input {
+        type filter hook input priority filter; policy accept;
+        tcp dport $PORT ip saddr != { $CLIENTS, 127.0.0.0/8 } drop
+        tcp dport $PORT meta nfproto ipv6 ip6 saddr != ::1 drop
     }
 }
 EOF

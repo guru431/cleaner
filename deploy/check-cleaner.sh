@@ -20,6 +20,8 @@ ETC=/etc/cleaner
 CERT=$ETC/tls/cert.pem
 GATEWAY="127.0.0.1:30000"
 EXTERNAL="${CLEANER_PROBE_HOST:-1.1.1.1}"
+EXTERNAL6="${CLEANER_PROBE_HOST6:-2606:4700:4700::1111}"
+PROBE_NAME="${CLEANER_PROBE_NAME:-api.deepseek.com}"
 CANARY="${1:-}"
 
 GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; YELLOW=$'\033[0;33m'; NC=$'\033[0m'
@@ -168,18 +170,48 @@ else
         97) miss "войти в контрольную группу не удалось" ;;
         *) ok "${EXTERNAL}:80 отклонён" ;;
     esac
-    sleep 1
-    kernel=$(journalctl -k --since "@$since" --no-pager 2>/dev/null || true)
+    probe "$EXTERNAL6" 443
+    case $? in
+        0) bad "[${EXTERNAL6}]:443 доступен — IPv6 наружу открыт" ;;
+        97) miss "войти в контрольную группу не удалось" ;;
+        *) ok "[${EXTERNAL6}]:443 по IPv6 недоступен" ;;
+    esac
+    if bash -c "echo \$\$ > '$procs' || exit 97; exec setpriv --reuid=cleaner --regid=cleaner --init-groups \
+        timeout 5 getent hosts $PROBE_NAME" >/dev/null 2>&1; then
+        ok "имена разрешаются от учётной записи cleaner (DNS по петле)"
+    else
+        bad "имя $PROBE_NAME от учётной записи cleaner не разрешается — подключения по имени не сработают"
+    fi
+    # Записи ограничены по частоте (30 и 6 в минуту): если служба только что исчерпала предел, повторить пробу.
+    for attempt in 1 2; do
+        sleep 1
+        kernel=$(journalctl -k --since "@$since" --no-pager 2>/dev/null || true)
+        if grep -q "cleaner-egress: .*DST=${EXTERNAL} .*DPT=80 " <<< "$kernel" \
+            && grep -q "cleaner-out: .*DST=${EXTERNAL} .*DPT=443 " <<< "$kernel"; then
+            break
+        fi
+        if [[ $attempt == 1 ]]; then
+            sleep 10
+            since=$(date +%s)
+            probe "$EXTERNAL" 80
+            probe "$EXTERNAL" 443
+        fi
+    done
     if grep -q "cleaner-egress: .*DST=${EXTERNAL} .*DPT=80 " <<< "$kernel"; then
         ok "отказ на порт 80 записан в журнал ядра"
     else
         bad "отказа на порт 80 нет в журнале ядра (cleaner-egress:)"
     fi
     if grep -q "cleaner-out: .*DST=${EXTERNAL} .*DPT=443 " <<< "$kernel"; then
-        ok "соединение на 443 записано в журнал ядра — проба шла через цепочку"
+        ok "соединение на 443 записано в журнал ядра — проба шла через таблицу"
     else
-        bad "соединения на 443 нет в журнале ядра (cleaner-out:) — проба прошла мимо цепочки"
+        bad "соединения на 443 нет в журнале ядра (cleaner-out:) — проба прошла мимо таблицы"
     fi
+fi
+if nft list chain inet cleaner_egress input 2>/dev/null | grep -q "tcp dport ${PORT} ip saddr != { ${CLIENTS}, 127.0.0.0/8 } drop"; then
+    ok "входящие на ${PORT} в таблице cleaner_egress — только из ${CLIENTS} и петли"
+else
+    bad "в таблице cleaner_egress нет входного фильтра порта ${PORT}"
 fi
 if [[ -x /usr/local/sbin/check-egress.sh ]]; then
     bash /usr/local/sbin/check-egress.sh >"$WORK/egress.txt" 2>&1

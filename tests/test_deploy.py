@@ -64,6 +64,10 @@ def test_egress_table_allows_internal_nets_and_443_and_rejects_the_rest():
     )]
     assert order == sorted(order)
     assert "iptables" not in text.replace("iptables-nft", "").split("set -euo pipefail", 1)[1]
+    # Второй слой для входящих на порт службы — тот же, что у правила ufw и настроек сервера.
+    cfg = config.load(DEPLOY / "cleaner.toml")
+    assert f"PORT={cfg.port}" in text.splitlines() and "CLIENTS=example/19" in text.splitlines()
+    assert "tcp dport $PORT ip saddr != { $CLIENTS, 127.0.0.0/8 } drop" in rules
     unit = (DEPLOY / "cleaner-egress.service").read_text(encoding="utf-8").splitlines()
     for line in ("Type=oneshot", "RemainAfterExit=yes", "ExecStart=/usr/local/sbin/cleaner-egress.sh",
                  "After=network-online.target", "Before=cleaner.service", "WantedBy=multi-user.target"):
