@@ -71,16 +71,19 @@ def test_restore_is_fast_on_many_reference_brackets():
         'url("' * 20000, "url(" * 25000, "@import '" * 12000, 'url("\\' * 16000, "url(\\" * 20000, "url('\\'" * 12000,
         "image-set(" * 10000, 'image-set("' * 10000, "src(/*" * 15000, "image-set((((()" * 6000,
         "src(" + "(" * 20000 + ")" * 20000, "image-set(a)" * 8000, "@import '" + "\\'url(\"" * 15000,
+        'u\\72l("' * 12000, "\\75\\72\\6c(" * 10000, "@\\69mport '" * 8000, "image-s\\65t(" * 8000,
+        "\\000075 " * 12000, "s\\000072" * 12000, "\\2d webkit\\2d " * 6000,
     ],
     ids=[
         "quoted", "unquoted", "import", "quoted_escape", "unquoted_escape", "escaped_quotes",
         "image_sets", "image_set_strings", "src_comments", "deep_image_sets", "deep_balanced_src", "closed_image_sets",
-        "string_to_the_end",
+        "string_to_the_end", "escaped_url_strings", "escaped_urls", "escaped_imports", "escaped_image_sets",
+        "spaced_escapes", "six_digit_escapes", "escaped_prefixes",
     ],
 )
 def test_restore_is_fast_on_unclosed_css_urls(text):
     """CSS url(), @import, image-set() и src() без закрывающей кавычки или скобки, с глубокой вложенностью или
-    во множестве не дают квадратичного времени."""
+    во множестве, с экранированными именами не дают квадратичного времени."""
     state = ChatState(chat_id="long", net_key=bytes(32))
     sanitize(state, "почта ivanov@contoso.ru", Settings())
     started = time.perf_counter()
