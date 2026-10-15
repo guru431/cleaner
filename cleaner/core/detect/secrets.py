@@ -573,6 +573,21 @@ def _not_a_value(key: str, value: str) -> bool:
     )
 
 
+def _bitlocker(key: str) -> bool:
+    return all(int(group) % 11 == 0 and int(group) < 65536 * 11 for group in key.split("-"))
+
+
+def _status_code(text: str, m: re.Match[str]) -> bool:
+    """Код из цифр после «код» (_TOKEN_PHRASE) — код ошибки или классификатора (_STATUS_WORD): слово такого кода между «код»
+    и числом или прямо перед «код». Слово перед ним ищется в сорока знаках: поиск по всему тексту назад был бы квадратичным."""
+    if _STATUS_WORD.search(text, m.end("word"), m.start("bare")):
+        return True
+    before = text[max(0, m.start() - 40):m.start()].split()
+    if before and before[-1].lower() in _PREPOSITIONS:
+        before.pop()
+    return bool(before) and _STATUS_WORD.fullmatch(before[-1]) is not None
+
+
 def detect(text: str, ctx: DetectContext) -> list[Span]:
     spans = _private_keys(text) + [
         Span(m.start(), m.end(), EntityType.SECRET, name, validated=True)
@@ -629,18 +644,3 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         spans.append(Span(*m.span("bare"), EntityType.SECRET, name, searchable=_looks_like_password(value)))
     spans += [Span(*m.span("bare"), EntityType.SECRET, name, searchable=False) for m in _PIN.finditer(text)]
     return spans + _library_spans(text, spans)
-
-
-def _bitlocker(key: str) -> bool:
-    return all(int(group) % 11 == 0 and int(group) < 65536 * 11 for group in key.split("-"))
-
-
-def _status_code(text: str, m: re.Match[str]) -> bool:
-    """Код из цифр после «код» (_TOKEN_PHRASE) — код ошибки или классификатора (_STATUS_WORD): слово такого кода между «код»
-    и числом или прямо перед «код». Слово перед ним ищется в сорока знаках: поиск по всему тексту назад был бы квадратичным."""
-    if _STATUS_WORD.search(text, m.end("word"), m.start("bare")):
-        return True
-    before = text[max(0, m.start() - 40):m.start()].split()
-    if before and before[-1].lower() in _PREPOSITIONS:
-        before.pop()
-    return bool(before) and _STATUS_WORD.fullmatch(before[-1]) is not None
