@@ -17,7 +17,7 @@ from cleaner.core.detect.merge import MergedSpan, merge
 from cleaner.core.entities import labels
 from cleaner.core.entities.resolve import ResolvedSpan, Resolver
 from cleaner.core.leakcheck import Leak
-from cleaner.core.types import ChatState, EntityType, Policy, Settings, Span
+from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
 
 DETECTORS = (rules, secrets, infra, dictionary, orgs)
 
@@ -53,8 +53,10 @@ def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext
     value = text[start:end]
     if not _WORD.search(value):
         return None         # одни разделители
-    if any(start < ruled_end and ruled_start < end for ruled_start, ruled_end in span.ruled):
-        return MergedSpan(start, end, span.type, span.sources)      # часть, которую задело правило пользователя
+    ruled = [type_ for ruled_start, ruled_end, type_ in span.ruled if start < ruled_end and ruled_start < end]
+    if ruled:       # часть, которую задело правило пользователя, — тип правила (из нескольких — со строже политикой)
+        policies = ctx.settings.policies
+        return MergedSpan(start, end, max(ruled, key=lambda t: STRICTNESS.get(policies.get(t), 0)), span.sources)
     if span.type is EntityType.DN:
         # Имя атрибута без значения («CN=» перед заменой) ничего не выдаёт.
         return MergedSpan(start, end, EntityType.DN, span.sources) if "=" in value else None

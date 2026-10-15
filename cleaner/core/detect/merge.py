@@ -20,9 +20,10 @@ class MergedSpan:
     # Фрагмент слит из нескольких находок, и ни одна не покрывает его целиком («Иван Иван» в «Иван Иван Иван»): искомы
     # их написания, а не он сам (searchable=False) — иначе цепочка становилась написанием длиной в себя (5.7, шаг 2).
     forms: tuple[str, ...] = ()
-    # Где во фрагменте лежат правила пользователя, поглотившие имя или адрес e-mail (5.7): выданную замену в нём они не
-    # трогают (5.10). mail — поглощён адрес: части вне правил — части адреса (имя входа — ACCOUNT).
-    ruled: tuple[tuple[int, int], ...] = ()
+    # Где во фрагменте лежат правила пользователя, поглотившие имя или адрес e-mail (5.7), и их типы: выданную замену в
+    # нём они не трогают, а часть, задетая правилом, получает его тип (5.10). mail — поглощён адрес: части вне правил —
+    # части адреса (имя входа — ACCOUNT).
+    ruled: tuple[tuple[int, int, EntityType], ...] = ()
     mail: bool = False
     # Фрагмент имени стоит через точку после выданной замены или метки и перед ней (5.10): это часть имени, а не имя.
     follows: bool = False
@@ -181,19 +182,24 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
                     continue
         kept = senior.source == "manual" and _name_kept(text, group, start, end, policies)
         type_ = kept or senior.type
+        ruled, mail = (), False
+        records = [s.type for s in group if s.source != "manual" and s.type in (*_NAME_TYPES, EntityType.EMAIL)]
+        if senior.source == "manual" and not kept and records:
+            ruled = tuple((s.start, s.end, s.type) for s in group if s.source == "manual")
+            mail = EntityType.EMAIL in records
+            # Правило поглотило запись — фрагмент берёт тип того из двух, чья политика строже (при равных — правила):
+            # метка правила не блокировала бы выдачу адреса при EMAIL=BLOCK и восстанавливала бы его при HIDE.
+            record = max(records, key=lambda t: STRICTNESS.get(policies.get(t), 0))
+            if STRICTNESS.get(policies.get(record), 0) > STRICTNESS.get(policies.get(type_), 0):
+                type_ = record
         # Искомым значение делает любая находка того же типа: слово после «Пароль —», которое нашли и словарём чата.
         # Слияние пересекающихся находок, ни одна из которых не покрывает его целиком («Иван Иван» словаря в «Иван Иван
         # Иван …», правило «la la» в «la la la …», цепочка адресов e-mail «a@b.c.a@b.c.a…»), — не значение: искомы
         # написания находок, а цепочка длиной в текст раздувала бы чат, и поиск сверял бы её с каждого слова.
-        searchable = any(s.searchable for s in group if s.type is senior.type)
+        searchable = any(s.searchable for s in group if s.type is type_)
         forms: tuple[str, ...] = ()
         if searchable and not any((s.start, s.end) == (start, end) for s in group):
-            forms = tuple(dict.fromkeys(text[s.start:s.end] for s in group if s.type is senior.type and s.searchable))
+            forms = tuple(dict.fromkeys(text[s.start:s.end] for s in group if s.type is type_ and s.searchable))
             searchable = False
-        ruled, mail = (), False
-        records = {s.type for s in group if s.source != "manual"} & {*_NAME_TYPES, EntityType.EMAIL}
-        if senior.source == "manual" and not kept and records:
-            ruled = tuple((s.start, s.end) for s in group if s.source == "manual")
-            mail = EntityType.EMAIL in records
         merged.append(MergedSpan(start, end, type_, sources, searchable, forms, ruled, mail))
     return _join_names(text, merged)

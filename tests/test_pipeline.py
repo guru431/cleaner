@@ -492,6 +492,38 @@ def test_email_keeps_the_stricter_policy_of_a_retyped_host_part(state, policy):
     assert host.sanitized == "узел <SECRET_2>.domain-1.example" and host.deliverable is (policy is Policy.HIDE)
 
 
+@pytest.mark.parametrize("text, record", [
+    ("почта ivanov@srv.contoso.ru", T.EMAIL), ("узел srv.contoso.ru", T.HOST), ("домен contoso.ru", T.DOMAIN),
+], ids=["email", "host", "domain"])
+@pytest.mark.parametrize("policy", [Policy.BLOCK, Policy.HIDE])
+def test_rule_off_whole_parts_keeps_the_stricter_policy_of_the_record(state, text, record, policy):
+    """Второе ревью, Minor: выделение «contoso» не на целой части поглощало адрес или имя меткой своего типа — при
+    EMAIL=BLOCK выдача не блокировалась, при «скрывать без восстановления» метка восстанавливалась целиком. Фрагмент
+    берёт тип записи, если её политика строже (5.7, шаг 4)."""
+    settings = Settings(policies=default_policies() | {record: policy})
+    ops.mask(state, "contoso", T.TERM)
+    result = sanitize(state, text, settings)
+    entity = state.entities[result.spans[0].entity_id]
+    assert entity.type is record and "contoso" not in result.sanitized
+    assert [state.entities[s.entity_id].type for s in result.blocked] == ([record] if policy is Policy.BLOCK else [])
+    assert (restore(state, result.sanitized, settings).text == text) is (policy is Policy.BLOCK)
+    lenient = Settings(policies=default_policies() | {T.TERM: policy})      # правило строже — его метка, как прежде
+    assert sanitize(state, text, lenient).sanitized == text.rsplit(" ", 1)[0] + " <TERM_1>"
+
+
+def test_rule_parts_of_a_split_record_keep_their_own_types(state):
+    """Рядом с выданной заменой поглощённая запись делится (5.10), и каждая часть, задетая правилом, получает тип своего
+    правила, а не самого длинного: «ivanov» (PERSON) и «fabrikam» (TERM) в ivanov@host-1.fabrikam.ru. Запись строже
+    правила делится так же: политику частей держат их правила."""
+    settings = Settings(policies=default_policies() | {T.EMAIL: Policy.BLOCK, T.TERM: Policy.HIDE})
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    ops.mask(state, "fabrikam", T.TERM)
+    ops.mask(state, "ivanov", T.PERSON)
+    result = sanitize(state, "почта ivanov@host-1.fabrikam.ru", settings)
+    assert result.sanitized == "почта <PERSON_1>@host-1.<TERM_1>"
+    assert restore(state, result.sanitized, settings).text == "почта ivanov@srv01.<TERM_1>"
+
+
 @pytest.mark.parametrize("text, expected", [
     ("почта ivanov@<TERM_1>.northwind.ru", "почта <ACCOUNT_1>@<TERM_1>.domain-3.example"),
     ("почта ivanov@host-1.<ORG_1>", "почта <ACCOUNT_1>@host-1.<ORG_1>"),
