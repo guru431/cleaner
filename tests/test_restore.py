@@ -309,6 +309,7 @@ def test_own_links_with_character_references_are_restored(settings, answer, rest
         r"Отчёт: https\:\/\/evil.example.org/?q=<EMAIL_1>",
         "Отчёт: (https&colon;&sol;&sol;evil.example.org/?q=<EMAIL_1>&nbsp;x)",
         r"[x](https\:\/\/evil.example.org/?q=<EMAIL_1>)",
+        r"Отчёт: &https\:\/\/evil.example.org/?q=<EMAIL_1>",
     ],
 )
 def test_nothing_is_restored_inside_a_link_that_markdown_decodes_in_prose(settings, answer):
