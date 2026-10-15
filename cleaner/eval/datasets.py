@@ -16,7 +16,10 @@ LABELS = {
     "LOCATION": "place",
     "EMAIL": "EMAIL", "PHONE": "PHONE", "PHONE_NUMBER": "PHONE", "INN": "INN", "SNILS": "SNILS", "OMS": "OMS",
     "PASSPORT": "PASSPORT", "DRIVER_LICENSE": "PASSPORT", "MILITARY_ID": "PASSPORT", "BIRTH_CERTIFICATE": "PASSPORT",
-    "CREDIT_CARD": "CARD", "CARD": "CARD", "IP_ADDRESS": "IP", "IP": "IP",
+    "PASSPORT_NUMBER": "PASSPORT", "KPP": "KPP", "OGRN": "OGRN", "OGRNIP": "OGRN",
+    "CREDIT_CARD": "CARD", "CARD": "CARD", "BANK_CARD_NUMBER": "CARD", "IP_ADDRESS": "IP", "IP": "IP",
+    # Токен — секрет по FR-4.1. Адрес целиком и CVC типа в ТЗ не имеют и не измеряются.
+    "TOKEN": "SECRET",
 }
 _NAME_GAP = re.compile(r"[ \t]+|\.[ \t]*")
 

@@ -24,5 +24,21 @@ def test_unknown_labels_are_counted_and_not_measured():
     assert unmapped == Counter({"SECRET_CODE": 1})
 
 
+def test_set_labels_with_a_tz_type_are_measured():
+    """Метки открытых наборов с типом ТЗ входят в измерение; без типа (URL, CVC) — нет."""
+    text = "паспорт 4510 123456, КПП 773601001, ОГРНИП 304500116000157, карта 4111 1111 1111 1111, ключ ghp_x, cvc 123"
+    labels = ["PASSPORT_NUMBER", "KPP", "OGRNIP", "BANK_CARD_NUMBER", "TOKEN", "CVC"]
+    values = ["4510 123456", "773601001", "304500116000157", "4111 1111 1111 1111", "ghp_x", "123"]
+    spans, position = [], 0
+    for label, value in zip(labels, values):
+        start = text.index(value, position)
+        spans.append((start, start + len(value), label))
+        position = start + len(value)
+    unmapped = Counter()
+    record = convert(text, spans, unmapped)
+    assert [s["type"] for s in record["spans"]] == ["PASSPORT", "KPP", "OGRN", "CARD", "SECRET"]
+    assert unmapped == Counter({"CVC": 1})
+
+
 def test_tokens_missing_from_the_text_skip_the_example():
     assert bio_to_spans(["нет"], ["O"], "совсем другое") is None
