@@ -31,6 +31,7 @@ class LocalSettings:
     model: str = "qwen-27b-fast"               # qwen-27b рассуждает и упирается в 2048 токенов ответа слоя 5
     trusted: frozenset[str] = frozenset()      # узлы вне частных сетей, которым администратор доверяет явно
     schema: bool = True                        # схема JSON параметром response_format; False — только в тексте запроса
+    ocr_model: str = ""                        # модель зрения для сканов (example: tencent/HunyuanOCR); пусто — ocr-ru
 
 
 def local_settings(repo: Repository) -> LocalSettings:
@@ -41,6 +42,7 @@ def local_settings(repo: Repository) -> LocalSettings:
         model=repo.setting("local_llm.model") or defaults.model,
         trusted=frozenset(json.loads(trusted)) if trusted else frozenset(),
         schema=(repo.setting("local_llm.schema") or "response_format") == "response_format",
+        ocr_model=repo.setting("local_llm.ocr_model") or defaults.ocr_model,
     )
 
 
@@ -51,6 +53,7 @@ def save_local_settings(repo: Repository, settings: LocalSettings) -> None:
     repo.set_setting("local_llm.model", settings.model)
     repo.set_setting("local_llm.trusted", json.dumps(sorted(settings.trusted)))
     repo.set_setting("local_llm.schema", "response_format" if settings.schema else "prompt")
+    repo.set_setting("local_llm.ocr_model", settings.ocr_model)
 
 
 class Engines:
@@ -83,14 +86,14 @@ class Engines:
             check_address(settings.url, settings.trusted)        # и при каждом использовании, а не только в форме
         except ValueError as exc:
             raise DetectorError(f"Адрес локальной модели отклонён: {exc}") from None
-        config = LocalLLMConfig(settings.url, settings.model, self.key)
+        config = LocalLLMConfig(settings.url, settings.model, self.key, ocr_model=settings.ocr_model)
         with self._lock:
             if self._client is None or self._client.config != config:
                 self._client = LocalLLM(config, self._transport)
             return self._client
 
     def extractor(self) -> Extractor:
-        """Разбор файлов; страницы сканов — в ocr-ru через шлюз (раздел 9)."""
+        """Разбор файлов; страницы сканов — через шлюз в ocr-ru или в модель распознавания из настроек (раздел 9)."""
         return Extractor(self._documents, lambda image, mime: self.client().ocr_page(image, mime), self.max_text_chars)
 
     def ner(self):

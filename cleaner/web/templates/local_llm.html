@@ -26,6 +26,10 @@
         <option value="response_format"{% if current.schema %} selected{% endif %}>параметром response_format</option>
         <option value="prompt"{% if not current.schema %} selected{% endif %}>только в тексте запроса</option>
       </select></label>
+      <label class="field"><span>Модель распознавания сканов</span><span class="control">
+        <input name="ocr_model" value="{{ current.ocr_model }}">
+        <small class="hint">Пусто — служба ocr-ru шлюза (example); имя — модель зрения с ответом OpenAI на том же маршруте /pages/ocr (example: tencent/HunyuanOCR)</small>
+      </span></label>
       <div class="buttons">
         <button class="primary">Сохранить</button>
         <button form="local-check">Проверить сохранённую настройку</button>

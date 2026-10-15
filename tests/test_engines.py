@@ -15,7 +15,9 @@ from cleaner.ingest.extract import ExtractError
 
 def test_local_settings_have_defaults_and_round_trip(repo):
     assert local_settings(repo) == LocalSettings()
-    wanted = LocalSettings("http://example:30000/v1", "qwen-27b-fast", frozenset({"llm.corp.example"}), False)
+    wanted = LocalSettings(
+        "http://example:30000/v1", "qwen-27b-fast", frozenset({"llm.corp.example"}), False, "tencent/HunyuanOCR",
+    )
     save_local_settings(repo, wanted)
     assert local_settings(repo) == wanted
     with pytest.raises(ValueError):
@@ -57,6 +59,19 @@ def test_extractor_sends_scans_to_the_gateway(repo, tmp_path):
     engines = Engines(repo, tmp_path, environ={"CLEANER_GATEWAY_KEY": "k"}, transport=httpx.MockTransport(handler))
     result = engines.extractor().extract("scan.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
     assert (result.text, result.ocr_pages, seen) == ("распознано", (1,), ["/pages/ocr"])
+
+
+def test_extractor_sends_scans_to_the_vision_model_from_the_settings(repo, tmp_path):
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path, json.loads(request.content)["model"]))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "распознано"}, "finish_reason": "stop"}]})
+
+    repo.set_setting("local_llm.ocr_model", "tencent/HunyuanOCR")
+    engines = Engines(repo, tmp_path, environ={"CLEANER_GATEWAY_KEY": "k"}, transport=httpx.MockTransport(handler))
+    result = engines.extractor().extract("scan.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    assert (result.text, seen) == ("распознано", [("/pages/ocr", "tencent/HunyuanOCR")])
 
 
 def test_documents_need_their_models(repo, tmp_path):

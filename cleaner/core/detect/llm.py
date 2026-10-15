@@ -53,7 +53,8 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 class CompletionError(Exception):
     """Ответ локальной модели не получен или не годится. Сообщение — без текста запроса и ответа.
 
-    code: unavailable | auth | http | length | empty | bad_response | ocr_format | ocr_too_large | ocr_empty | ocr_bad_image.
+    code: unavailable | auth | http | length | empty | bad_response | ocr_format | ocr_too_large | ocr_empty | ocr_bad_image
+    | ocr_truncated.
     """
 
     def __init__(self, code: str, message: str):

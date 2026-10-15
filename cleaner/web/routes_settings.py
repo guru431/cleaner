@@ -259,8 +259,9 @@ def save_local_llm(request: Request, form: dict[str, str] = Depends(get_form), v
     if not url or not model:
         raise HTTPException(400, "Укажите адрес и модель")
     trusted = frozenset(line.strip().lower() for line in form.get("trusted", "").splitlines() if line.strip())
+    settings = LocalSettings(url, model, trusted, form.get("schema") != "prompt", form.get("ocr_model", "").strip())
     try:
-        save_local_settings(repo_of(request), LocalSettings(url, model, trusted, form.get("schema") != "prompt"))
+        save_local_settings(repo_of(request), settings)
     except ValueError as exc:
         raise HTTPException(400, f"Адрес отклонён: {exc}") from None
     repo_of(request).audit("settings_changed", viewer.user.id, section="local_llm")

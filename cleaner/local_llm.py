@@ -1,4 +1,5 @@
-"""Клиент шлюза сервера: чат-запросы локальной модели и распознавание страниц ocr-ru (разделы 9 и 11).
+"""Клиент шлюза сервера: чат-запросы локальной модели и распознавание страниц — службой ocr-ru или моделью зрения
+с ответом OpenAI (разделы 9 и 11).
 
 Единственный, кроме egress, модуль пакета с сетевой библиотекой (SEC-1). Адрес — петлевой, частный
 или явно доверенный (SEC-12). Прокси из окружения не используется: запрос с данными чата уходит только
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -28,6 +30,19 @@ _OCR_MESSAGES = {
     "ocr_empty": "на странице не распознано ни одного знака",
     "ocr_bad_image": "распознавание не приняло изображение",
 }
+# Модель зрения с ответом OpenAI (HunyuanOCR на example): системная часть пустая, изображение — первым, указание — вторым,
+# как её учили. Указание — из translate (prompts/ocr_extract_hunyuan_v1.txt), проверенное на его корпусе страниц.
+_OCR_PROMPT = (
+    "Extract all information from the document image and represent it as Markdown.\n"
+    "Tables must be expressed in HTML with <table>/<tr>/<td>; use colspan/rowspan for merged cells.\n"
+    "Formulas must use LaTeX inline (e.g. $E=mc^2$).\n"
+    "Preserve the original languages — do NOT translate.\n"
+    "Follow the natural reading order (top-to-bottom, left-to-right; for multi-column layouts complete one column "
+    "before moving to the next).\n"
+    "For text visible under stamps or seals, transcribe it normally.\n"
+    "Output only the Markdown body — no preamble, no commentary."
+)
+_OCR_MAX_TOKENS = 16384                 # у HunyuanOCR на example контекст 32768, страница-картинка — несколько тысяч
 
 
 class LocalLLMError(CompletionError):
@@ -39,10 +54,13 @@ class LocalLLMConfig:
     base_url: str          # OpenAI-совместимый адрес до /v1, например http://127.0.0.1:30000/v1
     model: str
     api_key: str
-    timeout: float = 300.0
+    # Шлюз llm_routers (example) держит запрос local-chat, пока модель возвращается на карту после слота по требованию
+    # (распознавание скана снимает её) — до 420 с; клиент ждёт дольше.
+    timeout: float = 450.0
+    ocr_model: str = ""    # модель зрения с ответом OpenAI на маршруте /pages/ocr; пусто — служба ocr-ru
 
     def __repr__(self) -> str:          # ключ не попадает ни в логи, ни в тексты исключений
-        return f"LocalLLMConfig(base_url={self.base_url!r}, model={self.model!r})"
+        return f"LocalLLMConfig(base_url={self.base_url!r}, model={self.model!r}, ocr_model={self.ocr_model!r})"
 
 
 def check_address(url: str, trusted: frozenset[str]) -> None:
@@ -132,11 +150,7 @@ class LocalLLM:
             }
         response = self._post(f"{self._base}/chat/completions", body, self.config.timeout)
         _raise_for_status(response)
-        try:
-            choice = response.json()["choices"][0]
-            content, finish = choice["message"].get("content"), choice.get("finish_reason")
-        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
-            raise LocalLLMError("bad_response", "ответ шлюза не разбирается") from None
+        content, finish = _message(response)
         if not isinstance(content, str) or not content.strip():
             if finish == "length":
                 raise LocalLLMError("length", "ответ локальной модели обрезан по длине")
@@ -144,11 +158,14 @@ class LocalLLM:
         return content, finish == "length"
 
     def ocr_page(self, image: bytes, mime: str) -> str:
-        """Markdown одной страницы. Очередь занята или модель грузится — ждём Retry-After и повторяем (раздел 9)."""
+        """Markdown одной страницы: службой ocr-ru или, если задана модель распознавания, моделью зрения (_ocr_chat). Очередь
+        ocr-ru занята или модель грузится — ждём Retry-After и повторяем (раздел 9)."""
         if mime not in _OCR_MIMES:
             raise LocalLLMError("ocr_format", "распознаются только изображения PNG и JPEG")
         if len(image) > _OCR_MAX_BYTES:
             raise LocalLLMError("ocr_too_large", _OCR_MESSAGES["ocr_too_large"])
+        if self.config.ocr_model:
+            return self._ocr_chat(image, mime)
         body = {"model": OCR_MODEL, "image": base64.b64encode(image).decode("ascii")}
         for _ in range(_OCR_ATTEMPTS):
             response = self._post(self.ocr_url, body, OCR_TIMEOUT)
@@ -165,3 +182,53 @@ class LocalLLM:
                 raise LocalLLMError("bad_response", "ответ распознавания не разбирается") from None
             return markdown if isinstance(markdown, str) else ""
         raise LocalLLMError("unavailable", "очередь распознавания занята слишком долго")
+
+    def _ocr_chat(self, image: bytes, mime: str) -> str:
+        """Страница — сообщением с изображением на маршрут /pages/ocr: на example он ведёт в /v1/chat/completions HunyuanOCR, а
+        слот модели поднимает и ждёт шлюз. Обрезанный по длине ответ — отказ, а не половина страницы; пустой ответ и карта
+        блоков без текста (_layout_only) — страница без знаков, как у ocr-ru."""
+        body = {
+            "model": self.config.ocr_model, "temperature": 0, "max_tokens": _OCR_MAX_TOKENS,
+            "messages": [
+                {"role": "system", "content": ""},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(image).decode('ascii')}"}},
+                    {"type": "text", "text": _OCR_PROMPT},
+                ]},
+            ],
+        }
+        response = self._post(self.ocr_url, body, OCR_TIMEOUT)
+        if response.status_code == 413:
+            raise LocalLLMError("ocr_too_large", _OCR_MESSAGES["ocr_too_large"])
+        _raise_for_status(response)
+        content, finish = _message(response)
+        if finish == "length":
+            raise LocalLLMError("ocr_truncated", "распознанный текст страницы обрезан по длине ответа модели")
+        if not isinstance(content, str) or not content.strip() or _layout_only(content):
+            raise LocalLLMError("ocr_empty", _OCR_MESSAGES["ocr_empty"])
+        return content
+
+
+def _message(response: httpx.Response) -> tuple[object, object]:
+    """Текст первого варианта ответа OpenAI и причина его конца."""
+    try:
+        choice = response.json()["choices"][0]
+        return choice["message"].get("content"), choice.get("finish_reason")
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        raise LocalLLMError("bad_response", "ответ шлюза не разбирается") from None
+
+
+def _layout_only(text: str) -> bool:
+    """Ответ HunyuanOCR — карта блоков с координатами без содержимого, а не текст страницы: такой отказ модели на сложных
+    сканах замерил translate (ocr_router.looks_like_layout_json). Проверка узкая — массив объектов без поля с текстом."""
+    text = text.strip()
+    if not text.startswith("[") or "layout_type" not in text:
+        return False
+    try:
+        blocks = json.loads(text)
+    except ValueError:
+        return '"text"' not in text and '"content"' not in text      # оборванный JSON того же вида
+    return isinstance(blocks, list) and bool(blocks) and all(
+        isinstance(block, dict) and not any(str(block.get(key) or "").strip() for key in ("text", "content", "markdown"))
+        for block in blocks
+    )

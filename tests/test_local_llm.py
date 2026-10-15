@@ -102,6 +102,41 @@ def test_page_refusals_have_codes(status, code):
     assert raised.value.code == code
 
 
+VISION = LocalLLMConfig("http://127.0.0.1:4000/v1", "local-chat", "k-test-secret", ocr_model="tencent/HunyuanOCR")
+
+
+def test_page_goes_to_the_vision_model_when_one_is_set():
+    """FINDINGS 15.10.2026, P3: на example маршрут /pages/ocr ведёт в OpenAI-совместимый HunyuanOCR, а не в ocr-ru. С
+    моделью распознавания в настройках страница уходит туда же сообщением: изображение первым, указание вторым."""
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path, json.loads(request.content)))
+        return chat_answer("# Страница")
+
+    assert LocalLLM(VISION, httpx.MockTransport(handler)).ocr_page(b"\xff\xd8\xffimage", "image/jpeg") == "# Страница"
+    path, body = seen[0]
+    assert (path, body["model"], body["temperature"]) == ("/pages/ocr", "tencent/HunyuanOCR", 0)
+    image, prompt = body["messages"][1]["content"]
+    assert image["image_url"]["url"] == "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xffimage").decode("ascii")
+    assert prompt["type"] == "text" and "Markdown" in prompt["text"]
+
+
+@pytest.mark.parametrize(("response", "code"), [
+    (chat_answer("начало страницы", "length"), "ocr_truncated"),
+    (chat_answer(""), "ocr_empty"),
+    (chat_answer('[{"layout_type": "table", "bbox": "(0,0),(999,0),(999,999),(0,999)"}]'), "ocr_empty"),
+    (httpx.Response(413, json={"error": "big"}), "ocr_too_large"),
+    (httpx.Response(503, json={"error": "слот ocr не взят"}), "http"),
+])
+def test_vision_model_refusals_have_codes(response, code):
+    """Та же находка: обрезанная страница — отказ, а не половина текста; пустой ответ и карта блоков без текста (отказ
+    HunyuanOCR, замеренный translate) — страница без знаков; 503 шлюза — после того, как он сам ждал слот."""
+    with pytest.raises(LocalLLMError) as raised:
+        LocalLLM(VISION, httpx.MockTransport(lambda request: response)).ocr_page(b"\x89PNG\r\n\x1a\n", "image/png")
+    assert raised.value.code == code
+
+
 def test_unsupported_page_format_is_refused_without_a_request():
     def handler(request):
         raise AssertionError("запроса быть не должно")
