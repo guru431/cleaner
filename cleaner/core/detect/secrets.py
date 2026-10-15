@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_right
+from collections.abc import Callable
 from functools import lru_cache
 
 from cleaner.core.detect.base import DetectContext
@@ -202,7 +203,7 @@ def _library_hits(squeezed: str) -> dict[str, list[int]]:
     return hits
 
 
-def _unsqueezed(line: str):
+def _unsqueezed(line: str) -> Callable[[int], int]:
     """Позиция в строке со сжатыми рядами пробелов -> позиция в настоящей строке."""
     after: list[int] = []      # первая позиция сжатой строки после ряда
     removed: list[int] = []    # сколько пробелов выброшено до неё
