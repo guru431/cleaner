@@ -83,6 +83,13 @@ def _kind(word: str) -> str:
     return "noun" if parses[0].tag.POS == "NOUN" else "other"
 
 
+@lru_cache(maxsize=8192)
+def part_of_speech(word: str) -> str | None:
+    """Часть речи слова по первому, самому вероятному разбору (NOUN, ADJF, PREP…); None — слова нет в словаре."""
+    morph = _morph()
+    return morph.parse(word)[0].tag.POS if morph.word_is_known(word) else None
+
+
 def common_nouns(value: str) -> bool:
     """Только нарицательные существительные из словаря и служебные слова между ними: «из бухгалтерии», «отдел кадров».
 

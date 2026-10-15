@@ -7,6 +7,7 @@ from collections.abc import Callable
 from functools import lru_cache
 
 from cleaner.core.detect.base import DetectContext
+from cleaner.core.entities.names import part_of_speech
 from cleaner.core.types import EntityType, Span
 
 name = "secrets"
@@ -112,8 +113,8 @@ _SECURE = re.compile(
     re.IGNORECASE,
 )
 # После тире или дефиса в прозе часто идёт не пароль («Пароль — это строка…»). Такое значение
-# отбрасывается, только если это слово-связка или за ним продолжается фраза, а само оно на пароль
-# не похоже; после «:» и «=» берётся любое.
+# отбрасывается, только если это слово прозы (_prose_word) и на пароль оно не похоже; продолжение фразы
+# за ним не в счёт: «Пароль от Wi-Fi — sunflower для гостей» — пароль. После «:» и «=» берётся любое.
 _PHRASE = re.compile(
     r"(?<!\w)(?:пароль|password)(?:[ \t]+[\w-]+){0,3}"
     r"(?P<sep>[ \t]*[:=][ \t]*|[ \t]*[—–][ \t]*|[ \t]+-[ \t]+)" + _VALUE,
@@ -124,7 +125,19 @@ _PROSE = re.compile(r"(?<!\w)(?:пароль|password)(?:\s+is)?\s+(?P<bare>(?!-
 # без дефиса паролем в тексте и так не считается.
 _HYPHENATED_WORD = re.compile(r"[а-яё]+(?:-[а-яё]+)+", re.IGNORECASE)
 _LINKING_WORDS = frozenset({"это", "is", "was", "not", "see", "не", "см"})
-_CLAUSE = re.compile(r"[ \t]+\w")
+# Слова, которые в тексте стоят после «Пароль —» вместо пароля. Русские служебные слова, местоимения,
+# прилагательные, наречия, числительные и глаголы распознаёт словарь (_prose_word), здесь — только то, что он
+# читает существительным; английские — списком.
+_PROSE_WORDS = _LINKING_WORDS | frozenset({
+    "минимум", "рабочий", "строка", "набор", "комбинация", "сочетание", "слово", "фраза", "дата", "номер", "имя",
+    "фамилия",
+    "the", "a", "an", "this", "that", "it", "same", "your", "my", "our", "his", "her", "their", "any", "one",
+    "at", "of", "for", "from", "in", "on", "to", "by", "with", "without", "as", "like", "and", "or", "but",
+    "also", "only", "just", "still", "are", "be", "has", "have", "will", "should", "must", "can", "never",
+    "minimum", "min", "maximum", "more", "less", "old", "new", "empty", "blank", "temporary", "current",
+    "previous", "initial", "usual", "standard", "unchanged", "changed", "expired", "reset", "sent", "stored",
+})
+_RUSSIAN_WORD = re.compile(r"[а-яё]+(?:-[а-яё]+)*", re.IGNORECASE)
 _AUTH = re.compile(
     r"\bauthorization\s*[:=]\s*[\"']?(?:bearer|basic|token|negotiate|ntlm|apikey)\s+(?P<bare>[^\s\"'<>,;]+)",
     re.IGNORECASE,
@@ -289,6 +302,16 @@ def _looks_like_password(value: str) -> bool:
     return len(value) >= 6 and sum(kinds) >= 2 and (kinds[2] or kinds[3])
 
 
+def _prose_word(value: str) -> bool:
+    """Слово фразы после «Пароль —», а не пароль: из _PROSE_WORDS или русское слово словаря, кроме существительного.
+    Существительное и слово не из словаря — значение: «подсолнух», «йцукен» бывают паролями. Цена — русское
+    прилагательное или глагол в роли пароля («Пароль — зелёный») остаётся открытым."""
+    word = value.lower().replace("ё", "е")
+    return word in _PROSE_WORDS or (
+        _RUSSIAN_WORD.fullmatch(word) is not None and part_of_speech(word) not in (None, "NOUN")
+    )
+
+
 def _secret_key(key: str) -> bool:
     return bool(_KEY_WORD.search(key)) and not (_NOT_SECRET_KEY.fullmatch(key) and not _SECRET_END.search(key))
 
@@ -343,8 +366,10 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             continue
         value = text[bounds[0]:bounds[1]]
         dashed = m.group("sep").strip() in ("—", "–", "-")
-        prose = value.lower() in _LINKING_WORDS or _CLAUSE.match(text, bounds[1]) is not None
-        if not dashed or not prose or _looks_like_password(value):
+        # Значение в кавычках написано как есть, а не словом фразы. Русское слово через дефис похоже на пароль
+        # только дефисом («по-прежнему», см. _HYPHENATED_WORD) — его решает словарь.
+        looks = _looks_like_password(value) and not _HYPHENATED_WORD.fullmatch(value)
+        if not dashed or m.group("bare") is None or looks or not _prose_word(value):
             spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PROSE.finditer(text):
         bounds = _value(m)
