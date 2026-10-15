@@ -145,6 +145,35 @@ def test_address_colliding_with_an_open_value_gets_a_label(state):
     assert resolve(other, "10.1.2.5", ("10.1.2.5", T.IP), settings=settings) == ["<IP_1>"]
 
 
+def _padded(address: str) -> str:
+    return ".".join(f"{int(octet):03d}" for octet in address.split("."))
+
+
+@pytest.mark.parametrize(
+    "real, listed",
+    [
+        ("10.1.2.5", None),                                     # частная подмена, записанная с нулями
+        ("8.8.8.8", "203.000.113.001"),
+        ("2a00:1450:4010::65", "2001:0db8:0001:0000:0000:0000:0000:0001"),
+        ("2a00:1450:4010::65", "2001:db8:1:0::1/64"),
+    ],
+)
+def test_address_colliding_with_an_open_value_written_otherwise_gets_a_label(state, real, listed):
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: открытое значение сравнивалось с подменой как текст,
+    и адрес списка «никогда не скрывать» в другой записи не останавливал совпавшую с ним подмену."""
+    if listed is None:
+        listed = _padded(resolve(state, real, (real, T.IP))[0])
+        state = ChatState(chat_id="other", net_key=state.net_key)
+    assert resolve(state, real, (real, T.IP), settings=Settings(never=frozenset({listed}))) == ["<IP_1>"]
+
+
+@pytest.mark.parametrize("listed", ["2001:0db8:0001::0002", "203.000.113.002", "srv-dc01.contoso.ru"])
+def test_open_value_of_another_address_or_not_an_address_leaves_the_surrogate(state, listed):
+    surrogates = resolve(state, "8.8.8.8 и 2a00:1450:4010::65", ("8.8.8.8", T.IP), ("2a00:1450:4010::65", T.IP),
+                         settings=Settings(never=frozenset({listed})))
+    assert surrogates == ["203.0.113.1", "2001:db8:1::1"]
+
+
 @pytest.mark.parametrize(
     "text, real, fake",
     [

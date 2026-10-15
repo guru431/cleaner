@@ -104,6 +104,7 @@ class Resolver:
         self.open_values = settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
         self.real_ips: set[str] = set()
         self._text_addresses: set[str] | None = None
+        self._open_addresses: set[str] | None = None
 
     @staticmethod
     def _dictionary_key(type_: EntityType, value: str) -> str:
@@ -241,7 +242,7 @@ class Resolver:
             while fake is not None and self._address_in_text(fake) and netmap.private_bits(ip) is None:
                 fake = netmap.fake_ip(canonical, self.state)
             collides = (
-                fake in self.real_ips or (T.IP, fake) in self.index or fake in self.open_values
+                fake in self.real_ips or (T.IP, fake) in self.index or self._address_open(fake)
                 or (fake is not None and self._address_in_text(fake))
             )
             if fake is None or collides:
@@ -267,14 +268,16 @@ class Resolver:
                 token = m.group("v6") or m.group()
                 if token.endswith(":") and not token.endswith("::"):
                     token = token[:-1]          # двоеточие после адреса IPv6 — знак препинания («2001:db8:1::1: занят»)
-                try:
-                    ip, prefix = netmap.parse(token)
-                except ValueError:
-                    continue                    # не адрес — с подменой не совпадёт
-                self._text_addresses.add(str(ip))
-                if prefix is not None:
-                    self._text_addresses.add(f"{ip}/{prefix}")
+                self._text_addresses |= netmap.canonical_forms(token)    # не адрес — с подменой не совпадёт
         return address in self._text_addresses
+
+    def _address_open(self, address: str | None) -> bool:
+        """Совпадает ли подмена с открытым адресом (список «никогда не скрывать», правило «открыть») в любой его записи:
+        «2001:0db8:0001::0001» в списке — это подмена 2001:db8:1::1. Открытый адрес показывается в текстах чата как есть,
+        и восстановление превратило бы его в оригинал другой сущности. Список разбирается при первой подмене адреса."""
+        if self._open_addresses is None:
+            self._open_addresses = netmap.addresses(self.open_values)
+        return address in self._open_addresses
 
     def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
         key = macsid.mac_key(value)

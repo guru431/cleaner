@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from cleaner.core.detect.base import DetectContext
+from cleaner.core.entities import netmap
 from cleaner.core.types import EntityType, Policy, Span
 
 
@@ -91,13 +92,22 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
             groups.append([span])
             reach = span.end
     merged: list[MergedSpan] = []
+    opened: set[str] | None = None      # адреса списков исключений в каноническом виде — при первом адресе текста
     for group in groups:
         start, end = group[0].start, max(s.end for s in group)
         sources = tuple(dict.fromkeys(s.source for s in group))
         value = text[start:end].lower()
-        # Списки исключений действуют только на точное значение и не отменяют решение пользователя.
-        if "manual" not in sources and (value in ctx.settings.never or value in ctx.unmask):
-            continue
         senior = min(group, key=lambda s: (_rank(s), s.start - s.end))
+        # Списки исключений действуют только на точное значение и не отменяют решение пользователя. Адрес — то же
+        # значение в любой записи: «2a00:1450:4010::65» в тексте и «2a00:1450:4010:0:0:0:0:65» в списке, «10.1.2.5» и
+        # «010.001.002.005», «10.1.2.0» и «10.1.2.0/24» (длину /24 и больше слой 3 во фрагмент не берёт).
+        if "manual" not in sources:
+            if value in ctx.settings.never or value in ctx.unmask:
+                continue
+            if senior.type is EntityType.IP:
+                if opened is None:
+                    opened = netmap.addresses(ctx.settings.never | ctx.unmask)
+                if netmap.canonical_forms(value) & opened:
+                    continue
         merged.append(MergedSpan(start, end, senior.type, sources))
     return _join_names(text, merged)

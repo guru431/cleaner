@@ -148,6 +148,41 @@ def test_own_label_pasted_back_creates_nothing(state, settings):
     assert len(state.entities) == 1
 
 
+@pytest.mark.parametrize(
+    "listed, text",
+    [
+        ("2a00:1450:4010:0:0:0:0:65", "узел 2a00:1450:4010::65"),
+        ("2a00:1450:4010::65", "узел 2A00:1450:4010:0::0065"),
+        ("010.001.002.005", "узел 10.1.2.5"),
+        ("10.1.2.5", "узел 010.001.002.005"),
+        ("10.1.2.0/24", "сеть 10.1.2.0/24"),
+    ],
+)
+def test_never_listed_address_written_otherwise_stays_open(state, settings, listed, text):
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: список «никогда не скрывать» сравнивался с адресом
+    текста как запись. Адрес скрывался и до записи в список — у его сущности есть написание, и проверка утечек
+    не должна принять открытый адрес за утечку."""
+    sanitize(state, text, settings)
+    result = sanitize(state, text, Settings(never=frozenset({listed})))
+    assert (result.sanitized, result.deliverable) == (text, True)
+
+
+def test_unmasked_address_written_otherwise_stays_open(state, settings):
+    sanitize(state, "узел 2a00:1450:4010::65", settings)
+    ops.unmask(state, "2a00:1450:4010:0:0:0:0:65")
+    result = sanitize(state, "узел 2a00:1450:4010::65", settings)
+    assert (result.sanitized, result.deliverable) == ("узел 2a00:1450:4010::65", True)
+
+
+@pytest.mark.parametrize(
+    "listed, text",
+    [("2a00:1450:4010::66", "узел 2a00:1450:4010::65"), ("10.1.2.50", "узел 10.1.2.5"), ("10.1.2.0/24", "узел 10.1.2.5")],
+)
+def test_never_listed_address_does_not_open_another_one(state, listed, text):
+    result = sanitize(state, text, Settings(never=frozenset({listed})))
+    assert result.sanitized != text and result.deliverable
+
+
 def test_manual_rules(state, settings):
     state.rules.append(ChatRule("mask", "Проект Заря", T.TERM))
     state.rules.append(ChatRule("unmask", "10.1.2.5"))
