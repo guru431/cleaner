@@ -102,6 +102,12 @@ _AUTH = re.compile(
     re.IGNORECASE,
 )
 _BEARER = re.compile(r"(?<!\w)bearer\s+(?P<bare>[A-Za-z0-9._~+/=-]{16,})", re.IGNORECASE)
+# После «bearer» в тексте бывают слова («bearer authentication», «Bearer authentication-scheme»):
+# в настоящем токене есть цифры или заглавные внутри слова.
+_WORDS = re.compile(r"[A-Za-z][a-z]*(?:[-./][A-Za-z][a-z]*)*")
+# Под ключом со словом секрета в коде часто стоит не значение, а вызов команды PowerShell
+# («$pwd = Read-Host», «$token = Invoke-RestMethod»).
+_CMDLET = re.compile(r"(?:Get|Read|ConvertTo|ConvertFrom|Import|Invoke|New)-[A-Z][A-Za-z]*")
 
 _NOT_SECRET = frozenset({
     "true", "false", "yes", "no", "none", "null", "nil", "on", "off", "required", "optional",
@@ -117,9 +123,10 @@ _TEMPLATE = re.compile(
 # Правила npm, JWT и OpenAI без начала слова перебирают строку от каждого «//», «eyJ», «sk-» —
 # квадратичное время под общей блокировкой интерпретатора, то есть остановка службы для всех.
 # Их токены находят свои правила: _TOKEN (npm_, sk-), _JWT и ключ «_authToken=» в .npmrc.
+# IP-адреса — работа слоя 3: там они получают подмену и восстанавливаются (спецификация 6.2).
 _SKIPPED_PLUGINS = frozenset({
     "Base64HighEntropyString", "HexHighEntropyString", "KeywordDetector",
-    "NpmDetector", "JwtTokenDetector", "OpenAIDetector",
+    "NpmDetector", "JwtTokenDetector", "OpenAIDetector", "IPPublicDetector",
 })
 # Правила IBM, Cloudant и Softlayer разбирают пробелы вокруг «=» тремя повторами подряд (« *», « +»,
 # « *»): на длинном ряде пробелов это кубическое время. Ряд сжимается до одного пробела — повторы
@@ -196,6 +203,18 @@ def _looks_like_password(value: str) -> bool:
     return len(value) >= 6 and sum(kinds) >= 2 and (kinds[2] or kinds[3])
 
 
+def _not_a_value(key: str, value: str) -> bool:
+    """Значение под ключом со словом секрета, которое секретом не является: имя той же переменной
+    («cancellationToken: cancellationToken», «accessToken: AccessToken;»; но «password: password» —
+    слабый пароль), вызов команды и число под ключом токена — счётчик («max_new_tokens: 1024»).
+    Токенов из одних цифр не бывает, а пароль из цифр обычен, поэтому числа — только у «token»."""
+    return (
+        (value.lower() == key.lower() and not _KEY_WORD.fullmatch(key))
+        or _CMDLET.fullmatch(value) is not None
+        or (value.isdigit() and all(word.lower() == "token" for word in _KEY_WORD.findall(key)))
+    )
+
+
 def detect(text: str, ctx: DetectContext) -> list[Span]:
     spans = [
         Span(m.start(), m.end(), EntityType.SECRET, name, validated=True)
@@ -213,13 +232,13 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             continue
         value = _VALUE_AT.match(text, m.end())
         bounds = _value(value, minimum=2) if value else None
-        if bounds:
+        if bounds and not _not_a_value(key, text[bounds[0]:bounds[1]]):
             spans.append(Span(*bounds, EntityType.SECRET, name))
             hidden_until = bounds[1]
     for pattern in (_XML, _URL, _CLI, _SECURE, _AUTH, _BEARER):
         for m in pattern.finditer(text):
             bounds = _value(m, minimum=2 if pattern is _CLI else 3)
-            if bounds:
+            if bounds and not (pattern in (_AUTH, _BEARER) and _WORDS.fullmatch(text, *bounds)):
                 spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PHRASE.finditer(text):
         bounds = _value(m)

@@ -226,3 +226,43 @@ def test_pair_inside_another_value_is_still_found():
 def test_password_without_a_login_in_a_url_is_found():
     """Обзор партии P1: стандартная запись Redis «redis://:пароль@хост»."""
     assert found("redis://:Qwerty12@cache.contoso.ru") == {"Qwerty12"}
+
+
+@pytest.mark.parametrize("text", ["Сервер 85.143.10.20", "сборка 5.0.10.12", "listen 0.0.0.0:443"])
+def test_ip_addresses_are_left_to_layer_3(text):
+    """Находка «false SECRET … hits»: правило IP из detect-secrets делало адрес секретом без восстановления,
+    а адреса получают подмену в слое 3 (спецификация 6.2)."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '"max_new_tokens": 1024', '"maxNewTokens": "1024"', "cached_tokens: 12",
+        "cancellationToken: cancellationToken", "accessToken: AccessToken;", "db_password = db_password",
+        "$pwd1 = Read-Host -AsSecureString", "$env:DB_PASSWORD = Get-Content .\\pass.txt",
+        "Authorization: bearer authentication", "Bearer authentication-scheme",
+        "bearer authentication/authorization",
+    ],
+)
+def test_counters_and_code_under_secret_keys_are_left_alone(text):
+    """Находка «false SECRET … hits»: счётчик токенов, имя той же переменной, вызов команды и слова
+    после «bearer» — не секреты, а каждое такое число потом скрывалось во всём чате."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("password=123456", "123456"),
+        ("password: password", "password"),
+        ("accessToken: AccessToken1;", "AccessToken1"),
+        ("$pwd1 = Qwerty123", "Qwerty123"),
+        ("$pwd1 = Read-Host1", "Read-Host1"),
+        ("api_token=9f8e7d6c5b4a", "9f8e7d6c5b4a"),
+        ("Authorization: Bearer Zx81kLmN02pQ", "Zx81kLmN02pQ"),
+        ("bearer Zx81kLmNoPqRsTuVwX", "Zx81kLmNoPqRsTuVwX"),
+    ],
+)
+def test_values_next_to_counters_and_code_are_still_found(text, value):
+    assert found(text) == {value}
