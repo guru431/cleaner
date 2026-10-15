@@ -6,7 +6,9 @@ import math
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 
+from cleaner.storage.repo import User
 from cleaner.web import auth
 from cleaner.web.deps import SESSION_COOKIE, Viewer, get_form, get_viewer, page, repo_of
 
@@ -32,23 +34,34 @@ async def _login_fields(request: Request) -> dict[str, str]:
     return {key: value for key, value in form.items() if isinstance(value, str)}
 
 
-# Обычная функция, а не async: FastAPI выполняет её в пуле потоков, и Argon2 (десятки миллисекунд
-# и 64 МБ на попытку) не останавливает остальные запросы.
+# async: место для Argon2 (десятки миллисекунд и 64 МБ на попытку) вход ждёт в цикле событий и не держит
+# поток общего пула, которым обслуживаются все страницы (auth.check_password). Таблица неудач и база —
+# в пуле потоков, как у обычных маршрутов: цикл событий не должен ждать их замков.
 @router.post("/login")
-def login(request: Request, form: dict[str, str] = Depends(_login_fields)) -> Response:
-    repo, throttle = repo_of(request), request.app.state.throttle
+async def login(request: Request, form: dict[str, str] = Depends(_login_fields)) -> Response:
     expected = request.cookies.get(LOGIN_COOKIE, "")
     if not expected or not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), expected.encode("utf-8")):
         return _login_page(request, auth.new_token(), 403, "Форма устарела — попробуйте ещё раз")
     name = str(form.get("login", "")).strip()
-    wait = throttle.wait(name)
+    wait, user = await run_in_threadpool(_account, request, name)
     if wait:
         return _login_page(request, expected, 429, f"Слишком много попыток. Повторите через {math.ceil(wait)} с")
-    user = repo.user_by_login(name)
     try:
-        password_ok = auth.verify_password(user.password_hash if user else None, str(form.get("password", "")))
+        password_ok = await auth.check_password(user.password_hash if user else None, str(form.get("password", "")))
     except auth.Busy:                   # пароль не проверялся: это не неудачная попытка
         return _login_page(request, expected, 503, "Сервер занят проверкой других входов — попробуйте позже")
+    return await run_in_threadpool(_logged_in, request, expected, name, user, password_ok)
+
+
+def _account(request: Request, name: str) -> tuple[float, User | None]:
+    """Пауза логина после неудач, а без паузы — его учётная запись."""
+    wait = request.app.state.throttle.wait(name)
+    return wait, None if wait else repo_of(request).user_by_login(name)
+
+
+def _logged_in(request: Request, expected: str, name: str, user: User | None, password_ok: bool) -> Response:
+    """Итог проверки: неудача идёт в счёт паузы и в журнал, успех открывает сессию."""
+    repo, throttle = repo_of(request), request.app.state.throttle
     if not password_ok or user.disabled:
         throttle.failed(name)
         repo.audit("login_failed", user.id if user else None)

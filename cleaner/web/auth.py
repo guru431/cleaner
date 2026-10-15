@@ -1,9 +1,11 @@
 """Пароли, токены сессий, ограничение попыток входа (раздел 13 спецификации)."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from argon2 import PasswordHasher
@@ -13,11 +15,13 @@ from cleaner.clock import Clock
 
 MIN_PASSWORD = 12
 _hasher = PasswordHasher()          # Argon2id с параметрами библиотеки по умолчанию
-# Проверка берёт 64 МиБ, а вход выполняется в пуле потоков — до сорока анонимных проверок разом, около
-# 2,5 ГиБ. Одновременно идут не больше HASH_SLOTS; остальные ждут места не дольше HASH_WAIT секунд.
+# Хэш берёт 64 МиБ: анонимных входов разом может быть сколько угодно. Argon2 считается только в своём пуле
+# из HASH_SLOTS потоков, и очередь к нему — задания пула, а не потоки: вход ждёт места в цикле событий
+# и не держит потоков общего пула Starlette (их сорок, ими же обслуживаются все страницы). Вход, не
+# получивший места за HASH_WAIT секунд, снимает своё задание; хэш нового пароля ждёт в той же очереди.
 HASH_SLOTS = 4
 HASH_WAIT = 5.0
-_hashing = threading.BoundedSemaphore(HASH_SLOTS)
+_hashing = ThreadPoolExecutor(HASH_SLOTS, thread_name_prefix="cleaner-argon2")
 
 
 class Busy(Exception):
@@ -25,25 +29,33 @@ class Busy(Exception):
 
 
 def hash_password(password: str) -> str:
+    """Хэш нового пароля. Ждёт места без срока: впереди в очереди только входы, а каждый из них
+    уходит из неё не позже чем через HASH_WAIT."""
     if len(password) < MIN_PASSWORD:
         raise ValueError(f"пароль короче {MIN_PASSWORD} знаков")
-    return _hasher.hash(password)
+    return _hashing.submit(_hasher.hash, password).result()
 
 
 def verify_password(password_hash: str | None, password: str) -> bool:
-    """Для неизвестного логина хэш всё равно считается: по времени ответа логины не различить."""
-    if not _hashing.acquire(timeout=HASH_WAIT):
-        raise Busy()
+    """Для неизвестного логина хэш всё равно считается: по времени ответа логины не различить.
+    Выполняется в пуле Argon2 (check_password)."""
+    if password_hash is None:
+        _hasher.hash(password)
+        return False
     try:
-        if password_hash is None:
-            _hasher.hash(password)
-            return False
-        try:
-            return _hasher.verify(password_hash, password)
-        except (VerificationError, InvalidHashError):
-            return False
-    finally:
-        _hashing.release()
+        return _hasher.verify(password_hash, password)
+    except (VerificationError, InvalidHashError):
+        return False
+
+
+async def check_password(password_hash: str | None, password: str) -> bool:
+    """Проверка пароля при входе: место в пуле Argon2 ждётся в цикле событий, без потока."""
+    job = _hashing.submit(verify_password, password_hash, password)
+    result = asyncio.wrap_future(job)
+    done, _ = await asyncio.wait({result}, timeout=HASH_WAIT)
+    if not done and job.cancel():       # не началась — места заняты; началась в последний момент — дождаться её
+        raise Busy()
+    return await result
 
 
 def new_token() -> str:
@@ -58,7 +70,7 @@ def token_hash(token: str) -> str:
 class Throttle:
     """После пяти неудач подряд вход по логину откладывается: 1, 2, 4… секунды, не больше 5 минут.
 
-    Вход выполняется в пуле потоков, поэтому записи меняются под замком.
+    Неудачи и успехи входа записываются из пула потоков, поэтому записи меняются под замком.
     """
 
     FREE = 5
