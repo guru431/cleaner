@@ -3,7 +3,9 @@ import pytest
 from cleaner.core.detect import infra
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities import hostmap
-from cleaner.core.types import DictEntry, Settings
+from cleaner.core.pipeline import sanitize
+from cleaner.core.restore import restore
+from cleaner.core.types import ChatState, DictEntry, Settings
 from cleaner.core.types import EntityType as T
 
 CTX = DetectContext(Settings())
@@ -180,3 +182,25 @@ def test_domain_login_is_found_whatever_the_domain_name(domain):
 def test_host_after_a_url_login_is_found_before_any_closer(closer):
     text = f"«ssh://ivanov@srv-db01.corp.contoso.ru{closer} дальше"
     assert (T.HOST, "srv-db01.corp.contoso.ru") in found(text), text
+
+
+def test_name_under_an_issued_surrogate_domain_is_found():
+    """FINDINGS P2 «Detection: a real host name under an issued surrogate domain is not found»."""
+    ctx = DetectContext(Settings(), issued_domains=frozenset({"domain-1.example"}))
+    for text in (
+        "узел srv-db02.domain-1.example.", "https://SRV-DB02.DOMAIN-1.EXAMPLE/app", r"\\srv-db02.domain-1.example\c$",
+    ):
+        assert {type_ for type_, _ in found(text, ctx)} == {T.HOST}, text
+    assert values("узел srv-db02.domain-1.example") == set()        # подмену не выдавали: имя IANA
+    assert values("узел srv-db02.domain-2.example, домен domain-1.example", ctx) == set()
+
+
+def test_real_host_typed_under_an_issued_domain_is_masked_and_restored():
+    state = ChatState(chat_id="issued", net_key=bytes(32))
+    assert sanitize(state, "Домен contoso.ru", Settings()).sanitized == "Домен domain-1.example"
+    result = sanitize(state, "Узел srv-db02.domain-1.example, почта mail.domain-1.example", Settings())
+    assert result.sanitized == "Узел host-1.domain-1.example, почта mail.domain-1.example"
+    assert restore(state, result.sanitized, Settings()).text == "Узел srv-db02.contoso.ru, почта mail.contoso.ru"
+    again = "Узел host-1.domain-1.example"          # выданная часть перед подменой — та же подмена
+    assert sanitize(state, again, Settings()).sanitized == again
+    assert len(state.entities) == 2

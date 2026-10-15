@@ -116,6 +116,14 @@ def well_known(value: str, ctx: DetectContext) -> bool:
     return any(".".join(parts[i:]) in listed for i in range(len(parts)))
 
 
+def _under_issued(value: str, ctx: DetectContext) -> bool:
+    """Имя под выданной чатом подменой домена («srv-db02.domain-1.example»): «example» в нём общеизвестно,
+    но части перед подменой вписал человек — это настоящие имена. Выданные части («host-1») и
+    общеизвестные («www») конвейер оставляет как есть (pipeline._outside)."""
+    parts = value.lower().split(".")
+    return len(parts) > 2 and ".".join(parts[-2:]) in ctx.issued_domains
+
+
 def _name_type(value: str) -> EntityType:
     left, registrable = hostmap.split_name(value)
     return EntityType.DOMAIN if registrable and not left else EntityType.HOST
@@ -139,7 +147,9 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
     for pattern in (_URL_HOST, _UNC_HOST, _PARAM_HOST):
         for m in pattern.finditer(text):
             value = _HOST_PREFIX.match(m.group("host")).group().rstrip(".")     # «…contoso.ru», «…ru,»
-            if not re.fullmatch(r"[\w.-]+", value) or _is_address(value) or well_known(value, ctx):
+            if not re.fullmatch(r"[\w.-]+", value) or _is_address(value):
+                continue
+            if well_known(value, ctx) and not _under_issued(value, ctx):
                 continue
             start = m.start("host")
             yield Span(start, start + len(value), _name_type(value), name)
@@ -148,7 +158,7 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
             yield Span(m.start("host"), m.end("host"), EntityType.HOST, name)
     for m in _DOTTED.finditer(text):
         value = m.group()
-        if not well_known(value, ctx) and _plausible(value, text, m.end(), ctx):
+        if _under_issued(value, ctx) or (not well_known(value, ctx) and _plausible(value, text, m.end(), ctx)):
             yield Span(m.start(), m.end(), _name_type(value), name)
 
 
