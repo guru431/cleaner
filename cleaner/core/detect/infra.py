@@ -216,15 +216,8 @@ def _name_type(value: str) -> EntityType:
 
 def _plausible(value: str, text: str, end: int, ctx: DetectContext) -> bool:
     """Имя с точками вне сетевого контекста: похоже ли оно на узел, а не на код или файл."""
-    labels = value.split(".")
-    if any(label != label.lower() and label != label.upper() for label in labels):
-        return False        # смешанный регистр внутри части: System.Net
-    if all(label.isdigit() for label in labels[:-1]):
-        return False        # номер версии: 1.2.3.dev
-    if labels[-1].lower() in ctx.builtin.ambiguous_suffixes:
-        return False        # расширение файла или слово из кода
-    if text[end:end + 1] == "(":
-        return False        # вызов метода
+    if hostmap.code_like(value, ctx.builtin.ambiguous_suffixes) or text[end:end + 1] == "(":
+        return False        # System.Net, 1.2.3.dev, README.md, вызов метода
     return hostmap.has_known_suffix(value)
 
 

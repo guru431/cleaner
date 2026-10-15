@@ -228,13 +228,15 @@ def test_restore_is_fast_on_unclosed_css_urls(text):
         '<a href="https:' + " a" * 50000 + '">', '<a href="' + "https: @" * 20000 + '">', '<a href="' + "//a b " * 20000 + '">',
         # Голый адрес с «\» читается и с «\» как «%5C» (_readings): имя пользователя тянется через неё.
         "https://a\\x@" * 10000, "https:a\\" * 15000, "file:\\\\C:" * 12000,
+        # Имя без схемы, с которого ссылка linkify-it не начинается: путь читается только у ссылки (4,7 с, квадратично).
+        "/a.ru" * 20000,
     ],
     ids=[
         "brackets", "arguments", "open_tags", "spaced_label", "bare_links", "file_links", "slashes",
         "backslashes", "mixed_slashes", "unc_paths", "schemes", "schemes_without_slashes", "schemes_in_userinfo",
         "file_backslashes", "at_signs", "schemes_with_at_signs", "empty_users",
         "spaced_user", "spaced_schemes_with_at_signs", "spaced_slashes",
-        "encoded_backslashes", "schemes_with_backslashes", "drive_letters",
+        "encoded_backslashes", "schemes_with_backslashes", "drive_letters", "linkify_names",
     ],
 )
 def test_restore_is_fast_on_many_tags_arguments_and_bare_links(text):

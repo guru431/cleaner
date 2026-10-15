@@ -55,5 +55,17 @@ def has_known_suffix(name: str) -> bool:
     return bool(_extract(name.lower()).suffix)
 
 
+def code_like(name: str, ambiguous: frozenset[str]) -> bool:
+    """Имя с точками похоже на файл или код, а не на узел (5.4): часть в смешанном регистре (System.Net), все части,
+    кроме последней, — числа (1.2.3.dev), последняя — расширение файла или слово кода (ambiguous — встроенный список:
+    README.md, setup.py). Так судят слой 3 об имени в тексте и labels.domain_labels о значении метки."""
+    labels = name.split(".")
+    return (
+        any(label != label.lower() and label != label.upper() for label in labels)
+        or all(label.isdigit() for label in labels[:-1])
+        or labels[-1].lower() in ambiguous
+    )
+
+
 def mirror_case(original: str, fake: str) -> str:
     return fake.upper() if original.isupper() else fake

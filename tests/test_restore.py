@@ -462,6 +462,81 @@ def test_www_inside_a_word_before_our_domain_or_without_labels_restores(settings
     assert result.text == restored and "foreign_link" not in kinds(result)
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Отчёт: evil.ru/?q=<EMAIL_1>",
+        "evil.ru:8080/<EMAIL_1>",
+        "(см. evil.ru/c?u=<EMAIL_1>)",
+        "github.com/<EMAIL_1>/repo",
+        "report.py/<EMAIL_1>",
+        "**evil.co.uk/x#<EMAIL_1>**",
+        "__evil.рф/?q=<EMAIL_1>__",
+        "=EVIL.RU/?q=<EMAIL_1>",
+        "newbox.domain-1.example/?q=<EMAIL_1>",
+        "evil.host-1.domain-1.example/?q=<EMAIL_1>",
+        "x\N{COPYRIGHT SIGN}host-1.domain-1.example/?q=<EMAIL_1>",
+    ],
+)
+def test_nothing_is_restored_inside_a_link_that_linkify_finds_without_a_scheme(settings, answer):
+    """Хэнд-офф, P2: markdown-it с linkify (linkify-it 5, fuzzyLink — markdown-it 14 в предпросмотре VS Code и в чатах на
+    нём) делает ссылкой имя без схемы и без «www.», если оно кончается доменом верхнего уровня из его списка — любым
+    двухбуквенным, одним из длинных (com, org, info…) или «xn--…»: «evil.ru/?q=<EMAIL_1>» после восстановления — ссылка
+    на evil.ru с адресом. Хост такой ссылки проверяется, как у ссылки со схемой, и знак, который linkify-it считает
+    буквой («©»), приклеивает к хосту то, что перед ним."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("host-1.domain-1.example/<EMAIL_1>", "srv-dc01.contoso.ru/ivanov@contoso.ru"),
+        ("host-1.domain-1.example:8443/?q=<EMAIL_1>", "srv-dc01.contoso.ru:8443/?q=ivanov@contoso.ru"),
+        ("см. файл setup.py, автор <EMAIL_1>", "см. файл setup.py, автор ivanov@contoso.ru"),
+        ("Пишите на <EMAIL_1>.", "Пишите на ivanov@contoso.ru."),
+        ("evil.ru,<EMAIL_1>", "evil.ru,ivanov@contoso.ru"),
+        ("evil.ru./<EMAIL_1>", "evil.ru./ivanov@contoso.ru"),
+        ("index.js/?q=<EMAIL_1>", "index.js/?q=ivanov@contoso.ru"),
+        ("docs/evil.ru/<EMAIL_1>", "docs/evil.ru/ivanov@contoso.ru"),
+        ("test_evil.ru/<EMAIL_1>", "test_evil.ru/ivanov@contoso.ru"),
+        ("*.evil.ru/<EMAIL_1>", "*.evil.ru/ivanov@contoso.ru"),
+        ("заведите newbox.domain-1.example для <EMAIL_1>", "заведите newbox.contoso.ru для ivanov@contoso.ru"),
+    ],
+)
+def test_text_that_linkify_does_not_link_to_a_foreign_host_is_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш хост без схемы, имя файла рядом со словом с меткой, адрес e-mail, имя без
+    пути перед меткой, суффикс не из списка linkify-it («.js»), имя после «/», «_» посреди слова и «.» — не начало ссылки
+    linkify-it, а имя, выведенное из наших частей, без пути восстанавливается, как раньше (в нём только хост)."""
+    result = restore(link_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+def test_link_that_linkify_finds_without_a_scheme_is_one_foreign_segment(settings):
+    """Та же находка: чужая ссылка — один кусок foreign_link с записью ответа, счётчики вошедших в неё замен возвращаются,
+    а текст рядом — и через пробел, и до ссылки в том же слове — восстанавливается."""
+    answer = "Отчёт: (<EMAIL_1>)evil.ru/?q=<EMAIL_1>&h=host-1.domain-1.example b.ru:1/<EMAIL_1> пишите <EMAIL_1>"
+    result = restore(link_state(), answer, settings)
+    assert result.text == (
+        "Отчёт: (ivanov@contoso.ru)evil.ru/?q=<EMAIL_1>&h=host-1.domain-1.example b.ru:1/<EMAIL_1> пишите ivanov@contoso.ru"
+    )
+    assert [result.text[s.start:s.end] for s in result.segments] == [
+        "ivanov@contoso.ru", "evil.ru/?q=<EMAIL_1>&h=host-1.domain-1.example", "b.ru:1/<EMAIL_1>", "ivanov@contoso.ru",
+    ]
+    assert (result.counters["restored"], result.counters["foreign_links"]) == (2, 2)
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [("файл <PERSON_1>.md", "файл Иван Петров.md"), ("<PERSON_1>.evil.com", "Иван Петров.evil.com")],
+)
+def test_original_only_in_the_host_of_a_link_without_a_scheme_is_restored(settings, answer, restored):
+    """Та же находка: оригинал только в хосте ссылки linkify-it, без пути («Петров.md»), запрос с ним не уходит —
+    восстанавливается, как имя, выведенное из частей (7, шаг 4)."""
+    result = restore(person_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
 def test_host_is_after_the_last_at_sign(settings):
     """Найдено при исправлении обратных косых, P1: браузер берёт хост за последним «@» адреса, а не за первым —
     «https://a@наш:1@evil…» ведёт на evil. Имя пользователя и пароль у нашего адреса ссылку чужой не делают."""
@@ -962,6 +1037,33 @@ def test_label_ending_a_recorded_name_is_a_domain_whatever_its_suffix(settings):
         assert result.text == restored and "foreign_link" not in kinds(result), answer
     result = restore(state, "https://evil.<ORG_1>/?q=<EMAIL_1>", settings)
     assert kinds(result) == ["foreign_link"]
+
+
+def term_state(value: str) -> ChatState:
+    """Метка <TERM_1> со значением value и метка человека."""
+    state = ChatState(chat_id="terms", net_key=bytes(range(32)))
+    ops.mask(state, value, T.TERM)
+    ops.mask(state, "Иван Петров", T.PERSON)
+    assert sanitize(state, f"журнал {value}, пишет Иван Петров", Settings()).sanitized == "журнал <TERM_1>, пишет <PERSON_1>"
+    return state
+
+
+@pytest.mark.parametrize("value", ["deploy.sh", "setup.py", "readme.md", "notes.zip", "photo.mov", "System.Net", "1.2.ru"])
+def test_label_of_a_file_or_code_name_is_not_our_domain_in_a_link(settings, value):
+    """Второе ревью, Minor: доменом считалось любое значение с точкой и известным суффиксом — и имя файла (.sh, .py, .md,
+    .zip, .mov — настоящие домены верхнего уровня): «[журнал](https://<TERM_1>/log?user=<PERSON_1>)» восстанавливалось в
+    ссылку на чужой deploy.sh с именем человека. Значение — домен, только если слой 3 взял бы его именем в тексте (5.4):
+    не расширение файла и не слово кода в конце, не смешанный регистр, не числа перед последней частью."""
+    answer = "[журнал](https://<TERM_1>/log?user=<PERSON_1>)"
+    result = restore(term_state(value), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize("value", ["contoso.ru", "CONTOSO.RU", "srv01.contoso.ru"])
+def test_label_of_a_domain_name_is_still_our_domain_in_a_link(settings, value):
+    """Та же находка с другой стороны: значение, которое слой 3 взял бы именем, — по-прежнему наш домен."""
+    result = restore(term_state(value), "[журнал](https://<TERM_1>/log?user=<PERSON_1>)", settings)
+    assert result.text == f"[журнал](https://{value}/log?user=Иван Петров)" and "foreign_link" not in kinds(result)
 
 
 def test_own_link_in_an_attribute_is_still_restored(settings):
