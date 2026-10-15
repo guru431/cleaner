@@ -2,6 +2,7 @@ import pytest
 
 from cleaner.core.detect import secrets
 from cleaner.core.detect.base import DetectContext
+from cleaner.core.pipeline import sanitize
 from cleaner.core.types import Settings
 
 CTX = DetectContext(Settings())
@@ -130,6 +131,35 @@ def test_tokens_of_the_slow_library_rules_are_found_by_own_rules(text, value):
     """Находка «NpmDetector is quadratic…»: правила npm, OpenAI и JWT из detect-secrets квадратичны
     на длинной строке и выключены; их токены находят свои правила."""
     assert found(text) == {value}
+
+
+AWS_SECRETS = [f"{n:04d}" + "Ab" * 18 for n in range(60)]          # 40 знаков, как секретный ключ AWS
+
+
+@pytest.mark.parametrize("separator", [",", "   "], ids=["commas", "runs_of_spaces"])
+def test_every_token_of_a_line_with_hundreds_of_distinct_tokens_is_found(separator):
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: на такой строке значения больше не ищутся
+    по всей строке, а берутся там, где их нашли правила (ряды пробелов перед правилами сжимаются)."""
+    sids = ["AC%032x" % n for n in range(300)]
+    text = separator.join(f'"account_sid":"{sid}"' for sid in sids)
+    spans = secrets.detect(text, CTX)
+    assert sorted(text[s.start:s.end] for s in spans) == sorted(sids)
+
+
+def test_repeat_of_a_token_without_its_context_is_found_on_an_ordinary_line():
+    """Правило AWS видит ключ только рядом со словом «aws»; повтор того же значения дальше по строке скрывается."""
+    value = AWS_SECRETS[0]
+    text = f'aws_key="{value}"; echo {value} | base64'
+    assert [text[s.start:s.end] for s in secrets.detect(text, CTX)] == [value, value]
+
+
+def test_repeat_on_a_line_with_many_distinct_tokens_is_found_by_the_second_pass(state, settings):
+    """Дальше _REPEATS разных значений строки повтор без контекста слой 2 не ищет; его находит второй проход
+    очистки по известным значениям чата."""
+    text = "".join(f'aws_key="{value}";' for value in AWS_SECRETS) + " echo " + AWS_SECRETS[-1]
+    assert len(secrets.detect(text, CTX)) == len(AWS_SECRETS)
+    sanitized = sanitize(state, text, settings).sanitized
+    assert not any(value in sanitized for value in AWS_SECRETS), sanitized[-80:]
 
 
 def test_library_rules_still_see_a_key_after_a_run_of_spaces():

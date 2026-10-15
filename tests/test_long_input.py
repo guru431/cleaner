@@ -26,12 +26,15 @@ from cleaner.core.types import ChatState, Settings
         "sk-" * 30000, '{"account_sid":"AC' + "0123456789abcdef" * 2 + '","n":1},' * 2000, "token=" * 20000,
         "password=P;" + "Ab " * 30000, "password=P" + ";Ab Cd" * 15000, "PWD=/" * 20000, "token=${a}" * 10000,
         "net use \\\\a\\b" + " /x" * 30000 + " ", "mysql -u " * 10000, '<add key="pass" value="x"' * 4000,
+        # Тысячи разных токенов одного правила detect-secrets на одной строке: каждое значение искалось по всей строке.
+        "".join('{"account_sid":"AC%032x","n":1},' % i for i in range(5000)), "".join("=AKC%010d " % i for i in range(10000)),
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
         "cyrillic_logins", "label_colons", "spaced_dashes", "dots_slashes", "short_dates", "cards_in_a_row",
         "remote_commands", "slashes", "spaced_key", "spaced_secret_key", "eyj", "sk", "same_token", "token_pairs",
         "spaced_field", "spaced_fields", "pwd_paths", "token_templates", "net_use", "mysql", "add_key",
+        "distinct_tokens", "distinct_short_tokens",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
