@@ -1,6 +1,7 @@
 """Слой 1: шаблоны с проверками и контекстными словами."""
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable
 from datetime import date
@@ -57,6 +58,11 @@ _POINT_BEFORE_DIGIT = re.compile(r"\.\d")
 # десятое окно проходит проверку Луна. Такое окно принимается только при словах о карте рядом
 # или если соседние группы сами складываются в карты (_unlisted).
 _CARD_WORDS = re.compile(r"карт|кредитк|card|visa|master|maestro|amex|cvv|cvc|\bмир\b", re.IGNORECASE)
+# Полис ОМС или карта — по ближайшему к номеру слову (_policy). Совпадение с группой «not» — не слово своего
+# вида: «медицинская карта» («медкарта») не банковская и часто стоит рядом с полисом ОМС, а номер полиса
+# ОСАГО и КАСКО — не шестнадцать цифр: шестнадцать цифр рядом с ним — карта, которой его оплатили.
+_CARD_NEAR = re.compile(r"(?P<not>мед(?:ицинск\w*\s+|\.\s*|)карт)|" + _CARD_WORDS.pattern, re.IGNORECASE)
+_OMS_NEAR = re.compile(r"(?P<not>полис\w*\s+(?:осаго|каско))|полис|омс", re.IGNORECASE)
 _YEAR = re.compile(r"(?:19|20)\d\d")
 # Запятая рядом с номером — разделитель CSV, а не десятичная дробь: отсеивают контрольные разряды.
 _NUMBER = re.compile(r"(?<![\w.])\d{9,20}(?!\w|\.\d)")
@@ -88,6 +94,21 @@ Add = Callable[..., None]
 def _near(text: str, start: int, end: int, words: tuple[str, ...]) -> bool:
     around = (text[max(0, start - _BEFORE):start] + " " + text[end:end + _AFTER]).lower()
     return any(word in around for word in words)
+
+
+def _distance(pattern: re.Pattern[str], before: str, after: str) -> float:
+    """Знаков от номера до ближайшего слова pattern: до номера — от конца слова, после — до начала."""
+    found = [len(before) - m.end() for m in pattern.finditer(before) if not m.group("not")]
+    found += [m.start() for m in pattern.finditer(after) if not m.group("not")]
+    return min(found, default=math.inf)
+
+
+def _policy(text: str, start: int, end: int) -> bool:
+    """Шестнадцать цифр с верной суммой Луна — полис ОМС, если в окне есть слово о нём и оно не дальше слова о
+    карте. Одно наличие «полиса» в окне не годится: «оплатил полис картой 4111 …» — карта."""
+    before, after = text[max(0, start - _BEFORE):start], text[end:end + _AFTER]
+    oms = _distance(_OMS_NEAR, before, after)
+    return oms < math.inf and oms <= _distance(_CARD_NEAR, before, after)
 
 
 def _digits(value: str) -> str:
@@ -195,7 +216,7 @@ def _cards(text: str, m: re.Match[str], add: Add) -> None:
         start, end = groups[first][0], groups[last][1]
         # Контрольный разряд полиса ОМС единого образца — Mod10 (ISO/HL7 27931), тот же алгоритм Луна. Шестнадцать
         # цифр рядом со словом о полисе — полис: иначе подтверждённая карта брала бы верх над ним при слиянии.
-        oms = sum(len(group[2]) for group in groups[first:last + 1]) == 16 and _near(text, start, end, _OMS_WORDS)
+        oms = sum(len(group[2]) for group in groups[first:last + 1]) == 16 and _policy(text, start, end)
         add(start, end, EntityType.OMS if oms else EntityType.CARD, True)
 
 
