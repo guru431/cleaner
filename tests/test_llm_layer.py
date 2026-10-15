@@ -68,6 +68,18 @@ def test_truncated_answer_is_retried_in_halves_then_fails(state, settings):
         sanitize(other, "слово " * 100, settings, Layers(llm=LlmLayer(Completer(length, length))))
 
 
+def test_empty_answer_is_retried_in_halves_then_fails(state, settings):
+    """Обзор плана 2+4, m-9: пустой ответ — как невалидный, а не отказ с первого раза."""
+    empty = CompletionError("empty", "локальная модель вернула пустой ответ")
+    recovered = Completer(empty, items(("Сидоров", "PERSON")), items(), items())
+    result = sanitize(state, "отвечает Сидоров " * 400, settings, Layers(llm=LlmLayer(recovered)))   # 6800 знаков
+    assert [len(chunk) for chunk, _ in recovered.requests] == [6000, 3250, 3000, 1300]
+    assert "Сидоров" not in result.sanitized
+    other = ChatState(chat_id="other", net_key=bytes(32))
+    with pytest.raises(DetectorError, match="Слой 5: локальная модель вернула пустой ответ"):
+        sanitize(other, "слово " * 100, settings, Layers(llm=LlmLayer(Completer(empty, empty))))
+
+
 def test_garbage_is_retried_once_then_fails(state, settings):
     with pytest.raises(DetectorError, match="не разбирается"):
         sanitize(state, "текст", settings, Layers(llm=LlmLayer(Completer("не JSON", "опять не JSON"))))

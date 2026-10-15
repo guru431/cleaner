@@ -1,7 +1,7 @@
 """Слой 5: второй проход локальной модели по тексту, уже очищенному слоями 1–4 (раздел 5.6).
 
 Модель называет строки, позиции находит код: строка принимается, только если дословно есть во входной
-части и не содержит выданных замен. Обрыв по длине и мусор вместо JSON — часть повторяется один раз
+части и не содержит выданных замен. Обрыв по длине, пустой ответ и мусор вместо JSON — часть повторяется один раз
 половинами, затем очистка прерывается (FR-3.7). Ядро сети не касается: модель приходит объектом.
 """
 from __future__ import annotations
@@ -132,7 +132,8 @@ class LlmLayer:
             raw = self.completer.complete(messages, max_tokens=MAX_TOKENS, json_schema=SCHEMA if self.send_schema else None)
             pairs = parse_items(raw)
         except CompletionError as exc:
-            if exc.code != "length" or not retry:
+            # Пустой ответ — тот же сбой модели на этой части, что и обрыв: повтор половинами, а не отказ сразу.
+            if exc.code not in ("length", "empty") or not retry:
                 raise DetectorError(f"Слой 5: {exc}") from None
             return self._halves(chunk, state)
         except ValueError:
