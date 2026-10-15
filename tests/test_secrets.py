@@ -95,13 +95,28 @@ GITLAB_BODY = "a1B2c3D4e5F6g7H8i9J0"            # 20 знаков, как Devise
 @pytest.mark.parametrize(
     "prefix",
     ["glpat-", "gldt-", "glft-", "glsoat-", "glrt-", "glrtr-", "glcbt-", "glcbt-64_", "glffct-", "glimt-", "glptt-",
-     "glagent-", "gloas-"],
+     "glagent-", "gloas-", "glwt-"],
 )
 def test_gitlab_tokens_of_every_kind_are_found(prefix):
     """Находка «Layer 2 misses PuTTY and SSH2 private keys and GitLab tokens»: у правила detect-secrets значение — группа
     префикса короче 8 знаков, а правила с точной длиной (glimt-, glptt-, gloas-) не видят токен другой длины."""
     token = prefix + GITLAB_BODY
     assert found(f"в CI лежит {token} для сборки") == {token}
+
+
+@pytest.mark.parametrize("suffix", [".01.0z1a2b3c4", ".0z1a2b3c4"], ids=["versioned", "routable"])
+def test_routable_gitlab_token_is_found_whole(suffix):
+    """Ревью раунда токенов GitLab: у маршрутизируемого токена после тела через точку идут версия и контрольная сумма
+    (glpat-<тело>.01.<9 знаков>), и скрывалась только часть до первой точки."""
+    token = f"glpat-{GITLAB_BODY}k1L2m3N4o5P6q{suffix}"
+    for text in (f"в CI лежит {token} для сборки", f"В CI лежит {token}. Смените его"):
+        assert found(text) == {token}, text
+
+
+def test_full_stop_or_a_short_tail_after_a_gitlab_token_is_not_part_of_it():
+    token = "glpat-" + GITLAB_BODY
+    for text in (f"в CI лежит {token}. Смените его", f"в CI лежит {token}.01.abc", f"в CI лежит {token}.01.0z1a2b3c4d5"):
+        assert found(text) == {token}, text
 
 
 def test_gitlab_prefix_in_prose_is_not_a_token():
@@ -220,9 +235,16 @@ def test_key_ending_in_a_secret_word_is_never_skipped(text, value):
 
 def test_stop_listed_keys_still_hold_no_secret():
     for text in ("bypass=Zx81kLmN02pQ", "context_tokens: 8192", "token_url: https://login.example/t",
-                 "password_reset: weekly", "compass_heading: 270", "Argon2-Passes: 13", "num_passes=3"):
+                 "password_reset: weekly", "compass_heading: 270", "Argon2-Passes: 13", "num_passes=3",
+                 "max_passes = 20", "passes: 10"):
         assert found(text) == set(), text
     assert found("passes_secret: Zx81kLmN02pQ") == {"Zx81kLmN02pQ"}
+
+
+def test_value_under_a_passes_key_that_is_no_count_is_a_secret():
+    """Ревью раунда ключей PuTTY: стоп-слово passes (Argon2-Passes — число проходов) открывало и список паролей
+    wifi_passes. Число под таким ключом — счётчик, остальное — пароль."""
+    assert found("wifi_passes: Summer2024") == {"Summer2024"}
 
 
 @pytest.mark.parametrize(

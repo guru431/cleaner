@@ -45,12 +45,14 @@ _KEY_LINE = re.compile(r"\n[ \t]*+[A-Za-z0-9+/]{16}")
 _JWT = re.compile(r"(?<![\w-])eyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]*")
 # Токены GitLab всех видов — от 20 знаков после префикса (Devise.friendly_token): у правила detect-secrets значение — группа
 # префикса («gldt», короче 8 знаков, отбрасывается), а правила glimt-, glptt-, gloas- ждут токен ровно своей длины.
+# У маршрутизируемого токена за телом через точку — девять знаков длины и контрольной суммы, перед ними может быть
+# версия («glpat-<тело>.01.<9 знаков>»); точка в конце предложения за токеном в него не входит.
 _TOKEN = re.compile(
     r"""(?<![\w-])(?:
         AKIA[0-9A-Z]{16}
       | gh[pousr]_[A-Za-z0-9]{36,}
       | github_pat_[A-Za-z0-9_]{40,}
-      | gl(?:pat|dt|ft|soat|rtr?|cbt|ffct|imt|ptt|agent|oas)-[\w-]{20,}
+      | gl(?:pat|dt|ft|soat|rtr?|cbt|ffct|imt|ptt|agent|oas|wt)-[\w-]{20,}(?:(?:\.[0-9a-z]{2})?\.[0-9a-z]{9})?
       | xox[baprs]-[A-Za-z0-9-]{10,}
       | sk_live_[A-Za-z0-9]{16,}
       | AIza[\w-]{35}
@@ -85,13 +87,13 @@ _KEY_WORD = re.compile(
 )
 _VALUE_AT = re.compile(_VALUE)
 # Имена ключей, которые содержат те же слова, но хранят не секрет: счётчики токенов,
-# политики паролей, атрибуты Active Directory, обычные слова с «pass» (passes — число проходов: Argon2-Passes ключа PuTTY).
+# политики паролей, атрибуты Active Directory, обычные слова с «pass».
 _NOT_SECRET_KEY = re.compile(
     r"""(?:[\w.-]*[_.-])?(?:max|min|num|total|prompt|completion|input|output|context)[_.-]?tokens?
       | tokens
       | (?:[\w.-]*[_.-])?tokens?[_.-]?(?:type|count|limit|usage|budget|endpoint|url|uri|ttl|lifetime|expir\w*)
       | [\w.-]*tokeniz\w*
-      | [\w.-]*(?:bypass|compass|passive|passed|passes|passage|passenger|pass[_.-]?through)[\w.-]*
+      | [\w.-]*(?:bypass|compass|passive|passed|passage|passenger|pass[_.-]?through)[\w.-]*
       | (?:bad|max|min)?pwd(?:lastset|properties|historylength|count|age|length)
       | badpasswordtime
       | [\w.-]*password[_.-]?(?:policy|length|min\w*|max\w*|expir\w*|age|complexity|history
@@ -559,12 +561,14 @@ def _not_a_value(key: str, value: str) -> bool:
     """Значение под ключом со словом секрета, которое секретом не является: имя той же переменной
     («cancellationToken: cancellationToken», «accessToken: AccessToken;»; но «password: password» —
     слабый пароль), вызов команды и число под ключом токена — счётчик («max_new_tokens: 1024»).
-    Токенов из одних цифр не бывает, а пароль из цифр обычен, поэтому числа — только у «token».
+    Токенов из одних цифр не бывает, а пароль из цифр обычен, поэтому числа — только у «token» и у passes (число проходов:
+    Argon2-Passes ключа PuTTY, num_passes; «wifi_passes: Summer2024» — пароль).
     PWD и OLDPWD с путём — рабочий каталог оболочки, а не поле Pwd строки подключения."""
     return (
         (value.lower() == key.lower() and not _KEY_WORD.fullmatch(key))
         or _CMDLET.fullmatch(value) is not None
         or (value.isdigit() and all(word.lower() == "token" for word in _KEY_WORD.findall(key)))
+        or (value.isdigit() and "passes" in key.lower())
         or (key.upper() in ("PWD", "OLDPWD") and value.startswith(("/", "~")))
     )
 
