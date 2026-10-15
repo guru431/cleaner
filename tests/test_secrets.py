@@ -202,15 +202,34 @@ def test_stop_listed_keys_still_hold_no_secret():
         ("Пароль - Summer", "Summer"),
         ("Пароль — sunflower, логин ivanov", "sunflower"),
         ("Пароль — Qwerty123 действует сутки", "Qwerty123"),
+        ("Пароль от Wi-Fi — sunflower для гостей", "sunflower"),
+        ("Пароль — sunflower логин ivanov", "sunflower"),
+        ("пароль – qwerty", "qwerty"),
+        ("password - sunflower for guests", "sunflower"),
+        ("Пароль от роутера — Ромашка, как обычно", "Ромашка"),
+        ("Пароль — йцукен для всех", "йцукен"),
+        ('Пароль — "временный"', "временный"),
     ],
+    ids=["wifi", "letters", "hyphen", "comma", "clause_after_password_like", "wifi_clause", "login_clause",
+         "en_dash", "english_clause", "russian_noun", "unknown_russian", "quoted_adjective"],
 )
-def test_word_after_a_dash_is_a_password_unless_prose_follows(text, value):
+def test_word_after_a_dash_is_a_password_unless_it_is_a_prose_word(text, value):
+    """Находка «Password after a dash followed by prose stays open»: продолжение фразы за словом
+    больше не причина его открыть (решение владельца 15.10.2026)."""
     assert found(text) == {value}
 
 
 def test_prose_after_a_dash_is_left_alone():
-    for text in ("Пароль — это строка из 8 символов", "password - see vault", "Пароль — тот же, что и раньше",
-                 "Пароль — минимум 8 символов"):
+    for text in (
+        "Пароль — это строка из 8 символов", "password - see vault", "Пароль — тот же, что и раньше",
+        "Пароль — минимум 8 символов", "Пароль — это строка из букв", "Пароль — от 8 знаков",
+        "Пароль — такой же, как у почты", "Пароль — временный, смените его", "password — the same as before",
+        "Password - not required", "Пароль — Минимум 8 символов", "Пароль от почты — прежний",
+        "Пароль — изменен вчера", "Пароль — по-прежнему не подходит", "Пароль — кто-то сменил",
+        "Пароль — один для всех", "Пароль — ваш номер телефона", "Пароль — дата рождения",
+        "Забыл пароль — что делать?", "Сменил пароль — теперь не входит", "password - your birthday",
+        "password — minimum 8 characters", "Password - never expires",
+    ):
         assert found(text) == set(), text
 
 
