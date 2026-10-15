@@ -32,6 +32,18 @@ def test_network_libraries_are_imported_only_by_egress_modules():
     assert offenders == []
 
 
+def test_outgoing_context_is_built_only_by_the_pipeline():
+    """SEC-1: наружу уходит только то, что собрало ядро очистки, — OutgoingContext создаётся только в pipeline."""
+    builders = []
+    for path in PACKAGE.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                if name == "OutgoingContext":
+                    builders.append(path.relative_to(PACKAGE).as_posix())
+    assert builders and set(builders) == {"core/pipeline.py"}
+
+
 def test_fast_suite_refuses_connections_beyond_loopback():
     """Сторож из conftest.py: внешний адрес и имя для DNS — отказ, петля — работает."""
     with pytest.raises(OSError, match="запрещено"):
