@@ -188,6 +188,22 @@ def test_lowercase_domain_prefix_must_be_known():
     assert (T.ACCOUNT, "petrov") in found(r"вход contoso\petrov", ctx)
 
 
+def test_first_label_of_a_known_dns_domain_is_a_known_netbios_name():
+    """Решение владельца 15.10: при известном «contoso.ru» строчное «contoso\\petrov» — учётная запись."""
+    ctx = DetectContext(Settings(), known=(("contoso.ru", T.DOMAIN),))
+    result = found(r"вход contoso\petrov", ctx)
+    assert (T.DOMAIN, "contoso") in result and (T.ACCOUNT, "petrov") in result
+    assert T.ACCOUNT not in {type_ for type_, _ in found(r"вход ru\petrov, папка reports\summary", ctx)}
+    dictionary = DetectContext(Settings(always=(DictEntry(T.DOMAIN, "fabrikam.local"),)))
+    assert (T.ACCOUNT, "petrov") in found(r"вход fabrikam\petrov", dictionary)
+
+
+def test_netbios_name_of_a_domain_from_the_same_text():
+    state = ChatState(chat_id="netbios", net_key=bytes(32))
+    sanitized = sanitize(state, r"Сайт contoso.ru, вход contoso\petrov", Settings()).sanitized
+    assert "petrov" not in sanitized and "contoso" not in sanitized
+
+
 def accounts(text: str) -> set[str]:
     return {value for type_, value in found(text) if type_ is T.ACCOUNT}
 

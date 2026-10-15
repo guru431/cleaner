@@ -189,6 +189,8 @@ def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:
     for entry in ctx.settings.always:
         if entry.type is EntityType.DOMAIN:
             known_domains.update(form.lower() for form in (entry.value, *entry.aliases))
+    # Имя NetBIOS домена Active Directory обычно — первая часть его имени DNS: «contoso» у «contoso.ru».
+    known_domains.update([name.split(".", 1)[0] for name in known_domains if "." in name])
     for m in _DOMAIN_LOGIN.finditer(text):
         dom, login = m.group("dom"), m.group("login").rstrip(".-")
         if dom.lower() in builtin or dom.lower() in _REGISTRY_HIVES or not (dom.isupper() or dom.lower() in known_domains):
