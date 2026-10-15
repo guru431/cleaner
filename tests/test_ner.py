@@ -124,11 +124,51 @@ def test_document_acronyms_and_bare_legal_forms_are_not_organisations():
     assert spans(text, *(word_at(text, value, "organization") for value in noise)) == []
 
 
+def test_common_words_acronyms_and_countries_are_not_organisations():
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: шум ORG, который стоп-список не покрывал, и похожее
+    с открытых наборов (документ с обычным словом, экзамены и анализы, слова ИТ, страны, обычное существительное)."""
+    text = (
+        "Нужен полис ОМС и ИНН юрлица, полис ОСАГО. Банк ответил. Сервер упал. ИИ, ДТП, ЕГЭ, ОГЭ; в США и РФ. "
+        "УЗИ и МРТ, ТС, HR и IT, СМС. Филиал и Бухгалтерия, Компания; физлицо."
+    )
+    noise = (
+        "полис ОМС", "ИНН юрлица", "полис ОСАГО", "Банк", "Сервер", "ИИ", "ДТП", "ЕГЭ", "ОГЭ", "США", "РФ",
+        "УЗИ", "МРТ", "ТС", "HR", "IT", "СМС", "Филиал", "Бухгалтерия", "Компания", "физлицо",
+    )
+    assert spans(text, *(word_at(text, value, "organization") for value in noise)) == []
+
+
+def test_names_next_to_the_new_stop_words_stay_organisations():
+    text = "Банк «Восток» и Сбербанк, Правительство РФ, фонд ОМС, Сервер-Про и Система"
+    kept = ("Банк «Восток»", "Сбербанк", "Правительство РФ", "фонд ОМС", "Сервер-Про", "Система")
+    assert spans(text, *(word_at(text, value, "organization") for value in kept)) == [(value, T.ORG, "ner") for value in kept]
+
+
 def test_state_bodies_and_named_organisations_stay_organisations():
     """ФНС, ПФР и МВД — настоящие организации: открыть их можно словарём «никогда не скрывать», модель не решает."""
     text = "Справку из ФНС и ПФР отправили в ООО «Ромашка», копию — в МВД и ИП Петров."
     kept = ("ФНС", "ПФР", "ООО «Ромашка»", "МВД", "ИП Петров")
     assert spans(text, *(word_at(text, value, "organization") for value in kept)) == [(value, T.ORG, "ner") for value in kept]
+
+
+def test_common_noun_at_the_start_of_a_sentence_found_only_by_gliner_is_not_a_person():
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: GLiNER называет человеком существительное в начале
+    предложения («Копию отправил Петров» → «Копию»)."""
+    text = "Копию отправил Петров. Счёт выставил Сидоров!\n«Договор» подписал Иванов"
+    names = ("Копию", "Петров", "Счёт", "Сидоров", "Договор", "Иванов")
+    assert spans(text, *(word_at(text, value, "name") for value in names)) == [
+        (value, T.PERSON, "ner") for value in ("Петров", "Сидоров", "Иванов")
+    ]
+
+
+def test_names_and_nouns_elsewhere_or_seen_by_the_russian_model_stay_persons():
+    """Имя, фамилия, два слова и существительное не в начале предложения правило не трогает; находка русской модели —
+    тоже: правило только для GLiNER."""
+    text = "Иванов пришёл. Роман приедет. Вера звонила. Лев Толстой писал; звонил Директор"
+    names = ("Иванов", "Роман", "Вера", "Лев Толстой", "Директор")
+    assert spans(text, *(word_at(text, value, "name") for value in names)) == [(value, T.PERSON, "ner") for value in names]
+    layer = NerLayer([Tagger(Found(0, 5, "FIRST_NAME", 0.9)), Tagger(Found(0, 5, "name", 0.9))])
+    assert {(s.start, s.end, s.type) for s in layer.detect("Копию отправил Петров")} == {(0, 5, T.PERSON)}
 
 
 def test_password_is_told_by_the_whole_word():

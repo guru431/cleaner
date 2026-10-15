@@ -112,11 +112,21 @@ def _common_words(text: str, found: Found) -> bool:
 # («ИП», «ООО»; форма с названием в кавычках — правило orgs.py, формы — те же, что там). На открытых наборах это
 # самый частый шум ORG. Государственные органы (ФНС, ПФР, МВД, ГИБДД, МФЦ) — организации и сюда не входят: их
 # открывает словарь «никогда не скрывать» (раздел 5.5 ТЗ), а не модель.
+# Сверх этого замер 15.10.2026 на тех же наборах нашёл: документ с обычным словом («полис ОМС», «ИНН юрлица»),
+# экзамены, анализы и происшествия, слова ИТ, страны, обычное существительное с заглавной буквы («Банк ответил»,
+# «Сервер упал»). Только целой находкой: «Банк «Восток»», «Правительство РФ», «фонд ОМС» остаются. «Система» и
+# «Центр» сюда не входят: бывают названиями (АФК «Система»).
 _NOT_ORGANISATIONS = frozenset({
     "снилс", "инн", "кпп", "огрн", "огрнип", "бик", "окпо", "оквэд", "октмо", "окато", "егрюл", "егрип", "егрн",
-    "птс", "стс", "ву", "эцп", "кэп", "укэп", "фио", "паспорт",
-    "омс", "дмс", "осаго", "каско",
+    "птс", "стс", "ву", "эцп", "кэп", "укэп", "фио", "паспорт", "тс", "пдн",
+    "омс", "дмс", "осаго", "каско", "полис омс", "полис дмс", "полис осаго", "полис каско",
+    "инн юрлица", "инн физлица", "инн организации", "огрн организации", "юрлицо", "юрлица", "физлицо", "физлица",
     "ндс", "ндфл", "усн", "енвд", "псн", "осно", "есхн", "нпд", "енс", "енп", "аусн", "жкх", "жку",
+    "егэ", "огэ", "гиа", "дтп", "орз", "орви", "узи", "мрт", "пцр", "бцж",
+    "ии", "ai", "it", "ит", "hr", "pr", "smm", "crm", "llm", "jwt", "смс", "sms", "тз", "пк",
+    "сша", "рф", "оаэ", "вов", "сво",
+    "банк", "bank", "сервер", "компания", "организация", "фирма", "офис", "филиал", "отдел", "бухгалтерия",
+    "администрация", "магазин", "налоговая",
     "ооо", "оао", "зао", "пао", "нао", "ао", "ип", "фгуп", "фгбу", "фгбоу", "гуп", "муп", "гбу", "мбу", "ано", "нко",
     "тоо", "тсж", "снт", "общество с ограниченной ответственностью", "акционерное общество",
     "публичное акционерное общество", "непубличное акционерное общество", "закрытое акционерное общество",
@@ -127,6 +137,33 @@ _EDGE = " \t\r\n.,;:!?\"'«»„“”()"
 
 def _not_organisation(text: str, found: Found) -> bool:
     return _CATEGORY[found.label] == "org" and text[found.start:found.end].strip(_EDGE).lower() in _NOT_ORGANISATIONS
+
+
+# Перед началом предложения — конец предыдущего («.», «!», «?», «…») или перевод строки; между ними — пробелы,
+# кавычки, скобки, тире и знаки списка.
+_OPENERS = "\"'«„“([—–-•*"
+_SENTENCE_END = ".!?…"
+_LETTERS = re.compile(r"[^\W\d_]+")
+_RUSSIAN_PERSON = frozenset({"FIRST_NAME", "LAST_NAME", "MIDDLE_NAME"})
+
+
+def _sentence_start(text: str, start: int) -> bool:
+    position = start
+    while position > 0 and (text[position - 1].isspace() or text[position - 1] in _OPENERS):
+        position -= 1
+    return position == 0 or text[position - 1] in _SENTENCE_END or "\n" in text[position:start]
+
+
+def _sentence_noun(text: str, found: Found, russian: bytearray) -> bool:
+    """Человек GLiNER — одно нарицательное существительное словаря в начале предложения («Копию отправил Петров»):
+    заглавная буква там ничего не говорит. Имя, фамилия и отчество по словарю (раздел 5.9) остаются; находку русской
+    модели на том же месте (russian — знаки, занятые её людьми) правило не трогает. Цена — фамилия-существительное
+    («Волк») в начале предложения, которую нашёл только GLiNER, остаётся открытой."""
+    value = text[found.start:found.end]
+    return (
+        found.label == "name" and _LETTERS.fullmatch(value) is not None and _sentence_start(text, found.start)
+        and common_nouns(value) and russian.find(1, found.start, found.end) < 0
+    )
 
 
 def identifier(text: str, span: Span) -> bool:
@@ -179,6 +216,11 @@ class NerLayer:
             found += [f for f in _joined([
                 f for f in tagger.tag(text) if f.label in _CATEGORY and f.score >= THRESHOLD and f.end > f.start
             ]) if not _common_words(text, f) and not _not_organisation(text, f)]
+        russian = bytearray(len(text))          # картой, а не перебором: находок на длинном тексте тысячи
+        for f in found:
+            if f.label in _RUSSIAN_PERSON:
+                russian[f.start:f.end] = b"\x01" * (f.end - f.start)
+        found = [f for f in found if not _sentence_noun(text, f, russian)]
         spans = [
             Span(f.start, f.end, _TYPES[_CATEGORY[f.label]], name, f.score)
             for f in found if _CATEGORY[f.label] in _TYPES
