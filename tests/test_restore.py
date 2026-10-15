@@ -380,6 +380,56 @@ def test_punctuation_after_a_foreign_or_inside_a_name_keeps_the_link_foreign(set
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        r"https://host-1\.evil\.example\.org/?q=<EMAIL_1>",
+        r"Отчёт: 'https://host-1\.evil\.example\.org/?q=<EMAIL_1>'",
+        r"www.domain-1.example\.evil\.example\.org/?q=<EMAIL_1>",
+        r"https://host-1.domain-1.example\@evil.example.org/?q=<EMAIL_1>",
+        r"https://host-1.domain-1.example\:<EMAIL_1>@evil.example.org/",
+        r"https://host-1.domain-1.example:8080\@evil.example.org/?q=<EMAIL_1>",
+        r"https://host-1.domain-1.example\x@evil.example.org/?q=<EMAIL_1>",
+        r"https://host-1.domain-1.example\\@evil.example.org/?q=<EMAIL_1>",
+        r"[x](https://host-1.domain-1.example\x@evil.example.org/?q=<EMAIL_1>)",
+        r"[1]: <https://host-1.domain-1.example\\@evil.example.org/?q=<EMAIL_1>>",
+        r"https\://host-1.domain-1.example\x@evil.example.org/?q=<EMAIL_1>",
+        r"https://host-1%5C.evil.example.org/?q=<EMAIL_1>",
+    ],
+)
+def test_backslash_in_a_bare_or_markdown_link_does_not_hide_a_foreign_host(settings, answer):
+    """Обзор восстановления, P1: голый адрес проверялся без прочтения CommonMark, а «\\» в нём — как «/». Markdown-читатели
+    (cmark-gfm, remark-gfm, marked, markdown-it, mistune) берут голый адрес из записи как есть и кодируют «\\» в «%5C»,
+    и «https://наш\\@evil…» и «https://наш\\x@evil…» ведут на evil; remark-gfm, если хост с «_» (srv_01) не подошёл
+    его разбору, ищет адрес в тексте после раскрытия экранирований — «https://srv_01\\.evil\\.com/…» ведёт на
+    srv_01.evil.com. В цели ссылки Markdown «\\» перед буквой и «\\\\» кодируются так же."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (r"https://host-1\.domain-1\.example/?q=<EMAIL_1>", r"https://srv-dc01\.contoso\.ru/?q=ivanov@contoso.ru"),
+        (
+            r'if ($http_referer ~* "^https://host-1\.domain-1\.example/") { return <EMAIL_1>; }',
+            r'if ($http_referer ~* "^https://srv-dc01\.contoso\.ru/") { return ivanov@contoso.ru; }',
+        ),
+        (r"https://host-1.domain-1.example\/a?q=<EMAIL_1>", r"https://srv-dc01.contoso.ru\/a?q=ivanov@contoso.ru"),
+        (r'{"url":"https:\/\/host-1.domain-1.example\/a?q=<EMAIL_1>"}', r'{"url":"https:\/\/srv-dc01.contoso.ru\/a?q=ivanov@contoso.ru"}'),
+        (r"[x](file:\\\C:\Users\<EMAIL_1>\a.txt)", r"[x](file:\\\C:\Users\ivanov@contoso.ru\a.txt)"),
+        (r"file:\\C:\Users\<EMAIL_1>\a.txt", r"file:\\C:\Users\ivanov@contoso.ru\a.txt"),
+        (r"^host-1\.domain-1\.example$ для <EMAIL_1>\.", r"^srv-dc01\.contoso\.ru$ для ivanov@contoso.ru\."),
+    ],
+)
+def test_own_links_and_plain_text_with_backslashes_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш хост через «\\.» остаётся нашим при любом прочтении (хост с «%5C» браузер
+    отвергает), текст с «\\.» вне ссылки восстанавливается, как раньше, а «file:\\\\C:\\…» с буквой диска хоста не имеет
+    (WHATWG URL) — и в цели Markdown после раскрытия «\\\\», и без схемы с двумя косыми."""
+    result = restore(link_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
 def test_host_is_after_the_last_at_sign(settings):
     """Найдено при исправлении обратных косых, P1: браузер берёт хост за последним «@» адреса, а не за первым —
     «https://a@наш:1@evil…» ведёт на evil. Имя пользователя и пароль у нашего адреса ссылку чужой не делают."""
