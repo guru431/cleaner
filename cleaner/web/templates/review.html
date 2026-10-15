@@ -88,7 +88,7 @@
       <tbody>
       {% for f in fragments %}
       <tr>
-        <td class="mono">{{ f.value }}</td><td class="mono">{{ f.surrogate }}</td><td>{{ f.type }}</td>
+        <td class="mono">{{ f.value }}</td><td class="mono nowrap">{{ f.surrogate }}</td><td class="nowrap">{{ f.type }}</td>
         <td class="actions">
           <form method="post" action="/chats/{{ chat.id }}/unmask">
             {% include "_csrf.html" %}

@@ -30,7 +30,7 @@
     <tbody>
     {% for r in rows %}
     <tr>
-      <td class="mono">{{ r.value }}</td><td>{{ types[r.type] if r.type else "" }}</td>
+      <td class="mono">{{ r.value }}</td><td class="nowrap">{{ types[r.type] if r.type else "" }}</td>
       <td class="mono">{{ r.aliases | join(", ") }}</td><td>{{ r.comment }}</td>
       <td class="actions"><form method="post" action="/settings/dictionary/{{ r.id }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form></td>
     </tr>

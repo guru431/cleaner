@@ -15,8 +15,8 @@
     <tbody>
     {% for r in rows %}
     <tr>
-      <td class="mono">{{ r.surrogates | join(", ") }}</td>
-      <td>{{ r.type_name }}</td>
+      <td class="mono words">{{ r.surrogates | join(", ") }}</td>
+      <td class="nowrap">{{ r.type_name }}</td>
       <td>{{ r.restore_value }}{% if r.forms | length > 1 %}<div class="sub">{{ r.forms | join(", ") }}</div>{% endif %}</td>
       <td class="num">{{ r.count }}</td>
       <td class="actions">

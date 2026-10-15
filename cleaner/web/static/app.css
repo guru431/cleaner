@@ -185,7 +185,11 @@ td.actions { white-space: nowrap; overflow-wrap: normal; }
 td.actions > form, td.actions > details { display: inline-flex; margin: 0 4px 0 0; }
 td form { margin: 0; display: inline-flex; align-items: center; gap: 6px; }
 td.mono, td.event { font-family: var(--mono); font-size: 12.5px; }
-td.nowrap, td.event { white-space: nowrap; overflow-wrap: normal; }
+/* Перенос где угодно (anywhere) сжимает колонку до одного знака: рядом с длинным ключом или base64 короткие колонки
+   ломались посреди слова («Секре|т», «<SECRET_1|>»). Тип и число не переносятся, список замен — только между словами;
+   anywhere остаётся колонкам значений. */
+td.nowrap, td.event, td.num { white-space: nowrap; overflow-wrap: normal; }
+td.words { overflow-wrap: normal; }
 td.empty { color: var(--muted); }
 .sub { color: var(--muted); font-size: 12px; }
 td .sub { margin-top: 2px; }
