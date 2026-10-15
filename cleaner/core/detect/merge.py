@@ -17,6 +17,9 @@ class MergedSpan:
     type: EntityType
     sources: tuple[str, ...]
     searchable: bool = True    # Span.searchable
+    # Фрагмент имени стоит через точку после выданной замены или метки и перед ней (5.10): это часть имени, а не имя.
+    follows: bool = False
+    precedes: bool = False
 
 
 def _rank(span: Span) -> int:

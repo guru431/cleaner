@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from uuid import uuid4
 
 from cleaner.core.detect.merge import MergedSpan
@@ -139,9 +140,8 @@ class Resolver:
 
     def _resolve(self, span: MergedSpan, value: str) -> ResolvedSpan:
         origin = "manual" if "manual" in span.sources else "dictionary" if "dict" in span.sources else "detector"
-        special = {
-            T.IP: self._ip, T.MAC: self._mac, T.SID: self._sid, T.HOST: self._name, T.DOMAIN: self._name,
-        }.get(span.type)
+        name = partial(self._name, follows=span.follows, precedes=span.precedes)
+        special = {T.IP: self._ip, T.MAC: self._mac, T.SID: self._sid, T.HOST: name, T.DOMAIN: name}.get(span.type)
         # None — значение не того вида (например, ручное правило): обычная метка. Вид проверяется до
         # первой записи в состояние: исключение посреди подмены оставило бы сущность без замены и номер.
         resolved = special(value, span.type, origin) if special else None
@@ -391,37 +391,45 @@ class Resolver:
         type_ = self.manual.get(normalize(part))
         return self._labelled(type_, part, "manual") if type_ else None
 
-    def _name(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
+    def _name(
+        self, value: str, type_: EntityType, origin: str, follows: bool = False, precedes: bool = False,
+    ) -> tuple[Entity, str] | None:
+        """follows, precedes — фрагмент стоит в имени после выданной замены или метки и перед ней (pipeline._placed)."""
         if not _NAME.fullmatch(value):
             return None
-        if "." not in value:
+        whole = not (follows or precedes)
+        if "." not in value and whole:
             if type_ is T.DOMAIN:
                 return self._netbios(value, origin)
-            # Часть имени, отрезанная от выданной замены (pipeline._outside), — тоже часть имени.
             return self._manual(value) or self._part(value, origin, leading=True, standalone=True)
-        left, registrable = hostmap.parts(value)
-        retyped = self._manual(registrable)
-        domain, domain_fake = retyped or self._dns(registrable, origin)
-        fakes = []
-        owners = []
-        for position, label in enumerate(left):
+        # Часть имени рядом с заменой — не имя целиком (5.10): в частях перед заменой домена нет, одиночная часть после
+        # неё — тоже часть. Первой часть после замены не бывает, и отдельным написанием никакая из них не становится.
+        left, registrable = (value.split("."), "") if precedes or "." not in value else hostmap.parts(value)
+        retyped = self._manual(registrable) if registrable else None
+        domain = retyped or (self._dns(registrable, origin) if registrable else None)
+        fakes, owners, leading = [], [], not follows
+        for label in left:
             manual = self._manual(label)
             if manual is None and label.lower() in self.generic:
                 fakes.append(label)
                 continue
-            entity, fake = manual or self._part(label, origin, leading=position == 0)
+            entity, fake = manual or self._part(label, origin, leading=leading)
+            leading = False         # первая — первая не служебная часть: у www.srv02.corp.contoso.ru это srv02
             owners.append((entity, manual is not None))
             fakes.append(fake)
-        owners.append((domain, retyped is not None))
+        if domain:
+            owners.append((domain[0], retyped is not None))
+            fakes.append(domain[1])
         # Сущность имени целиком — часть с самой строгой политикой: по ней «блокировать» проверяют очистка и экран
         # чата (FR-4.2). При равных — часть, которой пользователь дал другой тип: блокировка её типа, заданная позже,
         # тоже видна на экране; затем — первая слева, как прежде. Восстановление проверяет политики всех частей.
         policies = self.settings.policies
         primary = max(owners, key=lambda owner: (_STRICTNESS.get(policies.get(owner[0].type), 0), owner[1]))[0]
-        surrogate = ".".join([*fakes, domain_fake])
+        surrogate = ".".join(fakes)
         # Имя длиннее имени DNS (253 знака) — цепочка вроде «a.a.a….ru» — целиком не записывается: поиск замен и
         # проверка ссылок перебирают цепочки частей до длины самой длинной записанной, и имя из тысяч частей делало бы
-        # их кубическими. Его части выданы, и восстанавливается оно по частям.
-        if left and len(value) <= 253:
+        # их кубическими. Его части выданы, и восстанавливается оно по частям. Часть имени рядом с заменой — не имя
+        # из запроса и тоже не записывается.
+        if left and whole and len(value) <= 253:
             self.state.surrogates.setdefault(surrogate, Surrogate(primary.id, value, "host"))
         return primary, surrogate

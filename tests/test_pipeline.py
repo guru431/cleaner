@@ -289,7 +289,12 @@ def test_new_values_next_to_an_issued_surrogate_are_masked(state, settings):
     ("domain", "Проверь <ORG_1>.fabrikam.ru", "Проверь <ORG_1>.domain-2.example"),
     ("domain", "Проверь srv-db02.<ORG_1>", "Проверь host-2.<ORG_1>"),
     ("domain", "Проверь srv-db02.host-1.<ORG_1>", "Проверь host-2.host-1.<ORG_1>"),
-], ids=["domain-after", "part-before", "foreign-label", "domain-after-org", "part-before-org", "part-before-name"])
+    ("host", "Проверь <TERM_1>.corp.domain-1.example, corp wiki", "Проверь <TERM_1>.sub-2.domain-1.example, corp wiki"),
+    ("host", "Проверь <TERM_1>.corp.fabrikam.ru", "Проверь <TERM_1>.sub-2.domain-2.example"),
+], ids=[
+    "domain-after", "part-before", "foreign-label", "domain-after-org", "part-before-org", "part-before-name",
+    "part-between", "name-after",
+])
 def test_real_name_next_to_a_label_part_is_masked(state, settings, retype, text, expected):
     """Обзор, Minor 8: после смены типа части имени метка стоит в имени (<TERM_1>.domain-1.example, host-1.<ORG_1>),
     и пользователь может вписать рядом настоящее имя. Скрывается часть вне замены, сама метка остаётся (5.10)."""
@@ -315,6 +320,37 @@ def test_name_longer_than_a_dns_name_is_masked_and_restored_by_parts(state, sett
     result = sanitize(state, text, settings)
     assert result.sanitized == "цепочка " + "host-1." * 40 + "domain-1.example" and result.deliverable
     assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert restore(state, result.sanitized, settings).text == text
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Проверь srv-02.msk.domain-1.example", "Проверь host-2.sub-3.domain-1.example"),
+    ("Проверь www.srv-02.domain-1.example", "Проверь www.host-2.domain-1.example"),
+    ("Проверь host-1.ru, ru и msk", "Проверь host-1.sub-2, ru и msk"),
+    ("Проверь host-1.fabrikam.ru", "Проверь host-1.domain-2.example"),
+], ids=["parts-before", "generic-before", "part-after", "domain-after"])
+def test_part_cut_off_an_issued_replacement_keeps_its_place_in_the_name(state, settings, text, expected):
+    """FINDINGS «Retyping a host name part: what it leaves» (1): часть вне выданной замены разбиралась как имя само по
+    себе — «srv-02.msk» получал подмену домена, а одиночная часть («ru» после host-1) — искомой и скрывалась везде.
+    Части перед заменой — части слева от домена, часть после неё — не первая; домен после замены — домен."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, expected, settings).sanitized == expected        # повторная вставка ничего не меняет
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, expected, settings).text == text.replace("host-1", "srv01").replace("domain-1.example", "contoso.ru")
+
+
+def test_first_part_after_generic_ones_is_the_leading_part(state, settings):
+    """FINDINGS «Review fixes round of 15.10: small leftovers»: первой считалась только часть на месте 0, и у
+    www.srv02.corp.contoso.ru часть srv02 получала sub-N и не становилась искомой — отдельное srv02 оставалось открытым.
+    Первая — первая не служебная часть; средняя часть искомой не становится, как прежде."""
+    text = "узел www.srv02.corp.contoso.ru, позже srv02, mail.corp.contoso.ru и corp wiki"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == (
+        "узел www.host-1.sub-2.domain-1.example, позже host-1, mail.sub-2.domain-1.example и corp wiki"
+    )
     assert restore(state, result.sanitized, settings).text == text
 
 
