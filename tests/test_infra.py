@@ -35,6 +35,16 @@ def test_addresses():
     assert "127.0.0.1" not in {value for _, value in result}
 
 
+def test_a_whole_private_range_is_kept_and_a_network_inside_it_is_hidden():
+    """Частный диапазон целиком («10.0.0.0/8») ничего не выдаёт, как и документационные: его подмена совпадала с ним
+    самим, и он всегда становился меткой. Сеть внутри диапазона и адрес узла скрываются."""
+    text = "Диапазоны 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 и 100.64.0.0/10; сеть 10.0.0.0/9, узел 192.168.0.0"
+    assert found(text) == {(T.IP, "10.0.0.0/9"), (T.IP, "192.168.0.0")}
+    state = ChatState(chat_id="ranges", net_key=bytes(32))
+    sanitized = sanitize(state, "Разрешены 10.0.0.0/8 и 192.168.0.0/16", Settings()).sanitized
+    assert sanitized == "Разрешены 10.0.0.0/8 и 192.168.0.0/16"
+
+
 def test_version_numbers_and_masks_are_not_addresses():
     assert values("Версия 2.1.0.5 установлена, маска 255.255.255.0, build 1.2.3.4") == set()
 

@@ -102,6 +102,10 @@ def _ipv4(text: str) -> Iterator[Span]:
         end = m.start() + len(address)
         if prefix and int(prefix) < 24 and netmap.private_bits(ip) is not None:
             if int(ip) & ((1 << (32 - int(prefix))) - 1) == 0:
+                if int(prefix) <= netmap.private_bits(ip):
+                    # Частный диапазон целиком («10.0.0.0/8») ничего не выдаёт, как документационные, а его подмена — он
+                    # сам: перестановка не трогает неизменные биты диапазона, и он всегда становился бы меткой.
+                    continue
                 end = m.end()       # адрес сети: длина префикса входит во фрагмент
         yield Span(m.start(), end, EntityType.IP, name, validated=True)
 
