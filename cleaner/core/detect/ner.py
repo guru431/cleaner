@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from cleaner.core.detect.base import DetectContext
+from cleaner.core.entities.names import common_nouns
 from cleaner.core.types import EntityType, Span
 
 name = "ner"
@@ -32,6 +33,10 @@ ADDRESS_GAP = re.compile(
 )
 _ADDRESS_GAP_MAX = 40
 _WORD = re.compile(r"\S+")
+# Строчные буквы вплотную к цифрам — пароль: «sunflower77», «Qwerty2024». Не серия документа «АА1234567» и не логин
+# или имя через подчёркивание («ivanov_test», «ИВАНОВА_МАРИЯ»): слой 5 их пропускает, а без находки слоя 4 они
+# открыты (замер слоёв 1–5 на открытых наборах: три номера документов и одно имя).
+_IDENTIFIER = re.compile(r"[a-zа-яё]{3}\d")
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,33 @@ def _joined(found: list[Found]) -> list[Found]:
     return out
 
 
+def _common_words(text: str, found: Found) -> bool:
+    """Организация из обычных слов: GLiNER при пороге 0,25 так называет «банк», «бухгалтерии», «отдел кадров».
+
+    Строчная находка ORG из одних существительных отбрасывается (находок ORG на hivetrace — 152 вместо 318,
+    на jayguard — 787 вместо 1329; полнота классов QA-3 на трёх открытых наборах не меняется). Заглавная буква,
+    цифра, прилагательное или слово не из словаря находку оставляют: в чатах строчными пишут и имена, и улицы
+    («алексей с новослободской 7»), и названия («автосити»).
+    Порог для одной метки не годится: «Краснодар» в адресе модель тоже называет организацией с уверенностью 0,26–0,68.
+    """
+    value = text[found.start:found.end]
+    return (
+        _CATEGORY[found.label] == "org" and value == value.lower() and not any(c.isdigit() for c in value)
+        and common_nouns(value)
+    )
+
+
+def identifier(text: str, span: Span) -> bool:
+    """PERSON или ORG, похожий на пароль («sunflower77»); слово берётся целиком — модель может пометить «sunflower»
+    внутри «sunflower77»."""
+    start, end = span.start, span.end
+    while start > 0 and (text[start - 1].isalnum() or text[start - 1] == "_"):
+        start -= 1
+    while end < len(text) and (text[end].isalnum() or text[end] == "_"):
+        end += 1
+    return span.type in (EntityType.PERSON, EntityType.ORG) and _IDENTIFIER.search(text, start, end) is not None
+
+
 def _addresses(text: str, parts: list[Found]) -> list[tuple[int, int, float]]:
     """Части адреса подряд — один ADDRESS, если среди них есть улица или дом: город или страна сами не скрываются."""
     groups: list[list[Found]] = []
@@ -100,9 +132,9 @@ class NerLayer:
     def detect(self, text: str, ctx: DetectContext | None = None) -> list[Span]:
         found: list[Found] = []
         for tagger in self.taggers:
-            found += _joined([
+            found += [f for f in _joined([
                 f for f in tagger.tag(text) if f.label in _CATEGORY and f.score >= THRESHOLD and f.end > f.start
-            ])
+            ]) if not _common_words(text, f)]
         spans = [
             Span(f.start, f.end, _TYPES[_CATEGORY[f.label]], name, f.score)
             for f in found if _CATEGORY[f.label] in _TYPES

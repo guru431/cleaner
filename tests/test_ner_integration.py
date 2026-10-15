@@ -7,6 +7,7 @@ import pytest
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.ner_models import NerModels
 from cleaner.core.pipeline import Layers, sanitize
+from cleaner.core.types import ChatState
 from cleaner.core.types import EntityType as T
 
 pytestmark = pytest.mark.integration
@@ -36,6 +37,22 @@ def test_english_name_and_organisation_are_found(layer, no_network):
     text = "Please contact John Smith from Contoso Pharmaceuticals about the invoice."
     found = {(text[s.start:s.end], s.type) for s in layer.detect(text)}
     assert ("John Smith", T.PERSON) in found and any(type_ is T.ORG for _, type_ in found), found
+
+
+def test_common_words_are_not_organisations(layer, no_network):
+    """GLiNER называет «банк» организацией с уверенностью около 0,77: строчные существительные отсеиваются."""
+    text = "Счёт выставили из бухгалтерии, сверку прислал банк."
+    assert [text[s.start:s.end] for s in layer.detect(text) if s.type is T.ORG] == []
+
+
+def test_password_taken_for_a_name_is_typed_by_layer_5(layer, no_network, state, settings, engines):
+    """AC-4.1 на example: GLiNER называет «sunflower77» именем; со слоем 5 — SECRET, без него — скрыт как PERSON."""
+    text = "Для общего ящика на стикере записано: sunflower77, отвечает Сидоров"
+    without = sanitize(state, text, settings, Layers(ner=layer)).sanitized
+    assert without == "Для общего ящика на стикере записано: <PERSON_1>, отвечает <PERSON_2>"
+    engines.second.marks = {"sunflower77": T.SECRET}
+    result = sanitize(ChatState(chat_id="second", net_key=bytes(32)), text, settings, Layers(ner=layer, llm=engines.second))
+    assert result.sanitized == "Для общего ящика на стикере записано: <SECRET_1>, отвечает <PERSON_1>"
 
 
 def test_three_cases_get_one_label_with_real_models(layer, no_network, state, settings):
