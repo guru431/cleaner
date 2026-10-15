@@ -12,7 +12,17 @@ from cleaner.ingest.documents import Docling
 from cleaner.ingest.extract import ExtractError, Extractor, _Text
 from cleaner.models import DOCLING_DIR
 
-pytestmark = pytest.mark.integration
+# Находка «Layers 2 and 4 review round…»: предупреждение об устаревании — ошибка теста, кроме двух, которые Docling
+# 2.131 выдаёт сам о своих полях: на каждом разборе PDF он сериализует настройки в ключ кэша конвейера (вычисляемое
+# force_full_page_ocr настроек распознавания), а при сборке конвейера PDF читает generate_table_images. Cleaner
+# ни то, ни другое не задаёт (do_ocr=False, картинок нет) — переходить не на что; новое устаревшее появится здесь.
+DOCLING_OWN_DEPRECATIONS = (
+    "ignore:`force_full_page_ocr` is deprecated:DeprecationWarning",
+    "ignore:This field is deprecated. Use `generate_page_images=True`:DeprecationWarning",
+)
+pytestmark = [
+    pytest.mark.integration, pytest.mark.filterwarnings("error::DeprecationWarning", *DOCLING_OWN_DEPRECATIONS),
+]
 CANARY = "petrov.check@kontora-test.ru"
 LINE = f"Сотрудник Петров Иван, почта {CANARY}, узел srv-check-01."
 
