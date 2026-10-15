@@ -9,7 +9,7 @@ from uuid import uuid4
 from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities import hostmap, labels, macsid, names, netmap
 from cleaner.core.match import has_invisible, normalize
-from cleaner.core.types import ChatState, Entity, EntityType, Settings, Surrogate
+from cleaner.core.types import ChatState, Entity, EntityType, Policy, Settings, Surrogate
 
 T = EntityType
 _DIGIT_TYPES = frozenset({T.INN, T.SNILS, T.OGRN, T.KPP, T.OMS, T.CARD, T.PASSPORT})
@@ -24,6 +24,7 @@ _LEGAL_FORMS = frozenset(
     {"ооо", "зао", "оао", "пао", "ао", "ип", "нко", "гуп", "муп", "фгуп", "llc", "inc", "ltd", "gmbh", "corp", "co"}
 )
 _NAME = re.compile(r"[\w-]+(?:\.[\w-]+)*")
+_STRICTNESS = {Policy.BLOCK: 2, Policy.HIDE: 1}         # прочие политики — 0
 
 
 @dataclass(frozen=True)
@@ -385,18 +386,24 @@ class Resolver:
             # Часть имени, отрезанная от выданной замены (pipeline._outside), — тоже часть имени.
             return self._manual(value) or self._part(value, origin, leading=True, standalone=True)
         left, registrable = hostmap.parts(value)
-        domain, domain_fake = self._manual(registrable) or self._dns(registrable, origin)
+        retyped = self._manual(registrable)
+        domain, domain_fake = retyped or self._dns(registrable, origin)
         fakes = []
-        primary = domain
+        owners = []
         for position, label in enumerate(left):
             manual = self._manual(label)
             if manual is None and label.lower() in self.generic:
                 fakes.append(label)
                 continue
             entity, fake = manual or self._part(label, origin, leading=position == 0)
-            if primary is domain:
-                primary = entity
+            owners.append((entity, manual is not None))
             fakes.append(fake)
+        owners.append((domain, retyped is not None))
+        # Сущность имени целиком — часть с самой строгой политикой: по ней «блокировать» проверяют очистка и экран
+        # чата (FR-4.2). При равных — часть, которой пользователь дал другой тип: блокировка её типа, заданная позже,
+        # тоже видна на экране; затем — первая слева, как прежде. Восстановление проверяет политики всех частей.
+        policies = self.settings.policies
+        primary = max(owners, key=lambda owner: (_STRICTNESS.get(policies.get(owner[0].type), 0), owner[1]))[0]
         surrogate = ".".join([*fakes, domain_fake])
         if left:
             self.state.surrogates.setdefault(surrogate, Surrogate(primary.id, value, "host"))

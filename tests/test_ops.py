@@ -3,6 +3,7 @@ import pytest
 from cleaner.core.entities import ops
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import restore
+from cleaner.core.types import Policy, Settings, default_policies
 from cleaner.core.types import EntityType as T
 
 
@@ -75,7 +76,79 @@ def test_retyping_the_domain_of_a_name_keeps_its_host_part(state, settings):
     assert restore(state, "host-1.<ORG_1>", settings).text == "srv01.contoso.ru"
 
 
-@pytest.mark.parametrize("value", ["srv0", "contoso", "srv01.contoso", "srv01.contoso.ru"],
+# Часть имени, которой дан другой тип: первая, средняя, домен — и имя, которое получается после смены типа.
+_RETYPED_PARTS = [
+    ("узел srv01.contoso.ru", "srv01", "<{}_1>.domain-1.example"),
+    ("узел srv-01.msk.contoso.ru", "msk", "host-1.<{}_1>.domain-1.example"),
+    ("узел srv01.contoso.ru", "contoso.ru", "host-1.<{}_1>"),
+]
+
+
+def _retype_part(state, settings, text, key, type_):
+    sanitize(state, text, settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == key).id, type_)
+    return sanitize(state, text, settings)
+
+
+@pytest.mark.parametrize("text, key, name", _RETYPED_PARTS, ids=["first", "middle", "domain"])
+def test_hidden_part_keeps_the_whole_name_a_surrogate(state, settings, text, key, name):
+    """Ревью 15.10.2026: часть с политикой «скрывать без восстановления» не восстанавливается и в составном имени,
+    в каком бы месте она ни стояла (FR-7.7); имя остаётся заменой целиком, как отдельная метка."""
+    name = name.format("SECRET")
+    assert _retype_part(state, settings, text, key, T.SECRET).sanitized == f"узел {name}"
+    result = restore(state, f"узел {name}", settings)
+    assert (result.text, [s.kind for s in result.segments], result.counters["kept"]) == (
+        f"узел {name}", ["kept_by_policy"], 1,
+    )
+    shown = Settings(policies={**default_policies(), T.SECRET: Policy.MASK})
+    assert restore(state, f"узел {name}", shown).text == text           # без политики — имя из запроса
+
+
+@pytest.mark.parametrize("text, key, name", _RETYPED_PARTS, ids=["first", "middle", "domain"])
+def test_blocked_part_blocks_the_whole_name(state, text, key, name):
+    """Ревью 15.10.2026: часть с политикой «блокировать» блокирует выдачу и в составном имени (FR-7.7), а сущность
+    фрагмента — она: по ней блокировку показывает экран чата."""
+    blocking = Settings(policies={**default_policies(), T.TERM: Policy.BLOCK})
+    result = _retype_part(state, blocking, text, key, T.TERM)
+    assert result.sanitized == f"узел {name.format('TERM')}" and not result.deliverable
+    assert [state.entities[span.entity_id].type for span in result.blocked] == [T.TERM]
+    assert sanitize(state, text, Settings()).deliverable
+
+
+def test_values_set_by_the_user_apply_to_each_part_of_a_name_with_a_labelled_domain(state, settings):
+    """Ревью 15.10.2026: имя с доменом-меткой (host-1.<ORG_1>) тоже собирается по частям — значение, заданное
+    пользователем у части или у домена, меняет только её."""
+    text = "узел srv01.contoso.ru и srv01, узел srv02.msk.contoso.ru, сайт contoso.ru"
+    sanitize(state, text, settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.type is T.DOMAIN).id, T.ORG)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "узел host-1.<ORG_1> и host-1, узел host-2.sub-3.<ORG_1>, сайт <ORG_1>"
+    answer = "host-1.<ORG_1>, host-2.sub-3.<ORG_1>"
+    assert restore(state, answer, settings).text == "srv01.contoso.ru, srv02.msk.contoso.ru"
+    entity = {e.key: e for e in state.entities.values()}
+    ops.set_restore_value(state, entity["srv01"].id, "srv99")
+    ops.set_restore_value(state, entity["msk"].id, "spb")
+    assert restore(state, answer, settings).text == "srv99.contoso.ru, srv02.spb.contoso.ru"
+    ops.set_restore_value(state, next(e for e in state.entities.values() if e.type is T.ORG).id, "fabrikam.ru")
+    assert restore(state, answer, settings).text == "srv99.fabrikam.ru, srv02.spb.fabrikam.ru"
+    assert restore(state, "<ORG_1>", settings).text == "fabrikam.ru"
+
+
+def test_label_of_a_part_inside_a_foreign_name_is_derived(state, settings):
+    """Ревью 15.10.2026: метка части в имени, которого не было в запросе, — выведенное имя, как host-1.evil.com;
+    имя из запроса и отдельная метка — восстановленные."""
+    _retype_part(state, settings, "узел srv01.contoso.ru и srv01", "srv01", T.TERM)
+    for answer, expected in (
+        ("<TERM_1>.evil.com", ("srv01.evil.com", ["derived"])),
+        ("host-1.evil.com", ("srv01.evil.com", ["derived"])),
+        ("<TERM_1>.domain-1.example", ("srv01.contoso.ru", ["restored"])),
+        ("на <TERM_1>. Затем", ("на srv01. Затем", ["restored"])),
+    ):
+        result = restore(state, answer, settings)
+        assert (result.text, [s.kind for s in result.segments]) == expected, answer
+
+
+@pytest.mark.parametrize("value",["srv0", "contoso", "srv01.contoso", "srv01.contoso.ru"],
                          ids=["inside-part", "half-domain", "two-parts", "whole"])
 def test_rule_off_the_part_boundaries_still_takes_the_whole_name(state, settings, value):
     """Не целая часть имени — как прежде: старший тип правила поглощает имя целиком (FR-3.3)."""
