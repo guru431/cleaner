@@ -21,6 +21,7 @@ _ADDRESS_TOKEN = re.compile(
 _LEGAL_FORMS = frozenset(
     {"ооо", "зао", "оао", "пао", "ао", "ип", "нко", "гуп", "муп", "фгуп", "llc", "inc", "ltd", "gmbh", "corp", "co"}
 )
+_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)*")
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,14 @@ class Resolver:
             key = self._dictionary_key(entry.type, entry.value)
             for form in (entry.value, *entry.aliases):
                 self.alias[(entry.type, normalize(form))] = key
+            lead = self._lead(entry.type, entry.value) if entry.aliases and entry.type in (T.HOST, T.DOMAIN) else None
+            for form in entry.aliases if lead else ():
+                # Варианты одной записи — одна замена (5.4): у имени с точками её задаёт первая часть,
+                # поэтому первая часть каждого варианта ведёт к ключу первой части значения. Домен
+                # варианта остаётся своим: «dc01.contoso.local» не делает contoso.local тем же, что contoso.ru.
+                other = self._lead(entry.type, form)
+                if other and other[0] is lead[0]:
+                    self.alias[(other[0], normalize(other[1]))] = lead[1].lower()
         self.open_values = settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
         self.real_ips: set[str] = set()
         self._text_addresses: set[str] | None = None
@@ -300,17 +309,32 @@ class Resolver:
         fake = self._issue(entity, "netbios", make)
         return entity, fake if value.isupper() else fake.lower()
 
+    @staticmethod
+    def _split(value: str) -> tuple[list[str], str]:
+        left, registrable = hostmap.split_name(value)
+        if not registrable:                      # неизвестный суффикс: домен — две последние части
+            parts = value.split(".")
+            left, registrable = parts[:-2], ".".join(parts[-2:])
+        return left, registrable
+
+    def _lead(self, type_: EntityType, value: str) -> tuple[EntityType, str] | None:
+        """Чья замена стоит в подмене имени первой: тип сущности и часть, по которой _name ищет её ключ."""
+        if not _NAME.fullmatch(value):
+            return None
+        if "." not in value:
+            return type_, value
+        left, registrable = self._split(value)
+        first = next((label for label in left if label.lower() not in self.generic), None)
+        return (T.HOST, first) if first else (T.DOMAIN, registrable)
+
     def _name(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
-        if not re.fullmatch(r"[\w-]+(?:\.[\w-]+)*", value):
+        if not _NAME.fullmatch(value):
             return None
         if "." not in value:
             if type_ is T.DOMAIN:
                 return self._netbios(value, origin)
             return self._part(value, origin, leading=True, standalone=True)
-        left, registrable = hostmap.split_name(value)
-        if not registrable:                      # неизвестный суффикс: домен — две последние части
-            parts = value.split(".")
-            left, registrable = parts[:-2], ".".join(parts[-2:])
+        left, registrable = self._split(value)
         key = self.alias.get((T.DOMAIN, normalize(registrable))) or registrable.lower()
         domain = self._entity(T.DOMAIN, key, registrable, origin)
 

@@ -65,6 +65,30 @@ def test_aliases_of_a_host_entry_form_one_entity(state):
     assert resolve(state, "srv-dc01 dc01", *spans, settings=settings) == ["host-1", "host-1"]
 
 
+def test_aliases_of_a_dotted_host_entry_share_its_host_part(state):
+    """Находка «dotted dictionary aliases split»: короткий и полный варианты записи — одна часть host-N.
+
+    Домен варианта «dc01.contoso.local» свой: иначе contoso.local у всех узлов восстанавливался бы как contoso.ru.
+    """
+    entry = DictEntry(T.HOST, "srv-dc01.contoso.ru", ("dc01", "DC01.contoso.local"))
+    text = "srv-dc01.contoso.ru, dc01 и DC01.contoso.local"
+    spans = (("srv-dc01.contoso.ru", T.HOST), ("dc01", T.HOST), ("DC01.contoso.local", T.HOST))
+    assert resolve(state, text, *spans, settings=Settings(always=(entry,))) == [
+        "host-1.domain-1.example", "host-1", "HOST-1.domain-2.example",
+    ]
+    assert state.surrogates["HOST-1.domain-2.example"].original == "DC01.contoso.local"
+
+
+def test_alias_whose_lead_part_is_of_another_kind_keeps_its_own_entity(state):
+    """Вариант, у которого первой стоит не часть имени, а домен, с частью имени не сводится."""
+    entry = DictEntry(T.HOST, "srv-dc01.contoso.ru", ("mail.contoso.ru",))
+    text = "srv-dc01.contoso.ru и mail.contoso.ru"
+    spans = (("srv-dc01.contoso.ru", T.HOST), ("mail.contoso.ru", T.HOST))
+    assert resolve(state, text, *spans, settings=Settings(always=(entry,))) == [
+        "host-1.domain-1.example", "mail.domain-1.example",
+    ]
+
+
 def test_addresses_macs_and_sids(state):
     sid = "S-1-5-21-1004336348-1177238915-682003330-1104"
     text = f"10.1.2.5 10.1.2.77 00:1A:2B:3C:4D:5E 00-1a-2b-3c-4d-5e {sid}"
