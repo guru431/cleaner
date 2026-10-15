@@ -33,7 +33,8 @@ def test_scan_is_recognised_and_marked_on_the_review(ivan, repo):
     [item] = repo.items(chat_id)
     assert (item.sanitized, item.meta["ocr_pages"]) == ("Скан: почта <EMAIL_1>", [1])
     assert "получен распознаванием изображения" in ivan.get(f"/chats/{chat_id}/items/{item.id}").text
-    assert "<h3>Файл 1 · " in ivan.get(f"/chats/{chat_id}").text
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert '<span class="title">Файл 1</span>' in page and f'href="/chats/{chat_id}/items/{item.id}"' in page
 
 
 def test_password_protected_file_fails_with_a_reason_and_no_retry(ivan, repo):

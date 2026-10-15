@@ -37,3 +37,21 @@ def test_every_icon_used_in_the_templates_is_in_the_sprite(browser):
     references = re.compile(r'icon\("([a-z]+)"\)|icons\.svg#([a-z]+)')              # макрос и прямой <use>
     used = {"".join(match) for path in TEMPLATES for match in references.findall(path.read_text(encoding="utf-8"))}
     assert used and used <= symbols, used - symbols
+
+
+def test_chat_pages_open_with_chats_current(ivan, repo):
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    item_id = repo.items(chat_id)[0].id
+    for path in ("/chats", f"/chats/{chat_id}", f"/chats/{chat_id}/items/{item_id}", f"/chats/{chat_id}/entities"):
+        response = ivan.get(path)
+        assert response.status_code == 200, path
+        assert re.findall(r'<a href="([^"]+)" class="on"', response.text) == ["/chats"], path
+
+
+def test_layer_switch_states_its_layer_and_state(ivan):
+    chat_id = ivan.chat()
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert 'aria-pressed="true" title="Слой 4 — модели распознавания имён: включён"' in page
+    ivan.post(f"/chats/{chat_id}/layers", layer="ner", enabled="no")
+    assert 'aria-pressed="false" title="Слой 4 — модели распознавания имён: выключен"' in ivan.get(f"/chats/{chat_id}").text

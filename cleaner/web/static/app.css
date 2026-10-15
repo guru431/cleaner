@@ -274,6 +274,7 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 .send-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .send-row form { margin: 0; display: flex; align-items: center; gap: 6px; }
 .send-row select { max-width: 320px; }
+.send-row .ask-local { margin-left: auto; }
 .compose { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 4px 8px; }
 .compose > .hint { grid-column: 1; }
 
