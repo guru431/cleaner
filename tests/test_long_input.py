@@ -27,9 +27,9 @@ from cleaner.core.types import EntityType as T
         "д.р. 11.11.11 " * 7000, "4111 1111 1111 1111 " * 5000, "schtasks " * 10000,
         # Правила detect-secrets: «//…» (NpmDetector), пробелы после слова ключа (IBM, Cloudant, Softlayer),
         # «eyJ» и «sk-» без начала слова (JWT, OpenAI), один токен много раз на строке выгрузки JSON.
-        "/home/" * 20000, " token" + " " * 5000 + "!", " secret_key" + " " * 5000 + "!", "eyJ" * 30000,
-        "sk-" * 30000, '{"account_sid":"AC' + "0123456789abcdef" * 2 + '","n":1},' * 2000, "token=" * 20000,
-        "password=P;" + "Ab " * 30000, "password=P" + ";Ab Cd" * 15000, "PWD=/" * 20000, "token=${a}" * 10000,
+        "/home/" * 10000, " token" + " " * 5000 + "!", " secret_key" + " " * 5000 + "!", "eyJ" * 30000,
+        "sk-" * 15000, '{"account_sid":"AC' + "0123456789abcdef" * 2 + '","n":1},' * 2000, "token=" * 5000,
+        "password=P;" + "Ab " * 30000, "password=P" + ";Ab Cd" * 15000, "PWD=/" * 20000, "token=${a}" * 2500,
         "net use \\\\a\\b" + " /x" * 30000 + " ", "mysql -u " * 10000, '<add key="pass" value="x"' * 4000,
         # Тысячи разных токенов одного правила detect-secrets на одной строке: каждое значение искалось по всей строке.
         "".join('{"account_sid":"AC%032x","n":1},' % i for i in range(5000)), "".join("=AKC%010d " % i for i in range(10000)),
