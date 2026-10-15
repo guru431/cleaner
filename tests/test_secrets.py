@@ -321,3 +321,38 @@ def test_paths_properties_flags_and_prose_are_left_alone(text):
 )
 def test_passwords_next_to_paths_properties_flags_and_prose_are_found(text, value):
     assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        (r"net use \\srv-fs01\share Qwerty123 /user:CONTOSO\ivanov", "Qwerty123"),
+        (r"net use Z: \\srv-fs01\share Qwerty123 /user:ivanov", "Qwerty123"),
+        (r"NET USE \\srv-fs01\share /user:CONTOSO\ivanov /persistent:no Qwerty123", "Qwerty123"),
+        ("mysql -uroot -pQwerty123 crm", "Qwerty123"),
+        ("mysqldump -h db01 -u app -p'S3cr3t pass' crm", "S3cr3t pass"),
+        ("mariadb-dump -uapp -pS3cr3t crm", "S3cr3t"),
+        ("sshpass -p Qwerty123 ssh admin@srv-db01", "Qwerty123"),
+        ("sshpass -pQwerty123 scp a.txt srv-db01:", "Qwerty123"),
+        ('<add key="DbPassword" value="Qwerty123"/>', "Qwerty123"),
+        ("<add key='Smtp.Password' value='Qwerty123' />", "Qwerty123"),
+    ],
+)
+def test_password_at_its_place_in_a_known_command_is_found(text, value):
+    """Идея «Command-specific password rules»: пароль без слова-ключа на своём месте в команде."""
+    assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        r"net use \\srv-fs01\share /user:CONTOSO\ivanov", r"net use \\srv-fs01\share * /user:ivanov",
+        r"net use Z: \\srv-fs01\share /persistent:yes", "net use \\\\srv-fs01\\share\nдальше текст",
+        "mysql -u root -p crm", "mysql -p", "mysql -P3306 -h db01 crm", "mysql -uroot crm | grep -pattern",
+        "sshpass -f ~/.pw ssh srv-db01", "sshpass -e ssh srv-db01",
+        '<add key="PageSize" value="20"/>', '<add key="PasswordMinLength" value="8"/>',
+        '<add key="DbPassword" value="${DB_PASS}"/>',
+    ],
+)
+def test_known_command_without_a_password_is_left_alone(text):
+    assert found(text) == set()

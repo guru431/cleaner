@@ -87,6 +87,24 @@ _CLI = re.compile(
     r"|/p(?:assword)?:(?![A-Za-z_][\w-]*=[^\s=]))" + _VALUE,
     re.IGNORECASE,
 )
+# Пароль без слова-ключа на своём месте в известной команде. «net use \\хост\ресурс пароль /user:…» —
+# первое слово после пути, кроме параметров и «*» (запрос пароля). «mysql -pпароль» — только слитно:
+# «-p имя» — запрос пароля и имя базы, «-P» — порт; не дальше двадцати слов и не за «|», «;», «&».
+# «sshpass -p пароль»; ключ приложения в web.config — <add key="…Password" value="…"/>.
+_COMMANDS = (
+    re.compile(
+        r"(?<![\w-])net[ \t]+use[ \t]+(?:(?:[a-z]:|\*)[ \t]+)?\\\\[^\s\\]+\\\S+(?:[ \t]+/\S+)*[ \t]+(?![/*])"
+        + _VALUE,
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?<![\w-])(?:mysql|mariadb)[\w.-]*(?:[ \t]+(?!-p)[^\s|;&]++){0,20}?[ \t]+-p" + _VALUE),
+    re.compile(r"(?<![\w-])sshpass[ \t]+-p[ \t]*" + _VALUE),
+)
+_ADD_KEY = re.compile(
+    r"""<add\s+key\s*=\s*(?P<q>["'])(?P<key>[^"'<>\r\n]+)(?P=q)\s+value\s*=\s*"""
+    r"""(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)')""",
+    re.IGNORECASE,
+)
 _SECURE = re.compile(
     r"""ConvertTo-SecureString\s+(?:-String\s+)?(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)')""",
     re.IGNORECASE,
@@ -211,6 +229,10 @@ def _looks_like_password(value: str) -> bool:
     return len(value) >= 6 and sum(kinds) >= 2 and (kinds[2] or kinds[3])
 
 
+def _secret_key(key: str) -> bool:
+    return bool(_KEY_WORD.search(key)) and not (_NOT_SECRET_KEY.fullmatch(key) and not _SECRET_END.search(key))
+
+
 def _not_a_value(key: str, value: str) -> bool:
     """Значение под ключом со словом секрета, которое секретом не является: имя той же переменной
     («cancellationToken: cancellationToken», «accessToken: AccessToken;»; но «password: password» —
@@ -237,9 +259,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         # Пара внутри уже разобранного значения пропускается: её значение кончается там же, а без этого
         # «token=token=…» или «PWD=/PWD=/…» разбирали значение до конца строки от каждого ключа.
         # Цена — пара внутри отвергнутого значения («PWD=/x?token=…») не ищется.
-        if m.start() < parsed_until:
-            continue
-        if not _KEY_WORD.search(key) or (_NOT_SECRET_KEY.fullmatch(key) and not _SECRET_END.search(key)):
+        if m.start() < parsed_until or not _secret_key(key):
             continue
         value = _VALUE_AT.match(text, m.end())
         if not value:
@@ -248,9 +268,13 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         bounds = _value(value, minimum=2)
         if bounds and not _not_a_value(key, text[bounds[0]:bounds[1]]):
             spans.append(Span(*bounds, EntityType.SECRET, name))
-    for pattern in (_XML, _URL, _CLI, _SECURE, _AUTH, _BEARER):
+    for m in _ADD_KEY.finditer(text):
+        bounds = _value(m, minimum=2) if _secret_key(m.group("key")) else None
+        if bounds and not _not_a_value(m.group("key"), text[bounds[0]:bounds[1]]):
+            spans.append(Span(*bounds, EntityType.SECRET, name))
+    for pattern in (_XML, _URL, _CLI, _SECURE, _AUTH, _BEARER, *_COMMANDS):
         for m in pattern.finditer(text):
-            bounds = _value(m, minimum=2 if pattern is _CLI else 3)
+            bounds = _value(m, minimum=2 if pattern is _CLI or pattern in _COMMANDS else 3)
             if bounds and not (pattern in (_AUTH, _BEARER) and _WORDS.fullmatch(text, *bounds)):
                 spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PHRASE.finditer(text):
