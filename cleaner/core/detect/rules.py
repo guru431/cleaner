@@ -17,7 +17,7 @@ _BEFORE = 40
 _AFTER = 15
 
 # Часть домена бывает меткой: части, которой пользователь дал другой тип, выдана метка (ivanov@<TERM_1>.domain-1.example,
-# ivanov@host-1.<ORG_1>). Метка без точки — домен, только если выдана домену в имени (detect).
+# ivanov@host-1.<ORG_1>). Метка без точки — домен, только если это метка доменного имени (detect, labels.domain_labels).
 _DOMAIN_PART = rf"(?:[\w-]+|{_LABEL.pattern})"
 _EMAIL = re.compile(rf"(?<![\w.+-])[\w.+-]+@(?:{_DOMAIN_PART}(?:\.{_DOMAIN_PART})+|{_LABEL.pattern})")
 # «схема://» прямо перед «…@хост»: то, что до «@», — пользователь адреса, а не e-mail. Знаки «?#=»
@@ -278,7 +278,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         local, _, domain = m.group().rpartition("@")
         if "." not in domain and domain.lower() not in ctx.issued_domains:
             continue        # «ivanov@<PERSON_1>»: метка не домена
-        # Метка в конце имени с точкой — часть адреса, только если выдана домену в имени: «ivanov@contoso.ru.<TERM_1>» —
+        # Метка в конце имени с точкой — часть адреса, только если это метка доменного имени: «ivanov@contoso.ru.<TERM_1>» —
         # адрес и метка за ним (точка без пробела), а не имя с меткой части. Без имени с точкой перед ней адрес — как был.
         parts = domain.split(".")
         while len(parts) > 2 and _LABEL.fullmatch(parts[-1]) and parts[-1].lower() not in ctx.issued_domains:

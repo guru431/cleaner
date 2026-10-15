@@ -520,6 +520,37 @@ def test_email_with_a_label_in_its_domain_is_found(state, settings, text, expect
     assert sanitize(state, expected, settings).sanitized == expected
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("Проверь srv02.<TERM_1>", "Проверь host-2.<TERM_1>"),
+    ("Проверь srv02.host-1.<TERM_1>", "Проверь host-2.host-1.<TERM_1>"),
+    ("почта ivanov@<TERM_1>", "почта <ACCOUNT_1>@<TERM_1>"),
+    ("почта ivanov@srv02.<TERM_1>", "почта <ACCOUNT_1>@host-2.<TERM_1>"),
+    ("Проверь www.<TERM_1>", "Проверь www.<TERM_1>"),
+    ("отчёт.<TERM_2>, ivanov@<TERM_2>", "отчёт.<TERM_2>, ivanov@<TERM_2>"),
+    ("отчёт.<PERSON_1>, ivanov@<PERSON_1>", "отчёт.<PERSON_1>, ivanov@<PERSON_1>"),
+], ids=["part-before", "parts-before", "email", "email-part", "generic", "not-a-domain", "person"])
+def test_label_of_a_domain_name_is_a_domain_as_in_restore(state, settings, text, expected):
+    """Наблюдение раунда имён узлов, P3: конвейер считал доменом только метку в конце записанного имени (<ORG_1> из
+    host-1.<ORG_1>), а восстановление — любую метку, значение которой — доменное имя. После host-1.<TERM_1> (выделение
+    «fabrikam» в host-1.fabrikam.ru) srv02.<TERM_1> оставался открытым, а ivanov@<TERM_1> — не адресом. Метка другого
+    значения («Заря», человек) доменом не становится."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    for value, type_, sample in (
+        ("fabrikam", T.TERM, "Проверь host-1.fabrikam.ru"), ("Заря", T.TERM, "проект Заря"),
+        ("Петров", T.PERSON, "звонил Петров"),
+    ):
+        ops.mask(state, value, type_)
+        sanitize(state, sample, settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, expected, settings).sanitized == expected
+    originals = {"host-1": "srv01", "<TERM_1>": "fabrikam.ru", "<TERM_2>": "Заря", "<PERSON_1>": "Петров"}
+    restored = text
+    for fake, original in originals.items():
+        restored = restored.replace(fake, original)
+    assert restore(state, expected, settings).text == restored
+
+
 def test_chain_of_overlapping_emails_is_hidden_but_not_searched_as_a_whole(state, settings):
     """Наблюдение раунда имён узлов, P2: в «a@b.c.» * N адреса пересекаются (следующий начинается в домене
     предыдущего), и второй проход сливал найденные написания в один фрагмент длиной в текст. Он становился искомым

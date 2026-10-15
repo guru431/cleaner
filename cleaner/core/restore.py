@@ -204,7 +204,6 @@ _PROSE_START = re.compile(r"https?://|www\.", re.IGNORECASE)
 # попытка кончается на ближайшем «<».
 _OUTSIDE_TAGS = re.compile(r"<[^<>\"']*>([^<\"']*)")
 _HOST_TYPES = frozenset({EntityType.IP, EntityType.HOST, EntityType.DOMAIN})
-_DOMAIN_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
 # Знаки ASCII в конце хоста, которых нет в доменах верхнего уровня и которые браузер не превращает в букву, цифру или
 # точку: без «-», «.» и «%» («%2e» браузер раскрывает в точку до разбора хоста). «/?#\:@» хост и так кончают.
 _UNRESOLVABLE_TAIL = re.compile(r"(?<=[^\W_])[!\"$&'()*+,;<=>^_`{|}~]+$")
@@ -304,18 +303,16 @@ class _Restorer:
             if surrogate.kind in ("host", "ip", "ip6") and len(surrogate.original or "") <= hostmap.MAX_NAME
         }
         # Метка, выданная адресу или имени узла вместо подмены (совпадение адресов, значение не того вида),
-        # в хосте ссылки ведёт на наш же узел: «http://<IP_1>:8080/». Модель пишет её и без скобок. Метка, значение
-        # которой — доменное имя (домен в имени, которому дали другой тип, — <ORG_1> из host-1.<ORG_1>; кусок имени,
-        # который задело выделение, — <TERM_1> из host-1.<TERM_1>), — наш домен, как domain-N.example: после
-        # восстановления это имя из текста пользователя.
+        # в хосте ссылки ведёт на наш же узел: «http://<IP_1>:8080/». Модель пишет её и без скобок. Метка доменного
+        # имени (labels.domain_labels: <ORG_1> из host-1.<ORG_1>, <TERM_1> из host-1.<TERM_1>) — наш домен, как
+        # domain-N.example: после восстановления это имя из текста пользователя. Те же метки доменом считает конвейер.
         self.label_domains: set[str] = set()
+        domains = labels.domain_labels(state)
         for text, surrogate in state.surrogates.items():
             if surrogate.kind != "label":
                 continue
             entity = state.entities[surrogate.entity_id]
-            domain = _DOMAIN_NAME.fullmatch(entity.restore_value) is not None and hostmap.has_known_suffix(
-                entity.restore_value,
-            )
+            domain = text in domains
             if domain or entity.type in _HOST_TYPES:
                 bare = text.strip("<>[]").lower()
                 variants = {bare, f"<{bare}>", f"&lt;{bare}&gt;"}

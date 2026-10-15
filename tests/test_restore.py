@@ -822,6 +822,28 @@ def test_label_of_a_domain_does_not_make_a_foreign_link_ours(settings, answer):
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
 
+def test_label_ending_a_recorded_name_is_a_domain_whatever_its_suffix(settings):
+    """Наблюдение раунда имён узлов, P3: доменом метку считают одинаково конвейер и восстановление (labels.domain_labels).
+    Домен с неизвестным суффиксом из адреса ссылки, которому дали другой тип, конвейер считал доменом по записанному
+    имени (host-1.<ORG_1>), а восстановление — нет: ссылка на www.host-1.<ORG_1> была чужой."""
+    state = ChatState(chat_id="domains", net_key=bytes(range(32)))
+    sanitize(state, "ссылка https://srv01.contoso.qqq/ и сайт https://contoso.qqq/", settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "contoso.qqq").id, T.ORG)
+    ops.mask(state, "ivanov@contoso.ru", T.EMAIL)
+    assert sanitize(state, "ссылка https://srv01.contoso.qqq/, почта ivanov@contoso.ru", settings).sanitized == (
+        "ссылка https://host-1.<ORG_1>/, почта <EMAIL_1>"
+    )
+    assert sanitize(state, "узел srv02.<ORG_1>", settings).sanitized == "узел host-2.<ORG_1>"
+    for answer, restored in (
+        ("https://www.host-1.<ORG_1>/?q=<EMAIL_1>", "https://www.srv01.contoso.qqq/?q=ivanov@contoso.ru"),
+        ("https://<ORG_1>/?q=<EMAIL_1>", "https://contoso.qqq/?q=ivanov@contoso.ru"),
+    ):
+        result = restore(state, answer, settings)
+        assert result.text == restored and "foreign_link" not in kinds(result), answer
+    result = restore(state, "https://evil.<ORG_1>/?q=<EMAIL_1>", settings)
+    assert kinds(result) == ["foreign_link"]
+
+
 def test_own_link_in_an_attribute_is_still_restored(settings):
     result = restore(link_state(), '<a href="https://host-1.domain-1.example/?q=<EMAIL_1>">', settings)
     assert result.text == '<a href="https://srv-dc01.contoso.ru/?q=ivanov@contoso.ru">'

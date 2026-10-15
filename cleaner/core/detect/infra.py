@@ -165,8 +165,8 @@ def well_known(value: str, ctx: DetectContext) -> bool:
 
 
 def _under_issued(value: str, ctx: DetectContext) -> bool:
-    """Имя под выданной чатом подменой домена («srv-db02.domain-1.example») или под меткой, выданной домену в
-    имени («srv-db02.<ORG_1>» рядом с host-1.<ORG_1>): «example» в нём общеизвестно, но части перед подменой
+    """Имя под выданной чатом подменой домена («srv-db02.domain-1.example») или под меткой доменного имени
+    («srv-db02.<ORG_1>» рядом с host-1.<ORG_1>, labels.domain_labels): «example» в нём общеизвестно, но части перед подменой
     вписал человек — это настоящие имена. Выданные части («host-1») и общеизвестные («www») конвейер оставляет
     как есть (pipeline._outside)."""
     parts = value.lower().split(".")
