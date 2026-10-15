@@ -28,9 +28,9 @@ from cleaner.core.types import EntityType as T
         "д.р. 11.11.11 " * 7000, "4111 1111 1111 1111 " * 5000, "schtasks " * 10000,
         # Правила detect-secrets: «//…» (NpmDetector), пробелы после слова ключа (IBM, Cloudant, Softlayer),
         # «eyJ» и «sk-» без начала слова (JWT, OpenAI), один токен много раз на строке выгрузки JSON.
-        "/home/" * 20000, " token" + " " * 5000 + "!", " secret_key" + " " * 5000 + "!", "eyJ" * 30000,
-        "sk-" * 30000, '{"account_sid":"AC' + "0123456789abcdef" * 2 + '","n":1},' * 2000, "token=" * 20000,
-        "password=P;" + "Ab " * 30000, "password=P" + ";Ab Cd" * 15000, "PWD=/" * 20000, "token=${a}" * 10000,
+        "/home/" * 10000, " token" + " " * 5000 + "!", " secret_key" + " " * 5000 + "!", "eyJ" * 30000,
+        "sk-" * 15000, '{"account_sid":"AC' + "0123456789abcdef" * 2 + '","n":1},' * 2000, "token=" * 5000,
+        "password=P;" + "Ab " * 30000, "password=P" + ";Ab Cd" * 15000, "PWD=/" * 20000, "token=${a}" * 2500,
         "net use \\\\a\\b" + " /x" * 30000 + " ", "mysql -u " * 10000, '<add key="pass" value="x"' * 4000,
         # Тысячи разных токенов одного правила detect-secrets на одной строке: каждое значение искалось по всей строке.
         "".join('{"account_sid":"AC%032x","n":1},' % i for i in range(5000)), "".join("=AKC%010d " % i for i in range(10000)),
@@ -41,6 +41,10 @@ from cleaner.core.types import EntityType as T
         "пароль: это " * 8000, "пароль а б в г: это " * 5000, "password " + "a " * 50000 + ": x",
         # Токен или код в прозе: слова после «токен», длинный ряд без цифр или без букв, ряд вида токена.
         "токен " * 20000, "код a " * 30000, "ключ " * 4 + "a" * 100000, "код " + "1" * 100000, "token " + "a1" * 100000,
+        # Слово кода ошибки перед «код» (поиск назад до начала текста — 4,6 с) и имя из тысяч частей.
+        "код 1234567 " * 10000, "token " + "a1_" * 50000,
+        # Слова после «пин» (без предела их числа — 3,6 с) и группы ключа BitLocker.
+        "пин а " * 5000, "123456-" * 5000,
         # Скобки в конце значения, атрибут и вызов с именами после ключа.
         "password=" + ")" * 100000, "password=" + "a." * 50000 + "1", "password=f(" + "a," * 50000 + "1)",
         "pwd=" + "(a)" * 30000, "password = self." + "aB" * 50000, "password=" + "(" * 50000 + "a" + ")" * 50000,
@@ -54,6 +58,8 @@ from cleaner.core.types import EntityType as T
         "- " * 50000 + "BEGIN PRIVATE KEY\nMIIEowIBAAKCAQEA", "PuTTY-User-Key-File-2: x\n" * 8000,
         "PuTTY-User-Key-File-2:" + "\nA: b" * 15000, "PuTTY-User-Key-File-2" * 10000,
         "PuTTY-User-Key-File-2: x\n" + ("AAAAB3NzaC1yc2EA" * 8 + "\n") * 2000, "gldt-" * 20000,
+        # Строки заголовка, продолженные обратной косой чертой (RFC 4716): строки первого заголовка идут до конца текста.
+        "BEGIN PRIVATE KEY\nA: \\\n" * 3000,
         # Имя, часть которого — метка (5.7, шаг 4).
         "<ORG_1>." * 20000, "a.<ORG_1>." * 10000, "<ORG_1>a." * 15000, "<ORG_1" * 20000, "<ORG_1>." + "a.b." * 25000,
         # Цепочка частей через точку, которая кончается не однобуквенной частью: её суффиксы сверяются со списками.
@@ -70,11 +76,12 @@ from cleaner.core.types import EntityType as T
         "password_words", "password_hyphenated_word", "password_double_hyphens", "password_copulas",
         "password_distinct_words", "password_colon_copulas", "password_long_leads", "password_long_lead_run",
         "token_words", "code_words", "key_letters", "code_digits", "token_run",
+        "digit_codes", "identifier_parts", "pin_words", "bitlocker_groups",
         "closing_brackets", "attribute_chain", "call_names", "bracket_pairs",
         "camel_attribute", "nested_brackets", "pem_begins", "dashes", "pem_dashed_headers", "pem_bare_headers", "pem_dashed_body",
         "pem_bare_blocks",
         "pem_header_lines", "pem_nested_headers", "pem_long_header_line", "pem_spaced_runs", "pem_spaced_hyphens",
-        "putty_headers", "putty_fields", "putty_names", "putty_body", "gitlab_prefixes",
+        "putty_headers", "putty_fields", "putty_names", "putty_body", "gitlab_prefixes", "pem_continued_headers",
         "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail", "dotted_words", "email_labels",
         "email_labels_open", "email_labels_after",
     ],

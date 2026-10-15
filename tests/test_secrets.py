@@ -95,13 +95,28 @@ GITLAB_BODY = "a1B2c3D4e5F6g7H8i9J0"            # 20 знаков, как Devise
 @pytest.mark.parametrize(
     "prefix",
     ["glpat-", "gldt-", "glft-", "glsoat-", "glrt-", "glrtr-", "glcbt-", "glcbt-64_", "glffct-", "glimt-", "glptt-",
-     "glagent-", "gloas-"],
+     "glagent-", "gloas-", "glwt-"],
 )
 def test_gitlab_tokens_of_every_kind_are_found(prefix):
     """Находка «Layer 2 misses PuTTY and SSH2 private keys and GitLab tokens»: у правила detect-secrets значение — группа
     префикса короче 8 знаков, а правила с точной длиной (glimt-, glptt-, gloas-) не видят токен другой длины."""
     token = prefix + GITLAB_BODY
     assert found(f"в CI лежит {token} для сборки") == {token}
+
+
+@pytest.mark.parametrize("suffix", [".01.0z1a2b3c4", ".0z1a2b3c4"], ids=["versioned", "routable"])
+def test_routable_gitlab_token_is_found_whole(suffix):
+    """Ревью раунда токенов GitLab: у маршрутизируемого токена после тела через точку идут версия и контрольная сумма
+    (glpat-<тело>.01.<9 знаков>), и скрывалась только часть до первой точки."""
+    token = f"glpat-{GITLAB_BODY}k1L2m3N4o5P6q{suffix}"
+    for text in (f"в CI лежит {token} для сборки", f"В CI лежит {token}. Смените его"):
+        assert found(text) == {token}, text
+
+
+def test_full_stop_or_a_short_tail_after_a_gitlab_token_is_not_part_of_it():
+    token = "glpat-" + GITLAB_BODY
+    for text in (f"в CI лежит {token}. Смените его", f"в CI лежит {token}.01.abc", f"в CI лежит {token}.01.0z1a2b3c4d5"):
+        assert found(text) == {token}, text
 
 
 def test_gitlab_prefix_in_prose_is_not_a_token():
@@ -191,6 +206,15 @@ def test_library_rules_still_see_a_key_after_a_run_of_spaces():
     assert found(text) == {key}
 
 
+@pytest.mark.parametrize("line_break", ["\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x85", " "])
+def test_library_rule_anchored_at_a_line_start_is_found_after_any_line_break(line_break):
+    """Правила detect-secrets идут по строкам только после совпадения во всём тексте; «^» и «(?<=^)» начала строки
+    там видят знак конца предыдущей строки как «\\s» и «\\W»."""
+    key = "Zx81kLmN02pQ" * 3 + "Ab1-Cd2_"
+    for value, line in ((ARTIFACTORY, ARTIFACTORY), (key, f"ibm_cloud_iam_key = {key}")):
+        assert found(f"первая строка{line_break}{line}{line_break}") == {value}, repr(line)
+
+
 @pytest.mark.parametrize(
     "text, value",
     [
@@ -211,9 +235,16 @@ def test_key_ending_in_a_secret_word_is_never_skipped(text, value):
 
 def test_stop_listed_keys_still_hold_no_secret():
     for text in ("bypass=Zx81kLmN02pQ", "context_tokens: 8192", "token_url: https://login.example/t",
-                 "password_reset: weekly", "compass_heading: 270", "Argon2-Passes: 13", "num_passes=3"):
+                 "password_reset: weekly", "compass_heading: 270", "Argon2-Passes: 13", "num_passes=3",
+                 "max_passes = 20", "passes: 10"):
         assert found(text) == set(), text
     assert found("passes_secret: Zx81kLmN02pQ") == {"Zx81kLmN02pQ"}
+
+
+def test_value_under_a_passes_key_that_is_no_count_is_a_secret():
+    """Ревью раунда ключей PuTTY: стоп-слово passes (Argon2-Passes — число проходов) открывало и список паролей
+    wifi_passes. Число под таким ключом — счётчик, остальное — пароль."""
+    assert found("wifi_passes: Summer2024") == {"Summer2024"}
 
 
 @pytest.mark.parametrize(
@@ -380,6 +411,105 @@ def test_numbers_and_words_after_token_or_code_in_prose_are_left_alone():
         "ключ /etc/ssh/ssh_host_ed25519_key на месте", "токен abcdefghijklmnopqrstuvwxyz", "код товара 4601234567890",
         f"токен в файле token.{HEX32}.json", f"ключ 12345678 и {HEX32[:12]}", "token type Bearer",
         f"токен нужно срочно обновить потому что {HEX32}",
+    ):
+        assert found(text) == set(), text
+
+
+def test_error_event_or_classifier_code_of_six_to_eight_digits_is_left_alone():
+    """Ревью правила «токен или код в тексте»: восьмизначный код ошибки Windows (HRESULT) и код классификатора скрывались
+    на своём месте, а это суть вопроса в поддержке."""
+    for text in (
+        "код ошибки 80070005 при обновлении", "error code 80244022", "Windows Update error code 80244022",
+        "ошибка с кодом 80070005", "Установка завершилась с кодом ошибки 80073712", "exited with status code 13370001",
+        "Код ОКТМО 45380000", "код по ОКПО 12345678", "код по окуд 0710001", "код события 1000001 в журнале",
+    ):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("код подтверждения 847593", "847593"), ("ошибка входа, пришёл код 847593", "847593"),
+        ("Error: verification code 73921456", "73921456"), ("Ошибка: код 847593 не подходит", "847593"),
+        ("в ответ пришёл код 847593", "847593"),
+    ],
+    ids=["confirmation", "error_far_before", "error_before_another_word", "error_before_a_colon", "reply"],
+)
+def test_one_time_code_next_to_an_error_word_is_still_hidden_in_its_place(text, value):
+    assert finds(text) == {(value, False)}
+
+
+def test_identifier_of_words_after_token_key_or_code_is_left_alone():
+    """Ревью правила «токен или код в тексте»: имя из слов через «_», «/», «-» (столбец, модуль, модель) было токеном
+    и скрывалось во всём чате."""
+    for text in (
+        "The primary key is customer_order_line_v2_id", "код в модуле cleaner/core/detect/secrets2",
+        "tokens for model gpt4o_mini_2024_07_18", "the key column order_items_2024_archive",
+        "ключ настройки Security-Policy-Level-2-Strict", "код функции getUserById_v2_handler",
+        "ключ API_KEY_2024_PRODUCTION_V2 в файле .env", "tokens for gpt-4o-mini-2024-07-18",
+    ):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("токен доступа token_c5b6a7f8e9d0c1b2a3f4", "token_c5b6a7f8e9d0c1b2a3f4"),
+        ("токен Zx81kLmN02pQ-aB_cD3eF4gH", "Zx81kLmN02pQ-aB_cD3eF4gH"),
+        ("ключ продукта W269N-WFGWX-YVC9B-WJ6CQ-T83GX", "W269N-WFGWX-YVC9B-WJ6CQ-T83GX"),
+        ("пароль от почты Summer_Holidays_2024", "Summer_Holidays_2024"),
+        ("Password for the mailbox correct-horse-battery-42", "correct-horse-battery-42"),
+    ],
+    ids=["random_part", "base64url", "product_key", "password_words", "password_passphrase"],
+)
+def test_token_with_a_random_part_or_a_password_of_words_is_still_found(text, value):
+    """Имя из слов открыто только после «токен», «ключ», «код»: после «пароль» это пароль из слов, а часть без вида слова
+    (шестнадцатеричная, base64, группа ключа продукта с цифрами между заглавными) делает значение токеном."""
+    assert finds(text) == {(value, True)}
+
+
+BITLOCKER = "135795-258016-380237-502458-624679-013574-720885-008547"   # вымышленный: каждая группа — число до 65 536, × 11
+
+
+@pytest.mark.parametrize(
+    "text", [f"Ключ восстановления BitLocker: {BITLOCKER}", BITLOCKER, f"ключ ({BITLOCKER}) не подошёл"],
+    ids=["after_words", "alone", "in_brackets"],
+)
+def test_bitlocker_recovery_key_is_found(text):
+    """Находка «BitLocker recovery keys and PIN codes are not found»: в ключе нет букв, и правило «токен или код в тексте»
+    его не видело."""
+    assert finds(text) == {(BITLOCKER, True)}
+
+
+def test_numbers_shaped_like_a_bitlocker_key_that_fail_its_check_are_left_alone():
+    for text in (
+        "123456-123456-123456-123456-123456-123456-123456-123456",          # группы не делятся на 11
+        "720896-258016-380237-502458-624679-013574-720885-008547",          # 65 536 × 11 — больше шестнадцати бит
+        "135795-258016-380237-502458-624679-013574-720885",                 # семь групп
+        f"{BITLOCKER}-135795", f"{BITLOCKER}1",
+    ):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("ПИН-код 4821", "4821"), ("PIN: 4821", "4821"), ("пин-код от карты 48213", "48213"),
+        ("PIN code 48213579", "48213579"), ("мой пин 4821, не говорите никому", "4821"), ("ПИН-код — 4821", "4821"),
+        ("пинкод: 4821", "4821"),
+    ],
+    ids=["pin_code", "colon", "two_words", "english_code", "comma", "dash", "glued"],
+)
+def test_pin_code_is_hidden_in_its_place(text, value):
+    """Находка «BitLocker recovery keys and PIN codes are not found»: четыре-пять цифр ниже порога кода. ПИН скрывается
+    только на своём месте: то же число в другом месте чата — год или счётчик."""
+    assert finds(text) == {(value, False)}
+
+
+def test_pin_words_and_pin_like_numbers_elsewhere_are_left_alone():
+    for text in (
+        "PIN-диод 1N4148 в схеме", "пин 3 разъёма", "код 4821 в журнале", "отчёт за 2024 год", "SPIN 4821",
+        "Пинг 4821 мс", "pinout 1234", "PIN-1234 на плате",
     ):
         assert found(text) == set(), text
 
@@ -765,6 +895,22 @@ def test_putty_and_ssh2_private_keys_are_one_fragment(text, value):
     """Находка «Layer 2 misses PuTTY and SSH2 private keys and GitLab tokens»: ключ PuTTY не скрывало ни одно правило,
     а у заголовка SSH2 ряды отделены пробелом, и шаблон PEM его не видел."""
     assert found(text) == {value}
+
+
+@pytest.mark.parametrize("line_break", ["\n", "\r\n"])
+def test_ssh2_key_with_a_continued_header_line_is_one_fragment(line_break):
+    """Ревью раунда ключей: RFC 4716 продолжает строку заголовка длиннее 72 байт обратной косой чертой в конце, и ключ
+    с такой строкой не находился совсем — тело уходило открытым."""
+    key = line_break.join((
+        "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----", 'Comment: "rsa-key-20261015 for the backup account, wrapped \\',
+        'over two lines"', "P2/56wAAAi4AAAA3aWYtbW9kbntzaWdu", KEY_LINE, "---- END SSH2 ENCRYPTED PRIVATE KEY ----",
+    ))
+    assert found(f"ключ:{line_break}{key}{line_break}дальше") == {key}
+
+
+def test_continued_header_line_without_a_key_body_is_not_a_secret():
+    text = "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\nComment: \"длинный комментарий \\\nна две строки\"\nа тела нет"
+    assert found(text) == set()
 
 
 def test_putty_and_ssh2_headers_without_a_key_body_are_not_secrets():

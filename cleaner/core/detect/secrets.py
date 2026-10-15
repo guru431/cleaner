@@ -12,6 +12,11 @@ from cleaner.core.types import EntityType, Span
 
 name = "secrets"
 
+# Выражение, которое ищется по всему тексту, начинается со знака или набора знаков, а проверка «перед ним не буква» стоит
+# за первым знаком: «B(?<!\wB)EGIN», «[пp](?<!\w[пp])(?:(?<=п)ароль|(?<=p)assword)». Только так re находит возможные
+# начала быстрым поиском; с проверки назад первым шагом выражение пробовалось с каждой позиции (6 мс на 290 КБ против
+# 0,1 мс), а слой 2 проходит текст двумя десятками выражений.
+
 # Блок приватного ключа. Заголовок «BEGIN … PRIVATE KEY» между рядами дефисов или тире (от двух с каждой стороны:
 # при пересылке «-----» становится «—–» или теряет дефисы) — блок до END или до конца текста, как настоящий PEM.
 # Заголовок без рядов или с рядом с одной стороны — блок, только если со следующей строки идёт тело base64, и до
@@ -21,10 +26,13 @@ name = "secrets"
 # Тело может идти после строк «Имя: значение» (_PEM_ARMOUR: броня PGP — Version:, Comment:; шифрованный PEM — Proc-Type:,
 # DEK-Info:; SSH2 — Comment:) и одной пустой строки. Ряды, отделённые от заголовка пробелом («---- BEGIN SSH2 ENCRYPTED
 # PRIVATE KEY ----»), — тоже заголовок с телом, а не блок до конца текста: «-- BEGIN RSA PRIVATE KEY --» бывает и тире.
+# Строку «Имя: значение», которая кончается обратной косой чертой, продолжает следующая строка (RFC 4716, SSH2).
 _DASHES = "-—–"
-_PEM_BEGIN = re.compile(r"(?<!\w)BEGIN (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?(?P<dashes>[-—–]{2,}+)?")
-_PEM_END = re.compile(r"(?<!\w)END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?[-—–]*+")
-_PEM_ARMOUR = re.compile(r"[ \t]*+(?:[-—–]++[ \t]*+)?(?:\r?\n[ \t]*+[A-Za-z][\w-]*+:[ \t][^\r\n]*+)*+")
+_PEM_BEGIN = re.compile(r"B(?<!\wB)EGIN (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?(?P<dashes>[-—–]{2,}+)?")
+_PEM_END = re.compile(r"E(?<!\wE)ND (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?[-—–]*+")
+_PEM_ARMOUR = re.compile(
+    r"[ \t]*+(?:[-—–]++[ \t]*+)?(?:\r?\n[ \t]*+[A-Za-z][\w-]*+:[ \t][^\r\n]*+(?:(?<=\\)\r?\n[^\r\n]*+)*+)*+"
+)
 _PEM_BODY = re.compile(
     r"(?:\r?\n[ \t]*+(?=\r?\n))?(?=\r?\n[ \t]*[A-Za-z0-9+/]{16})(?:\r?\n(?![ \t]*+(?:[-—–]++[ \t]?)?END )[ \t]*\S[^\r\n]*)++"
     r"(?:\r?\n[ \t]*+(?:[-—–]++[ \t]?)?END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?(?:[ \t]?[-—–]++)?)?"
@@ -33,30 +41,35 @@ _PEM_BODY = re.compile(
 # Private-MAC включительно или до строки другого вида (пустой, прозы). Секрет — только блок со строкой тела (_KEY_LINE):
 # заголовок в прозе («файл начинается с PuTTY-User-Key-File-3: ssh-ed25519») ключом не считается.
 _PUTTY = re.compile(
-    r"(?<![\w-])PuTTY-User-Key-File-\d++:[^\r\n]*+"
+    r"P(?<![\w-]P)uTTY-User-Key-File-\d++:[^\r\n]*+"
     r"(?:\r?\n[ \t]*+(?!Private-MAC:)(?:[A-Z][\w-]*+:[^\r\n]*+|[A-Za-z0-9+/]++=*+[ \t]*+(?![^\r\n])))*+"
     r"(?:\r?\n[ \t]*+Private-MAC:[^\r\n]*+)?"
 )
 _KEY_LINE = re.compile(r"\n[ \t]*+[A-Za-z0-9+/]{16}")
 # Подпись может быть пустой («alg: none»): такой токен раньше находило правило JWT из detect-secrets.
-_JWT = re.compile(r"(?<![\w-])eyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]*")
+_JWT = re.compile(r"e(?<![\w-]e)yJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]*")
 # Токены GitLab всех видов — от 20 знаков после префикса (Devise.friendly_token): у правила detect-secrets значение — группа
 # префикса («gldt», короче 8 знаков, отбрасывается), а правила glimt-, glptt-, gloas- ждут токен ровно своей длины.
+# У маршрутизируемого токена за телом через точку — девять знаков длины и контрольной суммы, перед ними может быть
+# версия («glpat-<тело>.01.<9 знаков>»); точка в конце предложения за токеном в него не входит.
 _TOKEN = re.compile(
-    r"""(?<![\w-])(?:
-        AKIA[0-9A-Z]{16}
-      | gh[pousr]_[A-Za-z0-9]{36,}
-      | github_pat_[A-Za-z0-9_]{40,}
-      | gl(?:pat|dt|ft|soat|rtr?|cbt|ffct|imt|ptt|agent|oas)-[\w-]{20,}
-      | xox[baprs]-[A-Za-z0-9-]{10,}
-      | sk_live_[A-Za-z0-9]{16,}
-      | AIza[\w-]{35}
-      | sk-[A-Za-z0-9_-]{20,}
-      | npm_[A-Za-z0-9]{36}
-      | \d{8,10}:AA[\w-]{33}
+    r"""[Agxsn\d](?<![\w-][Agxsn\d])(?:
+        (?<=A)KIA[0-9A-Z]{16}
+      | (?<=g)h[pousr]_[A-Za-z0-9]{36,}
+      | (?<=g)ithub_pat_[A-Za-z0-9_]{40,}
+      | (?<=g)l(?:pat|dt|ft|soat|rtr?|cbt|ffct|imt|ptt|agent|oas|wt)-[\w-]{20,}(?:(?:\.[0-9a-z]{2})?\.[0-9a-z]{9})?
+      | (?<=x)ox[baprs]-[A-Za-z0-9-]{10,}
+      | (?<=s)k_live_[A-Za-z0-9]{16,}
+      | (?<=A)Iza[\w-]{35}
+      | (?<=s)k-[A-Za-z0-9_-]{20,}
+      | (?<=n)pm_[A-Za-z0-9]{36}
+      | (?<=\d)\d{7,9}:AA[\w-]{33}
     )(?![\w-])""",
     re.VERBOSE,
 )
+# Ключ восстановления BitLocker — восемь групп по шесть цифр через дефис; группа — шестнадцать бит, умноженные на 11, то
+# есть делится на 11 и меньше 720 896 (_bitlocker). Без проверки так выглядел бы любой ряд чисел.
+_BITLOCKER = re.compile(r"\d(?<![\w-]\d)\d{5}(?:-\d{6}){7}(?![\w-])")
 
 # Значение без кавычек тянется до пробела. «;», «&» и «,» внутри пароля законны; концом значения
 # они служат, только если за ними пробел, конец текста или следующее поле вида «имя=»
@@ -79,13 +92,13 @@ _KEY_WORD = re.compile(
 )
 _VALUE_AT = re.compile(_VALUE)
 # Имена ключей, которые содержат те же слова, но хранят не секрет: счётчики токенов,
-# политики паролей, атрибуты Active Directory, обычные слова с «pass» (passes — число проходов: Argon2-Passes ключа PuTTY).
+# политики паролей, атрибуты Active Directory, обычные слова с «pass».
 _NOT_SECRET_KEY = re.compile(
     r"""(?:[\w.-]*[_.-])?(?:max|min|num|total|prompt|completion|input|output|context)[_.-]?tokens?
       | tokens
       | (?:[\w.-]*[_.-])?tokens?[_.-]?(?:type|count|limit|usage|budget|endpoint|url|uri|ttl|lifetime|expir\w*)
       | [\w.-]*tokeniz\w*
-      | [\w.-]*(?:bypass|compass|passive|passed|passes|passage|passenger|pass[_.-]?through)[\w.-]*
+      | [\w.-]*(?:bypass|compass|passive|passed|passage|passenger|pass[_.-]?through)[\w.-]*
       | (?:bad|max|min)?pwd(?:lastset|properties|historylength|count|age|length)
       | badpasswordtime
       | [\w.-]*password[_.-]?(?:policy|length|min\w*|max\w*|expir\w*|age|complexity|history
@@ -110,8 +123,8 @@ _URL = re.compile(r"\b[a-z][a-z0-9+.-]{0,31}://[^\s:/@]*:(?P<bare>[^\s@/]+)@", r
 # свойство MSBuild («/p:Configuration=Release»; пароль в нём находит правило ключа). Пароль из base64
 # с «=» на конце («/p:dGVzdDE=») свойством не считается: после «=» у свойства есть значение.
 _CLI = re.compile(
-    r"(?<![\w-])(?:--?(?:password|passwd|pwd|pass|secret|token|api-key)(?:\s+(?!-)|=)"
-    r"|/p(?:assword)?:(?![A-Za-z_][\w-]*=[^\s=]))" + _VALUE,
+    r"[-/](?<![\w-][-/])(?:(?<=-)-?(?:password|passwd|pwd|pass|secret|token|api-key)(?:\s+(?!-)|=)"
+    r"|(?<=/)p(?:assword)?:(?![A-Za-z_][\w-]*=[^\s=]))" + _VALUE,
     re.IGNORECASE,
 )
 # Пароль без слова-ключа на своём месте в известной команде. «net use \\хост\ресурс пароль /user:…» —
@@ -120,12 +133,12 @@ _CLI = re.compile(
 # «sshpass -p пароль»; ключ приложения в web.config — <add key="…Password" value="…"/>.
 _COMMANDS = (
     re.compile(
-        r"(?<![\w-])net[ \t]+use[ \t]+(?:(?:[a-z]:|\*)[ \t]+)?\\\\[^\s\\]+\\\S+(?:[ \t]+/\S+)*[ \t]+(?![/*])"
+        r"n(?<![\w-]n)et[ \t]+use[ \t]+(?:(?:[a-z]:|\*)[ \t]+)?\\\\[^\s\\]+\\\S+(?:[ \t]+/\S+)*[ \t]+(?![/*])"
         + _VALUE,
         re.IGNORECASE,
     ),
-    re.compile(r"(?<![\w-])(?:mysql|mariadb)[\w.-]*(?:[ \t]+(?!-p)[^\s|;&]++){0,20}?[ \t]+-p" + _VALUE),
-    re.compile(r"(?<![\w-])sshpass[ \t]+-p[ \t]*" + _VALUE),
+    re.compile(r"m(?<![\w-]m)(?:ysql|ariadb)[\w.-]*(?:[ \t]+(?!-p)[^\s|;&]++){0,20}?[ \t]+-p" + _VALUE),
+    re.compile(r"s(?<![\w-]s)shpass[ \t]+-p[ \t]*" + _VALUE),
 )
 _ADD_KEY = re.compile(
     r"""<add\s+key\s*=\s*(?P<q>["'])(?P<key>[^"'<>\r\n]+)(?P=q)\s+value\s*=\s*"""
@@ -144,7 +157,7 @@ _SECURE = re.compile(
 # как после тире: заголовок «Password policy for domain users: minimum…» не скрывает minimum во всём чате.
 # Слово перед тире начинается не с дефиса: иначе «Пароль - Qwerty - временный» брал значение после второго.
 _PHRASE = re.compile(
-    r"(?<!\w)(?:пароль|password)(?:(?:[ \t]+[\w-]+){0,3}(?P<sep>[ \t]*[:=][ \t]*)"
+    r"[пp](?<!\w[пp])(?:(?<=п)ароль|(?<=p)assword)(?:(?:[ \t]+[\w-]+){0,3}(?P<sep>[ \t]*[:=][ \t]*)"
     r"|(?:[ \t]+\w[\w-]*){0,6}(?P<dash>[ \t]*[—–][ \t]*|[ \t]+--?[ \t]+)"
     r"|(?:[ \t]++\w[\w-]*+){4,6}(?P<colon>[ \t]*+:[ \t]++))" + _VALUE,
     re.IGNORECASE,
@@ -155,7 +168,9 @@ _COPULAS = frozenset({"это", "is", "was"})
 _NEXT_VALUE = re.compile(r"[ \t]+" + _VALUE)
 # Знаки в конце — не часть слова прозы: «Password - here!», «Пароль — какой?», «это:».
 _TRAILING = "?!:;,.…"
-_PROSE = re.compile(r"(?<!\w)(?:пароль|password)(?:\s+is)?\s+(?P<bare>(?!-)[^\s,;:=]+)", re.IGNORECASE)
+_PROSE = re.compile(
+    r"[пp](?<!\w[пp])(?:(?<=п)ароль|(?<=p)assword)(?:\s+is)?\s+(?P<bare>(?!-)[^\s,;:=]+)", re.IGNORECASE
+)
 # Токен или код в тексте без ключа присваивания: «пришёл код восстановления 3f8e…», «Подтвердите действие токеном 8c7b…»,
 # «API-ключ для доступа к эндпоинту api_3f…», «смс с кодом 847593». После слова «токен», «код», «ключ», «пароль» (token,
 # code, key, password) в любом падеже — до четырёх слов без знаков препинания, «:» или пробел и ближайшее значение вида
@@ -164,13 +179,39 @@ _PROSE = re.compile(r"(?<!\w)(?:пароль|password)(?:\s+is)?\s+(?P<bare>(?!-
 # только на своём месте. Четыре-пять цифр — код события или ошибки («код события 4625», «код ошибки 18456»).
 # Значение и проверки вида — знаки ASCII, слова перед ним — любые; слова берутся по одному, от ближайшего.
 _TOKEN_PHRASE = re.compile(
-    r"(?<!\w)(?:токе?н(?:а|у|ом|е|ы|ов|ам|ами|ах)?|tokens?|(?P<code>код(?:а|у|ом|е|ы|ов|ам|ами|ах)?|codes?)"
-    r"|ключ(?:а|у|ом|е|и|ей|ам|ами|ах)?|keys?|парол(?:ь|я|ю|ем|е|и|ей)|passwords?)"
+    r"(?P<word>[тtкckпp](?<!\w[тtкckпp])(?:(?<=т)оке?н(?:а|у|ом|е|ы|ов|ам|ами|ах)?|(?<=t)okens?"
+    r"|(?P<code>(?<=к)од(?:а|у|ом|е|ы|ов|ам|ами|ах)?|(?<=c)odes?)|(?<=к)люч(?:а|у|ом|е|и|ей|ам|ами|ах)?|(?<=k)eys?"
+    r"|(?P<password>(?<=п)арол(?:ь|я|ю|ем|е|и|ей)|(?<=p)asswords?)))"
     r"(?:[ \t]++[\w-]++){0,4}?(?:[ \t]*+:[ \t]*+|[ \t]++)"
     r"(?P<bare>(?=[A-Za-z0-9_+/-]*?\d)(?=[A-Za-z0-9_+/-]*?[A-Za-z])(?:[0-9a-fA-F]{16,}+|[A-Za-z0-9][A-Za-z0-9_+/-]{19,}+=*+)"
     r"|(?(code)\d{6,8}+|(?!)))(?![\w+/=-])(?!\.\w)",
     re.IGNORECASE,
 )
+# Код из цифр после слова ошибки, события, выхода, состояния или классификатора — не одноразовый: «код ошибки 80070005»
+# (HRESULT Windows), «error code 80244022», «ошибка с кодом 80070005», «код по ОКТМО 45380000». Слово стоит между «код» и
+# числом или прямо перед «код» (и через «с», «со», with); «ошибка входа, пришёл код 847593» — одноразовый код.
+_STATUS_WORD = re.compile(
+    r"(?<!\w)(?:ошибк\w*|событи\w*|возврат\w*|завершени\w*|выхода|состояни\w*|статус\w*|сбо(?:й|я|ю|ем|е)|исключени\w*"
+    r"|errors?|exit|status|return\w*|events?|hresult|result|stop|exception|fault|failure|bugcheck"
+    r"|ок(?:по|тмо|ато|вэд2?|огу|фс|опф|уд|пд2?|дп|см|в|еи|оф)|кбк)(?!\w)",
+    re.IGNORECASE,
+)
+_PREPOSITIONS = frozenset({"с", "со", "with"})
+# ПИН-код — от четырёх до восьми цифр после «ПИН», «ПИН-код», PIN, PIN code, до двух слов между ними, «:», «=», тире
+# или пробел: «ПИН-код 4821», «PIN: 4821», «пин-код от карты 48213». Скрывается только на своём месте, как код из цифр.
+# «PIN-диод», «пин 3 разъёма», «PIN-1234» на плате — не ПИН-код.
+_PIN = re.compile(
+    r"[пp](?<![\w-][пp])(?:(?<=п)ин|(?<=p)in)(?:[ -]?(?:код(?:а|у|ом|е|ы|ов)?|code))?(?:[ \t]++[\w-]++){0,2}?"
+    r"(?:[ \t]*+[:=—–][ \t]*+|[ \t]++(?:-[ \t]++)?)(?P<bare>\d{4,8}+)(?![\w+/=-])(?!\.\w)",
+    re.IGNORECASE,
+)
+# Имя из слов, а не токен: части через «_», «/», «-» — слово (строчное, с заглавной, заглавное, camelCase) с числом в конце
+# или без, число до восьми цифр со словом за ним или без, строчное слово с числом внутри («gpt4o», «k8s»):
+# «customer_order_line_v2_id», «cleaner/core/detect/secrets2», «gpt-4o-mini-2024-07-18», «API_KEY_2024_PRODUCTION_V2».
+# Часть со случайными знаками («c5b6a7f8», «Zx81kLmN», «W269N» ключа продукта) делает значение токеном.
+_NAME_WORD = r"[A-Z]*+[a-z]*+(?:[A-Z][a-z]++)*+"
+_NAME_PART = rf"(?:{_NAME_WORD}(?:\d{{1,8}}+)?+|\d{{1,8}}+{_NAME_WORD}|[a-z]++\d{{1,8}}+[a-z]++)(?![^_/-])"
+_IDENTIFIER = re.compile(rf"{_NAME_PART}(?:[_/-]{_NAME_PART})++")
 # Русское слово через дефис («по-прежнему», «кто-то») похоже на пароль только дефисом, а то же слово
 # без дефиса паролем в тексте и так не считается.
 _HYPHENATED_WORD = re.compile(r"[а-яё]+(?:-[а-яё]+)+", re.IGNORECASE)
@@ -193,10 +234,10 @@ _PROSE_WORDS = _LINKING_WORDS | frozenset({
 })
 _RUSSIAN_WORD = re.compile(r"[а-яё]+(?:-[а-яё]+)*", re.IGNORECASE)
 _AUTH = re.compile(
-    r"\bauthorization\s*[:=]\s*[\"']?(?:bearer|basic|token|negotiate|ntlm|apikey)\s+(?P<bare>[^\s\"'<>,;]+)",
+    r"a(?<!\wa)uthorization\s*[:=]\s*[\"']?(?:bearer|basic|token|negotiate|ntlm|apikey)\s+(?P<bare>[^\s\"'<>,;]+)",
     re.IGNORECASE,
 )
-_BEARER = re.compile(r"(?<!\w)bearer\s+(?P<bare>[A-Za-z0-9._~+/=-]{16,})", re.IGNORECASE)
+_BEARER = re.compile(r"b(?<!\wb)earer\s+(?P<bare>[A-Za-z0-9._~+/=-]{16,})", re.IGNORECASE)
 # После «bearer» в тексте бывают слова («bearer authentication», «Bearer authentication-scheme»):
 # в настоящем токене есть цифры или заглавные внутри слова.
 _WORDS = re.compile(r"[A-Za-z][a-z]*(?:[-./][A-Za-z][a-z]*)*")
@@ -296,11 +337,11 @@ def _library_rules() -> tuple[re.Pattern[str], ...]:
     )
 
 
-def _library_hits(squeezed: str) -> dict[str, list[int]]:
+def _library_hits(squeezed: str, rules: tuple[re.Pattern[str], ...]) -> dict[str, list[int]]:
     """Значения правил в строке -> их начала, в порядке analyze_string. Значение — как у него: findall отдаёт
     непустые группы совпадения, а у выражения без групп — всё совпадение (здесь — без краёв, см. _LEADING_EDGE)."""
     hits: dict[str, list[int]] = {}
-    for regex in _library_rules():
+    for regex in rules:
         groups = range(1, regex.groups + 1) if regex.groups else (0,)
         for m in regex.finditer(squeezed):
             for group in groups:
@@ -332,6 +373,13 @@ def _unsqueezed(line: str) -> Callable[[int], int]:
 
 def _library_spans(text: str, own: list[Span]) -> list[Span]:
     """Токены известных сервисов по правилам detect-secrets — там, где свои правила ничего не нашли."""
+    # По строкам идут только правила, которые нашли что-то во всём тексте: вызов правила на строке стоит около 0,4 мкс,
+    # и 50 000 коротких строк шли 0,66 с, хотя токенов в них нет. Совпадение в строке — совпадение и в тексте на том же
+    # месте: «^» и «(?<=^)» у правил стоят рядом с «\s» и «(?<=\W)», а знак конца строки — пробельный и не буквенный.
+    squeezed = _SPACES.sub(" ", text)
+    rules = tuple(regex for regex in _library_rules() if regex.search(squeezed))
+    if not rules:
+        return []
     spans: list[Span] = []
     # Занятые знаки — картой, а не перебором найденного: токен, повторённый на строке выгрузки сотни
     # раз, давал кубическое время (каждое повторение сверялось с каждым найденным, и столько же раз).
@@ -340,7 +388,7 @@ def _library_spans(text: str, own: list[Span]) -> list[Span]:
         taken[span.start:span.end] = b"\x01" * (span.end - span.start)
     offset = 0
     for line in text.splitlines(keepends=True):
-        hits = _library_hits(_SPACES.sub(" ", line))
+        hits = _library_hits(_SPACES.sub(" ", line), rules)
         original = _unsqueezed(line) if len(hits) > _REPEATS else None
         for index, (value, starts) in enumerate(hits.items()):
             if original is None or index < _REPEATS:
@@ -521,21 +569,38 @@ def _not_a_value(key: str, value: str) -> bool:
     """Значение под ключом со словом секрета, которое секретом не является: имя той же переменной
     («cancellationToken: cancellationToken», «accessToken: AccessToken;»; но «password: password» —
     слабый пароль), вызов команды и число под ключом токена — счётчик («max_new_tokens: 1024»).
-    Токенов из одних цифр не бывает, а пароль из цифр обычен, поэтому числа — только у «token».
+    Токенов из одних цифр не бывает, а пароль из цифр обычен, поэтому числа — только у «token» и у passes (число проходов:
+    Argon2-Passes ключа PuTTY, num_passes; «wifi_passes: Summer2024» — пароль).
     PWD и OLDPWD с путём — рабочий каталог оболочки, а не поле Pwd строки подключения."""
     return (
         (value.lower() == key.lower() and not _KEY_WORD.fullmatch(key))
         or _CMDLET.fullmatch(value) is not None
         or (value.isdigit() and all(word.lower() == "token" for word in _KEY_WORD.findall(key)))
+        or (value.isdigit() and "passes" in key.lower())
         or (key.upper() in ("PWD", "OLDPWD") and value.startswith(("/", "~")))
     )
+
+
+def _bitlocker(key: str) -> bool:
+    return all(int(group) % 11 == 0 and int(group) < 65536 * 11 for group in key.split("-"))
+
+
+def _status_code(text: str, m: re.Match[str]) -> bool:
+    """Код из цифр после «код» (_TOKEN_PHRASE) — код ошибки или классификатора (_STATUS_WORD): слово такого кода между «код»
+    и числом или прямо перед «код». Слово перед ним ищется в сорока знаках: поиск по всему тексту назад был бы квадратичным."""
+    if _STATUS_WORD.search(text, m.end("word"), m.start("bare")):
+        return True
+    before = text[max(0, m.start() - 40):m.start()].split()
+    if before and before[-1].lower() in _PREPOSITIONS:
+        before.pop()
+    return bool(before) and _STATUS_WORD.fullmatch(before[-1]) is not None
 
 
 def detect(text: str, ctx: DetectContext) -> list[Span]:
     spans = _private_keys(text) + [
         Span(m.start(), m.end(), EntityType.SECRET, name, validated=True)
-        for pattern in (_JWT, _TOKEN)
-        for m in pattern.finditer(text)
+        for pattern in (_JWT, _TOKEN, _BITLOCKER)
+        for m in pattern.finditer(text) if pattern is not _BITLOCKER or _bitlocker(m.group())
     ]
     parsed_until = 0
     for m in _KEY_NAME.finditer(text):
@@ -580,5 +645,10 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         if bounds and _looks_like_password(text[bounds[0]:bounds[1]]) and not _HYPHENATED_WORD.fullmatch(text, *bounds):
             spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _TOKEN_PHRASE.finditer(text):
-        spans.append(Span(*m.span("bare"), EntityType.SECRET, name, searchable=_looks_like_password(m.group("bare"))))
+        value = m.group("bare")
+        # Код ошибки — не секрет; имя из слов — не токен, но после «пароль» это пароль из слов.
+        if _status_code(text, m) if value.isdigit() else (m.group("password") is None and _IDENTIFIER.fullmatch(value)):
+            continue
+        spans.append(Span(*m.span("bare"), EntityType.SECRET, name, searchable=_looks_like_password(value)))
+    spans += [Span(*m.span("bare"), EntityType.SECRET, name, searchable=False) for m in _PIN.finditer(text)]
     return spans + _library_spans(text, spans)
