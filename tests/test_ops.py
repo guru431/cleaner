@@ -196,6 +196,20 @@ def test_label_of_a_part_inside_a_foreign_name_is_derived(state, settings):
         assert (result.text, [s.kind for s in result.segments]) == expected, answer
 
 
+def test_name_assembled_from_a_domain_label_restores_each_part(state, settings):
+    """FINDINGS «Retyping a host name part: what it leaves» (4): имя, которого не было в запросе, модель может собрать и
+    из метки домена — оно восстанавливается по частям и помечается derived, как собранное из подмен (7, шаг 4)."""
+    _retype_part(state, settings, "узел srv01.contoso.ru, сайт contoso.ru, сайт fabrikam.ru", "contoso.ru", T.ORG)
+    for answer, expected in (
+        ("<ORG_1>.domain-2.example", ("contoso.ru.fabrikam.ru", ["derived", "derived"])),
+        ("domain-1.example.domain-2.example", ("contoso.ru.fabrikam.ru", ["derived", "derived"])),
+        ("host-1.domain-2.example", ("srv01.fabrikam.ru", ["derived", "derived"])),
+        ("host-1.<ORG_1>", ("srv01.contoso.ru", ["restored"])),
+    ):
+        result = restore(state, answer, settings)
+        assert (result.text, [s.kind for s in result.segments]) == expected, answer
+
+
 @pytest.mark.parametrize("value",["srv0", "contoso", "srv01.contoso", "srv01.contoso.ru"],
                          ids=["inside-part", "half-domain", "two-parts", "whole"])
 def test_rule_off_the_part_boundaries_still_takes_the_whole_name(state, settings, value):
