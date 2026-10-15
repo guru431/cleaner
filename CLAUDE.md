@@ -33,7 +33,7 @@ set -a; . data/cleaner.env; set +a          # главный ключ — в о�
 
 ## Установка на example
 
-Сервер описан в `D:\vsc\vLLM` (его правила действуют и здесь); установщик, юнит и проверка — в `deploy/`. Доступ с этой машины (сеть `example/19`): `ssh -i ~/.ssh/example -p 34012 example@example`, у `example` sudo без пароля.
+Сервер описан в `D:\vsc\vLLM` (его правила действуют и здесь); установщик, юнит и проверка — в `deploy/`. Доступ с build-host (сеть `example/19`): `ssh -i ~/.ssh/example -p 34012 example@example`; с workstation — по WireGuard через debian: `ssh -i ~/.ssh/studio_deploy_key -p 34012 deploy@example` (ключ `example` там только в профиле `Services` на build-host). У `example` и `deploy` sudo без пароля; команды ниже — с любым из адресов.
 
 ```bash
 # Файлы машины разработки: uv (стоит в .venv, uv==0.12.21) не берёт версии моложе 14 дней; кэш — на D:
