@@ -400,15 +400,26 @@ class _Restorer:
         entity = self.state.entities[surrogate.entity_id] if surrogate else None
         return entity.restore_value if entity and entity.restore_rank == FIXED_RANK else None
 
-    def _original(self, key: str, surrogate: Surrogate) -> str:
-        """Оригинал замены. Значение, заданное пользователем, важнее записанного при выдаче. Имя узла целиком
-        выдано не своей сущности, а составлено из замен частей — оно и собирается по частям."""
+    def _parts(self, key: str, surrogate: Surrogate) -> list[tuple[Surrogate | None, str]]:
+        """Имя узла целиком выдано не своей сущности, а составлено из замен частей: замена каждой части (None — у
+        служебной, «www») и её оригинал. Домен — domain-N.example или метка, если домену дан другой тип
+        (host-1.<ORG_1>). У замены, которая не составное имя, частей нет."""
+        if surrogate.kind != "host" or key in self.issued:
+            return []
         fakes, parts = key.split("."), (surrogate.original or "").split(".")
-        if surrogate.kind == "host" and key not in self.issued and 2 < len(fakes) <= len(parts):
-            left = len(fakes) - 2           # части слева от domain-N.example; остальное — домен оригинала
-            pairs = [*zip(fakes[:left], parts), (".".join(fakes[left:]), ".".join(parts[left:]))]
-            table = self.state.surrogates       # метка части — в своём регистре, подмена — в нижнем
-            return ".".join(self._fixed(table.get(fake) or table.get(fake.lower())) or part for fake, part in pairs)
+        left = len(fakes) - (1 if labels.SHAPE.fullmatch(fakes[-1]) else 2)     # части слева от домена
+        if left < 1 or len(fakes) > len(parts):
+            return []
+        table = self.state.surrogates       # метка части — в своём регистре, подмена — в нижнем
+        pairs = [*zip(fakes[:left], parts), (".".join(fakes[left:]), ".".join(parts[left:]))]
+        return [(table.get(fake) or table.get(fake.lower()), part) for fake, part in pairs]
+
+    def _original(self, key: str, surrogate: Surrogate) -> str:
+        """Оригинал замены. Значение, заданное пользователем, важнее записанного при выдаче. Составное имя узла
+        собирается по частям."""
+        parts = self._parts(key, surrogate)
+        if parts:
+            return ".".join(self._fixed(part) or original for part, original in parts)
         if surrogate.original is None:
             return self.state.entities[surrogate.entity_id].restore_value       # метка
         return self._fixed(surrogate) or surrogate.original
@@ -416,19 +427,23 @@ class _Restorer:
     def _exact(self, m: surrogates.Hit) -> Piece:
         text = m.group()
         surrogate = self.state.surrogates[m.key]
-        entity = self.state.entities[surrogate.entity_id]
-        if self._hidden(entity.type):
+        # Политика каждой части составного имени: часть, которую не восстанавливают, оставляет заменой всё имя —
+        # как отдельная метка остаётся меткой (FR-7.7).
+        owners = [surrogate, *(part for part, _ in self._parts(m.key, surrogate) if part)]
+        if any(self._hidden(self.state.entities[owner.entity_id].type) for owner in owners):
             self.counters["kept"] += 1
             return text, "kept_by_policy"
         original = self._original(m.key, surrogate)
         kind = "restored"
-        if surrogate.kind == "host":
-            if text.isupper():
+        if surrogate.kind in ("host", "label"):
+            if surrogate.kind == "host" and text.isupper():
                 original = original.upper()
             before = m.string[max(0, m.start() - 1):m.start()]
             after = m.string[m.end():m.end() + 2]
             if before == "." or (after[:1] == "." and after[1:2].isalnum()):
-                kind = "derived"        # часть имени, которого не было в запросе
+                # Часть имени, которого не было в запросе: имя из запроса нашлось бы целиком. Метка тоже бывает
+                # частью имени (части дан другой тип): «<TERM_1>.evil.com» — то же, что «host-1.evil.com».
+                kind = "derived"
         self.counters[kind] += 1
         return original, kind
 
