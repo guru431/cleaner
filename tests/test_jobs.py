@@ -1,14 +1,15 @@
 import logging
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
 
+from cleaner.ingest.extract import ExtractError
 from cleaner.storage.repo import Item
-from cleaner.web.app import create_app
-from cleaner.web.jobs import INTERRUPTED, Jobs
+from cleaner.web.app import FILE_WORKERS, create_app
+from cleaner.web.jobs import INTERRUPTED, WORKERS, Jobs
 
 
 def blocking_job():
@@ -21,6 +22,86 @@ def blocking_job():
         seen.append("done")
 
     return job, started, release, seen
+
+
+class Pool(ThreadPoolExecutor):
+    """Настоящий пул, который помнит свои задания: тест ждёт их результат, а не опрашивает базу."""
+
+    def __init__(self, workers: int):
+        super().__init__(max_workers=workers)
+        self.futures: list[Future] = []
+
+    def submit(self, fn, /, *args, **kwargs):
+        future = super().submit(fn, *args, **kwargs)
+        self.futures.append(future)
+        return future
+
+
+@pytest.fixture
+def chat(repo):
+    user = repo.create_user("ivan", "hash", "user")
+    return user, repo.create_chat(user, "Чат")
+
+
+def test_pasted_text_is_cleaned_while_scans_hold_every_file_thread(repo, clock, engines, chat):
+    """Находка «Scanned PDFs hold the two-thread job pool for every user»: сканы заняли все потоки разбора
+    файлов, а вставленный абзац очищается сразу, не дожидаясь их."""
+    user, chat_id = chat
+    reading = {f"скан-{n}.pdf": threading.Event() for n in range(FILE_WORKERS)}
+    release = threading.Event()
+
+    class StuckScan:
+        def extract(self, filename, data, progress):
+            reading[filename].set()
+            release.wait(5)                     # отпускает тест; пять секунд — только страховка
+            raise ExtractError("распознавание остановлено тестом")
+
+    engines.extractor = StuckScan
+    shared, files = Pool(WORKERS), Pool(FILE_WORKERS)
+    service = create_app(repo, clock, secure_cookies=False, engines=engines, jobs=Jobs(shared), files=Jobs(files)).state.service
+    try:
+        for name in reading:
+            service.add_file(chat_id, user, name, b"%PDF-1.7")
+        assert all(event.wait(1) for event in reading.values())        # все потоки разбора файлов заняты
+        text = service.add_input(chat_id, user, "почта a@x.example")
+        shared.futures[0].result(timeout=1)
+        assert repo.item(chat_id, text.id).sanitized == "почта <EMAIL_1>"
+    finally:
+        release.set()
+        shared.shutdown(wait=True)
+        files.shutdown(wait=True)
+
+
+def test_only_file_extraction_goes_to_the_file_pool(repo, clock, engines, chat):
+    """Свой пул — только у разбора файла: повтор файла (текст уже извлечён), проверка риска и вопрос локальной
+    модели остаются в общем."""
+    user, chat_id = chat
+    shared, files = Pool(WORKERS), Pool(FILE_WORKERS)
+    service = create_app(repo, clock, secure_cookies=False, engines=engines, jobs=Jobs(shared), files=Jobs(files)).state.service
+    try:
+        letter = service.add_file(chat_id, user, "letter.eml", b"From: a@x.example\n\nbody")
+        files.futures[0].result(timeout=1)
+        text = service.add_input(chat_id, user, "почта b@x.example")
+        shared.futures[0].result(timeout=1)
+        service.retry(chat_id, user, letter.id)
+        shared.futures[1].result(timeout=1)
+        service.check_risk(chat_id, user, text.id)
+        shared.futures[2].result(timeout=1)
+        service.ask_local(chat_id, user)
+        shared.futures[3].result(timeout=1)
+        assert (len(files.futures), len(shared.futures)) == (1, 4)
+        assert [repo.item(chat_id, i.id).sanitized for i in (letter, text)] == ["Документ: почта <EMAIL_1>", "почта <EMAIL_2>"]
+    finally:
+        shared.shutdown(wait=True)
+        files.shutdown(wait=True)
+
+
+def test_service_stop_shuts_the_file_pool_down(repo, clock, engines, jobs):
+    files = Jobs(ThreadPoolExecutor(max_workers=1), stop_wait=0)
+    with TestClient(create_app(repo, clock, secure_cookies=False, engines=engines, jobs=jobs, files=files)):
+        pass
+    with pytest.raises(RuntimeError):
+        files.submit(print)
 
 
 def test_shutdown_waits_for_a_running_job():

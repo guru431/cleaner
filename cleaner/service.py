@@ -206,12 +206,14 @@ class ChatService:
     def __init__(
         self, repo: Repository, max_text_chars: int = 500_000, engines: Any = None, submit: Submit = run_now,
         send_submit: Submit = run_now, cloud_send: Callable[..., Iterable[str]] = cloud.send,
+        file_submit: Submit = run_now,
     ):
         self.repo = repo
         self.max_text_chars = max_text_chars
         self.engines = engines          # cleaner.engines.Engines или заглушка тестов; None — без слоёв 4–5
         self.submit = submit
-        self.send_submit = send_submit  # свой пул: облако не ждёт за сканами в общем (раздел 14)
+        self.send_submit = send_submit  # свой пул: облако не ждёт за очисткой и моделями в общем (раздел 14)
+        self.file_submit = file_submit  # свой пул: вставленный текст не ждёт за распознаванием сканов (раздел 14)
         self.cloud_send = cloud_send
         self.live = LiveAnswers()
 
@@ -271,7 +273,7 @@ class ChatService:
     def add_file(self, chat_id: str, user_id: str, filename: str, data: bytes) -> Item:
         """Файл — в очередь. Его байты живут только в памяти задания; имя нужно лишь для расширения (FR-2.7)."""
         item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="queued"))
-        self.submit(self.process, chat_id, item.id, user_id, data, filename)
+        self.file_submit(self.process, chat_id, item.id, user_id, data, filename)
         return self.repo.item(chat_id, item.id) or item
 
     def process(self, chat_id: str, item_id: str, user_id: str, data: bytes | None = None, filename: str = "") -> None:
