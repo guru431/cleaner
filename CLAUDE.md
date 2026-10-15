@@ -45,6 +45,6 @@ ssh -i ~/.ssh/example -p 34012 -o BatchMode=yes example@example 'sudo bash /usr/
 ```
 
 - Логин первого администратора — вторым аргументом установщика (после каталога доставки), только при первой установке; пароль спрашивается с клавиатуры, поэтому `ssh -t`.
-- Правка `ufw` — только под страховкой `ufw-failsafe` (установщик ставит её сам); затем новое SSH-подключение и `sudo systemctl stop ufw-failsafe.timer`. После любого `ufw reload` — `sudo systemctl try-restart ai-egress-guard.service cleaner-egress.service`: без входа в цепочку `CLEANER-EGRESS` выход службы наружу не ограничен портом 443 (`check-cleaner.sh`, раздел 5).
+- Правка `ufw` — только под страховкой `ufw-failsafe` (установщик ставит её сам); затем новое SSH-подключение и `sudo systemctl stop ufw-failsafe.timer`. Выход службы наружу ограничивает своя таблица nftables `inet cleaner_egress` (`deploy/cleaner-egress.sh`): `ufw reload` и `disable` её не трогают; проверка — `check-cleaner.sh`, раздел 5.
 - После изменения `deploy/cleaner.service` — переснять эталон vLLM: `powershell -File D:\vsc\vLLM\dashboard\deploy\manifest.ps1 -Route second-net -UpdateBaseline`, затем `python dashboard/deploy/facts.py --write` в `D:\vsc\vLLM`.
 - Отпечаток сертификата печатают установщик и `check-cleaner.sh`; в документы он не выписывается. Значения ключей не попадают в файлы и в вывод.
