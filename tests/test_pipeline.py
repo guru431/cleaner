@@ -439,6 +439,17 @@ def test_selection_inside_an_email_leaves_the_issued_replacement_next_to_it(stat
     assert restore(state, expected, settings).text == text.replace("host-1", "srv01")
 
 
+def test_person_selection_inside_an_email_leaves_the_issued_replacement_next_to_it(state, settings):
+    """Найдено в раунде слияний: шаг 3 (5.7) пересобирал фрагмент PERSON и терял, где в нём лежат правила, — выделение
+    «ivanov» с типом «человек» поглощало адрес вместе с выданной заменой, и метка восстанавливалась в
+    «ivanov@host-1.fabrikam.ru», с подменой вместо srv01."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    ops.mask(state, "ivanov", T.PERSON)
+    result = sanitize(state, "почта ivanov@host-1.fabrikam.ru", settings)
+    assert result.sanitized == "почта <PERSON_1>@host-1.domain-2.example"
+    assert restore(state, result.sanitized, settings).text == "почта ivanov@srv01.fabrikam.ru"
+
+
 def test_email_with_a_strict_part_next_to_a_replacement_is_split_and_blocked(state):
     """Та же находка вместе с политикой части: адрес, который поглотила часть со строже политикой, рядом с выданной
     заменой делится так же, и часть блокирует выдачу своей меткой."""
@@ -509,6 +520,37 @@ def test_email_with_a_label_in_its_domain_is_found(state, settings, text, expect
     assert sanitize(state, expected, settings).sanitized == expected
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("Проверь srv02.<TERM_1>", "Проверь host-2.<TERM_1>"),
+    ("Проверь srv02.host-1.<TERM_1>", "Проверь host-2.host-1.<TERM_1>"),
+    ("почта ivanov@<TERM_1>", "почта <ACCOUNT_1>@<TERM_1>"),
+    ("почта ivanov@srv02.<TERM_1>", "почта <ACCOUNT_1>@host-2.<TERM_1>"),
+    ("Проверь www.<TERM_1>", "Проверь www.<TERM_1>"),
+    ("отчёт.<TERM_2>, ivanov@<TERM_2>", "отчёт.<TERM_2>, ivanov@<TERM_2>"),
+    ("отчёт.<PERSON_1>, ivanov@<PERSON_1>", "отчёт.<PERSON_1>, ivanov@<PERSON_1>"),
+], ids=["part-before", "parts-before", "email", "email-part", "generic", "not-a-domain", "person"])
+def test_label_of_a_domain_name_is_a_domain_as_in_restore(state, settings, text, expected):
+    """Наблюдение раунда имён узлов, P3: конвейер считал доменом только метку в конце записанного имени (<ORG_1> из
+    host-1.<ORG_1>), а восстановление — любую метку, значение которой — доменное имя. После host-1.<TERM_1> (выделение
+    «fabrikam» в host-1.fabrikam.ru) srv02.<TERM_1> оставался открытым, а ivanov@<TERM_1> — не адресом. Метка другого
+    значения («Заря», человек) доменом не становится."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    for value, type_, sample in (
+        ("fabrikam", T.TERM, "Проверь host-1.fabrikam.ru"), ("Заря", T.TERM, "проект Заря"),
+        ("Петров", T.PERSON, "звонил Петров"),
+    ):
+        ops.mask(state, value, type_)
+        sanitize(state, sample, settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, expected, settings).sanitized == expected
+    originals = {"host-1": "srv01", "<TERM_1>": "fabrikam.ru", "<TERM_2>": "Заря", "<PERSON_1>": "Петров"}
+    restored = text
+    for fake, original in originals.items():
+        restored = restored.replace(fake, original)
+    assert restore(state, expected, settings).text == restored
+
+
 def test_chain_of_overlapping_emails_is_hidden_but_not_searched_as_a_whole(state, settings):
     """Наблюдение раунда имён узлов, P2: в «a@b.c.» * N адреса пересекаются (следующий начинается в домене
     предыдущего), и второй проход сливал найденные написания в один фрагмент длиной в текст. Он становился искомым
@@ -522,6 +564,50 @@ def test_chain_of_overlapping_emails_is_hidden_but_not_searched_as_a_whole(state
     assert restore(state, result.sanitized, settings).text == text
     sanitize(state, "почта ivanov@contoso.ru", settings)      # адрес с одним «@» — искомое написание, как прежде
     assert any("ivanov@contoso.ru" in e.forms for e in state.entities.values())
+
+
+def test_overlapping_dictionary_values_are_hidden_but_not_searched_as_a_whole(state):
+    """Наблюдение раунда имён узлов, P2: «Иван Иван» словаря в «Иван Иван Иван …» — пересекающиеся находки, и их слияние
+    становилось искомым написанием длиной в цепочку. Оно скрыто одной меткой и восстанавливается целиком, а искомо
+    написание находки; то же значение потом в другом тексте скрывается."""
+    settings = Settings(always=(DictEntry(T.PERSON, "Иван Иван"),))
+    text = "Иван Иван Иван Иван Иван"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "<PERSON_1>" and result.deliverable
+    assert [form for e in state.entities.values() for form in e.forms] == ["Иван Иван"]
+    assert sanitize(state, text, settings).sanitized == result.sanitized
+    assert restore(state, result.sanitized, settings).text == text
+    later = sanitize(state, "Пришёл Иван Иван.", settings)
+    assert "Иван" not in later.sanitized and later.deliverable
+
+
+def test_overlapping_rule_values_are_hidden_but_not_searched_as_a_whole(state, settings):
+    """То же у правила пользователя «la la» в «la la la …»: слияние — своя сущность, которая восстанавливается целиком,
+    а её написание — значение правила. Смена её типа даёт правило на это значение, а не на всю цепочку."""
+    ops.mask(state, "la la", T.TERM)
+    text = "la la la la la"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "<TERM_1>" and result.deliverable
+    [chain] = state.entities.values()
+    assert chain.forms == ["la la"]
+    assert sanitize(state, text, settings).sanitized == result.sanitized
+    assert restore(state, result.sanitized, settings).text == text
+    later = sanitize(state, "la la", settings)
+    assert later.sanitized == "<TERM_2>" and restore(state, later.sanitized, settings).text == "la la"
+    ops.retype(state, chain.id, T.ORG)
+    assert [(rule.value, rule.type) for rule in state.rules] == [("la la", T.ORG)]
+
+
+def test_run_of_surnames_is_not_one_person(state, settings):
+    """Наблюдение раунда имён узлов, P2: ряд фамилий через пробел сливался шагом 3 (5.7) в один PERSON длиной в ряд. Ряд
+    длиннее четырёх слов — список людей: каждый — своя метка, и каждый искомый."""
+    names = ["Иванов", "Петров", "Сидоров", "Козлов", "Морозов"]
+    text = "Присутствовали " + " ".join(names) + "."
+    result = sanitize(state, text, settings, Layers(ner=Marks({name: T.PERSON for name in names})))
+    assert result.sanitized == "Присутствовали <PERSON_1> <PERSON_2> <PERSON_3> <PERSON_4> <PERSON_5>."
+    assert sorted(form for e in state.entities.values() for form in e.forms) == sorted(names)
+    assert restore(state, result.sanitized, settings).text == text
+    assert sanitize(state, "Звонил Петров", settings).sanitized == "Звонил <PERSON_2>"
 
 
 def test_email_without_an_at_sign_next_to_a_replacement_does_not_stop_sanitizing(state, settings):

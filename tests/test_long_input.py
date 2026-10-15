@@ -11,11 +11,12 @@ from cleaner.core import leakcheck
 from cleaner.core.detect import rules
 from cleaner.core.detect.base import DetectContext, load_builtin
 from cleaner.core.detect.merge import MergedSpan
+from cleaner.core.entities import ops
 from cleaner.core.entities.resolve import Resolver
 from cleaner.core.match import find_forms
 from cleaner.core.pipeline import DETECTORS, sanitize
 from cleaner.core.restore import StreamRestorer, restore
-from cleaner.core.types import ChatState, Settings, Surrogate
+from cleaner.core.types import ChatState, DictEntry, Settings, Surrogate
 from cleaner.core.types import EntityType as T
 
 
@@ -319,4 +320,43 @@ def test_names_longer_than_a_dns_name_kept_by_older_chats_are_found_by_parts():
             sanitize(state, "host-1." * 3000 + "x", Settings())
         else:
             restore(state, "https://" + "host-1." * 3000 + "x/", Settings())
+        assert time.perf_counter() - started < 0.3, step
+
+
+@pytest.mark.parametrize(
+    "text, always, rule",
+    [
+        ("Иван Иван " * 1000, ("Иван Иван",), None), ("la la " * 1000, (), "la la"),
+        ("Иванов Петров " * 500, ("Иванов", "Петров"), None),
+    ],
+    ids=["dictionary_pairs", "rule_pairs", "surnames"],
+)
+def test_overlapping_known_values_and_runs_of_names_are_fast_and_not_one_spelling(text, always, rule):
+    """Наблюдение раунда имён узлов, P2: пересекающиеся известные значения и ряд фамилий через пробел сливались в
+    фрагмент длиной в текст, и он становился написанием чата: раздувал состояние и сверялся с каждым словом текстов.
+    Искомы написания находок, ряд длиннее имени не сливается (5.7)."""
+    settings = Settings(always=tuple(DictEntry(T.PERSON, value) for value in always))
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    if rule:
+        ops.mask(state, rule, T.TERM)
+    sanitize(state, "Иван", settings)       # разбор имён загружается один раз на процесс
+    for step in ("sanitize", "again"):
+        started = time.perf_counter()
+        sanitize(state, text, settings)
+        assert time.perf_counter() - started < 0.3, step
+    assert max(len(form) for entity in state.entities.values() for form in entity.forms) < 20
+
+
+@pytest.mark.parametrize(
+    "text", ["host-1\\." * 3000 + "x", "a\\." * 10000, "\\." * 15000, "<EMAIL_1>\\." * 3000],
+    ids=["parts", "letters", "separators", "labels"],
+)
+def test_names_written_with_escaped_dots_are_found_in_linear_time(text):
+    """Наблюдение раунда имён узлов, P3: имя через «\\.» (регулярное выражение) ищется своим выражением; цепочка из
+    тысяч частей проходится по дереву записанных имён, как через точку, — и при очистке, и при восстановлении."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "узел " + "srv-01." * 30 + "contoso.ru, почта ivanov@contoso.ru", Settings())
+    for step in ("sanitize", "restore"):
+        started = time.perf_counter()
+        (sanitize if step == "sanitize" else restore)(state, text, Settings())
         assert time.perf_counter() - started < 0.3, step
