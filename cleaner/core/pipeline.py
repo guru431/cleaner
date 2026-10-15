@@ -85,8 +85,12 @@ def _outside(
         return [span]
     if span.type not in _SPLIT and not span.ruled:
         return []
+    bounds = ranges[first:last]
+    at = text.find("@", span.start, span.end) if span.type is EntityType.EMAIL else -1
+    if at >= 0:
+        bounds = sorted([*bounds, (at, at + 1)])        # имя входа и имя узла — разные части, и рядом с заменой
     pieces, position = [], span.start
-    for start, end in [*ranges[first:last], (span.end, span.end)]:
+    for start, end in [*bounds, (span.end, span.end)]:
         if start > position:
             piece = _piece(text, span, position, min(start, span.end), ctx)
             if piece:

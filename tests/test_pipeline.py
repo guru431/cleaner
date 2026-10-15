@@ -380,6 +380,50 @@ def test_selection_inside_a_name_leaves_the_issued_replacement_next_to_it(state,
     assert restore(state, expected, settings).text == text.replace("host-1", "srv01")
 
 
+def test_email_with_a_retyped_host_part_stays_an_email(state, settings):
+    """FINDINGS «Retyping a host name part: what it leaves» (2): правило смены типа части имени поглощало адрес e-mail с
+    этой частью — он становился меткой TERM. Правило на целой части имени после «@» адрес не поглощает (5.7, шаг 4)."""
+    text = "узел srv01.contoso.ru и srv01, почта ivanov@srv01.contoso.ru"
+    assert sanitize(state, text, settings).sanitized.endswith("почта <EMAIL_1>")
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.TERM)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "узел <TERM_1>.domain-1.example и <TERM_1>, почта <EMAIL_1>"
+    assert restore(state, result.sanitized, settings).text == text
+    ops.mask(state, "srv0", T.TERM)        # выделение не на целой части поглощает адрес, как прежде
+    assert sanitize(state, "почта ivanov@srv01.contoso.ru", settings).sanitized == "почта <TERM_2>"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("почта ivanov@<TERM_1>.northwind.ru", "почта <ACCOUNT_1>@<TERM_1>.domain-3.example"),
+    ("почта ivanov@host-1.<ORG_1>", "почта <ACCOUNT_1>@host-1.<ORG_1>"),
+    ("почта ivanov@<ORG_1>", "почта <ACCOUNT_1>@<ORG_1>"),
+    ("почта postmaster@<TERM_1>.domain-1.example", "почта postmaster@<TERM_1>.domain-1.example"),
+    ("звонил <PERSON_1>, ivanov@<PERSON_1>", "звонил <PERSON_1>, ivanov@<PERSON_1>"),
+    ("почта ivanov@srv02.<ORG_1>", "почта <ACCOUNT_1>@host-2.<ORG_1>"),
+    ("почта ivanov@srv03.domain-1.example", "почта <ACCOUNT_1>@host-3.domain-1.example"),
+], ids=["label-and-name", "name-and-label", "domain-label", "role-mailbox", "not-a-domain", "part-and-label", "part-and-domain"])
+def test_email_with_a_label_in_its_domain_is_found(state, settings, text, expected):
+    """FINDINGS «Retyping a host name part: what it leaves» (2): правило e-mail не брало метку в домене, и в
+    «ivanov@<TERM_1>.fabrikam.ru» оставались открытыми и логин, и домен. Метка, выданная домену в имени (<ORG_1> из
+    host-1.<ORG_1>), — домен и сама по себе; другая метка после «@» доменом не считается."""
+    sanitize(state, "узел srv01.contoso.ru и srv01, узел srv02.fabrikam.ru, сайт fabrikam.ru", settings)
+    for key, type_ in (("srv01", T.TERM), ("fabrikam.ru", T.ORG)):
+        ops.retype(state, next(e for e in state.entities.values() if e.key == key).id, type_)
+    sanitize(state, "узел srv01.contoso.ru и srv01, узел srv02.fabrikam.ru, сайт fabrikam.ru", settings)
+    ops.mask(state, "Петров", T.PERSON)
+    sanitize(state, "звонил Петров", settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, expected, settings).sanitized == expected
+
+
+def test_email_without_an_at_sign_next_to_a_replacement_does_not_stop_sanitizing(state, settings):
+    """Фрагмент типа EMAIL без «@» бывает — правило пользователя с этим типом; рядом с заменой он делится, как прежде."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    ops.mask(state, "host-1 fabrikam", T.EMAIL)
+    assert sanitize(state, "узел host-1 fabrikam", settings).sanitized == "узел host-1 <ACCOUNT_1>"
+
+
 def test_labels_with_dots_outside_names_stay_as_they_are(state, settings):
     sanitize(state, "узел srv01.contoso.ru, сайт contoso.ru", settings)
     ops.retype(state, next(e for e in state.entities.values() if e.type is T.DOMAIN).id, T.ORG)

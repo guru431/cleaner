@@ -33,6 +33,15 @@ def test_manual_rule_on_a_whole_part_of_a_name_keeps_the_name_type():
         assert merge(text, spans, CTX)[0].type is expected, manual
 
 
+def test_manual_rule_on_a_whole_part_of_an_email_domain_keeps_the_email():
+    """Имя после «@» — тоже имя (5.7, шаг 4): правило на его целой части адрес не поглощает, а на части имени входа
+    или не на целой части — поглощает, как прежде."""
+    text = "ivanov@srv01.contoso.ru"
+    for manual, expected in (((7, 12), T.EMAIL), ((13, 23), T.EMAIL), ((7, 11), T.TERM), ((0, 6), T.TERM)):
+        spans = [Span(0, 23, T.EMAIL, "rules", validated=True), Span(*manual, T.TERM, "manual")]
+        assert merge(text, spans, CTX)[0].type is expected, manual
+
+
 def test_rule_swallowing_a_name_records_where_it_lies():
     """Конвейер оставит выданную замену в имени и отдаст правилу только задетые им части (5.10)."""
     [merged] = merge("host-1.fabrikam.ru", [Span(0, 18, T.HOST, "infra"), Span(7, 15, T.TERM, "manual")], CTX)

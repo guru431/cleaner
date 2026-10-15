@@ -8,6 +8,7 @@ from datetime import date
 
 from cleaner.core import validators
 from cleaner.core.detect.base import DetectContext
+from cleaner.core.entities.labels import SHAPE as _LABEL
 from cleaner.core.types import EntityType, Span
 
 name = "rules"
@@ -15,7 +16,10 @@ name = "rules"
 _BEFORE = 40
 _AFTER = 15
 
-_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# Часть домена бывает меткой: части, которой пользователь дал другой тип, выдана метка (ivanov@<TERM_1>.domain-1.example,
+# ivanov@host-1.<ORG_1>). Метка без точки — домен, только если выдана домену в имени (detect).
+_DOMAIN_PART = rf"(?:[\w-]+|{_LABEL.pattern})"
+_EMAIL = re.compile(rf"(?<![\w.+-])[\w.+-]+@(?:{_DOMAIN_PART}(?:\.{_DOMAIN_PART})+|{_LABEL.pattern})")
 # «схема://» прямо перед «…@хост»: то, что до «@», — пользователь адреса, а не e-mail. Знаки «?#=»
 # в нём значат, что это уже параметры адреса («?mail=ivanov@contoso.ru»), — тогда это e-mail.
 _USERINFO_BEFORE = re.compile(r"[a-z][a-z0-9+.-]{0,31}://(?P<user>[^\s/@]*)$", re.IGNORECASE)
@@ -272,6 +276,8 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
     skip = ctx.builtin.builtin_accounts | _URL_SERVICE_LOGINS
     for m in _EMAIL.finditer(text):
         local, _, domain = m.group().rpartition("@")
+        if "." not in domain and domain.lower() not in ctx.issued_domains:
+            continue        # «ivanov@<PERSON_1>»: метка не домена
         url = _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()])
         if url and not _NOT_USERINFO.search(url.group("user") + local):
             continue        # пользователь адреса, а не e-mail: вход — правило _URL_LOGIN ниже

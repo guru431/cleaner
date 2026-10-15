@@ -45,6 +45,8 @@ from cleaner.core.types import EntityType as T
         "<ORG_1>." * 20000, "a.<ORG_1>." * 10000, "<ORG_1>a." * 15000, "<ORG_1" * 20000, "<ORG_1>." + "a.b." * 25000,
         # Цепочка частей через точку, которая кончается не однобуквенной частью: её суффиксы сверяются со списками.
         "abc.def." * 20000,
+        # Адрес e-mail с меткой в домене.
+        "a@<ORG_1>." * 15000, "a@<ORG_1>.<ORG_1" * 10000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -56,7 +58,8 @@ from cleaner.core.types import EntityType as T
         "password_distinct_words", "closing_brackets", "attribute_chain", "call_names", "bracket_pairs",
         "camel_attribute", "pem_begins", "dashes", "pem_dashed_headers", "pem_bare_headers", "pem_dashed_body",
         "pem_bare_blocks",
-        "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail", "dotted_words",
+        "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail", "dotted_words", "email_labels",
+        "email_labels_open",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):

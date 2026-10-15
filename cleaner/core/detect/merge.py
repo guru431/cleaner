@@ -87,11 +87,15 @@ _NAME_TYPES = (EntityType.HOST, EntityType.DOMAIN)
 
 
 def _name_kept(text: str, group: list[Span], start: int, end: int) -> EntityType | None:
-    """Тип имени узла или домена, если правила пользователя в нём легли на целые части (раздел 6.4: каждая часть
-    слева и домен). Такое правило имя не поглощает: часть получит его тип при подмене (resolve._name)."""
+    """Тип имени узла, домена или адреса e-mail, если правила пользователя в нём легли на целые части имени (раздел 6.4:
+    каждая часть слева и домен; у адреса — имени после «@»). Такое правило имя не поглощает: часть получит его тип при
+    подмене (resolve._name), адрес — свою метку, в которой скрыта и часть."""
     name = next((
-        s for s in group if s.source != "manual" and s.type in _NAME_TYPES and (s.start, s.end) == (start, end)
+        s for s in group
+        if s.source != "manual" and s.type in (*_NAME_TYPES, EntityType.EMAIL) and (s.start, s.end) == (start, end)
     ), None)
+    if name is not None and name.type is EntityType.EMAIL:
+        start = text.rfind("@", start, end) + 1
     if name is None or not _DOTTED_NAME.fullmatch(text, start, end):
         return None
     left, registrable = hostmap.parts(text[start:end])
