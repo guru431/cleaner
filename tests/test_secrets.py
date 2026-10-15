@@ -829,6 +829,22 @@ def test_putty_and_ssh2_private_keys_are_one_fragment(text, value):
     assert found(text) == {value}
 
 
+@pytest.mark.parametrize("line_break", ["\n", "\r\n"])
+def test_ssh2_key_with_a_continued_header_line_is_one_fragment(line_break):
+    """Ревью раунда ключей: RFC 4716 продолжает строку заголовка длиннее 72 байт обратной косой чертой в конце, и ключ
+    с такой строкой не находился совсем — тело уходило открытым."""
+    key = line_break.join((
+        "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----", 'Comment: "rsa-key-20261015 for the backup account, wrapped \\',
+        'over two lines"', "P2/56wAAAi4AAAA3aWYtbW9kbntzaWdu", KEY_LINE, "---- END SSH2 ENCRYPTED PRIVATE KEY ----",
+    ))
+    assert found(f"ключ:{line_break}{key}{line_break}дальше") == {key}
+
+
+def test_continued_header_line_without_a_key_body_is_not_a_secret():
+    text = "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\nComment: \"длинный комментарий \\\nна две строки\"\nа тела нет"
+    assert found(text) == set()
+
+
 def test_putty_and_ssh2_headers_without_a_key_body_are_not_secrets():
     for text in (
         "Файл начинается со строки PuTTY-User-Key-File-3: ssh-ed25519, за ней идут поля",

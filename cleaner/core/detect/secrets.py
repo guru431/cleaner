@@ -21,10 +21,13 @@ name = "secrets"
 # Тело может идти после строк «Имя: значение» (_PEM_ARMOUR: броня PGP — Version:, Comment:; шифрованный PEM — Proc-Type:,
 # DEK-Info:; SSH2 — Comment:) и одной пустой строки. Ряды, отделённые от заголовка пробелом («---- BEGIN SSH2 ENCRYPTED
 # PRIVATE KEY ----»), — тоже заголовок с телом, а не блок до конца текста: «-- BEGIN RSA PRIVATE KEY --» бывает и тире.
+# Строку «Имя: значение», которая кончается обратной косой чертой, продолжает следующая строка (RFC 4716, SSH2).
 _DASHES = "-—–"
 _PEM_BEGIN = re.compile(r"(?<!\w)BEGIN (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?(?P<dashes>[-—–]{2,}+)?")
 _PEM_END = re.compile(r"(?<!\w)END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?[-—–]*+")
-_PEM_ARMOUR = re.compile(r"[ \t]*+(?:[-—–]++[ \t]*+)?(?:\r?\n[ \t]*+[A-Za-z][\w-]*+:[ \t][^\r\n]*+)*+")
+_PEM_ARMOUR = re.compile(
+    r"[ \t]*+(?:[-—–]++[ \t]*+)?(?:\r?\n[ \t]*+[A-Za-z][\w-]*+:[ \t][^\r\n]*+(?:(?<=\\)\r?\n[^\r\n]*+)*+)*+"
+)
 _PEM_BODY = re.compile(
     r"(?:\r?\n[ \t]*+(?=\r?\n))?(?=\r?\n[ \t]*[A-Za-z0-9+/]{16})(?:\r?\n(?![ \t]*+(?:[-—–]++[ \t]?)?END )[ \t]*\S[^\r\n]*)++"
     r"(?:\r?\n[ \t]*+(?:[-—–]++[ \t]?)?END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?(?:[ \t]?[-—–]++)?)?"
