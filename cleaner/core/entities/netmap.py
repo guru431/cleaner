@@ -125,5 +125,9 @@ def fake_ip(token: str, state: ChatState) -> str | None:
     fake = map_private(int(ip), bits, state.net_key)
     if prefix is None:
         return str(ipaddress.IPv4Address(fake))
-    network = fake & ~((1 << (32 - prefix)) - 1) & 0xFFFFFFFF
-    return f"{ipaddress.IPv4Address(network)}/{prefix}"
+    host = (1 << (32 - prefix)) - 1
+    if int(ip) & host == 0:
+        # Адрес сети остаётся адресом сети. Только он: адрес узла «10.1.2.5/16» с обнулёнными битами стал бы подменой
+        # сети «10.1.0.0/16», и один из двух оригиналов восстанавливался бы другим (раздел 6.2).
+        fake &= ~host & 0xFFFFFFFF
+    return f"{ipaddress.IPv4Address(fake)}/{prefix}"
