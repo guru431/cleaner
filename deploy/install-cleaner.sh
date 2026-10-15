@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Установка и обновление Cleaner на example. Идемпотентен: повторный прогон обновляет код,
+# Установка и обновление Cleaner на сервере. Идемпотентен: повторный прогон обновляет код,
 # зависимости и юнит, а главный ключ, базу, настройки, сертификат и правило ufw не трогает.
 #
 #   sudo bash install-cleaner.sh <каталог доставки> [логин первого администратора]
+#
+# Адрес, сети клиентов и шлюз — в профиле хоста deploy/hosts/<hostname -s>.conf (другое имя —
+# CLEANER_HOST=<имя>); профиля нет — установка не начинается.
 #
 # Каталог доставки — распакованный `git archive` репозитория Cleaner в каталоге под root
 # (`/root/stage-cleaner` с правами 0700 или `sudo mktemp -d`). git отдаёт файлы с LF по .gitattributes,
@@ -27,9 +30,8 @@ UNIT=/etc/systemd/system/cleaner.service
 CHECK=/usr/local/sbin/check-cleaner.sh
 EGRESS=/usr/local/sbin/cleaner-egress.sh
 EGRESS_UNIT=/etc/systemd/system/cleaner-egress.service
-HOST_IP=example
+HOST_ENV=$ETC/host.env
 PORT=5464
-CLIENTS=example/19
 STAMP=$(date +%Y%m%d-%H%M%S)
 
 log() { echo "[cleaner] $*"; }
@@ -62,6 +64,17 @@ require_safe_src() {
 require_safe_src "$SRC"
 [[ -d "$SRC/cleaner" && -f "$SRC/requirements-linux.txt" ]] || fail "$SRC — не дерево репозитория Cleaner"
 command -v python3.12 >/dev/null || fail "нет python3.12"
+
+# --- профиль хоста: HOST_IP, CLIENTS, INTERNAL, GATEWAY, CERT_NAME, SERVER_GUARD, GATEWAY_KEY_HINT ----
+# Читается после проверки каталога доставки: он принадлежит root и закрыт на запись остальным.
+HOST_NAME=${CLEANER_HOST:-$(hostname -s)}
+PROFILE="$SRC/deploy/hosts/$HOST_NAME.conf"
+[[ -f "$PROFILE" ]] || fail "нет профиля хоста $PROFILE — заведите его в deploy/hosts/ или задайте CLEANER_HOST"
+# shellcheck source=/dev/null
+. "$PROFILE"
+[[ -n "${HOST_IP:-}" && -n "${CLIENTS:-}" && -n "${INTERNAL:-}" && -n "${GATEWAY:-}" && -n "${CERT_NAME:-}" ]] \
+    || fail "профиль $PROFILE неполон: нужны HOST_IP, CLIENTS, INTERNAL, GATEWAY, CERT_NAME"
+log "профиль хоста: $HOST_NAME ($HOST_IP, клиенты: $CLIENTS)"
 # Первая установка или обновление — решается до любых изменений: откат обновления не должен
 # останавливать работающую службу, если до замены файлов дело не дошло.
 FIRST_INSTALL=1
@@ -74,10 +87,16 @@ id -u cleaner >/dev/null 2>&1 || useradd --system --no-create-home --home-dir "$
 install -d -o root -g cleaner -m 0750 "$APP" "$ETC" "$TLS"
 install -d -o cleaner -g cleaner -m 0700 "$DATA"
 install -d -o cleaner -g cleaner -m 0750 "$APP/models"     # модели слоя 4 и Docling: пишет только models download
+# Профиль — для cleaner-egress.sh и check-cleaner.sh, которые живут вне каталога доставки. Секретов в нём нет.
+install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"
 
-# --- настройки: ставятся один раз ------------------------------------------------
+# --- настройки: ставятся один раз, адрес службы — из профиля хоста -----------------
 if [[ ! -f "$CONF" ]]; then
-    install -o root -g cleaner -m 0640 "$SRC/deploy/cleaner.toml" "$CONF"
+    sed "s|^host = .*|host = \"${HOST_IP}\"   # профиль ${HOST_NAME}: только интерфейс сети клиентов (SEC-8)|" \
+        "$SRC/deploy/cleaner.toml" > "$CONF"
+    chown root:cleaner "$CONF"
+    chmod 0640 "$CONF"
+    grep -q "^host = \"${HOST_IP}\"" "$CONF" || fail "в $CONF не подставился адрес $HOST_IP"
     log "настройки установлены: $CONF"
 else
     log "настройки уже есть — не трогаю: $CONF"
@@ -93,8 +112,8 @@ if [[ ! -s "$TLS/cert.pem" || ! -s "$TLS/key.pem" ]]; then
         umask 077
         openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
             -keyout "$TLS/key.pem" -out "$TLS/cert.pem" \
-            -subj "/CN=example Cleaner" \
-            -addext "subjectAltName=IP:${HOST_IP},DNS:example" \
+            -subj "/CN=${CERT_NAME} Cleaner" \
+            -addext "subjectAltName=IP:${HOST_IP},DNS:${CERT_NAME}" \
             -addext "keyUsage=digitalSignature,keyEncipherment" \
             -addext "extendedKeyUsage=serverAuth" 2>&1
     ); then
@@ -216,7 +235,7 @@ elif [[ ! -f "$ENVF" || ! -f "$DATA/cleaner.db" ]]; then
     rollback "есть только одно из двух — $ENVF или $DATA/cleaner.db; верните второе (key import или копия базы)"
 fi
 if ! grep -q '^CLEANER_GATEWAY_KEY=..*' "$ENVF"; then
-    log "Ключа шлюза нет: выпустите его (sudo ai-ctl gateway-key create cleaner) и допишите строку CLEANER_GATEWAY_KEY=… в $ENVF через sudoedit"
+    log "Ключа шлюза нет: ${GATEWAY_KEY_HINT:-выпустите его в шлюзе сервера}; допишите строку CLEANER_GATEWAY_KEY=… в $ENVF через sudoedit"
 fi
 
 # --- копия базы: новая версия мигрирует схему при старте, а прежний код базу новой версии не откроет ----
@@ -260,20 +279,26 @@ log "служба отвечает: https://${HOST_IP}:${PORT}/login"
 # Имя страховки постоянное: ai-ctl boot-readiness и панель ищут ровно ufw-failsafe.timer.
 # После правки ufw — рестарт ai-egress-guard, как у install-step8-perimeter.sh.
 RULES="$(ufw status 2>/dev/null || true)"
-if grep -qE "^${PORT}/tcp +ALLOW +${CLIENTS//./\\.}( |$)" <<< "$RULES"; then
-    log "правило ufw для ${PORT} уже есть — страховку не взвожу"
+missing=()
+for net in $CLIENTS; do
+    grep -qE "^${PORT}/tcp +ALLOW +${net//./\\.}( |$)" <<< "$RULES" || missing+=("$net")
+done
+if [[ ${#missing[@]} -eq 0 ]]; then
+    log "правила ufw для ${PORT} уже есть — страховку не взвожу"
 else
     systemctl stop ufw-failsafe.timer ufw-failsafe.service >/dev/null 2>&1 || true
     systemctl reset-failed ufw-failsafe.timer ufw-failsafe.service >/dev/null 2>&1 || true
     systemd-run --on-active=10m --unit=ufw-failsafe /usr/sbin/ufw --force disable >/dev/null \
         || fail "страховка ufw-failsafe не поставлена — правила не тронуты"
     # Без этой проверки set -e молча вышел бы с взведённой страховкой, и ufw выключился бы через 10 минут.
-    if ! ufw allow proto tcp from "$CLIENTS" to any port "$PORT" comment 'cleaner' >/dev/null; then
-        systemctl stop ufw-failsafe.timer >/dev/null 2>&1 || true
-        fail "правило ufw для ${PORT} не добавлено; страховка снята, экран не тронут — служба недоступна клиентам"
-    fi
+    for net in "${missing[@]}"; do
+        if ! ufw allow proto tcp from "$net" to any port "$PORT" comment 'cleaner' >/dev/null; then
+            systemctl stop ufw-failsafe.timer >/dev/null 2>&1 || true
+            fail "правило ufw для ${PORT} из ${net} не добавлено; страховка снята — служба недоступна части клиентов"
+        fi
+    done
     systemctl try-restart ai-egress-guard.service >/dev/null 2>&1 || true
-    log "правило ufw добавлено: ${PORT}/tcp из ${CLIENTS}; страховка ufw-failsafe — 10 минут"
+    log "правила ufw добавлены: ${PORT}/tcp из ${missing[*]}; страховка ufw-failsafe — 10 минут"
     log "ТЕПЕРЬ откройте НОВОЕ SSH-подключение и убедитесь, что оно проходит."
     log "После этого снимите страховку:  sudo systemctl stop ufw-failsafe.timer"
     log "Если что-то пошло не так — подождите 10 минут, ufw выключится сам."

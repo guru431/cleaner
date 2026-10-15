@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Границы выхода наружу службы Cleaner на example (SEC-15, раздел 15 спецификации).
+# Границы выхода наружу службы Cleaner (SEC-15, раздел 15 спецификации). Сети ниже — для example;
+# на другом хосте их переопределяет профиль, который установщик кладёт в /etc/cleaner/host.env.
 #
 #   cleaner-egress.sh          — поставить таблицу nftables inet cleaner_egress (юнит cleaner-egress.service)
 #   cleaner-egress.sh check    — код 0, если таблица на месте и кончается отказом (ExecStartPre=+ у cleaner.service)
@@ -24,6 +25,9 @@ CLIENTS=example/19
 # Копия INTERNAL из ai-egress-guard.sh сервера: правило vLLM — менять все копии вместе. Тест vLLM видит
 # только свой репозиторий, поэтому совпадение списков сверяет check-cleaner.sh.
 INTERNAL="127.0.0.0/8 example/24 example/24 example/19 example/24 172.16.0.0/12"
+HOST_ENV=/etc/cleaner/host.env
+# shellcheck source=/dev/null
+if [[ -f "$HOST_ENV" ]]; then . "$HOST_ENV"; fi
 
 if [[ "${1:-}" == "check" ]]; then
     rules=$(nft list table inet "$TABLE" 2>/dev/null) \
@@ -35,6 +39,7 @@ fi
 
 uid=$(id -u "$USER_NAME") || { echo "нет пользователя $USER_NAME" >&2; exit 1; }
 nets=$(tr ' ' ',' <<< "$INTERNAL")
+clients=$(tr ' ' ',' <<< "$CLIENTS")
 
 nft -f - <<EOF
 table inet $TABLE
@@ -56,11 +61,11 @@ table inet $TABLE {
         meta l4proto tcp reject with tcp reset
         reject
     }
-    # Входящие на порт службы — только из сети клиентов и петли: второй слой за правилом ufw, как раньше
+    # Входящие на порт службы — только из сетей клиентов и петли: второй слой за правилом ufw, как раньше
     # IPAddressDeny= юнита (он ограничивал оба направления и снят ради выхода на 443).
     chain input {
         type filter hook input priority filter; policy accept;
-        tcp dport $PORT ip saddr != { $CLIENTS, 127.0.0.0/8 } drop
+        tcp dport $PORT ip saddr != { $clients, 127.0.0.0/8 } drop
         tcp dport $PORT meta nfproto ipv6 ip6 saddr != ::1 drop
     }
 }

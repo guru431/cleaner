@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Проверка Cleaner фактом на живом example: служба, права файлов, вход по HTTPS, экран,
+# Проверка Cleaner фактом на живом сервере (значения ниже — example; на другом хосте их переопределяет
+# профиль /etc/cleaner/host.env, который кладёт установщик): служба, права файлов, вход по HTTPS, экран,
 # исходящие службы (с этапа 3 — только TCP 443), самопроверка. Образец — check-egress.sh и
 # check-rerank.sh репозитория vLLM: проверяется то, что происходит, а не то, что написано.
 #
@@ -19,6 +20,10 @@ DATA=/var/lib/cleaner
 ETC=/etc/cleaner
 CERT=$ETC/tls/cert.pem
 GATEWAY="127.0.0.1:30000"
+SERVER_GUARD=1
+HOST_ENV=$ETC/host.env
+# shellcheck source=/dev/null
+if [[ -f "$HOST_ENV" ]]; then . "$HOST_ENV"; fi
 EXTERNAL="${CLEANER_PROBE_HOST:-1.1.1.1}"
 EXTERNAL6="${CLEANER_PROBE_HOST6:-2606:4700:4700::1111}"
 PROBE_NAME="${CLEANER_PROBE_NAME:-api.deepseek.com}"
@@ -95,7 +100,13 @@ fingerprint=$(openssl x509 -in "$CERT" -noout -fingerprint -sha256 2>/dev/null |
 echo "4. Экран"
 rules=$(ufw status 2>/dev/null || true)
 port_rules=$(grep -E "^${PORT}/tcp" <<< "$rules" || true)
-if [[ "$(grep -c . <<< "$port_rules")" == "1" ]] && grep -qE "ALLOW +${CLIENTS//./\\.}( |$)" <<< "$port_rules"; then
+want=0
+have=0
+for net in $CLIENTS; do
+    want=$((want + 1))
+    if grep -qE "ALLOW +${net//./\\.}( |$)" <<< "$port_rules"; then have=$((have + 1)); fi
+done
+if [[ "$(grep -c . <<< "$port_rules")" == "$want" && "$have" == "$want" ]]; then
     ok "порт ${PORT} открыт только для ${CLIENTS}"
 else
     bad "правила ufw для ${PORT}: ${port_rules:-нет}"
@@ -132,9 +143,15 @@ else
     bad "в таблице cleaner_egress нет правила IPv6 только для петли"
 fi
 nets() { sed -n "s/^${2}=\"\(\${[A-Z_]*:-\)\{0,1\}\([^}\"]*\)}\{0,1\}\"$/\2/p" "$1" | tr ' ' '\n' | sort | tr '\n' ' '; }
-ours=$(nets /usr/local/sbin/cleaner-egress.sh INTERNAL)
+if [[ -n "${INTERNAL:-}" ]]; then
+    ours=$(tr ' ' '\n' <<< "$INTERNAL" | sort | tr '\n' ' ')      # из профиля хоста
+else
+    ours=$(nets /usr/local/sbin/cleaner-egress.sh INTERNAL)
+fi
 guard=$(nets /usr/local/sbin/ai-egress-guard.sh INTERNAL)
-if [[ -z "$guard" ]]; then
+if [[ "$SERVER_GUARD" != "1" ]]; then
+    skip "ai-egress-guard.sh на этом хосте нет — внутренние сети заданы профилем: ${ours}"
+elif [[ -z "$guard" ]]; then
     miss "нет /usr/local/sbin/ai-egress-guard.sh — список внутренних сетей не сверен"
 elif [[ "$ours" == "$guard" ]]; then
     ok "внутренние сети совпадают с ai-egress-guard.sh"
@@ -208,12 +225,19 @@ else
         bad "соединения на 443 нет в журнале ядра (cleaner-out:) — проба прошла мимо таблицы"
     fi
 fi
-if nft list chain inet cleaner_egress input 2>/dev/null | grep -q "tcp dport ${PORT} ip saddr != { ${CLIENTS}, 127.0.0.0/8 } drop"; then
+input_rule=$(nft list chain inet cleaner_egress input 2>/dev/null | grep "tcp dport ${PORT} ip saddr != {" | grep " drop" || true)
+absent=""
+for net in $CLIENTS 127.0.0.0/8; do
+    grep -qF "$net" <<< "$input_rule" || absent="$absent $net"
+done
+if [[ -n "$input_rule" && -z "$absent" ]]; then
     ok "входящие на ${PORT} в таблице cleaner_egress — только из ${CLIENTS} и петли"
 else
-    bad "в таблице cleaner_egress нет входного фильтра порта ${PORT}"
+    bad "в таблице cleaner_egress нет входного фильтра порта ${PORT}${absent:+ (нет сетей:$absent)}"
 fi
-if [[ -x /usr/local/sbin/check-egress.sh ]]; then
+if [[ "$SERVER_GUARD" != "1" ]]; then
+    skip "check-egress.sh сервера vLLM на этом хосте нет"
+elif [[ -x /usr/local/sbin/check-egress.sh ]]; then
     bash /usr/local/sbin/check-egress.sh >"$WORK/egress.txt" 2>&1
     case $? in
         0) ok "check-egress.sh сервера: всё закрыто" ;;

@@ -59,3 +59,19 @@ ssh -i ~/.ssh/example -p 34012 -o BatchMode=yes example@example 'sudo bash /usr/
 - Отпечаток сертификата печатают установщик и `check-cleaner.sh`; в документы он не выписывается. Значения ключей не попадают в файлы и в вывод.
 - Быстрый набор на сервере (Python 3.12) — до удаления `/root/stage-cleaner`: тестовые пакеты (`pytest`, `pytest-timeout`, `iniconfig`, `httpx2`, `httpcore2`, `truststore` — то, чем `requirements-dev-linux.txt` шире `requirements-linux.txt`) с их строками `--hash` из него — файлом в `/root/stage-cleaner/extra-test.txt`, затем `sudo /opt/cleaner/.venv/bin/python -m pip install --require-hashes --only-binary=:all: --no-deps --target /root/stage-testlib -r /root/stage-cleaner/extra-test.txt` и `cd /root/stage-cleaner && PYTHONPATH=/root/stage-testlib /opt/cleaner/.venv/bin/python -m pytest -q -p no:cacheprovider` (и `-m integration tests/test_long_input.py`); после — `rm -rf /root/stage-testlib`. Один тест пропускается: сверку с vLLM там делает `check-cleaner.sh`.
 - Сверка с эталоном vLLM без правки юнита: `powershell -File D:\vsc\vLLM\dashboard\deploy\manifest.ps1 -Route second-net` — «расхождений нет».
+- Всё, что зависит от хоста (адрес, сети клиентов, внутренние сети, шлюз, сверка с `ai-egress-guard`), — в
+  профиле `deploy/hosts/<hostname -s>.conf`; установщик кладёт его в `/etc/cleaner/host.env`, оттуда его читают
+  `cleaner-egress.sh` и `check-cleaner.sh`. Новый хост — новый профиль; `CLIENTS` обязаны входить в `INTERNAL`
+  (таблица `cleaner_egress` фильтрует и ответы службы), это сторожит `tests/test_deploy.py`.
+
+## Установка на example
+
+Второй экземпляр с 2026-10-15: `https://example5464`, клиенты — 192.168.0.0/20 и VPN example/20
+(профиль `deploy/hosts/example.conf`). Слой 5 — роль `local-chat` шлюза llm_routers на этом же хосте
+(`http://127.0.0.1:4000/v1`, ключ потребителя `cleaner` — `GATEWAY_KEY_CLEANER` в vault `local-config`, на хосте —
+строка `CLEANER_GATEWAY_KEY` в `/etc/cleaner/cleaner.env`); распознавание сканов не работает — маршрут
+`/pages/ocr` там OpenAI-совместимый, а не ocr-ru. Администратор `admin`, пароль — `CLEANER_example_ADMIN_PASSWORD`
+в vault `local-config`. Доступ с workstation: `ssh -i ~/.ssh/studio_deploy_key -p 22222 deploy@example, sudo без пароля;
+доставка и установка — те же команды, что для example, с этим адресом (пароль администратора при первой
+установке — с клавиатуры, `ssh -t`). `ai-egress-guard.sh` и `check-egress.sh` на example нет — проверка их
+пропускает. Python там тоже 3.12, `requirements-linux.txt` общий.

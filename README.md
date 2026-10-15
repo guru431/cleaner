@@ -43,10 +43,15 @@ set -a; . data/cleaner.env; set +a
 
 - Служба `cleaner` на example: `https://example:5464`, открывается только из сети
   example/19. Код `/opt/cleaner`, данные `/var/lib/cleaner`, настройки и ключи `/etc/cleaner/`.
-- LLM для слоя 5 — шлюз example (`:30000`), шлюз llm_routers не используется.
+- LLM для слоя 5 — шлюз example (`:30000`).
+- Второй экземпляр (с 2026-10-15) — example, `https://example5464`, из домашней сети
+  192.168.0.0/20 и VPN example/20. Слой 5 — роль `local-chat` шлюза llm_routers на этом же хосте
+  (gemma4); распознавание сканов там не работает: маршрут `/pages/ocr` шлюза другого формата.
+- Адрес, сети клиентов и шлюз хоста — профиль `deploy/hosts/<hostname -s>.conf`.
 - Разработка — в основном на build-host (`D:\vsc\cleaner`), с workstation проект сводится через git.
 - Установка и обновление (доставка `git archive`, установщик, проверка) — по шагам в
-  [CLAUDE.md](CLAUDE.md), раздел «Установка на example». Правила сервера — в проекте `vLLM`.
+  [CLAUDE.md](CLAUDE.md), разделы «Установка на example» и «Установка на example». Правила
+  сервера example — в проекте `vLLM`.
 
 ## Документы
 

@@ -70,7 +70,10 @@ def test_egress_table_allows_internal_nets_and_443_and_rejects_the_rest():
     # Второй слой для входящих на порт службы — тот же, что у правила ufw и настроек сервера.
     cfg = config.load(DEPLOY / "cleaner.toml")
     assert f"PORT={cfg.port}" in text.splitlines() and "CLIENTS=example/19" in text.splitlines()
-    assert "tcp dport $PORT ip saddr != { $CLIENTS, 127.0.0.0/8 } drop" in rules
+    # Профиль хоста переопределяет сети до построения таблицы; сетей клиентов может быть несколько.
+    assert text.index('. "$HOST_ENV"') < text.index("nft -f - <<EOF")
+    assert "clients=$(tr ' ' ',' <<< \"$CLIENTS\")" in text.splitlines()
+    assert "tcp dport $PORT ip saddr != { $clients, 127.0.0.0/8 } drop" in rules
     unit = (DEPLOY / "cleaner-egress.service").read_text(encoding="utf-8").splitlines()
     for line in ("Type=oneshot", "RemainAfterExit=yes", "ExecStart=/usr/local/sbin/cleaner-egress.sh",
                  "After=network-online.target", "Before=cleaner.service", "WantedBy=multi-user.target"):
@@ -124,16 +127,80 @@ def test_server_lock_carries_every_top_level_requirement(source, lock):
 
 @pytest.mark.parametrize("script", ["check-cleaner.sh", "install-cleaner.sh"])
 def test_scripts_use_the_addresses_and_paths_of_the_unit_and_the_config(script):
-    """Установщик и проверка живут отдельно от юнита и настроек: адрес, порт и каталоги у них общие."""
+    """Установщик и проверка живут отдельно от юнита и настроек: порт и каталоги у них общие,
+    адрес и сети — из профиля хоста."""
     cfg = config.load(DEPLOY / "cleaner.toml")
     text = (DEPLOY / script).read_text(encoding="utf-8")
     assert text.startswith("#!/usr/bin/env bash\n") and "\r" not in text
     lines = text.splitlines()
-    for line in (
-        f"HOST_IP={cfg.host}", f"PORT={cfg.port}", "CLIENTS=example/19",
-        "APP=/opt/cleaner", f"DATA={cfg.data_dir.as_posix()}", "ETC=/etc/cleaner",
-    ):
+    for line in (f"PORT={cfg.port}", "APP=/opt/cleaner", f"DATA={cfg.data_dir.as_posix()}", "ETC=/etc/cleaner"):
         assert line in lines, line
+    if script == "check-cleaner.sh":
+        # Значения по умолчанию — example (сервер, где профиль ещё не разложен); host.env их переопределяет.
+        s06 = _profile(HOSTS / "example.conf")
+        assert f"HOST_IP={s06['HOST_IP']}" in lines and f"CLIENTS={s06['CLIENTS']}" in lines
+        assert text.index('. "$HOST_ENV"') < text.index('echo "1. Служба"')
+    else:
+        assert 'PROFILE="$SRC/deploy/hosts/$HOST_NAME.conf"' in lines
+        assert text.index("require_safe_src \"$SRC\"") < text.index('. "$PROFILE"')
+        assert 'install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"' in lines
+
+
+HOSTS = DEPLOY / "hosts"
+_REQUIRED = ("HOST_IP", "CLIENTS", "INTERNAL", "GATEWAY", "CERT_NAME", "SERVER_GUARD", "GATEWAY_KEY_HINT")
+
+
+def _profile(path: Path) -> dict[str, str]:
+    values = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            key, _, value = line.partition("=")
+            values[key] = value.strip('"')
+    return values
+
+
+def test_host_profiles_are_complete_and_clients_stay_inside_internal_nets():
+    """Профиль хоста задаёт адрес, сети и шлюз. Таблица cleaner_egress фильтрует и ответы службы:
+    клиент вне внутренних сетей получил бы отказ на свой же запрос — поэтому CLIENTS ⊂ INTERNAL."""
+    import ipaddress
+
+    profiles = sorted(HOSTS.glob("*.conf"))
+    assert {p.stem for p in profiles} >= {"example", "example"}
+    for path in profiles:
+        text = path.read_text(encoding="utf-8")
+        assert "\r" not in text, path.name
+        values = _profile(path)
+        assert set(_REQUIRED) <= set(values) and all(values[key] for key in _REQUIRED), path.name
+        ipaddress.ip_address(values["HOST_IP"])
+        internal = [ipaddress.ip_network(net) for net in values["INTERNAL"].split()]
+        assert ipaddress.ip_network("127.0.0.0/8") in internal, path.name
+        for net in values["CLIENTS"].split():
+            client = ipaddress.ip_network(net)
+            assert any(client.subnet_of(inner) for inner in internal), f"{path.name}: {net} вне INTERNAL"
+        assert values["SERVER_GUARD"] in ("0", "1"), path.name
+
+
+def test_s06_profile_matches_the_defaults_of_the_config_and_the_egress_chain():
+    """example — сервер, где всё начиналось: значения по умолчанию в настройках и сценариях совпадают с профилем."""
+    s06 = _profile(HOSTS / "example.conf")
+    cfg = config.load(DEPLOY / "cleaner.toml")
+    assert s06["HOST_IP"] == cfg.host
+    assert set(s06["INTERNAL"].split()) == _internal(EGRESS)
+    assert (s06["GATEWAY"], s06["SERVER_GUARD"]) == ("127.0.0.1:30000", "1")
+
+
+def test_example_profile_opens_the_home_lan_and_vpn_and_uses_the_local_gateway():
+    """Решение владельца 2026-10-15: на example — домашняя сеть и VPN, слой 5 — шлюз llm_routers на этом же хосте."""
+    srv = _profile(HOSTS / "example.conf")
+    assert (srv["HOST_IP"], srv["CLIENTS"]) == ("example, "192.168.0.0/20 example/20")
+    assert (srv["GATEWAY"], srv["SERVER_GUARD"]) == ("127.0.0.1:4000", "0")
+
+
+def test_installer_renders_the_service_address_from_the_profile():
+    """Адрес службы в /etc/cleaner/cleaner.toml берётся из профиля, и установщик проверяет подстановку."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    assert 's|^host = .*|host = \\"${HOST_IP}\\"' in text
+    assert 'grep -q "^host = \\"${HOST_IP}\\"" "$CONF"' in text
 
 
 def test_server_dependencies_take_torch_without_cuda():
