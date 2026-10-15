@@ -112,6 +112,44 @@ def test_internal_link_and_derived_names_are_restored(settings):
     assert kinds(result) == ["restored", "derived", "restored"]
 
 
+@pytest.mark.parametrize(
+    "answer, restored, segments",
+    [
+        (r"RewriteCond %{HTTP_HOST} ^host-1\.sub-2\.domain-1\.example$", r"RewriteCond %{HTTP_HOST} ^srv-web01\.corp\.contoso\.ru$", ["restored"]),
+        (r"server_name ~^www\.domain-1\.example$;", r"server_name ~^www\.contoso\.ru$;", ["derived"]),
+        (r"grep 'host-1\.evil\.com' log", r"grep 'srv-web01\.evil\.com' log", ["derived"]),
+        (r"^host-1\.sub-2\.domain-1.example$", r"^srv-web01\.corp\.contoso.ru$", ["derived"] * 3),
+    ],
+    ids=["rewrite", "nginx", "derived", "both-separators"],
+)
+def test_name_written_with_escaped_dots_is_restored_with_them(settings, answer, restored, segments):
+    """Наблюдение раунда имён узлов, P3: в регулярном выражении имя пишут через «\\.», и из «host-1\\.domain-1\\.example»
+    восстанавливалась только первая часть. Цепочка частей через «\\.» ищется так же, как через точку, и оригинал пишется
+    с тем же разделителем; повторная вставка ответа ничего не создаёт."""
+    state = infra_state()
+    result = restore(state, answer, settings)
+    assert (result.text, kinds(result)) == (restored, segments)
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, answer, settings).sanitized == answer
+    assert (len(state.entities), len(state.surrogates)) == counts
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (r"C:\host-1\domain-1.example", r"C:\srv-web01\contoso.ru"),
+        (r"C:\Users\host-1\.ssh\config", r"C:\Users\srv-web01\.ssh\config"),
+        (r"host-1\\.domain-1", r"srv-web01\\.domain-1"),
+        (r"\\host-1\share\.domain-1\.examples", r"\\srv-web01\share\.domain-1\.examples"),
+    ],
+    ids=["path", "dot-folder", "escaped-backslash", "not-a-name"],
+)
+def test_backslash_before_a_dot_elsewhere_is_not_a_separator_of_our_name(settings, answer, restored):
+    """Та же находка с другой стороны: путь Windows («\\» перед частью или перед папкой на точку), экранированная
+    обратная косая и цепочка, которой нет в таблице, читаются, как раньше."""
+    assert restore(infra_state(), answer, settings).text == restored
+
+
 def test_address_in_a_known_fake_subnet_is_derived(settings):
     state = infra_state()
     fake = next(text for text, surrogate in state.surrogates.items() if surrogate.kind == "ip")
@@ -307,12 +345,12 @@ def test_own_encoded_links_and_text_next_to_encoded_links_are_restored(settings,
     [
         (
             r"RewriteCond %{HTTP_HOST} ^www\.host-1\.domain-1\.example$ [NC]",
-            r"RewriteCond %{HTTP_HOST} ^www\.srv-dc01\.domain-1\.example$ [NC]",
+            r"RewriteCond %{HTTP_HOST} ^www\.srv-dc01\.contoso\.ru$ [NC]",
         ),
-        (r"server_name ~^www\.host-1\.domain-1\.example$;", r"server_name ~^www\.srv-dc01\.domain-1\.example$;"),
+        (r"server_name ~^www\.host-1\.domain-1\.example$;", r"server_name ~^www\.srv-dc01\.contoso\.ru$;"),
         (
             "```apache\nRewriteCond %{HTTP_HOST} ^www\\.host-1\\.domain-1\\.example$\n```",
-            "```apache\nRewriteCond %{HTTP_HOST} ^www\\.srv-dc01\\.domain-1\\.example$\n```",
+            "```apache\nRewriteCond %{HTTP_HOST} ^www\\.srv-dc01\\.contoso\\.ru$\n```",
         ),
     ],
 )
@@ -320,7 +358,7 @@ def test_regular_expression_with_our_host_name_is_restored(settings, answer, res
     """Обзор пакета восстановления, Minor: «^www\\.host-1\\.domain-1\\.example$» remark-gfm раскрывает в ссылку
     «www.host-1.domain-1.example$», и слово считалось чужой ссылкой — host-1 не восстанавливался (до пакета
     восстанавливался). Знак в конце последней части, которого не бывает в домене верхнего уровня, к чужому узлу не
-    ведёт: имя перед ним наше — и ссылка наша."""
+    ведёт: имя перед ним наше — и ссылка наша. Имя через «\\.» восстанавливается целиком и с тем же разделителем."""
     result = restore(link_state(), answer, settings)
     assert result.text == restored and "foreign_link" not in kinds(result)
 

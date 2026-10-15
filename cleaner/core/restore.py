@@ -532,8 +532,10 @@ class _Restorer:
         if surrogate.kind in ("host", "label"):
             if surrogate.kind == "host" and text.isupper():
                 original = original.upper()
+            if surrogate.kind == "host" and "\\." in text:
+                original = original.replace(".", "\\.")     # имя в регулярном выражении — с тем же разделителем
             before = m.string[max(0, m.start() - 1):m.start()]
-            after = m.string[m.end():m.end() + 2]
+            after = m.string[m.end():m.end() + 3].removeprefix("\\")
             if before == "." or (after[:1] == "." and after[1:2].isalnum()):
                 # Часть имени, которого не было в запросе: имя из запроса нашлось бы целиком. Метка тоже бывает
                 # частью имени (части дан другой тип): «<TERM_1>.evil.com» — то же, что «host-1.evil.com».

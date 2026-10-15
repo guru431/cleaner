@@ -26,6 +26,9 @@ _SID = re.compile(r"(?<![\w-])(?P<prefix>S-1-5-21-\d+-\d+-\d+)(?:-\d+)?(?![\w-])
 # Часть имени бывает меткой: части, которой пользователь дал другой тип, выдана метка (<TERM_1>.domain-1.example).
 _PART = rf"(?:[\w-]+|{_LABEL.pattern})"
 _NAME = re.compile(rf"(?<![\w-]){_PART}(?:\.{_PART})*(?![\w-])")
+# Имя в регулярном выражении, шаблоне grep, настройке nginx — части через «\.» («^host-1\.domain-1\.example$»). Ищется
+# отдельно, только с этим разделителем: восстановление пишет оригинал с ним же, а цепочки через точку — как раньше.
+_ESCAPED_NAME = re.compile(rf"(?<![\w-]){_PART}(?:\\\.{_PART})+(?![\w-])")
 
 
 class Hit:
@@ -137,30 +140,31 @@ class Finder:
         return hits
 
     def _names(self, text: str) -> list[Hit]:
-        """Имена узлов: самые длинные цепочки частей через точку, которые есть в таблице. Цепочка проходится по дереву
-        частей, пока она — начало какой-нибудь замены: перебор всех цепочек до длины самой длинной замены был бы
-        кубическим на длинной цепочке («a.a.a…»), если в таблице есть имя из тысяч частей."""
+        """Имена узлов: самые длинные цепочки частей через точку (или через «\\.»), которые есть в таблице. Цепочка
+        проходится по дереву частей, пока она — начало какой-нибудь замены: перебор всех цепочек до длины самой длинной
+        замены был бы кубическим на длинной цепочке («a.a.a…»), если в таблице есть имя из тысяч частей."""
         if not self.hosts:
             return []
         hits = []
-        for m in _NAME.finditer(text):
-            parts = m.group().split(".")
-            offsets = [m.start()]
-            for part in parts:
-                offsets.append(offsets[-1] + len(part) + 1)
-            lowered = [part.lower() for part in parts]      # «İ» в нижнем регистре длиннее: позиции — по тексту
-            first = 0
-            while first < len(parts):
-                node, last, found = self.hosts, first, None
-                while last < len(parts) and (node := node.get(lowered[last])) is not None:
-                    last += 1
-                    if None in node:
-                        found = last, node[None]
-                if found:
-                    hits.append(Hit(offsets[first], offsets[found[0]] - 1, found[1], text))
-                    first = found[0]
-                else:
-                    first += 1
+        for pattern, separator in ((_NAME, "."), (_ESCAPED_NAME, "\\.")):
+            for m in pattern.finditer(text):
+                parts = m.group().split(separator)
+                offsets = [m.start()]
+                for part in parts:
+                    offsets.append(offsets[-1] + len(part) + len(separator))
+                lowered = [part.lower() for part in parts]      # «İ» в нижнем регистре длиннее: позиции — по тексту
+                first = 0
+                while first < len(parts):
+                    node, last, found = self.hosts, first, None
+                    while last < len(parts) and (node := node.get(lowered[last])) is not None:
+                        last += 1
+                        if None in node:
+                            found = last, node[None]
+                    if found:
+                        hits.append(Hit(offsets[first], offsets[found[0]] - len(separator), found[1], text))
+                        first = found[0]
+                    else:
+                        first += 1
         return hits
 
 

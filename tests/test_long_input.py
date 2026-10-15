@@ -338,3 +338,18 @@ def test_overlapping_known_values_and_runs_of_names_are_fast_and_not_one_spellin
         sanitize(state, text, settings)
         assert time.perf_counter() - started < 0.3, step
     assert max(len(form) for entity in state.entities.values() for form in entity.forms) < 20
+
+
+@pytest.mark.parametrize(
+    "text", ["host-1\\." * 3000 + "x", "a\\." * 10000, "\\." * 15000, "<EMAIL_1>\\." * 3000],
+    ids=["parts", "letters", "separators", "labels"],
+)
+def test_names_written_with_escaped_dots_are_found_in_linear_time(text):
+    """Наблюдение раунда имён узлов, P3: имя через «\\.» (регулярное выражение) ищется своим выражением; цепочка из
+    тысяч частей проходится по дереву записанных имён, как через точку, — и при очистке, и при восстановлении."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "узел " + "srv-01." * 30 + "contoso.ru, почта ivanov@contoso.ru", Settings())
+    for step in ("sanitize", "restore"):
+        started = time.perf_counter()
+        (sanitize if step == "sanitize" else restore)(state, text, Settings())
+        assert time.perf_counter() - started < 0.3, step
