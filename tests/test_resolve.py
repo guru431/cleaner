@@ -1,3 +1,5 @@
+import ipaddress
+
 import pytest
 
 from cleaner.core.detect.base import load_builtin
@@ -228,6 +230,47 @@ def test_ipv6_given_a_label_instead_of_a_surrogate_keeps_its_written_notation(st
     assert resolve(state, "узел 2A00:1450:4010:0::0065", ("2A00:1450:4010:0::0065", T.IP), settings=settings) == ["<IP_1>"]
     [entity] = state.entities.values()
     assert (entity.key, entity.restore_value) == ("2a00:1450:4010::65", "2A00:1450:4010:0::0065")
+
+
+@pytest.mark.parametrize(
+    "network, fake",
+    [("2a00:1450:4010::/64", "2001:db8:1::1/64"), ("8.8.8.0/24", "203.0.113.1/24")],
+    ids=["ipv6", "public_ipv4"],
+)
+def test_network_from_a_rule_keeps_its_prefix_in_the_surrogate(state, network, fake):
+    """FINDINGS «Restore round of 15.10», остаток (2): сеть IPv6 и публичная IPv4 из правила получали подмену-адрес без
+    длины префикса, и модель не видела, что это сеть."""
+    assert resolve(state, f"сеть {network}", (network, T.IP)) == [fake]
+    assert state.surrogates[fake].original == network
+    assert state.surrogates[fake.split("/")[0]].original == network.split("/")[0]
+
+
+@pytest.mark.parametrize(
+    "text, network, fake",
+    [
+        ("сеть 2a00:1450:4010::/64, пример 2001:db8:1::1", "2a00:1450:4010::/64", "2001:db8:1::2/64"),
+        ("сеть 8.8.8.0/24, пример 203.0.113.1", "8.8.8.0/24", "203.0.113.2/24"),
+    ],
+    ids=["ipv6", "public_ipv4"],
+)
+def test_network_surrogate_skips_an_address_of_the_text_equal_to_its_address(state, text, network, fake):
+    """С другой стороны: подмена сети 2001:db8:1::1/64 восстанавливается и адресом без длины префикса, и пример
+    2001:db8:1::1 из того же текста восстанавливался бы адресом сети. С текстом сравниваются обе записи подмены."""
+    assert resolve(state, text, (network, T.IP)) == [fake]
+
+
+@pytest.mark.parametrize("network", ["10.1.0.0/16", "2a00:1450:4010::/64", "8.8.8.0/24"])
+def test_network_surrogate_equal_to_an_open_address_without_its_prefix_gets_a_label(state, network):
+    """Находка ревью раунда IP (15.10): подмена сети сверялась с открытыми адресами только целиком. Правило 10.1.0.0/16 и
+    «никогда не скрывать» 10.90.0.0 давали подмену 10.90.0.0/16, и восстановление превращало открытый 10.90.0.0 в
+    10.1.0.0. С открытыми адресами сравниваются обе записи подмены."""
+    [fake] = resolve(ChatState(chat_id="other", net_key=state.net_key), f"сеть {network}", (network, T.IP))
+    address = ipaddress.ip_address(fake.split("/")[0])
+    opened = Settings(never=frozenset({str(address)}))
+    assert resolve(state, f"сеть {network}", (network, T.IP), settings=opened) == ["<IP_1>"]
+    neighbour = Settings(never=frozenset({str(address + 1)}))
+    assert resolve(ChatState(chat_id="another", net_key=state.net_key), f"сеть {network}", (network, T.IP),
+                   settings=neighbour) == [fake]
 
 
 def test_address_inside_a_longer_colon_chain_is_not_taken(state):

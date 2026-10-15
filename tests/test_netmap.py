@@ -85,3 +85,13 @@ def test_ipv6_keeps_the_64_bit_subnet(state):
     assert netmap.fake_ip("2a00:1450:4010::66", state) == "2001:db8:1::2"
     assert netmap.fake_ip("2a00:1450:4011::1", state) == "2001:db8:2::3"
     assert netmap.fake_ip("fe80::1ff:fe23:4567:890a", state) == "fe80::4"
+
+
+def test_network_of_ipv6_and_of_a_public_ipv4_keeps_its_prefix(state):
+    """Раздел 6.3: сеть IPv6 и публичная IPv4 получают адрес по порядку с той же длиной префикса. Номер узла не
+    обнуляется: все публичные сети /24 стали бы одной 203.0.113.0/24, а занятая текстом подмена IPv6 не сменилась бы
+    следующей — повтор дал бы ту же."""
+    assert netmap.fake_ip("2a00:1450:4010::/64", state) == "2001:db8:1::1/64"
+    assert netmap.fake_ip("2a00:1450:4010::/64", state) == "2001:db8:1::2/64"
+    assert netmap.fake_ip("8.8.8.0/24", state) == "203.0.113.1/24"
+    assert netmap.fake_ip("8.8.4.4", state) == "203.0.113.2"

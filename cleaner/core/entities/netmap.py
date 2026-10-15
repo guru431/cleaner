@@ -117,11 +117,12 @@ def _fake_v6(ip: ipaddress.IPv6Address, state: ChatState) -> str:
 def fake_ip(token: str, state: ChatState) -> str | None:
     """Подмена для адреса или записи «сеть/префикс». None — выдать подмену нельзя, нужна метка."""
     ip, prefix = parse(token)
-    if ip.version == 6:
-        return _fake_v6(ip, state)
     bits = private_bits(ip)
     if bits is None:
-        return _fake_public(state)
+        # IPv6 и публичный IPv4 — адрес по порядку, у сети — с её длиной префикса (6.3). Номер узла не обнуляется: все
+        # публичные сети /24 стали бы одной 203.0.113.0/24, а подмена, занятая текстом, при повторе не сменилась бы.
+        fake = _fake_v6(ip, state) if ip.version == 6 else _fake_public(state)
+        return fake if fake is None or prefix is None else f"{fake}/{prefix}"
     fake = map_private(int(ip), bits, state.net_key)
     if prefix is None:
         return str(ipaddress.IPv4Address(fake))

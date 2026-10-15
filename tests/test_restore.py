@@ -826,17 +826,58 @@ def test_value_set_by_the_user_is_restored_for_hosts_addresses_macs_and_sids(set
     )
 
 
+def network_saved_earlier(network: str, fake: str) -> ChatState:
+    """Чат, сохранённый до второго раунда IP (15.10.2026): сеть IPv6 и публичная IPv4 из правила пользователя получали
+    подмену-адрес без длины префикса."""
+    state = ChatState(chat_id="networks", net_key=bytes(range(32)))
+    entity = Entity("net", T.IP, 1, network, network, "manual", [network])
+    state.entities[entity.id] = entity
+    state.surrogates[fake] = Surrogate(entity.id, network, "ip6" if ":" in fake else "ip")
+    state.issued[f"{entity.id}|ip"] = fake
+    state.rules.append(ChatRule("mask", network, T.IP))
+    state.counters["IP"] = 1
+    return state
+
+
+@pytest.mark.parametrize(
+    "network, fake", [("2a00:1450:4010::/64", "2001:db8:1::1"), ("8.8.8.0/24", "203.0.113.1")], ids=["ipv6", "public_ipv4"],
+)
+def test_prefix_written_after_a_network_surrogate_is_not_doubled(settings, network, fake):
+    """FINDINGS «Restore round of 15.10», (2): сеть IPv6 и публичная IPv4 из правила пользователя получали подмену-адрес
+    без длины префикса, и ответ «подмена/64» восстанавливался в «…/64/64». В чатах, сохранённых тогда, подмена осталась
+    прежней, и сеть восстанавливается без своей длины, если ответ пишет свою, — длина остаётся та, что в ответе."""
+    state = network_saved_earlier(network, fake)
+    assert sanitize(state, f"сеть {network}", settings).sanitized == f"сеть {fake}"
+    address, length = network.split("/")
+    answer = f"сеть {fake}/{length}, она же {fake}; шире — {fake}/16"
+    assert restore(state, answer, settings).text == f"сеть {network}, она же {network}; шире — {address}/16"
+
+
 @pytest.mark.parametrize("network", ["2a00:1450:4010::/64", "8.8.8.0/24"], ids=["ipv6", "public_ipv4"])
-def test_prefix_written_after_a_network_surrogate_is_not_doubled(settings, network):
-    """FINDINGS «Restore round of 15.10», (2): сеть IPv6 и публичная IPv4 из правила пользователя (слой 3 длину
-    префикса во фрагмент не берёт) получают подмену-адрес без длины префикса, и ответ «подмена/64» восстанавливался в
-    «…/64/64». Сеть восстанавливается без своей длины, если ответ пишет свою, — и длина остаётся та, что в ответе."""
+def test_network_surrogate_with_its_prefix_restores_like_a_private_network(settings, network):
+    """Раздел 6.3: подмена сети IPv6 и публичной IPv4 теперь с длиной префикса и восстанавливается, как у частной сети
+    IPv4: целиком — сетью, адресом — адресом, а длина, которую ответ пишет за адресом, остаётся."""
     state = ChatState(chat_id="networks", net_key=bytes(range(32)))
     ops.mask(state, network, T.IP)
     [fake] = sanitize(state, f"сеть {network}", settings).sanitized.split()[1:]
     address, length = network.split("/")
-    answer = f"сеть {fake}/{length}, она же {fake}; шире — {fake}/16"
-    assert restore(state, answer, settings).text == f"сеть {network}, она же {network}; шире — {address}/16"
+    assert fake.endswith(f"/{length}")
+    bare = fake.split("/")[0]
+    answer = f"сеть {fake}, адрес {bare}; шире — {bare}/16"
+    assert restore(state, answer, settings).text == f"сеть {network}, адрес {address}; шире — {address}/16"
+
+
+def test_open_address_equal_to_a_network_surrogate_without_its_prefix_stays_open(settings):
+    """Находка ревью раунда IP (15.10): правило 10.1.0.0/16 и «никогда не скрывать» 10.90.0.0 — подмена сети 10.90.0.0/16,
+    и открытый 10.90.0.0 восстанавливался в 10.1.0.0. Теперь сеть получает метку, а открытый адрес остаётся собой."""
+    opened = netmap.fake_ip("10.1.0.0/16", ChatState(chat_id="other", net_key=bytes(range(32)))).split("/")[0]
+    never = Settings(never=frozenset({opened}))
+    state = ChatState(chat_id="networks", net_key=bytes(range(32)))
+    ops.mask(state, "10.1.0.0/16", T.IP)
+    text = f"сеть 10.1.0.0/16, открытый {opened}"
+    sanitized = sanitize(state, text, never).sanitized
+    assert sanitized == f"сеть <IP_1>, открытый {opened}"
+    assert restore(state, sanitized, never).text == text
 
 
 def test_prefix_written_after_a_network_label_is_not_doubled(settings):

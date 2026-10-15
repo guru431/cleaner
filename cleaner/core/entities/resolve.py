@@ -74,6 +74,11 @@ def _ip_text(value: str) -> str:
     return f"{ip}/{prefix}"
 
 
+def _fake_forms(fake: str) -> set[str]:
+    """Записи подмены адреса, которые найдёт восстановление: она сама и у сети — её адрес без длины префикса (_ip)."""
+    return {fake, fake.split("/")[0]}
+
+
 class Resolver:
     """Один проход по тексту: находит или создаёт сущности и выдаёт им замены."""
 
@@ -287,7 +292,7 @@ class Resolver:
     def _address_in_text(self, address: str) -> bool:
         """Стоит ли подмена в тексте как адрес, в любой записи: «2001:0db8:0001::0001» — это 2001:db8:1::1,
         «203.000.113.001» — 203.0.113.1, «203.0.113.1/24» — и сеть, и сам адрес. Ответ таких записей не различит.
-        Подмены netmap выдаёт в каноническом виде."""
+        Подмена сети — ещё и своим адресом (_fake_forms). Подмены netmap выдаёт в каноническом виде."""
         if self._text_addresses is None:      # собирается один раз на текст: проверок — тысячи
             self._text_addresses = set()
             for m in _ADDRESS_TOKEN.finditer(self.text):
@@ -295,15 +300,16 @@ class Resolver:
                 if token.endswith(":") and not token.endswith("::"):
                     token = token[:-1]          # двоеточие после адреса IPv6 — знак препинания («2001:db8:1::1: занят»)
                 self._text_addresses |= netmap.canonical_forms(token)    # не адрес — с подменой не совпадёт
-        return address in self._text_addresses
+        return not self._text_addresses.isdisjoint(_fake_forms(address))
 
-    def _address_open(self, address: str | None) -> bool:
+    def _address_open(self, address: str) -> bool:
         """Совпадает ли подмена с открытым адресом (список «никогда не скрывать», правило «открыть») в любой его записи:
-        «2001:0db8:0001::0001» в списке — это подмена 2001:db8:1::1. Открытый адрес показывается в текстах чата как есть,
-        и восстановление превратило бы его в оригинал другой сущности. Список разбирается при первой подмене адреса."""
+        «2001:0db8:0001::0001» в списке — это подмена 2001:db8:1::1, открытый 10.90.0.0 — подмена сети 10.90.0.0/16
+        (_fake_forms). Открытый адрес показывается в текстах чата как есть, и восстановление превратило бы его в оригинал
+        другой сущности. Список разбирается при первой подмене адреса."""
         if self._open_addresses is None:
             self._open_addresses = netmap.addresses(self.open_values)
-        return address in self._open_addresses
+        return not self._open_addresses.isdisjoint(_fake_forms(address))
 
     def _claimed(self, fake: str, ip: netmap.Address) -> bool:
         """Восстанавливается ли подмена уже в другой адрес (6.2). Узел «.0» и сеть с обнулёнными битами узла переставляются
