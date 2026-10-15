@@ -57,8 +57,8 @@ from cleaner.core.types import EntityType as T
         "<ORG_1>." * 20000, "a.<ORG_1>." * 10000, "<ORG_1>a." * 15000, "<ORG_1" * 20000, "<ORG_1>." + "a.b." * 25000,
         # Цепочка частей через точку, которая кончается не однобуквенной частью: её суффиксы сверяются со списками.
         "abc.def." * 20000,
-        # Адрес e-mail с меткой в домене.
-        "a@<ORG_1>." * 15000, "a@<ORG_1>.<ORG_1" * 10000,
+        # Адрес e-mail с меткой в домене; метки не домена после имени отрезаются.
+        "a@<ORG_1>." * 15000, "a@<ORG_1>.<ORG_1" * 10000, "a@b.c" + ".<ORG_1>" * 10000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -75,7 +75,7 @@ from cleaner.core.types import EntityType as T
         "pem_header_lines", "pem_nested_headers", "pem_long_header_line", "pem_spaced_runs", "pem_spaced_hyphens",
         "putty_headers", "putty_fields", "putty_names", "putty_body", "gitlab_prefixes",
         "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail", "dotted_words", "email_labels",
-        "email_labels_open",
+        "email_labels_open", "email_labels_after",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):

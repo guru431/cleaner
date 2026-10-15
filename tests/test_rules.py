@@ -26,10 +26,14 @@ def test_email_without_trailing_dot():
     ("пишите ivanov@<ORG_1>", "ivanov@<ORG_1>"),
     ("пишите ivanov@<PERSON_1>", None),
     ("пишите ivanov@localhost, a@b@c.example", "b@c.example"),
-], ids=["label-first", "label-last", "domain-label", "other-label", "no-dot"])
+    ("пишите ivanov@contoso.ru.<TERM_1> завтра", "ivanov@contoso.ru"),
+    ("пишите ivanov@srv02.contoso.ru.<ORG_1>.", "ivanov@srv02.contoso.ru.<ORG_1>"),
+    ("пишите ivanov@host-1.<TERM_1>", "ivanov@host-1.<TERM_1>"),
+], ids=["label-first", "label-last", "domain-label", "other-label", "no-dot", "label-after", "domain-label-after", "label-only-after"])
 def test_email_with_a_label_in_its_domain(text, email):
     """FINDINGS «Retyping a host name part: what it leaves» (2): часть домена бывает меткой — части дали другой тип.
-    Метка сама по себе — домен, только если выдана домену в имени (<org_1> из host-1.<ORG_1>)."""
+    Метка сама по себе — домен, только если выдана домену в имени (<org_1> из host-1.<ORG_1>). Обзор пакета, отклонённое:
+    метка не домена после имени с точкой — уже не часть адреса («ivanov@contoso.ru.<TERM_1>» — адрес и метка за ним)."""
     ctx = DetectContext(Settings(), issued_domains=frozenset({"domain-1.example", "<org_1>"}))
     emails = [text[span.start:span.end] for span in rules.detect(text, ctx) if span.type is T.EMAIL]
     assert emails == ([email] if email else [])

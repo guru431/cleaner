@@ -447,7 +447,11 @@ def test_email_keeps_the_stricter_policy_of_a_retyped_host_part(state, policy):
     ("звонил <PERSON_1>, ivanov@<PERSON_1>", "звонил <PERSON_1>, ivanov@<PERSON_1>"),
     ("почта ivanov@srv02.<ORG_1>", "почта <ACCOUNT_1>@host-2.<ORG_1>"),
     ("почта ivanov@srv03.domain-1.example", "почта <ACCOUNT_1>@host-3.domain-1.example"),
-], ids=["label-and-name", "name-and-label", "domain-label", "role-mailbox", "not-a-domain", "part-and-label", "part-and-domain"])
+    ("почта ivanov@contoso.ru.<TERM_1>", "почта <EMAIL_1>.<TERM_1>"),
+], ids=[
+    "label-and-name", "name-and-label", "domain-label", "role-mailbox", "not-a-domain", "part-and-label",
+    "part-and-domain", "label-after",
+])
 def test_email_with_a_label_in_its_domain_is_found(state, settings, text, expected):
     """FINDINGS «Retyping a host name part: what it leaves» (2): правило e-mail не брало метку в домене, и в
     «ivanov@<TERM_1>.fabrikam.ru» оставались открытыми и логин, и домен. Метка, выданная домену в имени (<ORG_1> из
