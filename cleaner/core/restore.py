@@ -13,7 +13,7 @@ from html.entities import html5 as _ENTITIES
 
 from cleaner.core import surrogates
 from cleaner.core.detect.base import load_builtin
-from cleaner.core.entities import labels, macsid, netmap
+from cleaner.core.entities import hostmap, labels, macsid, netmap
 from cleaner.core.entities.names import FIXED_RANK
 from cleaner.core.types import ChatState, EntityType, Policy, Settings, Surrogate
 
@@ -204,6 +204,7 @@ _PROSE_START = re.compile(r"https?://|www\.", re.IGNORECASE)
 # попытка кончается на ближайшем «<».
 _OUTSIDE_TAGS = re.compile(r"<[^<>\"']*>([^<\"']*)")
 _HOST_TYPES = frozenset({EntityType.IP, EntityType.HOST, EntityType.DOMAIN})
+_DOMAIN_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 _MAC = re.compile(
     r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
@@ -300,11 +301,24 @@ class _Restorer:
             if surrogate.kind in ("host", "ip", "ip6") and len(surrogate.original or "") <= 253
         }
         # Метка, выданная адресу или имени узла вместо подмены (совпадение адресов, значение не того вида),
-        # в хосте ссылки ведёт на наш же узел: «http://<IP_1>:8080/». Модель пишет её и без скобок.
+        # в хосте ссылки ведёт на наш же узел: «http://<IP_1>:8080/». Модель пишет её и без скобок. Метка, значение
+        # которой — доменное имя (домен в имени, которому дали другой тип, — <ORG_1> из host-1.<ORG_1>; кусок имени,
+        # который задело выделение, — <TERM_1> из host-1.<TERM_1>), — наш домен, как domain-N.example: после
+        # восстановления это имя из текста пользователя.
+        self.label_domains: set[str] = set()
         for text, surrogate in state.surrogates.items():
-            if surrogate.kind == "label" and state.entities[surrogate.entity_id].type in _HOST_TYPES:
+            if surrogate.kind != "label":
+                continue
+            entity = state.entities[surrogate.entity_id]
+            domain = _DOMAIN_NAME.fullmatch(entity.restore_value) is not None and hostmap.has_known_suffix(
+                entity.restore_value,
+            )
+            if domain or entity.type in _HOST_TYPES:
                 bare = text.strip("<>[]").lower()
-                own_hosts |= {bare, f"<{bare}>", f"&lt;{bare}&gt;"}
+                variants = {bare, f"<{bare}>", f"&lt;{bare}&gt;"}
+                own_hosts |= variants
+                if domain:
+                    self.label_domains |= variants
         # Наши хосты — деревом частей, как в поиске замен (surrogates.Finder); None — хост кончается здесь. Цепочка
         # частей хоста ссылки проходится, пока она — начало нашего: перебор всех цепочек до числа частей самого
         # длинного занимал на хосте из тысяч частей секунды.
@@ -349,15 +363,17 @@ class _Restorer:
     def _host_is_ours(self, host: str) -> bool:
         """Хост целиком — выданная подмена или собран только из её частей (host-1.sub-2.domain-1.example).
 
-        Служебные части впереди («www», «mail» — generic_labels.txt) имени, которое кончается выданным доменом, его
-        чужим не делают: «www.domain-1.example» пишут и пользователь, и модель, а после восстановления это узел того
-        же домена организации. Только впереди и только перед выданным доменом: «domain-1.example.www» и
-        «www.host-1» — уже не имена под нашим доменом, а неизвестная часть («www.evil.domain-1.example») — чужая.
+        Служебные части впереди («www», «mail» — generic_labels.txt) имени, которое кончается выданным доменом или
+        меткой домена (www.host-1.<ORG_1>), его чужим не делают: «www.domain-1.example» пишут и пользователь, и модель,
+        а после восстановления это узел того же домена организации. Только впереди и только перед нашим доменом:
+        «domain-1.example.www» и «www.host-1» — уже не имена под нашим доменом, а неизвестная часть
+        («www.evil.domain-1.example») — чужая.
         """
         labels_ = host.strip("[]").lower().split(".")
         reachable = {0}
-        if ".".join(labels_[-2:]) in self.domains:
-            for position, label in enumerate(labels_[:-2]):
+        domain = 2 if ".".join(labels_[-2:]) in self.domains else 1 if labels_[-1] in self.label_domains else 0
+        if domain:
+            for position, label in enumerate(labels_[:-domain]):
                 if label not in self.generic:
                     break
                 reachable.add(position + 1)

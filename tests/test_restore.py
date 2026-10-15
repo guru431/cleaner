@@ -733,6 +733,55 @@ def test_labelled_host_does_not_make_a_foreign_link_ours(answer):
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
 
+def labelled_domains() -> ChatState:
+    """Домену в имени дана метка: выделение задело его внутри имени (host-1.<TERM_1>), домен сменил тип (<ORG_1>)."""
+    state = ChatState(chat_id="domains", net_key=bytes(range(32)))
+    sanitize(state, "узел srv01.contoso.ru, узел srv02.northwind.ru, сайт northwind.ru", Settings())
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "northwind.ru").id, T.ORG)
+    ops.mask(state, "fabrikam", T.TERM)
+    ops.mask(state, "Заря", T.TERM)
+    text = "узел host-1.fabrikam.ru, узел srv02.northwind.ru, почта ivanov@contoso.ru, проект Заря"
+    assert sanitize(state, text, Settings()).sanitized == (
+        "узел host-1.<TERM_1>, узел host-2.<ORG_1>, почта <EMAIL_1>, проект <TERM_2>"
+    )
+    return state
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("https://www.host-1.<TERM_1>/?q=<EMAIL_1>", "https://www.srv01.fabrikam.ru/?q=ivanov@contoso.ru"),
+        ("[вики](https://host-1.<TERM_1>/<EMAIL_1>)", "[вики](https://srv01.fabrikam.ru/ivanov@contoso.ru)"),
+        ("https://<TERM_1>/?q=<EMAIL_1>", "https://fabrikam.ru/?q=ivanov@contoso.ru"),
+        ("https://www.host-2.<ORG_1>/?q=<EMAIL_1>", "https://www.srv02.northwind.ru/?q=ivanov@contoso.ru"),
+        ("https://mail.<ORG_1>/?q=<EMAIL_1>", "https://mail.northwind.ru/?q=ivanov@contoso.ru"),
+    ],
+)
+def test_link_to_a_name_under_a_labelled_domain_is_restored(settings, answer, restored):
+    """Наблюдение раунда имён узлов, P3: «www.host-1.fabrikam.ru» с выделением fabrikam стал «www.host-1.<TERM_1>», и
+    восстановление считало его чужой ссылкой — метка TERM не наш узел. Метка, значение которой — доменное имя, в хосте
+    ссылки — наш домен, как domain-N.example, и служебные части перед ней — тоже."""
+    result = restore(labelled_domains(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "https://www.<TERM_1>.evil.example.org/?q=<EMAIL_1>",
+        "https://evil.<TERM_1>/?q=<EMAIL_1>",
+        "https://host-1.<TERM_2>/?q=<EMAIL_1>",
+        "https://<TERM_2>/?q=<EMAIL_1>",
+        "https://<EMAIL_1>/?q=<TERM_1>",
+    ],
+)
+def test_label_of_a_domain_does_not_make_a_foreign_link_ours(settings, answer):
+    """Та же находка с другой стороны: наша метка домена в чужом имени и неизвестная часть перед ней ссылку не пускают,
+    а метка значения, которое не доменное имя («Заря», адрес e-mail), хостом не бывает."""
+    result = restore(labelled_domains(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
 def test_own_link_in_an_attribute_is_still_restored(settings):
     result = restore(link_state(), '<a href="https://host-1.domain-1.example/?q=<EMAIL_1>">', settings)
     assert result.text == '<a href="https://srv-dc01.contoso.ru/?q=ivanov@contoso.ru">'
