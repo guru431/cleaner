@@ -76,8 +76,14 @@ def test_restore_is_fast_on_unclosed_css_urls(text):
     [
         "<" * 50000, "<a>, data='x' " * 10000, "<a " * 20000 + "f(a, data='x')",
         "EMAIL_1" + " " * 50000, "//x:<EMAIL_1> " * 5000, "file:///" * 20000, "//" * 50000,
+        "\\" * 100000, "/\\" * 50000, " \\\\x" * 10000, "https:" * 20000, "!http:a:" * 15000, "//a:wss:" * 15000,
+        "file:\\" * 20000,
     ],
-    ids=["brackets", "arguments", "open_tags", "spaced_label", "bare_links", "file_links", "slashes"],
+    ids=[
+        "brackets", "arguments", "open_tags", "spaced_label", "bare_links", "file_links", "slashes",
+        "backslashes", "mixed_slashes", "unc_paths", "schemes", "schemes_without_slashes", "schemes_in_userinfo",
+        "file_backslashes",
+    ],
 )
 def test_restore_is_fast_on_many_tags_arguments_and_bare_links(text):
     """Участки вне тегов считаются один раз на ответ, а не для каждого атрибута; метка без ограничителей,

