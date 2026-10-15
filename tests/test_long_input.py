@@ -28,6 +28,9 @@ from cleaner.core.types import ChatState, Settings
         "net use \\\\a\\b" + " /x" * 30000 + " ", "mysql -u " * 10000, '<add key="pass" value="x"' * 4000,
         # Тысячи разных токенов одного правила detect-secrets на одной строке: каждое значение искалось по всей строке.
         "".join('{"account_sid":"AC%032x","n":1},' % i for i in range(5000)), "".join("=AKC%010d " % i for i in range(10000)),
+        # Слова перед тире после «пароль», «--» и связка «это» перед значением.
+        "пароль а б в г д е " * 5000, "пароль " + "a-" * 50000 + " — x", "пароль -- " * 10000, "пароль — это " * 8000,
+        "".join("пароль — слово%d " % i for i in range(5000)),
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -35,6 +38,8 @@ from cleaner.core.types import ChatState, Settings
         "remote_commands", "slashes", "spaced_key", "spaced_secret_key", "eyj", "sk", "same_token", "token_pairs",
         "spaced_field", "spaced_fields", "pwd_paths", "token_templates", "net_use", "mysql", "add_key",
         "distinct_tokens", "distinct_short_tokens",
+        "password_words", "password_hyphenated_word", "password_double_hyphens", "password_copulas",
+        "password_distinct_words",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
