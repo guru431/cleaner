@@ -12,7 +12,8 @@ from cleaner.core.entities import hostmap, macsid
 from cleaner.core.types import ChatState
 
 _LABEL = re.compile(r"<[A-Z]+(?:_[A-Z]+)*_\d+>|\[\[[A-Z]+(?:_[A-Z]+)*_\d+\]\]")
-_IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\w|\.\d)")
+# Адрес через «\.» (регулярное выражение) — та же подмена: восстановление пишет оригинал с тем же разделителем.
+_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(\\?\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?:/\d{1,2})?(?!\w|\\?\.\d)")
 # Как в слое 3: адрес может стоять сразу за подписью («Source:2001:db8:1::1»), подпись в замену не входит.
 _IPV6 = re.compile(
     r"(?<![\w:.])(?:(?=\w*[^\W\dA-Fa-f])\w+:|\w{5,}:)?"
@@ -101,11 +102,12 @@ class Finder:
     def _ipv4(self, text: str) -> list[Hit]:
         hits = []
         for m in _IPV4.finditer(text):
-            token, address = m.group(), m.group().split("/")[0]
+            written = m.group().split("/")[0]
+            token, address = m.group().replace("\\.", "."), written.replace("\\.", ".")
             if self._of_kind(token, "ip"):
                 hits.append(Hit(m.start(), m.end(), token, text))
             elif self._of_kind(address, "ip"):
-                hits.append(Hit(m.start(), m.start() + len(address), address, text))
+                hits.append(Hit(m.start(), m.start() + len(written), address, text))
         return hits
 
     def _ipv6(self, text: str) -> list[Hit]:

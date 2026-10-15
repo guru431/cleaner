@@ -39,8 +39,8 @@ def parse(token: str) -> tuple[Address, int | None]:
     """Адрес и длина префикса (если указана). ValueError, если токен — не адрес.
 
     Запись с нулями впереди читается как обычная (unpadded): у неё та же сущность и та же подмена,
-    а восстанавливается обычная запись адреса."""
-    address, _, prefix = token.partition("/")
+    а восстанавливается обычная запись адреса. «\\.» — точка: адрес в регулярном выражении («^10\\.1\\.2\\.5$»)."""
+    address, _, prefix = token.replace("\\.", ".").partition("/")
     return ipaddress.ip_address(unpadded(address.split("%")[0])), (int(prefix) if prefix else None)
 
 

@@ -833,6 +833,47 @@ def test_email_with_escaped_dots_next_to_a_replacement_keeps_them(state, setting
     assert restore(state, expected, settings).text == text.replace("domain-1", "contoso").replace("example", "ru")
 
 
+def test_ipv4_written_with_escaped_dots_is_one_address_with_the_same_separators(state, settings):
+    """Второе ревью, P2: «^10\\.1\\.2\\.35$» не находился, а известный адрес в такой записи получал отдельную метку <IP_N>.
+    Это тот же адрес — та же сущность и та же подмена, записанная через «\\.»; восстановление пишет оригинал с тем же
+    разделителем, и производный адрес той же сети /24 — тоже. Повторная вставка ничего не меняет."""
+    text = r"узел 10.1.2.35, правило ^10\.1\.2\.35$ и сеть 10\.1\.0\.0/16"
+    result = sanitize(state, text, settings)
+    plain, escaped, network = (span.surrogate for span in result.spans)
+    assert escaped == plain.replace(".", "\\.") and network.endswith(r"\.0\.0/16") and "<IP_" not in result.sanitized
+    assert len(state.entities) == 2 and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, result.sanitized, settings).text == text
+    derived = escaped.rsplit("\\.", 1)[0] + r"\.36"
+    assert restore(state, f"^{derived}$", settings).text == r"^10\.1\.2\.36$"
+
+
+def test_known_ipv4_written_with_escaped_dots_is_caught_by_the_leak_check(state, settings):
+    """Та же находка: известный адрес через «\\.» проверка утечек видит и по написанию, и в записи с нулями впереди."""
+    sanitize(state, "узел 10.1.2.35", settings)
+    planted = r"^10\.1\.2\.35$ и 010\.001\.002\.035"
+    found = [planted[leak.start:leak.end] for leak in leakcheck.check(planted, state, settings)]
+    assert found == [r"10\.1\.2\.35", r"010\.001\.002\.035"]
+
+
+def test_opened_address_stays_open_written_with_escaped_dots(state):
+    """Список «никогда не скрывать» открывает адрес в любой записи (5.7, шаг 5) — и через «\\.»."""
+    text = r"allow ^10\.1\.2\.35$; deny 10\.1\.2\.36"
+    result = sanitize(state, text, Settings(never=frozenset({"10.1.2.35"})))
+    assert result.sanitized.startswith(r"allow ^10\.1\.2\.35$; deny 10\.") and result.sanitized != text
+
+
+def test_documentation_address_written_with_escaped_dots_is_not_given_as_a_surrogate(state, settings):
+    """Подмена не совпадает с адресом текста и в записи через «\\.»: иначе восстановление сделало бы из примера
+    203\\.0\\.113\\.1 публичный адрес (6.2)."""
+    text = r"пример ^203\.0\.113\.1$, узел 8.8.4.4"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == r"пример ^203\.0\.113\.1$, узел 203.0.113.2"
+    assert restore(state, result.sanitized, settings).text == text
+
+
 class Marks:
     """Слой 4 для теста: помечает заданные строки и считает вызовы."""
 

@@ -13,7 +13,9 @@ from cleaner.core.types import EntityType, Span
 
 name = "infra"
 
-_IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\w|\.\d)")
+# Адрес в регулярном выражении, правиле nginx, шаблоне grep пишут через «\.» («^10\.1\.2\.35$») — все три разделителя
+# одного вида; «\\.» — обратная косая и точка.
+_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(\\?\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?:/\d{1,2})?(?!\w|\\?\.\d)")
 # Адрес не начинается внутри другой записи через двоеточие, но может стоять сразу за подписью
 # («Source:f54a:…», «IPv6:2a00:…»): за словом, которое не может быть группой адреса, — с буквой
 # не из 0-9a-f или длиннее четырёх знаков. Подпись во фрагмент не входит.
@@ -105,7 +107,7 @@ def _ipv4(text: str) -> Iterator[Span]:
     for m in _IPV4.finditer(text):
         address, _, prefix = m.group().partition("/")
         try:
-            ip = ipaddress.IPv4Address(netmap.unpadded(address))
+            ip = netmap.parse(address)[0]
         except ValueError:
             continue
         if not netmap.is_maskable(ip) or _VERSION_BEFORE.search(text[max(0, m.start() - 16):m.start()]):

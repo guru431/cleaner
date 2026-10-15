@@ -161,6 +161,27 @@ def test_zero_padded_and_plain_spellings_are_one_address():
     assert len(state.entities) == 1
 
 
+@pytest.mark.parametrize("text, expected", [
+    (r"if ($remote_addr ~ ^10\.1\.2\.35$) { return 403; }", {(T.IP, r"10\.1\.2\.35")}),
+    (r"grep -E '192\.168\.10\.5|8\.8\.4\.4' access.log", {(T.IP, r"192\.168\.10\.5"), (T.IP, r"8\.8\.4\.4")}),
+    (r"Deny from 10\.1\.0\.0/16 и узел 010\.001\.002\.005", {(T.IP, r"10\.1\.0\.0/16"), (T.IP, r"010\.001\.002\.005")}),
+], ids=["nginx", "grep", "network-and-padded"])
+def test_ipv4_written_with_escaped_dots_is_found(text, expected):
+    """Второе ревью, P2: адрес в регулярном выражении, правиле nginx, шаблоне grep пишут через «\\.», и слой 3 его не
+    находил — адрес уходил в облако. Разделители — все три «\\.»; правила — те же, что у адреса через точку."""
+    assert found(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    r"version 1\.2\.3\.4, build 10\.0\.190\.45",r"^\d+\.\d+\.\d+\.\d+$ и [0-9]{1,3}\.[0-9]{1,3}", r"^127\.0\.0\.1$",
+    r"10\\.1\\.2\\.35 и 10\.1\.2\.35\.4", r"C:\Logs\10\.1\.2",
+], ids=["versions", "patterns", "loopback", "escaped-backslash-and-longer", "short"])
+def test_backslash_and_dot_elsewhere_make_no_address(text):
+    """Та же находка с другой стороны: номера версий, шаблоны чисел, петля, «\\\\.» (обратная косая и точка), цепочка
+    длиннее адреса и три числа остаются, как через точку."""
+    assert values(text) == set()
+
+
 def test_lowercase_domain_known_from_an_earlier_text():
     ctx = DetectContext(Settings(), known=(("CORP", T.DOMAIN),))
     assert (T.ACCOUNT, "petrov") in found(r"вход corp\petrov", ctx)

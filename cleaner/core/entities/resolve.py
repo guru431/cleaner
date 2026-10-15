@@ -14,10 +14,10 @@ from cleaner.core.types import STRICTNESS, ChatState, Entity, EntityType, Settin
 
 T = EntityType
 _DIGIT_TYPES = frozenset({T.INN, T.SNILS, T.OGRN, T.KPP, T.OMS, T.CARD, T.PASSPORT})
-# Записи адресов в тексте: IPv4 с длиной префикса и без, IPv6. Как в слое 3 и при восстановлении, адрес
+# Записи адресов в тексте: IPv4 с длиной префикса и без (и через «\.»), IPv6. Как в слое 3 и при восстановлении, адрес
 # может стоять сразу за подписью («Source:2001:db8:1::1», «Source:203.0.113.1»); подпись в запись не входит.
 _ADDRESS_TOKEN = re.compile(
-    r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\w|\.\d)"
+    r"(?<![\w.])\d{1,3}(\\?\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?:/\d{1,2})?(?!\w|\\?\.\d)"
     r"|(?<![\w:.])(?:(?=\w*[^\W\dA-Fa-f])\w+:|\w{5,}:)?"
     r"(?P<v6>(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![\w:])"
 )
@@ -298,6 +298,7 @@ class Resolver:
         # IPv6 восстанавливается в записи из текста, где адрес встретился впервые, как и остальные сущности;
         # IPv4 — в простой записи (5.4). Ключ — канонический: одна сущность на адрес в любой записи. Каноническая
         # запись остаётся и среди искомых: по ней известные значения и проверка утечек находили адрес и раньше.
+        # Адрес через «\.» получает ту же подмену через «\.», и восстановление пишет оригинал так же (раздел 7, шаг 2).
         written = value if ip.version == 6 else canonical
         entity = self._entity(T.IP, canonical, written, origin)
         if canonical not in entity.forms:
@@ -323,7 +324,8 @@ class Resolver:
                 self.state.surrogates.setdefault(fake.split("/")[0], bare)
             return fake
 
-        return entity, self._issue(entity, "ip", make)
+        surrogate = self._issue(entity, "ip", make)
+        return entity, surrogate.replace(".", "\\.") if "\\." in value else surrogate
 
     def _address_in_text(self, address: str) -> bool:
         """Стоит ли подмена в тексте как адрес, в любой записи: «2001:0db8:0001::0001» — это 2001:db8:1::1,

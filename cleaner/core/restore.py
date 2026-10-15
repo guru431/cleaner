@@ -219,7 +219,7 @@ _HOST_TYPES = frozenset({EntityType.IP, EntityType.HOST, EntityType.DOMAIN})
 # Знаки ASCII в конце хоста, которых нет в доменах верхнего уровня и которые браузер не превращает в букву, цифру или
 # точку: без «-», «.» и «%» («%2e» браузер раскрывает в точку до разбора хоста). «/?#\:@» хост и так кончают.
 _UNRESOLVABLE_TAIL = re.compile(r"(?<=[^\W_])[!\"$&'()*+,;<=>^_`{|}~]+$")
-_IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
+_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(\\?\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?!\w|\\?\.\d)")     # и через «\.»
 _MAC = re.compile(
     r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
     r"|(?<![\w.])[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}(?![\w.])"
@@ -542,6 +542,8 @@ class _Restorer:
             self._original(m.key, surrogate), self.state.entities[surrogate.entity_id].type, m.string, m.end(),
         )
         kind = "restored"
+        if surrogate.kind == "ip" and "\\." in text:
+            original = original.replace(".", "\\.")         # адрес в регулярном выражении — с тем же разделителем
         if surrogate.kind in ("host", "label"):
             if surrogate.kind == "host" and text.isupper():
                 original = original.upper()
@@ -576,7 +578,7 @@ class _Restorer:
 
     def _derived_ip(self, m: re.Match[str]) -> Piece | None:
         try:
-            ip = ipaddress.IPv4Address(m.group())
+            ip = ipaddress.IPv4Address(m.group().replace("\\.", "."))
         except ValueError:
             return None
         bits = netmap.private_bits(ip)
@@ -585,9 +587,9 @@ class _Restorer:
         if self._hidden(EntityType.IP):
             self.counters["kept"] += 1
             return m.group(), "kept_by_policy"
-        original = netmap.unmap_private(int(ip), bits, self.state.net_key)
+        original = str(ipaddress.IPv4Address(netmap.unmap_private(int(ip), bits, self.state.net_key)))
         self.counters["derived"] += 1
-        return str(ipaddress.IPv4Address(original)), "derived"
+        return (original.replace(".", "\\.") if "\\." in m.group() else original), "derived"
 
     def _mac(self, m: re.Match[str]) -> Piece | None:
         surrogate = self.macs.get(macsid.mac_key(m.group()))

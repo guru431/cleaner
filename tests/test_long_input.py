@@ -149,10 +149,12 @@ def test_run_of_eights_gives_no_phones():
         "010.001.002.005 " * 12000, "10.1.2.5/24 " * 15000, "2a00:1450:4010:0:0:0:0:65 " * 7000,
         "".join("10.%d.%d.%d " % (i >> 16, i >> 8 & 255, i & 255) for i in range(15000)), "a:" * 100000,
         "Source" * 30000 + ":1:2", "1.2.3.4." * 25000, "2a00::" * 30000,
+        # Адреса через «\.» (второе ревью, P2): цепочка чисел и записи с нулями впереди.
+        "1\\.2\\.3\\.4\\." * 4000, "010\\.001\\.002\\.005 " * 3000,
     ],
     ids=[
         "padded", "written_with_prefix", "full_ipv6", "distinct_addresses", "colons", "label", "dotted_numbers",
-        "ipv6_runs",
+        "ipv6_runs", "escaped_dotted_numbers", "escaped_padded",
     ],
 )
 def test_leak_check_is_fast_on_many_addresses(text):
