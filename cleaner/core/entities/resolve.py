@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities import hostmap, labels, macsid, names, netmap
-from cleaner.core.match import normalize
+from cleaner.core.match import has_invisible, normalize
 from cleaner.core.types import ChatState, Entity, EntityType, Settings, Surrogate
 
 T = EntityType
@@ -79,6 +79,15 @@ class Resolver:
         self.text_lower = text.lower()
         self.generic = generic_labels
         self.index = {(e.type, e.key): e for e in state.entities.values()}
+        # До 15.10.2026 нормализация оставляла невидимые знаки (мягкий перенос, пробел нулевой ширины, ударение), и
+        # ключ сущности из такого значения хранится с ними, а у адреса — с пробелом на их месте. Сегодняшний ключ того
+        # же значения другой, и сущность получила бы новую метку. Поэтому её написание с невидимыми знаками ведёт к
+        # ней и по сегодняшнему ключу: так находится и сущность, в которую значение влито объединением, — написания
+        # влитой переходят к ней. Ключ, уже занятый другой сущностью, остаётся за той.
+        for entity in state.entities.values():
+            for form in entity.forms:
+                if has_invisible(form):
+                    self.index.setdefault((entity.type, canonical_key(entity.type, form)), entity)
         self.alias: dict[tuple[EntityType, str], str] = {}
         for entry in settings.always:
             key = self._dictionary_key(entry.type, entry.value)
