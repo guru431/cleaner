@@ -302,6 +302,18 @@ def test_long_known_value_is_not_sliced_at_every_word():
     assert time.perf_counter() - started < 0.3
 
 
+def test_many_long_spellings_with_a_shared_beginning_are_found_in_linear_time():
+    """Второе ревью, Important: каждое вхождение начала из 64 знаков сверялось со всеми длинными написаниями с этим
+    началом — 6000 токенов вида JWT с общим началом из 74 знаков (486 КБ) искались 2,65 с. Один текст создаёт их сам:
+    первый проход делает их написаниями, второй ищет. Длинные написания лежат деревом по 64 знака."""
+    prefix = "eyjhbgcioijiuzi1niisinr5cci6ikpxvcj9.eyjzdwiioiixmjm0nty3odkwiiwibmftzsi6"
+    forms = [prefix + "%06x" % i for i in range(3000)]
+    started = time.perf_counter()
+    found = find_forms(" ".join(forms), [(form, "strict", i) for i, form in enumerate(forms)])
+    assert time.perf_counter() - started < 0.15
+    assert sorted(payload for _, _, payload in found) == list(range(3000))
+
+
 def test_link_host_check_walks_a_tree_of_parts():
     """Наблюдение раунда имён узлов, P3: проверка хоста ссылки собирала все цепочки частей до числа частей самой длинной
     записанной подмены — после имени из 125 частей хост из 20 000 частей проверялся 2,2 с. Части проходятся по дереву,

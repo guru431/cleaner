@@ -10,7 +10,11 @@ import regex
 
 T = TypeVar("T")
 _TOKEN = re.compile(r"[^\W\d_]+|\d+")
-_PREFIX = 64        # написание длиннее ищется по началу такой длины (find_forms)
+_PREFIX = 64        # написание длиннее ищется по кускам такой длины (find_forms)
+# Узел дерева длинных написаний — их начало длиной в несколько кусков: следующие куски и хвосты (последний кусок, 1–64
+# знака) по длине, хвост -> [(режим, нагрузка)]. С вхождения сверяется срез на кусок и на каждую длину хвоста — не
+# больше 64 в узле, сколько бы написаний ни делили начало.
+_Node = tuple[dict[str, "_Node[T]"], dict[int, dict[str, list[tuple[str, T]]]]]
 _SPACE_RUN = re.compile(r"\s+")
 # Невидимые знаки: форматирующие (мягкий перенос, пробел нулевой ширины, метки направления) и знак
 # ударения. Ударение выпадает, только если не вошло в букву при сборке NFC: у русских гласных букв
@@ -180,11 +184,11 @@ def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int
         lowered, starts, ends = _unescaped(lowered, starts, ends)
     # первое слово написания -> длина написания -> написание -> [(режим, нагрузка)].
     # Группировка по длине нужна, чтобы тысячи логинов с общим началом («user00001», «i.ivanov»)
-    # проверялись одним обращением к словарю, а не перебором. Написание длиннее _PREFIX — по своему началу:
-    # срез длиной в написание с каждого вхождения первого слова был бы квадратичным («a@bbb…b.ru» и тысячи «a»
-    # в тексте), а сравнение с началом текста кончается на первом несовпавшем знаке.
+    # проверялись одним обращением к словарю, а не перебором. Написание длиннее _PREFIX — деревом кусков по _PREFIX
+    # знаков (_Node): срез длиной в написание с каждого вхождения первого слова был бы квадратичным («a@bbb…b.ru» и
+    # тысячи «a» в тексте), а сверка с каждым написанием общего начала — тоже (тысячи токенов JWT одного издателя).
     index: dict[str, dict[int, dict[str, list[tuple[str, T]]]]] = {}
-    long: dict[str, dict[str, list[tuple[str, str, T]]]] = {}
+    long: dict[str, dict[str, _Node[T]]] = {}
     loose: list[tuple[str, str, T]] = []
     for form, mode, payload in forms:
         needle = _ESCAPED_DOT.sub("", _normalize(form)[0])
@@ -192,7 +196,12 @@ def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int
             continue
         head = _TOKEN.match(needle)
         if head and mode != "none" and len(needle) > _PREFIX:
-            long.setdefault(head.group(), {}).setdefault(needle[:_PREFIX], []).append((needle, mode, payload))
+            node = long.setdefault(head.group(), {}).setdefault(needle[:_PREFIX], ({}, {}))
+            position = _PREFIX
+            while len(needle) - position > _PREFIX:
+                node = node[0].setdefault(needle[position:position + _PREFIX], ({}, {}))
+                position += _PREFIX
+            node[1].setdefault(len(needle) - position, {}).setdefault(needle[position:], []).append((mode, payload))
         elif head and mode != "none":
             by_length = index.setdefault(head.group(), {})
             by_length.setdefault(len(needle), {}).setdefault(needle, []).append((mode, payload))
@@ -205,11 +214,18 @@ def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int
             for mode, payload in table.get(lowered[start:start + length], ()):
                 if _bounded(lowered, start, start + length, mode):
                     hits.append((starts[start], ends[start + length - 1], payload))
-        prefixes = long.get(token.group())
-        for needle, mode, payload in prefixes.get(lowered[start:start + _PREFIX], ()) if prefixes else ():
-            end = start + len(needle)
-            if lowered.startswith(needle, start) and _bounded(lowered, start, end, mode):
-                hits.append((starts[start], ends[end - 1], payload))
+        roots = long.get(token.group())
+        node = roots.get(lowered[start:start + _PREFIX]) if roots else None
+        position = start + _PREFIX
+        while node is not None:
+            children, tails = node
+            for length, table in tails.items():
+                end = position + length
+                for mode, payload in table.get(lowered[position:end], ()):
+                    if _bounded(lowered, start, end, mode):
+                        hits.append((starts[start], ends[end - 1], payload))
+            node = children.get(lowered[position:position + _PREFIX]) if children else None
+            position += _PREFIX
     for needle, mode, payload in loose:
         position = lowered.find(needle)
         while position != -1:
