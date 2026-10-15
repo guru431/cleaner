@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from cleaner.core import leakcheck
 from cleaner.core.detect import rules
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.pipeline import DETECTORS, sanitize
@@ -64,6 +65,27 @@ def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
 def test_run_of_eights_gives_no_phones():
     """FINDINGS P2 «false … PHONE, CARD …»: «8 8 8 …» давал тысячи ложных телефонов, очистка шла две секунды."""
     assert rules.detect("8 " * 50000, DetectContext(Settings())) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "010.001.002.005 " * 12000, "10.1.2.5/24 " * 15000, "2a00:1450:4010:0:0:0:0:65 " * 7000,
+        "".join("10.%d.%d.%d " % (i >> 16, i >> 8 & 255, i & 255) for i in range(15000)), "a:" * 100000,
+        "Source" * 30000 + ":1:2", "1.2.3.4." * 25000, "2a00::" * 30000,
+    ],
+    ids=[
+        "padded", "written_with_prefix", "full_ipv6", "distinct_addresses", "colons", "label", "dotted_numbers",
+        "ipv6_runs",
+    ],
+)
+def test_leak_check_is_fast_on_many_addresses(text):
+    """Раздел 8: записи адресов сравниваются с ключами сущностей словарём, а находки написаний — двоичным поиском."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "узел 10.1.2.5 и 2a00:1450:4010::65", Settings())
+    started = time.perf_counter()
+    leakcheck.check(text, state, Settings())
+    assert time.perf_counter() - started < 0.5
 
 
 @pytest.mark.parametrize("host", ["a." * 20000 + "x", "www." * 20000 + "domain-1.example"], ids=["parts", "generic"])
