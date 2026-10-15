@@ -316,6 +316,42 @@ def test_own_links_and_labels_next_to_foreign_links_are_restored(settings):
 
 
 @pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("Сайт www.domain-1.example, пишите <EMAIL_1>", "Сайт www.contoso.ru, пишите ivanov@contoso.ru"),
+        ("https://www.domain-1.example/?q=<EMAIL_1>", "https://www.contoso.ru/?q=ivanov@contoso.ru"),
+        ('<a href="//mail.domain-1.example/?to=<EMAIL_1>">', '<a href="//mail.contoso.ru/?to=ivanov@contoso.ru">'),
+        ("www.host-1.domain-1.example/<EMAIL_1>", "www.srv-dc01.contoso.ru/ivanov@contoso.ru"),
+        ("[вики](https://www.WWW2.Domain-1.example/<EMAIL_1>)", "[вики](https://www.WWW2.contoso.ru/ivanov@contoso.ru)"),
+    ],
+)
+def test_generic_label_in_front_of_an_issued_domain_is_our_host(settings, answer, restored):
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: «www.domain-1.example», написанное пользователем или
+    моделью, считалось ссылкой на чужой узел, и метки рядом не восстанавливались. Служебная часть имени перед
+    выданным доменом ведёт на узел того же домена."""
+    result = restore(link_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "https://www.domain-1.example.evil.example.org/?q=<EMAIL_1>",
+        "https://domain-1.example.www/?q=<EMAIL_1>",
+        "https://www.evil.domain-1.example/?q=<EMAIL_1>",
+        "https://www.host-1/?q=<EMAIL_1>",
+        "https://www/?q=<EMAIL_1>",
+        "https://mail.www.evil.example.org/?q=<EMAIL_1>",
+    ],
+)
+def test_generic_label_in_front_of_a_foreign_name_stays_foreign(settings, answer):
+    """Та же находка с другой стороны: служебная часть делает нашим только имя, которое кончается выданным доменом, и
+    только впереди; неизвестная часть перед доменом и чужой домен после нашего ссылку по-прежнему не пускают."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
     "answer",
     [
         r'<img src="\\evil.example.org/p?q=<EMAIL_1>">',
