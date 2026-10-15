@@ -115,3 +115,22 @@ def test_restore_is_fast_on_many_tags_arguments_and_bare_links(text):
     started = time.perf_counter()
     restore(state, text + "<EMAIL_1>", Settings())
     assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '<a href="&#' + "0" * 100000 + '47;">', '<a href="' + "&#47;" * 20000 + '">',
+        '<a style="' + "&abcdefghijklmnopqrstuvwxyzabcde" * 2000 + '">', '<a href="&' + "a" * 100000 + '">',
+        "href=&#47;&#47;a" * 5000, "href=" * 20000, "[1]: &#47;\n" * 5000, '"//a&#46;' * 2000,
+    ],
+    ids=["zeros", "slashes", "unknown_names", "long_name", "unquoted", "empty_unquoted", "definitions", "dots"],
+)
+def test_restore_is_fast_on_character_references(text):
+    """Ссылки на знаки в цели ссылки раскрываются за линейное время: тысячи нулей в числовой ссылке, длинные
+    незнакомые имена, атрибуты без кавычек и определения ссылок без угловых скобок."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "почта ivanov@contoso.ru", Settings())
+    started = time.perf_counter()
+    restore(state, text + "<EMAIL_1>", Settings())
+    assert time.perf_counter() - started < 0.5

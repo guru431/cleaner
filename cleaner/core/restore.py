@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import bisect
+import html
 import ipaddress
 import re
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
+from html.entities import html5 as _ENTITIES
 
 from cleaner.core import surrogates
 from cleaner.core.entities import labels, macsid, netmap
@@ -75,18 +77,23 @@ _SET = rf"(?:(?:{_css_name('-webkit-')})?{_css_name('image-set')}|{_css_name('sr
 
 
 # Атрибут тянется и через строки до той же кавычки: браузер выбрасывает из адреса переводы строк.
-# Это линейно — поиск каждого атрибута кончается на следующей такой же кавычке. Определение ссылки
-# Markdown — только в начале строки, как в CommonMark, цель в угловых скобках может стоять на
+# Это линейно — поиск каждого атрибута кончается на следующей такой же кавычке. Значение без кавычек
+# берётся до пробельного знака ASCII, как в HTML, но и через «>»: «>» могла закрывать метку
+# («href=//наш:<EMAIL_1>@evil…»), а после восстановления её нет, и значение у браузера длиннее. Определение
+# ссылки Markdown — только в начале строки, как в CommonMark, цель в угловых скобках может стоять на
 # следующей строке и содержать пробелы («[1]: <https://… …>»): иначе «[ERROR]: <EMAIL_1>» в журнале
-# считалось бы ссылкой. Адрес в CSS url(…) и @import браузер загружает сам — и в атрибуте style, и в
+# считалось бы ссылкой; цель без скобок — до пробела или управляющего знака. Без кавычек и без скобок цель
+# со схемой и так нашлась бы как голый адрес, а записанную ссылками на знаки («&#47;&#47;evil…») — нет.
+# Адрес в CSS url(…) и @import браузер загружает сам — и в атрибуте style, и в
 # элементе style, и в файле CSS: аргумент в кавычках берётся до той же кавычки с учётом «\"» (без неё
 # строку CSS кончает конец текста — и загружает), без кавычек — до «)». Нашей ссылка считается, только если
-# наши все адреса в ней (_Restorer._is_own).
+# наши все адреса в ней при любом прочтении ссылок на знаки (_Restorer._is_own, _readings).
 _LINK = re.compile(
     r"\]\((?P<md>(?:[^()\r\n]|\([^()\r\n]*\))*)\)"
-    r"|(?m:^)[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*(?:\r?\n[ \t]*)?<(?P<ref>[^\r\n]*)>"
+    r"|(?m:^)[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*(?:\r?\n[ \t]*)?"
+    r"(?:<(?P<ref>[^\r\n]*)>|(?P<dest>[^\x00-\x20<][^\x00-\x20]*))"
     r"|(?<![\w-])(?P<name>href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content)"
-    r"\s*=\s*(?P<quote>[\"'])(?P<attr>[\s\S]*?)(?P=quote)"
+    r"\s*=\s*(?:(?P<quote>[\"'])(?P<attr>[\s\S]*?)(?P=quote)|(?P<unquoted>[^\t\n\f\r \"'][^\t\n\f\r ]*))"
     rf"|(?:(?<![\w-]){_URL}\(\s*|{_IMPORT}\s*)(?P<cq>[\"'])(?P<css>(?:\\[\s\S]|[^\\])*?)(?:(?P=cq)|\Z)"
     rf"|(?<![\w-]){_URL}\((?P<cssu>(?:\\[\s\S]|[^\\()\"'])*)\)"
     rf"|(?<![\w-]){_SET}\((?P<set>{_css_args(_CSS_DEPTH)}(?=[)\]}}])|[\s\S]*)"
@@ -109,6 +116,50 @@ _URL_HOSTS = re.compile(
     r"(\[[^\]]+\]|[^/\\:?#\s]+)",
     re.IGNORECASE,
 )
+# Ссылка на знак HTML («&#47;», «&#x2F», «&sol;», «&nbsp» без «;») — так же, как её находит html.unescape.
+_CHARREF = re.compile(r"&(?:#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?)")
+# Числовая ссылка, которую раскрывает CommonMark: только с «;», до семи десятичных или шести шестнадцатеричных цифр.
+_MD_NUMERIC = re.compile(r"&#(?:[0-9]{1,7}|[xX][0-9a-fA-F]{1,6});")
+_ASCII_ALNUM = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+
+
+def _charref(ref: str, reader: str) -> str:
+    """Во что раскроет ссылку на знак ref читатель: html — текст HTML (как html.unescape), attr — значение
+    атрибута HTML, md — CommonMark. Имя ищется самое длинное из таблицы HTML5. Имя без «;» (старый набор: «&amp»,
+    «&nbsp», «&not») атрибут не раскрывает, если за ним буква, цифра или «=» («?a=1&notify=2»), а CommonMark не
+    раскрывает никогда; числовую ссылку без «;» HTML раскрывает всегда, CommonMark — нет."""
+    if ref[1] == "#":
+        if reader == "md" and not _MD_NUMERIC.fullmatch(ref):
+            return ref
+        hexadecimal = ref[2] in "xX"
+        digits = ref.rstrip(";")[3 if hexadecimal else 2:].lstrip("0")
+        if len(digits) > 8:
+            # Больше U+10FFFF, и браузер ставит U+FFFD. Ведущие нули — не повод: «&#00…047;» — это «/», а
+            # html.unescape на 4300 цифрах и больше падает с ValueError.
+            return "\N{REPLACEMENT CHARACTER}"
+        return html.unescape(f"&#{'x' if hexadecimal else ''}{digits or '0'};")
+    name = ref[1:]
+    end = next((end for end in range(len(name), 1, -1) if name[:end] in _ENTITIES), 0)
+    if not end:
+        return ref
+    if not name[:end].endswith(";") and (
+        reader == "md" or (reader == "attr" and end < len(name) and (name[end] in _ASCII_ALNUM or name[end] == "="))
+    ):
+        return ref
+    return _ENTITIES[name[:end]] + name[end:]
+
+
+def _readings(text: str) -> tuple[str, ...]:
+    """Текст ссылки так, как его прочтут: как есть (CSS в элементе style и в файле, простой текст), в тексте HTML,
+    в значении атрибута HTML и в цели ссылки CommonMark. Ссылки на знаки браузер и CommonMark раскрывают до разбора
+    адреса: «&#47;&#47;evil…» в атрибуте — это «//evil…», «наш&commat;evil…» — «наш@evil…». Где окажется ответ,
+    неизвестно, поэтому ссылка наша, только если наша при каждом прочтении. Одного html.unescape мало: в атрибуте
+    «&#47;&#47;наш&nbspevil…» — один хост с «&nbsp» внутри, а html.unescape раскрыл бы «&nbsp» в пробел, и хост
+    оборвался бы на нашем имени. Одинаковые прочтения проверяются один раз."""
+    if "&" not in text:
+        return (text,)
+    readings = [_CHARREF.sub(lambda m: _charref(m.group(), reader), text) for reader in ("html", "attr", "md")]
+    return tuple(dict.fromkeys((text, *readings)))
 # Вне тегов HTML — текст до первого «<» и участки от «>» до ближайшего «<» или кавычки, если между «<» и
 # этой «>» кавычек нет. Кавычка оставляет атрибут в теге: «>» могла стоять в значении («<a title="a>b"
 # href=…»). Любой «<», не только «<буква», и любая кавычка — в сторону ссылки; поиск линеен: каждая
@@ -251,7 +302,11 @@ class _Restorer:
         """Не уведёт ли ссылка оригиналы на чужой узел. Наша — если наши все адреса внутри неё:
         за нашим адресом в том же атрибуте может стоять чужой (srcset, незакрытая кавычка,
         «?next=https://…»), а совпадение целиком дальше не проверяется. Значение без адреса —
-        не ссылка (data="…" в коде), его восстанавливают как обычный текст."""
+        не ссылка (data="…" в коде), его восстанавливают как обычный текст. Ссылки на знаки раскрываются до
+        разбора адреса, и цель должна быть нашей при каждом их прочтении (_readings)."""
+        return all(self._is_own_reading(reading) for reading in _readings(target))
+
+    def _is_own_reading(self, target: str) -> bool:
         target = re.sub(r"[\t\r\n]", "", target.strip())   # браузер выбрасывает их из адреса
         if target.lower().startswith("mailto:"):
             address = target[len("mailto:"):]
@@ -281,18 +336,23 @@ class _Restorer:
             # чужая оставляет метки во всём значении.
             return any(self._foreign(inner) for inner in _LINK.finditer(m.string, m.start("attr"), m.end("attr")))
         target = next((
-            m.group(name) for name in ("md", "ref", "attr", "css", "cssu", "set", "mailto", "dq", "sq", "url")
+            m.group(name)
+            for name in ("md", "ref", "dest", "attr", "unquoted", "css", "cssu", "set", "mailto", "dq", "sq", "url")
             if m.group(name)
         ), "")
         # Экранирования CSS браузер раскрывает до загрузки — и в имени, и в адресе: «\2f\2f evil…» — это
         # «//evil…», «наш\40 evil…» — «наш@evil…». Хост, видный в тексте, тогда не тот, что загрузят, поэтому
-        # ссылка CSS (url(), @import, image-set(), src(), атрибут style) с «\» нашей не бывает.
+        # ссылка CSS (url(), @import, image-set(), src(), атрибут style) с «\» нашей не бывает — и с «\»,
+        # записанной ссылкой на знак: в атрибуте style «&bsol;2f» — это «\2f».
         css = any(m.group(name) is not None for name in ("css", "cssu", "set"))
         css = css or (m.group("name") or "").lower() == "style"
-        if self._is_own(target) and not (css and "\\" in m.group()):
+        if self._is_own(target) and not (css and any("\\" in reading for reading in _readings(m.group()))):
             return False        # ссылка на наш же узел восстанавливается как обычный текст
         restored = self._inner(m.group())
-        if target[:2] in ("//", "/\\", "\\/", "\\\\") and any(m.group("dq", "sq", "url")) and _nowhere(restored):
+        if (
+            target[:2] in ("//", "/\\", "\\/", "\\\\") and any(m.group("dq", "sq", "url"))
+            and all(_nowhere(reading) for reading in _readings(restored))     # «&#46;» — тоже точка
+        ):
             return False        # «//TODO:…» в коде: и после восстановления адрес не ведёт на внешний узел
         return restored != m.group()        # иначе — если в ней есть что восстанавливать
 
