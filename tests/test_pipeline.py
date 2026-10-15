@@ -147,6 +147,48 @@ def test_zero_padded_ipv4_is_still_restored_in_the_plain_notation(state, setting
     assert restore(state, network.split("/")[0], settings).text == "сеть 10.1.0.0"
 
 
+@pytest.mark.parametrize(
+    "text, rules",
+    [
+        ("сеть 192.168.0.0/23, интерфейс 192.168.1.0/23", ()),
+        ("интерфейс 192.168.1.0/23, сеть 192.168.0.0/23", ()),
+        ("сеть 10.1.0.0/16, узел 10.1.132.0/16", ()),
+        ("сеть 192.168.0.0/23, интерфейс 192.168.1.0/23", ("192.168.0.0/23", "192.168.1.0/23")),
+    ],
+    ids=["network_first", "address_first", "short_prefix", "both_by_rules"],
+)
+def test_address_whose_surrogate_restores_to_another_address_gets_a_label(state, settings, text, rules):
+    """Ревью раунда IP (15.10): «192.168.1.0/23» — узел в верхней половине /23, слой 3 берёт его без длины префикса, и
+    его подмена совпадала с подменой сети без длины префикса — в тексте выходили две «192.168.94.0/23», и обе
+    восстанавливались сетью. Подмена, которая уже восстанавливается в другой адрес, второй раз не выдаётся (6.2)."""
+    for rule in rules:
+        ops.mask(state, rule, T.IP)
+    result = sanitize(state, text, settings)
+    first, second = (word.rstrip(",") for word in result.sanitized.split()[1::2])
+    assert first != second and "<IP_" in result.sanitized and result.deliverable
+    assert restore(state, result.sanitized, settings).text == text
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+
+
+@pytest.mark.parametrize(
+    "text, rules, octets",
+    [
+        ("сеть 10.1.0.0/16, половины 10.1.0.0/17 и 10.1.128.0/17", (), 2),
+        ("сеть 10.1.2.0/24, шлюз 10.1.2.0 и узел 10.1.2.5", ("10.1.2.0/24",), 3),
+    ],
+    ids=["halves", "same_address"],
+)
+def test_networks_and_addresses_of_one_subnet_keep_their_surrogates(state, settings, text, rules, octets):
+    """С другой стороны: у подмен сетей 10.90.0.0/16 и 10.90.0.0/17 (верхняя половина) совпал только адрес без длины
+    префикса, а его не выдавали никому; шлюз 10.1.2.0 и сеть 10.1.2.0/24 — один адрес. Меток нет, подсети те же (FR-5.4)."""
+    for rule in rules:
+        ops.mask(state, rule, T.IP)
+    result = sanitize(state, text, settings)
+    assert "<IP_" not in result.sanitized
+    assert len({span.surrogate.split("/")[0].rsplit(".", 4 - octets)[0] for span in result.spans}) == 1
+    assert restore(state, result.sanitized, settings).text == text
+
+
 @pytest.mark.parametrize("leaked", ["2a00:1450:4010::65", "2A00:1450:4010:0::0065"], ids=["canonical", "written"])
 def test_leak_check_finds_an_ipv6_in_the_canonical_and_in_the_written_notation(state, settings, leaked):
     """Запись из текста хранится для восстановления, но каноническая остаётся искомой: проверка утечек

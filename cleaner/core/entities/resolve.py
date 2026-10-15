@@ -268,9 +268,9 @@ class Resolver:
             # Частный адрес переставляется однозначно — при совпадении остаётся только метка.
             while fake is not None and self._address_in_text(fake) and netmap.private_bits(ip) is None:
                 fake = netmap.fake_ip(canonical, self.state)
-            collides = (
+            collides = fake is not None and (
                 fake in self.real_ips or (T.IP, fake) in self.index or self._address_open(fake)
-                or (fake is not None and self._address_in_text(fake))
+                or self._address_in_text(fake) or self._claimed(fake, ip)
             )
             if fake is None or collides:
                 return self._label(entity)
@@ -304,6 +304,24 @@ class Resolver:
         if self._open_addresses is None:
             self._open_addresses = netmap.addresses(self.open_values)
         return address in self._open_addresses
+
+    def _claimed(self, fake: str, ip: netmap.Address) -> bool:
+        """Восстанавливается ли подмена уже в другой адрес (6.2). Узел «.0» и сеть с обнулёнными битами узла переставляются
+        в одну подмену: 192.168.1.0 (верхняя половина /23) — в 192.168.94.0, как и сеть 192.168.0.0/23 без длины префикса,
+        и «192.168.1.0/23» из текста (длину префикса узла слой 3 во фрагмент не берёт) восстанавливалось бы сетью. Подмена
+        сети сверяется и своим адресом, если его выдали подменой адреса; адрес сети, записанный только для восстановления
+        (_ip), подмене другой сети не мешает: 10.90.0.0/16 и 10.90.0.0/17 — разные записи. Тот же адрес в другой записи
+        (сеть 10.1.2.0/24 и шлюз 10.1.2.0) — не помеха."""
+        for key in dict.fromkeys((fake, fake.split("/")[0])):
+            taken = self.state.surrogates.get(key)
+            if taken is None or (key != fake and self.state.issued.get(f"{taken.entity_id}|ip") != key):
+                continue
+            try:
+                if netmap.parse(taken.original or "")[0] != ip:
+                    return True
+            except ValueError:
+                return True         # метка или имя узла
+        return False
 
     def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
         key = macsid.mac_key(value)
