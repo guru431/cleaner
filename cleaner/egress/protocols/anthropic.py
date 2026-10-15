@@ -37,5 +37,11 @@ def text(event: dict) -> str | None:
     return None
 
 
+def finished(event: dict) -> bool:
+    """Провайдер назвал причину остановки (message_delta) или закрыл сообщение: ответ кончился, а не оборвался."""
+    kind = event.get("type")
+    return kind == "message_stop" or (kind == "message_delta" and bool((event.get("delta") or {}).get("stop_reason")))
+
+
 def stopped_by_length(event: dict) -> bool:
     return event.get("type") == "message_delta" and (event.get("delta") or {}).get("stop_reason") == "max_tokens"

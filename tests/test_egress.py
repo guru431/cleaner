@@ -180,9 +180,54 @@ def test_cancel_stops_reading():
     assert pieces == ["a"]
 
 
+@pytest.mark.parametrize("protocol, body", [
+    ("openai", sse({"choices": [{"delta": {"content": "половина"}}]}, done=False)),
+    ("anthropic", sse({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "половина"}}, done=False)),
+])
+def test_stream_cut_without_its_end_marker_is_an_error(protocol, body):
+    """Раздел 16: соединение закрылось без [DONE] или message_stop — обрыв, а не весь ответ."""
+    pieces = []
+    with pytest.raises(ProviderError, match="оборвался"):
+        for piece in send(probe_context("p", "m"), connection(protocol), None, None,
+                          transport=httpx.MockTransport(Recorder(body))):
+            pieces.append(piece)
+    assert pieces == ["половина"]
+
+
+def test_finish_reason_without_done_is_a_complete_answer():
+    body = sse({"choices": [{"delta": {"content": "всё"}, "finish_reason": "stop"}]}, done=False)
+    assert run(probe_context("p", "m"), connection(), Recorder(body)) == "всё"
+
+
+def test_stop_before_the_request_sends_nothing():
+    cancel = threading.Event()
+    cancel.set()
+    recorder = Recorder(openai_chunks("x"))
+    assert run(probe_context("p", "m"), connection(), recorder, cancel=cancel) == ""
+    assert recorder.requests == []
+
+
+def test_closing_the_connection_from_stop_ends_the_stream_quietly():
+    """«Остановить» закрывает соединение: ожидание молчащего провайдера прерывается без ошибки."""
+    cancel, closers, pieces = threading.Event(), [], []
+    for piece in send(probe_context("p", "m"), connection(), None, None, cancel=cancel, on_open=closers.append,
+                      transport=httpx.MockTransport(Recorder(openai_chunks("a", "b", "c")))):
+        pieces.append(piece)
+        cancel.set()
+        closers[0]()
+    assert pieces == ["a"]
+
+
+def test_max_completion_tokens_replaces_max_tokens():
+    recorder = Recorder(openai_chunks("x"))
+    run(probe_context("p", "m"), connection(max_completion_tokens=4000), recorder)
+    assert recorder.json["max_completion_tokens"] == 4000 and "max_tokens" not in recorder.json
+
+
 def test_extra_body_cannot_add_tools_or_replace_messages():
     check_extra_body({"temperature": 0.2, "provider": {"data_collection": "deny"}})
-    for extra in ({"tools": []}, {"messages": []}, {"model": "x"}, {"web_search_options": {}}, ["list"]):
+    for extra in ({"tools": []}, {"messages": []}, {"model": "x"}, {"web_search_options": {}}, {"plugins": []},
+                  {"enable_search": True}, ["list"]):
         with pytest.raises(ValueError):
             check_extra_body(extra)
 

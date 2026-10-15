@@ -10,7 +10,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -29,6 +29,8 @@ AUTH_STYLES = ("bearer", "x-api-key")
 FORBIDDEN_EXTRA = frozenset({
     "model", "messages", "system", "stream", "tools", "tool_choice", "functions", "function_call",
     "attachments", "files", "web_search_options", "mcp_servers", "container",
+    # поиск и надстройки маршрутизаторов и провайдеров: OpenRouter, xAI, DashScope
+    "plugins", "search_parameters", "enable_search", "web_search", "search_options", "documents", "file_ids",
 })
 _ERROR_BYTES = 8192
 _TIMEOUT = httpx.Timeout(30.0, read=180.0)          # модели с рассуждениями молчат минутами до первого слова
@@ -109,13 +111,17 @@ def _error(response: httpx.Response, key: str) -> ProviderError:
     return _scrub(provider_error(body, response.status_code), key)
 
 
+_DONE: dict = {}          # «data: [DONE]» — конец ответа OpenAI-совместимого провайдера
+
+
 def _events(lines: Iterator[str]) -> Iterator[dict]:
-    """События потокового ответа: строки «data: {…}»; «data: [DONE]» — конец (OpenAI)."""
+    """События потокового ответа: строки «data: {…}»; «data: [DONE]» отдаётся как _DONE."""
     for line in lines:
         if not line.startswith("data:"):
             continue
         data = line[5:].strip()
         if data == "[DONE]":
+            yield _DONE
             return
         try:
             event = json.loads(data)
@@ -128,9 +134,11 @@ def _events(lines: Iterator[str]) -> Iterator[dict]:
 def send(
     ctx: OutgoingContext, connection: Connection, state: ChatState | None, settings: Settings | None, *,
     cancel: threading.Event | None = None, transport: httpx.BaseTransport | None = None, outcome: dict | None = None,
+    on_open: Callable[[Callable[[], None]], None] | None = None,
 ) -> Iterator[str]:
     """Фрагменты ответа по мере получения. state — для проверки утечек (у проверки подключения его нет).
-    outcome получает {"truncated": True}, если провайдер остановился по пределу длины ответа."""
+    outcome получает {"truncated": True}, если провайдер остановился по пределу длины ответа. on_open получает
+    функцию, закрывающую соединение: «Остановить» прерывает и ожидание провайдера, который молчит."""
     if not isinstance(ctx, OutgoingContext):
         raise TypeError("egress принимает только OutgoingContext, собранный pipeline")
     if state is not None:
@@ -142,25 +150,39 @@ def send(
     protocol = PROTOCOLS[connection.protocol]
     url, headers, body = protocol.request(ctx, connection)
     key = connection.api_key
+    if cancel is not None and cancel.is_set():
+        return                                      # остановили, пока задание ждало в пуле: запрос не уходит
     with httpx.Client(transport=transport, trust_env=False, follow_redirects=False, timeout=_TIMEOUT) as client:
         try:
             with client.stream("POST", url, json=body, headers={**headers, **_headers(connection)}) as response:
+                if on_open is not None:
+                    on_open(response.close)
                 if response.status_code >= 300:
                     raise _error(response, key)
+                ended = False
                 for event in _events(response.iter_lines()):
                     if cancel is not None and cancel.is_set():
                         return
+                    if event is _DONE or protocol.finished(event):
+                        ended = True
                     if outcome is not None and protocol.stopped_by_length(event):
                         outcome["truncated"] = True
                     try:
-                        piece = protocol.text(event)
+                        piece = protocol.text(event) if event is not _DONE else None
                     except StreamEnd:
                         return
                     except ProviderError as exc:
                         raise _scrub(exc, key) from None
                     if piece:
                         yield piece
+                if not ended:
+                    # Соединение закрылось без признака конца: это обрыв, а не весь ответ (раздел 16).
+                    raise ProviderError("поток ответа оборвался до конца")
         except httpx.TimeoutException:
+            if cancel is not None and cancel.is_set():
+                return
             raise ProviderError("провайдер не ответил вовремя") from None
-        except httpx.HTTPError:
+        except (httpx.HTTPError, httpx.StreamError):
+            if cancel is not None and cancel.is_set():
+                return                              # соединение закрыла остановка
             raise ProviderError("соединение с провайдером не удалось или оборвалось") from None
