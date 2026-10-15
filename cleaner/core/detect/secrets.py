@@ -12,10 +12,18 @@ from cleaner.core.types import EntityType, Span
 
 name = "secrets"
 
-_PEM = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?"
-    r"(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
-    re.DOTALL,
+# Блок приватного ключа. Заголовок «BEGIN … PRIVATE KEY» между рядами дефисов или тире (от двух с каждой стороны:
+# при пересылке «-----» становится «—–» или теряет дефисы) — блок до END или до конца текста, как настоящий PEM.
+# Заголовок без рядов или с рядом с одной стороны — блок, только если со следующей строки идёт тело base64, и до
+# строки END или пустой строки: «Файл начинается со строки BEGIN RSA PRIVATE KEY» в прозе — не секрет. Ряд перед
+# заголовком досчитывается назад кодом (_private_keys): выражение, начатое с ряда, перебирало бы «-----…» от каждого
+# дефиса. Слов перед PRIVATE не больше трёх (SSH2 ENCRYPTED): «BEGIN BEGIN …» иначе перебирался бы до конца от каждого.
+_DASHES = "-—–"
+_PEM_BEGIN = re.compile(r"(?<!\w)BEGIN (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?(?P<dashes>[-—–]{2,}+)?")
+_PEM_END = re.compile(r"(?<!\w)END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?[-—–]*+")
+_PEM_BODY = re.compile(
+    r"[ \t]*(?=\r?\n[ \t]*[A-Za-z0-9+/]{16})(?:\r?\n(?![ \t]*[-—–]*+END )[ \t]*\S[^\r\n]*)++"
+    r"(?:\r?\n[ \t]*[-—–]*+END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?[-—–]*+)?"
 )
 # Подпись может быть пустой («alg: none»): такой токен раньше находило правило JWT из detect-secrets.
 _JWT = re.compile(r"(?<![\w-])eyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]*")
@@ -182,14 +190,34 @@ _OPENING = {")": "(", "]": "[", "}": "{"}
 # Имя без точки — когда скобки пусты («input()»), за скобкой сразу кавычка (аргумент или индекс строкой) или
 # в скобках только имена из букв, а имя функции — со строчной буквы, «_» или «$» («get_secret(name)», «tokens[i]»;
 # аргументы после «, » в значение не входят). «password=Ab(1», «Ab(1)», «Pass(word)», «Summer2024(» — пароли.
-# Атрибут без скобок — код, если имена из букв и «_», первое — со строчной буквы, «_» или «$», а последнее содержит
-# слово секрета: «self.password», «settings.SECRET_KEY», «$cred.Password». «Summer.2024», «Ab.Cd», «summer.night»,
-# «My.Password» — пароли. Значение в кавычках не проверяется: «"Qwerty1("», «"self.password"» — строки.
+# Атрибут без скобок — код, если имена из букв и «_», первое — объект кода (_CODE_OBJECTS, переменная PowerShell, имя
+# с «_» или заглавной внутри), а в последнем слово секрета целиком (_SECRET_NAME): «self.password»,
+# «settings.SECRET_KEY», «$cred.Password», «db_config.password». «Summer.2024», «Ab.Cd», «summer.night», «My.Password»,
+# «admin.secret», «my.pass», «self.compass» — пароли. Значение в кавычках не проверяется: «"self.password"» — строка.
+# Всё это — только после ключа присваивания в коде (_in_code): в адресе, команде, XML, прозе и строке подключения
+# вызов и атрибут — пароль («redis://:my.pass@», «sshpass -p top.secret», «Пароль: qwerty(abc)»).
 _CALL = re.compile(r"(?P<name>\$?[A-Za-z_]\w*)(?P<dotted>(?:\.[A-Za-z_]\w*)+)?[(\[]")
 _CLOSING = {"(": ")", "[": "]"}
 _VARIABLE = re.compile(r"\$|[a-z_]")
 _NAMES = re.compile(r"[A-Za-z_][A-Za-z_.]*(?:,[A-Za-z_][A-Za-z_.]*)*")
-_ATTRIBUTE = re.compile(r"(?:\$[A-Za-z_]|[a-z_])[A-Za-z_]*(?:\.[A-Za-z_]+)*\.(?P<last>[A-Za-z_]+)")
+_ATTRIBUTE = re.compile(r"(?P<first>(?:\$[A-Za-z_]|[a-z_])[A-Za-z_]*)(?:\.[A-Za-z_]+)*\.(?P<last>[A-Za-z_]+)")
+# Первое имя, которое в пароле не встречается: объекты и настройки из кода. Любое другое имя из строчных букв
+# («admin», «my», «north», «user») — часть пароля: лишняя замена атрибута дешевле открытого пароля.
+_CODE_OBJECTS = frozenset({
+    "self", "this", "cls", "settings", "config", "cfg", "os", "env", "process", "options", "opts", "args", "params",
+})
+_CAMEL = re.compile(r"[a-z][A-Z]")
+# Слово секрета целиком — между краями имени, «_» и границами camelCase («SECRET_KEY», «client_secret», «accessToken»),
+# а не внутри слова («compass»). Без «pass»: в Python это ключевое слово, атрибута с таким именем нет, и «$ecret.Pass» —
+# скорее пароль, чем код.
+_SECRET_NAME = re.compile(
+    r"(?:^|(?<=_)|(?<=[a-z])(?=[A-Z]))"
+    r"(?i:password|passwd|passphrase|pwd|secret|token|credentials?|(?:api|access|private)_?key)"
+    r"(?:$|(?=_)|(?<=[a-z])(?=[A-Z]))"
+)
+# Поле строки подключения: «;» прямо перед ключом или после значения перед следующим полем, как их видит _BARE
+# («Server=db;Password=…», «Password=…;User ID=app»). Значение поля — строка как есть, а не код.
+_NEXT_FIELD = re.compile(r";(?:[\w.-]+=|[A-Z][\w.-]*(?: [A-Z][\w.-]*)+=)")
 
 # Правила по энтропии и по ключевым словам шумят на обычном тексте; контекст у нас свой.
 # Правила npm, JWT и OpenAI без начала слова перебирают строку от каждого «//», «eyJ», «sk-» —
@@ -197,15 +225,16 @@ _ATTRIBUTE = re.compile(r"(?:\$[A-Za-z_]|[a-z_])[A-Za-z_]*(?:\.[A-Za-z_]+)*\.(?P
 # Их токены находят свои правила: _TOKEN (npm_, sk-), _JWT и ключ «_authToken=» в .npmrc.
 # IP-адреса — работа слоя 3: там они получают подмену и восстанавливаются (спецификация 6.2).
 # Правило приватных ключей находит только фразу заголовка («BEGIN RSA PRIVATE KEY») — и в прозе тоже, а сам ключ
-# не скрывает; блок PEM целиком находит _PEM.
+# не скрывает; блок PEM целиком, и с испорченным заголовком, находит _private_keys.
 _SKIPPED_PLUGINS = frozenset({
     "Base64HighEntropyString", "HexHighEntropyString", "KeywordDetector",
     "NpmDetector", "JwtTokenDetector", "OpenAIDetector", "IPPublicDetector", "PrivateKeyDetector",
 })
-# Выражение без групп отдаёт совпадение целиком, а правило Artifactory берёт в него и края: пробел, «=», «:» и кавычку
-# перед значением, пробел или кавычку после. Края в значение не входят («=» в конце — часть ключа Azure в base64).
-_LEADING_EDGE = " \t\r\n=:\""
-_TRAILING_EDGE = " \t\r\n\""
+# Выражение без групп отдаёт совпадение целиком, а правило Artifactory берёт в него и края: пробел (любой, и неразрывный:
+# «\s» в выражении), «=», «:» или кавычку перед значением, пробел или кавычку после. Края в значение не входят («=» в
+# конце — часть ключа Azure в base64).
+_LEADING_EDGE = "=:\""
+_TRAILING_EDGE = "\""
 # Правила IBM, Cloudant и Softlayer разбирают пробелы вокруг «=» тремя повторами подряд (« *», « +»,
 # « *»): на длинном ряде пробелов это кубическое время. Ряд сжимается до одного пробела — повторы
 # принимают любое их число, а двух пробелов подряд нет ни в одном значении этих правил.
@@ -243,8 +272,8 @@ def _library_hits(squeezed: str) -> dict[str, list[int]]:
             for group in groups:
                 value, start = m.group(group) or "", m.start(group)
                 if not group:                           # края совпадения целиком (_LEADING_EDGE)
-                    stripped = value.lstrip(_LEADING_EDGE)
-                    value, start = stripped.rstrip(_TRAILING_EDGE), start + len(value) - len(stripped)
+                    stripped = value.lstrip().lstrip(_LEADING_EDGE)
+                    value, start = stripped.rstrip().rstrip(_TRAILING_EDGE), start + len(value) - len(stripped)
                 if len(value) >= 8:
                     hits.setdefault(value, []).append(start)
     return hits
@@ -297,9 +326,10 @@ def _library_spans(text: str, own: list[Span]) -> list[Span]:
     return spans
 
 
-def _value(m: re.Match[str], minimum: int = 3) -> tuple[int, int] | None:
+def _value(m: re.Match[str], minimum: int = 3, code: bool = False) -> tuple[int, int] | None:
     """Границы значения в совпадении или None, если это не секрет. После имени ключа или параметра
-    берётся и короткое значение (minimum=2): «password=Q7» — тоже пароль."""
+    берётся и короткое значение (minimum=2): «password=Q7» — тоже пароль. code — значение стоит после ключа
+    присваивания в коде (_in_code), и вызов или атрибут (_code) там не значение."""
     for group in ("dq", "sq", "bare"):
         if group not in m.re.groupindex or m.group(group) is None:
             continue
@@ -308,7 +338,7 @@ def _value(m: re.Match[str], minimum: int = 3) -> tuple[int, int] | None:
             return None
         if group == "bare":
             end = _trimmed_end(m.string, start, end)
-            if _code(m.string, start, end):
+            if code and _code(m.string, start, end):
                 return None
         value = m.string[start:end]
         if len(value) < minimum or value.lower() in _NOT_SECRET or _TEMPLATE.match(value):
@@ -336,7 +366,10 @@ def _code(string: str, start: int, end: int) -> bool:
     call = _CALL.match(string, start, end)
     if call is None:
         attribute = _ATTRIBUTE.fullmatch(string, start, end)
-        return attribute is not None and _KEY_WORD.search(attribute.group("last")) is not None
+        return (
+            attribute is not None and _code_object(attribute.group("first"))
+            and _SECRET_NAME.search(attribute.group("last")) is not None
+        )
     if call.group("dotted") is not None or (call.end() == end < len(string) and string[end] in ")]\"'"):
         return True
     closed = string[end - 1] == _CLOSING[string[call.end() - 1]]
@@ -346,6 +379,40 @@ def _code(string: str, start: int, end: int) -> bool:
     return (closed and not arguments) or (
         _VARIABLE.match(call.group("name")) is not None and _NAMES.fullmatch(arguments) is not None
     )
+
+
+def _code_object(name: str) -> bool:
+    return name.startswith("$") or "_" in name or _CAMEL.search(name) is not None or name in _CODE_OBJECTS
+
+
+def _in_code(text: str, key: str, key_start: int, value_end: int) -> bool:
+    """Ключ text[key_start:…] из знаков ASCII и значение до value_end — присваивание в коде, а не поле строки
+    подключения (_NEXT_FIELD) и не русское «Пароль:» (там пишут пароль, а не код)."""
+    return (
+        key.isascii() and not (key_start > 0 and text[key_start - 1] == ";")
+        and _NEXT_FIELD.match(text, value_end) is None
+    )
+
+
+def _private_keys(text: str) -> list[Span]:
+    """Блоки приватных ключей (_PEM_BEGIN). Поиск идёт после конца предыдущего блока: заголовок внутри блока до конца
+    текста иначе снова искал бы END до конца — квадратичное время на тексте из одних заголовков."""
+    spans: list[Span] = []
+    position = 0
+    while (m := _PEM_BEGIN.search(text, position)) is not None:
+        start = m.start()
+        while start > position and text[start - 1] in _DASHES:
+            start -= 1
+        if m.start() - start >= 2 and m.group("dashes"):
+            end = _PEM_END.search(text, m.end())
+            position = end.end() if end else len(text)
+        elif body := _PEM_BODY.match(text, m.end()):
+            position = body.end()
+        else:
+            position = m.end()
+            continue
+        spans.append(Span(start, position, EntityType.SECRET, name, validated=True))
+    return spans
 
 
 def _looks_like_password(value: str) -> bool:
@@ -406,9 +473,9 @@ def _not_a_value(key: str, value: str) -> bool:
 
 
 def detect(text: str, ctx: DetectContext) -> list[Span]:
-    spans = [
+    spans = _private_keys(text) + [
         Span(m.start(), m.end(), EntityType.SECRET, name, validated=True)
-        for pattern in (_PEM, _JWT, _TOKEN)
+        for pattern in (_JWT, _TOKEN)
         for m in pattern.finditer(text)
     ]
     parsed_until = 0
@@ -423,7 +490,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         if not value:
             continue
         parsed_until = value.end()
-        bounds = _value(value, minimum=2)
+        bounds = _value(value, minimum=2, code=_in_code(text, key, m.start(), value.end()))
         if bounds and not _not_a_value(key, text[bounds[0]:bounds[1]]):
             spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _ADD_KEY.finditer(text):
@@ -439,7 +506,9 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         if m.group("dash") is not None:
             span = _after_dash(m)
         else:
-            bounds = _value(m)
+            # «password = …» без слов перед «=» — тот же ключ присваивания, что видит _KEY_NAME.
+            keyword = text[m.start():m.start("sep")]
+            bounds = _value(m, code=keyword.lower() == "password" and _in_code(text, keyword, m.start(), m.end()))
             span = Span(*bounds, EntityType.SECRET, name) if bounds else None
         if span:
             spans.append(span)

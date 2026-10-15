@@ -505,6 +505,41 @@ def test_passwords_with_a_dot_or_brackets_that_are_no_code_are_still_found(text,
 @pytest.mark.parametrize(
     "text, value",
     [
+        ("redis://:my.pass@cache.local:6379", "my.pass"), ("sshpass -p top.secret ssh host", "top.secret"),
+        ("mysql -uroot -pmy.secret db", "my.secret"), (r"net use \\srv\share top.secret /user:x", "top.secret"),
+        ("<password>top.secret</password>", "top.secret"), ("Пароль: top.secret", "top.secret"),
+        ("Пароль — top.secret", "top.secret"), ("password is my.secret", "my.secret"),
+        ("--password top.secret", "top.secret"), ("sshpass -p qwerty(abc) ssh host", "qwerty(abc)"),
+        ("Пароль: qwerty(abc)", "qwerty(abc)"),
+        ("password=admin.secret", "admin.secret"), ("password: my.pass", "my.pass"), ("pwd=north.compass", "north.compass"),
+        ("Password=my.Password;", "my.Password"), ("$password = $ecret.Pass", "$ecret.Pass"),
+        ("password = self.compass", "self.compass"), ("Server=db;Password=config.Password;", "config.Password"),
+        ("Password=self.password;User ID=app", "self.password"),
+    ],
+    ids=["url", "sshpass", "mysql", "net_use", "xml", "ru_colon", "ru_dash", "is", "cli", "sshpass_call", "ru_call",
+         "plain_object", "pass", "compass", "conn_end", "ps_pass", "word_inside", "conn_key", "conn_next"],
+)
+def test_dotted_or_called_value_outside_an_assignment_in_code_is_a_secret(text, value):
+    """Обзор раунда слоёв 2 и 4: правило «это код» действовало во всех шаблонах, и пароль с точкой или скобками
+    открывался в адресе, команде, XML, прозе, строке подключения и после «password=»."""
+    assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password = db_config.password", "token = appSettings.Token", "password = this.password;",
+        "api_key: opts.api_key", "password: process.env.DB_PASSWORD", "Password = cfg.secretKey",
+    ],
+    ids=["underscore", "camel", "statement", "opts", "process", "secret_key"],
+)
+def test_attribute_of_a_code_object_under_a_secret_key_is_code(text):
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
         ("pwd=Ab[1]", "Ab[1]"), ("password=(Qw1)", "(Qw1)"), ("f(password=abc)", "abc"), ("pwd=Ab{1}", "Ab{1}"),
         ("connect(pwd=Ab[1])", "Ab[1]"), ("password=(Qw1).", "(Qw1)"), ("token=Ab(1)]", "Ab(1)"),
     ],
@@ -536,6 +571,38 @@ def test_private_key_block_after_its_header_in_prose_is_one_fragment():
     assert found(f"Файл начинается со строки BEGIN RSA PRIVATE KEY:\n{block}\n") == {block}
 
 
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("ключ:\n----BEGIN RSA PRIVATE KEY----\nMIIEowIBAAKCAQEA\n----END RSA PRIVATE KEY----\nдальше",
+         "----BEGIN RSA PRIVATE KEY----\nMIIEowIBAAKCAQEA\n----END RSA PRIVATE KEY----"),
+        ("ключ:\n—–BEGIN RSA PRIVATE KEY—–\nMIIEowIBAAKCAQEA\n—–END RSA PRIVATE KEY—–\nдальше",
+         "—–BEGIN RSA PRIVATE KEY—–\nMIIEowIBAAKCAQEA\n—–END RSA PRIVATE KEY—–"),
+        ("ключ:\n----BEGIN RSA PRIVATE KEY----\nMIIEowIBAAKCAQEA\n\nдальше",
+         "----BEGIN RSA PRIVATE KEY----\nMIIEowIBAAKCAQEA\n\nдальше"),
+        ("ключ:\nBEGIN RSA PRIVATE KEY\nMIIEowIBAAKCAQEA\nAAKCAQEAMIIEowIB\nEND RSA PRIVATE KEY\nдальше",
+         "BEGIN RSA PRIVATE KEY\nMIIEowIBAAKCAQEA\nAAKCAQEAMIIEowIB\nEND RSA PRIVATE KEY"),
+        ("ключ: BEGIN RSA PRIVATE KEY\r\nMIIEowIBAAKCAQEA\r\nAAKCAQEAMIIEowIB\r\n\r\nдальше",
+         "BEGIN RSA PRIVATE KEY\r\nMIIEowIBAAKCAQEA\r\nAAKCAQEAMIIEowIB"),
+        ("-----BEGIN OPENSSH PRIVATE KEY\nb3BlbnNzaC1rZXktdjEAAAAA\n\nдальше",
+         "-----BEGIN OPENSSH PRIVATE KEY\nb3BlbnNzaC1rZXktdjEAAAAA"),
+    ],
+    ids=["four_dashes", "typographic", "dashes_to_the_end", "bare_end", "bare_blank_line", "one_side"],
+)
+def test_private_key_block_with_a_damaged_header_is_one_fragment(text, value):
+    """Обзор раунда слоёв 2 и 4: после выключения PrivateKeyDetector заголовок с другим числом дефисов, с тире или
+    без них не помечался ничем, и тело ключа уходило открытым."""
+    assert found(text) == {value}
+
+
+def test_bare_private_key_header_without_a_body_is_not_a_secret():
+    for text in (
+        "Строка BEGIN RSA PRIVATE KEY\nа за ней тело ключа", "BEGIN PRIVATE KEY\nthen the body follows",
+        "BEGIN RSA PRIVATE KEY-----", "Ключ: XBEGIN RSA PRIVATE KEY\nMIIEowIBAAKCAQEA",
+    ):
+        assert found(text) == set(), text
+
+
 ARTIFACTORY = "AKC" + "p8Xk2pQ9vLm4Rt7Wz1"
 
 
@@ -544,11 +611,13 @@ ARTIFACTORY = "AKC" + "p8Xk2pQ9vLm4Rt7Wz1"
     [
         (f'"artifactory": "{ARTIFACTORY}"', ARTIFACTORY), (f"токен {ARTIFACTORY} в профиле", ARTIFACTORY),
         ("в профиле указан AP6abcdEFGH12 и всё", "AP6abcdEFGH12"),
+        (f"токен {ARTIFACTORY} в профиле", ARTIFACTORY),
     ],
-    ids=["quoted", "spaces", "password"],
+    ids=["quoted", "spaces", "password", "nbsp"],
 )
 def test_artifactory_value_is_found_without_its_surroundings(text, value):
-    """Находка «Layers 2 and 4: what the batch of 15.10 left»: значение правила Artifactory включало кавычки и пробелы."""
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: значение правила Artifactory включало кавычки и пробелы
+    (и неразрывный пробел: «\\s» в выражении правила — любой пробел Юникода)."""
     assert found(text) == {value}
 
 

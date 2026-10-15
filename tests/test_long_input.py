@@ -33,7 +33,10 @@ from cleaner.core.types import ChatState, Settings
         "".join("пароль — слово%d " % i for i in range(5000)),
         # Скобки в конце значения, атрибут и вызов с именами после ключа.
         "password=" + ")" * 100000, "password=" + "a." * 50000 + "1", "password=f(" + "a," * 50000 + "1)",
-        "pwd=" + "(a)" * 30000,
+        "pwd=" + "(a)" * 30000, "password = self." + "aB" * 50000,
+        # Заголовок ключа с рядами дефисов или тире, без них и тело ключа.
+        "BEGIN " * 20000, "-" * 100000, "—–BEGIN PRIVATE KEY—–\n" * 5000, "BEGIN PRIVATE KEY\n" * 10000,
+        "BEGIN PRIVATE KEY\nMIIEowIBAAKCAQEA\n" + "-" * 100000, "BEGIN PRIVATE KEY\nMIIEowIBAAKCAQEA\nEND PRIVATE KEY\n" * 5000,
         # Имя, часть которого — метка (5.7, шаг 4).
         "<ORG_1>." * 20000, "a.<ORG_1>." * 10000, "<ORG_1>a." * 15000, "<ORG_1" * 20000, "<ORG_1>." + "a.b." * 25000,
     ],
@@ -45,6 +48,8 @@ from cleaner.core.types import ChatState, Settings
         "distinct_tokens", "distinct_short_tokens",
         "password_words", "password_hyphenated_word", "password_double_hyphens", "password_copulas",
         "password_distinct_words", "closing_brackets", "attribute_chain", "call_names", "bracket_pairs",
+        "camel_attribute", "pem_begins", "dashes", "pem_dashed_headers", "pem_bare_headers", "pem_dashed_body",
+        "pem_bare_blocks",
         "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail",
     ],
 )
