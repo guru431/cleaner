@@ -35,8 +35,9 @@ _AUTHORITY = (
 # до пробела и не кончается знаком препинания или кавычкой; адрес сразу после кавычки кончается
 # такой же кавычкой («"https://…","<EMAIL_1>"»), а без неё идёт и через кавычки («?q='…'»). «www.» начинает
 # адрес после любого знака: cmark-gfm и remark-gfm делают ссылкой «_www.evil…», marked — и «xwww.evil…».
-# Обратная кавычка голый адрес не кончает: непарную все Markdown-читатели берут в ссылку, и после закрывающей
-# («`code`https://…/x`<EMAIL_1>»), а парную — код — отличает только разбор блоков Markdown (раздел 7).
+# Обратная кавычка голый адрес и mailto: не кончает: непарную все Markdown-читатели берут в ссылку, и после закрывающей
+# («`code`https://…/x`<EMAIL_1>»), markdown-it — и в mailto: («mailto:<EMAIL_1>`пример.рф»), а парную — код — отличает только
+# разбор блоков Markdown (раздел 7).
 _START = rf"(?:{_AUTHORITY}|www\.)"
 _END = r"[^\s\"'`.,;:!?)\]}]"
 # Строки в image-set() и -webkit-image-set() — в любом варианте, не только в первом, — и в src() браузер
@@ -112,7 +113,7 @@ _LINK = re.compile(
     rf"|{_IMPORT}(?P<imp>(?>\s|/\*[\s\S]*?(?:\*/|\Z))*+(?:\"(?:\\[\s\S]|[^\\\"])*+|'(?:\\[\s\S]|[^\\'])*+)?)"
     rf"|(?<![\w-]){_URL}\((?P<cssu>(?:\\[\s\S]|[^\\()\"'])*)\)"
     rf"|(?<![\w-]){_SET}\((?P<set>{_css_args(_CSS_DEPTH)}(?=[)\]}}])|[\s\S]*)"
-    rf"|(?P<mailto>mailto:[^\s\"'`]*{_END})"
+    rf"|(?P<mailto>mailto:[^\s\"']*{_END})"
     rf"|(?<=\")(?P<dq>{_START}[^\s\"]*{_END})"
     rf"|(?<=')(?P<sq>{_START}[^\s']*{_END})"
     rf"|(?P<url>{_START}\S*{_END})",
@@ -188,6 +189,24 @@ def _md(text: str) -> str:
     return _MD_DECODED.sub(lambda m: m.group()[1] if m.group()[0] == "\\" else _charref(m.group(), "md"), text)
 
 
+def _md_map(text: str) -> tuple[str, list[int]]:
+    """Текст так, как его прочтёт CommonMark (_md), и для каждого его знака — начало его записи в text, а в конце — len(text):
+    отрезок прочтения [a, b) записан в text[where[a]:where[b]]."""
+    out: list[str] = []
+    where: list[int] = []
+    position = 0
+    for m in _MD_DECODED.finditer(text):
+        out.append(text[position:m.start()])
+        where.extend(range(position, m.start()))
+        char = m.group()[1] if m.group()[0] == "\\" else _charref(m.group(), "md")
+        out.append(char)
+        where.extend(range(m.start(), m.end()) if char == m.group() else [m.start()] * len(char))
+        position = m.end()
+    out.append(text[position:])
+    where.extend(range(position, len(text) + 1))
+    return "".join(out), where
+
+
 def _readings(text: str, markdown: bool = False) -> tuple[str, ...]:
     """Текст ссылки так, как его прочтут: как есть (CSS в элементе style и в файле, простой текст), в тексте HTML,
     в значении атрибута HTML и в цели ссылки CommonMark. Ссылки на знаки браузер и CommonMark раскрывают до разбора
@@ -254,6 +273,26 @@ _FUZZY_PREFIXES = "$+=^`|"      # буквы, после которых ссыл
 # в ссылку не берёт, — в сторону ссылки.
 _FUZZY_PATH_START = re.compile(r"(?::\d++)?+[/?#]")
 _FUZZY_PATH = re.compile(rf"{_FUZZY_PATH_START.pattern}[^\s<>\uff5c\x00-\x1f\x7f-\x9f]*+")
+# Голый адрес e-mail делают ссылкой mailto cmark-gfm (GitHub), remark-gfm, micromark и marked: имя до «@» из букв и цифр
+# ASCII и «._+-», у cmark-gfm — до прежнего «@» («<EMAIL_1>.boss@evil…» — имя «contoso.ru.boss»), домен из них и «_» через
+# точки, без проверки суффикса, и с точкой впереди («@.evil…»); у cmark-gfm точка бывает и только в имени («<EMAIL_1>@zip»),
+# а marked отступает назад, пока домен не кончится буквой или цифрой без «-» и «_» за ней («evil.dev_» — «evil.de»).
+# cmark-gfm и remark-gfm ищут адрес в тексте после раскрытия экранирований и ссылок на знаки («petrov\@evil…»,
+# «petrov&#64;evil…»). И markdown-it с linkify (linkify-it 5, fuzzyEmail): у него в имени ещё «;:&=$,» и «"», и начинается
+# оно после пробела, начала текста, «"», «(», «<» или «>» («{"a":"petrov","b":"x@evil…» в сжатом JSON — одно имя), но не
+# сразу после прежнего «@» (в «<EMAIL_1>,boss@evil…» его нет); домен — из его букв (и не ASCII) и «-», последняя часть — из
+# его списка (_FUZZY_TLD) или адрес IPv4. _EMAIL_AT — «@», за которым может идти домен хоть одного из них.
+_EMAIL_GFM = _ASCII_ALNUM | frozenset("._+-")
+_EMAIL_NAME = _EMAIL_GFM | frozenset(";:&=$,\"")
+_EMAIL_AT = re.compile(rf"@(?=[-_.]|{_FUZZY_LETTER})")
+_EMAIL_GFM_DOMAIN = re.compile(r"\.?+[A-Za-z0-9_-]++(?:\.[A-Za-z0-9_-]++)*+")
+_EMAIL_MARKED_DOMAIN = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*[A-Za-z0-9])+(?![-_])")
+_EMAIL_FUZZY_DOMAIN = re.compile(rf"(?:{_FUZZY_LETTER}|-)++(?:\.(?:{_FUZZY_LETTER}|-)++)++")
+# Начало другой ссылки посреди домена обрывает его: remark-gfm делает ссылки из «www.» и «https://» после знака
+# препинания раньше адресов («…evil.dev.www.…» — домен «…evil.dev»), markdown-it — ссылку со схемой после не буквы ASCII
+# («…пример.рфhttps://…»). У markdown-it домен обрывает и код: «`» для linkify-it — буква, но кусок текста, где он ищет
+# адрес, кончается перед кодом («…~evil.example.org`;)`»); парная ли кавычка, видно только разбором Markdown.
+_LINK_START = re.compile(r"(?<![A-Za-z0-9])(?:www\.|(?:https?|ftp)://)", re.IGNORECASE)
 _RESTORED = frozenset({"restored", "altered", "derived"})
 _COUNTER = {
     "restored": "restored", "altered": "altered", "derived": "derived", "unknown": "unknown", "kept_by_policy": "kept",
@@ -356,6 +395,31 @@ def _fuzzy_host(text: str, start: int, dot: int) -> int | None:
         else:
             valid = False
     return None
+
+
+def _email_names(text: str, at: int) -> tuple[int, int, int]:
+    """Начала имени адреса e-mail, «@» которого в at, у GFM и у linkify-it (_EMAIL_GFM, _EMAIL_NAME; at — имени нет) и начало
+    всех знаков имени linkify-it перед at. Сразу за прежним «@» (не «\\@»: после экранирования markdown-it начинает новый
+    кусок текста) имя linkify-it не начинается — только после «"», «_» (выделение — тоже новый кусок) или ссылки на знак
+    внутри. Поиск идёт не дальше прежнего «@», поэтому линеен на весь текст."""
+    gfm = at
+    while gfm and text[gfm - 1] in _EMAIL_GFM:
+        gfm -= 1
+    run = gfm
+    while run and text[run - 1] in _EMAIL_NAME:
+        run -= 1
+    start = run
+    if run and text[run - 1] == "@" and text[run - 2:run - 1] != "\\":
+        start = min((i + 1 for i in (text.find(char, run, at) for char in '"_&') if i >= 0), default=at)
+    return gfm, start, run
+
+
+def _joined(pieces: list[Piece]) -> tuple[str, list[int]]:
+    """Текст кусков и начала кусков в нём с его длиной в конце."""
+    starts = [0]
+    for piece, _, _ in pieces:
+        starts.append(starts[-1] + len(piece))
+    return "".join(piece for piece, _, _ in pieces), starts
 
 
 def _at(starts: list[int], position: int) -> int:
@@ -469,15 +533,17 @@ class _Restorer:
         return result
 
     def _fuzzy(self, pieces: list[Piece]) -> list[Piece]:
-        """Ссылки linkify-it без схемы и без «www.» (_FUZZY_NAME) — в уже восстановленном тексте: её начало видно только в
-        нём («<TERM_1>/?q=…», «host-1.domain-1.example/…» — «.example» нет в списке linkify-it, а «.ru» есть). Внутри
-        чужой ссылки, как у _link, остаётся запись ответа, и вся ссылка помечается foreign_link."""
+        """Голые адреса e-mail (_emails) и ссылки linkify-it без схемы и без «www.» (_FUZZY_NAME) — в уже восстановленном
+        тексте: их начало видно только в нём («<ACCOUNT_1>@evil…», «<TERM_1>/?q=…», «host-1.domain-1.example/…» — «.example»
+        нет в списке linkify-it, а «.ru» есть). Внутри чужой ссылки, как у _link, остаётся запись ответа, и вся ссылка
+        помечается foreign_link. Адреса — первыми: метка, оставленная в чужом адресе, открывает ссылку linkify-it сразу
+        за своей «>» («<EMAIL_1>evil.ru/#contoso.ru»), а в ссылке, оставленной записью ответа, нового адреса не бывает."""
         if not any(kind in _RESTORED for _, kind, _ in pieces):
             return pieces
-        text = "".join(piece for piece, _, _ in pieces)
-        starts = [0]
-        for piece, _, _ in pieces:
-            starts.append(starts[-1] + len(piece))
+        text, starts = _joined(pieces)
+        if links := self._emails(pieces, starts, text):
+            pieces = self._foreign_links(pieces, starts, sorted(links))
+            text, starts = _joined(pieces)
         links, position = [], 0
         while m := _FUZZY_NAME.search(text, position):
             position = m.end()
@@ -505,6 +571,118 @@ class _Restorer:
             return False
         host = _written(pieces, starts, start, host_end)
         return host is None or not self._host_is_ours(host)
+
+    def _emails(self, pieces: list[Piece], starts: list[int], text: str) -> list[tuple[int, int]]:
+        """Голые адреса e-mail, которые уводят оригинал на чужой домен, — начало и конец каждого в text. Кроме самого текста
+        адреса ищутся в его прочтении CommonMark (_md_map), как у cmark-gfm и remark-gfm, но только их видами: markdown-it
+        экранирования и ссылки на знаки отделяет от текста, в котором ищет адреса. В самом тексте адреса проверяются слева
+        направо: чужой адрес оставляет записью ответа и «@» в значении («<EMAIL_1>»), и за ней тогда начинается имя
+        linkify-it следующего адреса (_email_names)."""
+        decoded_links: list[tuple[int, int]] = []
+        if "\\" in text or "&" in text:
+            decoded, where = _md_map(text)
+            if decoded != text:
+                decoded_links = sorted(
+                    link for m in _EMAIL_AT.finditer(decoded) for link in self._email(pieces, starts, decoded, m.start(), where)
+                )
+        links: list[tuple[int, int]] = []
+
+        def reverted(position: int) -> bool:
+            """Оставит ли записью ответа восстановленный знак position уже найденный чужой адрес."""
+            if pieces[_at(starts, position)][1] not in _RESTORED:
+                return False
+            for spans in (decoded_links, links):        # начала адресов — по возрастанию
+                i = bisect.bisect_right(spans, (position + 1,)) - 1
+                if i >= 0 and spans[i][1] > position:
+                    return True
+            return False
+
+        for m in _EMAIL_AT.finditer(text):
+            links += self._email(pieces, starts, text, m.start(), reverted=reverted)
+        return decoded_links + links
+
+    def _email(
+        self, pieces: list[Piece], starts: list[int], text: str, at: int, where: list[int] | None = None,
+        reverted: Callable[[int], bool] | None = None,
+    ) -> list[tuple[int, int]]:
+        """Ссылка mailto, которую делает из адреса с «@» в at хоть один читатель (_EMAIL_AT) и которая уводит оригинал на
+        чужой домен (_email_foreign), — начало и конец в тексте кусков всех прочтений адреса вместе: запись ответа
+        остаётся во всём, что могут взять в имя и домен читатели. where — text это прочтение CommonMark (_md_map), и в нём
+        ищут только читатели GFM. reverted — оставит ли записью ответа знак уже найденный чужой адрес."""
+        gfm, fuzzy, run = _email_names(text, at)
+        if fuzzy > run and reverted is not None and reverted(run - 1):
+            fuzzy = run         # прежнюю «@» в значении оставит чужой адрес, и имя linkify-it начнётся за меткой
+        mapped = where or range(len(text) + 1)
+        name = min(gfm, fuzzy)
+        if name == at or not any(
+            pieces[i][1] in _RESTORED for i in range(_at(starts, mapped[name]), _at(starts, mapped[at] - 1) + 1)
+        ):
+            return []       # в имени нет оригинала — так почти у всех «@»
+        domains = (_EMAIL_GFM_DOMAIN, _EMAIL_MARKED_DOMAIN, _EMAIL_FUZZY_DOMAIN)
+        found = [[pattern.match(text, at + 1) for pattern in domains]]
+        reach = max((m.end() for m in found[0] if m), default=at)
+        cuts = {m.start() for m in (_LINK_START.search(text, at + 1, reach + 3),) if m}
+        if (code := text.find("`", at + 1, reach)) > 0:
+            cuts.add(code)
+        for cut in sorted(cuts):        # домен, оборванный другой ссылкой или кодом
+            found.append([pattern.match(text, at + 1, cut) for pattern in domains])
+        links = []
+        for *gfm_domains, fuzzy_domain in found:
+            links += ((gfm, m.end()) for m in gfm_domains if m and gfm < at and "." in text[gfm:m.end()])
+            if fuzzy_domain and fuzzy < at and where is None:
+                end = fuzzy_domain.end()
+                tld = fuzzy_domain.group().rpartition(".")[2]
+                if _FUZZY_TLD.fullmatch(tld) or tld.isdigit() or self._cuttable(pieces, starts, at + 1, end):
+                    links.append((fuzzy, end))
+        links = list(dict.fromkeys(links))
+        if any(     # первой чужой ссылки довольно: поиск кончается на ней
+            self._email_foreign(pieces, starts, mapped[start], mapped[at], mapped[at + 1], mapped[end], text[at + 1:end])
+            for start, end in links
+        ):
+            return [(mapped[min(start for start, _ in links)], mapped[max(end for _, end in links)])]
+        return []
+
+    @staticmethod
+    def _cuttable(pieces: list[Piece], starts: list[int], start: int, end: int) -> bool:
+        """Начинается ли внутри text[start:end] восстановленный кусок: если его оставят записью ответа (чужая ссылка рядом),
+        метка в ней («<EMAIL_1>») оборвёт здесь домен, и суффикс домена станет другим."""
+        return any(pieces[i][1] in _RESTORED for i in range(_at(starts, start) + 1, _at(starts, end - 1) + 1))
+
+    def _email_foreign(
+        self, pieces: list[Piece], starts: list[int], start: int, at: int, domain_start: int, end: int, domain: str,
+    ) -> bool:
+        """Уйдёт ли оригинал по ссылке mailto на чужой домен — правило mailto (раздел 7) для голого адреса. В тексте кусков
+        ссылка — [start, end), «@» в at, домен с domain_start; domain — домен так, как его прочтёт читатель. Оригинал только в
+        домене уходит разве что в DNS, как у ссылки linkify-it (_fuzzy_foreign); адрес, который целиком дало одно значение, —
+        запись пользователя, и так же «@» с доменом из одного значения («To:<EMAIL_1>», «"user":"<ACCOUNT_1>","mail":
+        "<EMAIL_1>"»: имя у markdown-it длиннее, а письмо уходит на домен пользователя). Домен без известного суффикса (кроме
+        адреса IPv4) письма не примет: его нет в DNS («<EMAIL_1>.png» — «contoso.ru.png»), если только восстановленный кусок
+        внутри не может его оборвать (_cuttable). Иначе домен должен быть нашим по записи в ответе (_host_is_ours, после
+        раскрытия экранирований), а домен, граница которого делит замену, — чужой."""
+        last = _at(starts, end - 1)
+        if _at(starts, start) == last:
+            return False
+        if not any(pieces[i][1] in _RESTORED for i in range(_at(starts, start), _at(starts, at - 1) + 1)):
+            return False
+        if _at(starts, at) == last and pieces[last][1] in _RESTORED:
+            return False
+        suffix = ".".join(domain.rsplit(".", 2)[-2:])      # известный суффикс виден по двум последним частям («*.ck»)
+        if not (hostmap.has_known_suffix(suffix) or suffix.rpartition(".")[2].isdigit()):
+            if not self._cuttable(pieces, starts, domain_start, end):
+                return False
+        if domain.lower() in self._original_hosts:
+            return False        # узел из запроса, как его ни записали («<SECRET_1>.domain-1.example» — «srv01.contoso.ru»)
+        host = _written(pieces, starts, domain_start, end)
+        return host is None or not self._host_is_ours(_md(host))
+
+    @functools.cached_property
+    def _original_hosts(self) -> frozenset[str]:
+        """Имена узлов и адреса из запроса так, как их восстановят: письмо на такой домен уходит на узел, который назвал сам
+        пользователь, и тогда, когда часть имени сменила тип и записана меткой. Нужны только адресам с оригиналом в имени."""
+        return frozenset(
+            self._original(text, surrogate).lower() for text, surrogate in self.state.surrogates.items()
+            if surrogate.kind in ("host", "ip", "ip6")
+        )
 
     def _foreign_links(self, pieces: list[Piece], starts: list[int], links: list[tuple[int, int]]) -> list[Piece]:
         """Каждая ссылка links (начало и конец в тексте кусков) — один кусок foreign_link с записью ответа. Обработанный
