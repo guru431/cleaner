@@ -181,7 +181,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .panel > table thead th:first-child { border-top-left-radius: var(--radius); }
 .panel > table thead th:last-child { border-top-right-radius: var(--radius); }
 th.num, td.num { text-align: right; }
-td.actions { white-space: nowrap; overflow-wrap: normal; }
+/* Колонка действий — по своему содержимому (1% меньше любой кнопки), у правого края: иначе свободная ширина
+   таблицы доставалась и ей, и при коротких значениях кнопки стояли посреди строки. */
+td.actions { width: 1%; white-space: nowrap; overflow-wrap: normal; }
 td.actions > form, td.actions > details { display: inline-flex; margin: 0 4px 0 0; }
 td form { margin: 0; display: inline-flex; align-items: center; gap: 6px; }
 td.mono, td.event { font-family: var(--mono); font-size: 12.5px; }

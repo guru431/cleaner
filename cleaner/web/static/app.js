@@ -27,17 +27,23 @@ document.addEventListener("selectionchange", () => {
   field.value = selection.toString().trim();
 });
 
-// Перезагрузка по опросу или по концу потока. Ленту прокручивает она сама, а не страница, и её место браузер
-// не восстанавливает: если читали не конец, верхний видимый элемент и сдвиг от его верха кладутся в состояние этой
-// записи истории (history.state — не хранилище: живёт в этой вкладке, на этой записи) и возвращаются при загрузке.
-// Элемент, а не scrollTop: выросший выше элемент (повтор старого текста) иначе сдвинул бы место чтения.
+// Перезагрузка по опросу или по концу потока. Ленту прокручивает она сама, а страницу проверки — main, а не окно,
+// и их место браузер не восстанавливает. Оно кладётся в состояние этой записи истории (history.state — не хранилище:
+// живёт в этой вкладке, на этой записи) и возвращается при загрузке: у ленты, если читали не конец, — верхний
+// видимый элемент и сдвиг от его верха (элемент, а не scrollTop: выросший выше элемент — повтор старого текста —
+// иначе сдвинул бы место чтения); у main — scrollTop (на проверке перезагружает итог проверки риска, а всё выше
+// вкладок остаётся прежним; без этого вкладка с итогом уходила под край окна).
 function reload() {
+  const place = { ...history.state };
   const feed = document.querySelector("[data-scroll-end]");
   if (feed && feed.scrollHeight - feed.scrollTop - feed.clientHeight > 2) {
     const top = feed.getBoundingClientRect().top;
     const item = [...feed.children].find((element) => element.getBoundingClientRect().bottom > top);
-    if (item) history.replaceState({ ...history.state, feed: { item: item.id, offset: top - item.getBoundingClientRect().top } }, "");
+    if (item) place.feed = { item: item.id, offset: top - item.getBoundingClientRect().top };
   }
+  const main = document.querySelector("main");
+  if (main && main.scrollTop > 0) place.main = main.scrollTop;
+  history.replaceState(place, "");
   window.location.reload();
 }
 
@@ -112,4 +118,13 @@ document.querySelectorAll("[data-scroll-end]").forEach((feed) => {
   if (item && feed.contains(item)) feed.scrollTop += item.getBoundingClientRect().top - feed.getBoundingClientRect().top + (saved ? saved.offset : 0);
   else feed.scrollTop = feed.scrollHeight;
   if (saved) history.replaceState(rest, "");
+});
+
+// main — туда же, где страницу читали перед перезагрузкой (reload выше), один раз. После вкладок: выбранная вкладка
+// задаёт высоту страницы.
+document.querySelectorAll("main").forEach((main) => {
+  const { main: saved, ...rest } = history.state || {};
+  if (saved === undefined) return;
+  main.scrollTop = saved;
+  history.replaceState(rest, "");
 });

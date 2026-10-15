@@ -1,6 +1,7 @@
 """Страницы интерфейса: шаблоны без встроенных стилей и скриптов (SEC-9), иконки на месте, страницы открываются."""
 import re
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
@@ -54,6 +55,18 @@ def test_every_icon_used_in_the_templates_is_in_the_sprite(browser):
     references = re.compile(r'icon\("([a-z]+)"\)|icons\.svg#([a-z]+)')              # макрос и прямой <use>
     used = {"".join(match) for path in TEMPLATES for match in references.findall(path.read_text(encoding="utf-8"))}
     assert used and used <= symbols, used - symbols
+
+
+def test_pages_name_their_icon(browser):
+    """Без <link rel="icon"> браузер сам запрашивает /favicon.ico, а такого адреса нет: каждая вкладка писала в
+    консоль 404. Значок — файлом из static (CSP), с заголовками безопасности, как остальные."""
+    b = browser()
+    href = re.search(r'<link rel="icon" href="([^"]+)"', b.get("/login").text).group(1)
+    icon = b.get(href)
+    assert href.startswith("/static/") and icon.status_code == 200
+    assert icon.headers["content-type"].startswith("image/svg+xml")
+    assert icon.headers["content-security-policy"].startswith("default-src 'self'")
+    ElementTree.fromstring(icon.content)            # испорченный XML браузер молча не рисует: «--» в комментарии
 
 
 def test_chat_pages_open_with_chats_current(ivan, repo):
