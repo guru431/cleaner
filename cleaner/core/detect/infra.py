@@ -30,14 +30,17 @@ _URL_HOST = re.compile(
 # Двоеточие перед «\\» — это «C:\\Users» из журнала JSON, а не сетевой путь; путь из JSON — «\\\\host».
 _UNC_HOST = re.compile(r"(?<![\\\w:])\\\\(?:\\\\)?(?P<host>[\w.-]+)(?=\\)")
 _HOST_PREFIX = re.compile(r"[\w.-]*")     # имя узла без знаков за ним: «», «”», «**», «}», «…»
-_PARAM_HOST = re.compile(r"(?<![\w-])(?:-ComputerName|-Server|-cn|/S)[ \t]+(?P<host>[\w.-]+)", re.IGNORECASE)
+# Буква диска после ключа — не узел: «/S» у dir и xcopy — ключ подкаталогов («dir /s C:\Temp»).
+_PARAM_HOST = re.compile(
+    r"(?<![\w-])(?:-ComputerName|-Server|-cn|/S)[ \t]+(?![a-z]:)(?P<host>[\w.-]+)", re.IGNORECASE
+)
 _MACHINE = re.compile(r"(?<![\w.$-])(?P<host>(?=[A-Za-z-]*\d)[A-Za-z0-9][A-Za-z0-9-]{1,14})\$(?![\w$])")
 _DOTTED = re.compile(r"(?<![\w.$@-])(?:\w(?:[\w-]{0,61}\w)?\.)+[^\W\d_][\w-]{1,62}(?![\w-]|\.\w)")
 
 # Перед доменом может стоять двоеточие ключа команды («/user:CONTOSO\ivanov»); обратная косая
-# бывает удвоена (журналы JSON).
+# бывает удвоена (журналы JSON). Имя входа может быть и кириллицей («CORP\иванов»).
 _DOMAIN_LOGIN = re.compile(
-    r"(?<![\w\\./-])(?P<dom>[A-Za-z][A-Za-z0-9-]{1,14})\\{1,2}(?P<login>[A-Za-z0-9_][\w.$-]{0,63})(?![\w\\])"
+    r"(?<![\w\\./-])(?P<dom>[A-Za-z][A-Za-z0-9-]{1,14})\\{1,2}(?P<login>\w[\w.$-]{0,63})(?![\w\\])"
 )
 _FILE_EXT = re.compile(
     r"\.(?:txt|log|docx?|xlsx?|pptx?|pdf|exe|dll|ps1|psm1|bat|cmd|ini|cfg|conf|xml|json|ya?ml|csv|zip|7z|rar"
@@ -65,11 +68,18 @@ _DN = re.compile(
 )
 
 
+def _unpadded(address: str) -> str:
+    """«010.001.002.005» из таблиц и выгрузок — это 10.1.2.5: ipaddress нулей впереди не принимает.
+    Только если все четыре числа дополнены до трёх цифр: «01.02.03.04» — скорее номер, чем адрес."""
+    octets = address.split(".")
+    return ".".join(str(int(octet)) for octet in octets) if all(len(octet) == 3 for octet in octets) else address
+
+
 def _ipv4(text: str) -> Iterator[Span]:
     for m in _IPV4.finditer(text):
         address, _, prefix = m.group().partition("/")
         try:
-            ip = ipaddress.IPv4Address(address)
+            ip = ipaddress.IPv4Address(_unpadded(address))
         except ValueError:
             continue
         if not netmap.is_maskable(ip) or _VERSION_BEFORE.search(text[max(0, m.start() - 16):m.start()]):

@@ -70,6 +70,58 @@ def test_code_and_file_names_are_not_hosts():
     assert values(text) == set()
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "git config --global user.email", "const el = e.target;", "systemctl isolate multi-user.target",
+        "настройки в application.properties и log4j.properties", "ключ ~/.ssh/id_rsa.pub", "import java.io.*;",
+    ],
+)
+def test_code_names_ending_in_a_top_level_domain_are_not_domains(text):
+    """FINDINGS P3 «Detection: false positives that damage the text, and smaller recall gaps»: домены из кода."""
+    assert values(text) == set()
+
+
+def test_real_names_with_the_same_endings_are_still_found():
+    text = "Узлы srv01.corp.local, mail.contoso.ru, portal.fabrikam.org, api.contoso.io; домен contoso.io"
+    assert values(text) == {"srv01.corp.local", "mail.contoso.ru", "portal.fabrikam.org", "api.contoso.io", "contoso.io"}
+    assert values(r"https://portal.contoso.email/app, \\fs01.contoso.pub\share") == {
+        "portal.contoso.email", "fs01.contoso.pub",
+    }
+
+
+@pytest.mark.parametrize("text", [r"dir /s C:\Temp", r"xcopy /S D:\src", "dir /s c:"])
+def test_drive_letter_after_a_switch_is_not_a_host(text):
+    assert values(text) == set()
+
+
+def test_host_after_a_server_switch_is_still_found():
+    assert values("schtasks /S srv01 /query, systeminfo /s SRV02") == {"srv01", "SRV02"}
+
+
+def test_zero_padded_address_is_found():
+    result = found("узлы 010.001.002.005 и 192.168.001.010")
+    assert {(T.IP, "010.001.002.005"), (T.IP, "192.168.001.010")} <= result
+    assert values("петля 127.000.000.001, версия 001.002.003.004, номер 01.02.03.04") == set()
+
+
+def test_zero_padded_address_is_masked_and_restored():
+    state = ChatState(chat_id="padded", net_key=bytes(32))
+    result = sanitize(state, "узел 010.001.002.005", Settings())
+    assert "010.001.002.005" not in result.sanitized
+    assert restore(state, result.sanitized, Settings()).text == "узел 010.001.002.005"
+
+
+def test_lowercase_domain_known_from_an_earlier_text():
+    ctx = DetectContext(Settings(), known=(("CORP", T.DOMAIN),))
+    assert (T.ACCOUNT, "petrov") in found(r"вход corp\petrov", ctx)
+
+
+def test_cyrillic_login():
+    assert accounts(r"вход CORP\иванов, профиль C:\Users\петров\Desktop") == {"иванов", "петров"}
+    assert values(r"ERROR\nОшибка доступа, папка отчёты\иванов") == set()
+
+
 def test_well_known_and_never_listed_names_stay():
     ctx = DetectContext(Settings(never=frozenset({"partner.org"})))
     text = "Скачайте с download.microsoft.com, зеркало files.partner.org, наш сайт contoso.ru"

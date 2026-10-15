@@ -72,3 +72,5 @@ openai.com
 anthropic.com
 ollama.com
 huggingface.co
+# Имена из кода, совпадающие с доменом: окончание само по себе частое у настоящих узлов (.io)
+java.io
