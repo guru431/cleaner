@@ -17,8 +17,9 @@ from cleaner.core.entities import hostmap, labels, macsid, netmap
 from cleaner.core.entities.names import FIXED_RANK
 from cleaner.core.types import ChatState, EntityType, Policy, Settings, Surrogate
 
-Piece = tuple[str, str | None]      # текст и вид выделения; None — кусок ещё не обработан
-Handler = Callable[[re.Match[str]], Piece | None]
+Replaced = tuple[str, str]          # текст и вид выделения
+Piece = tuple[str, str | None, str]     # текст, вид выделения (None — кусок ещё не обработан) и его запись в ответе
+Handler = Callable[[re.Match[str]], Replaced | None]
 
 # Начало адреса с хостом — как его разбирает браузер (WHATWG URL). У особых схем (http, https, ws, wss, ftp)
 # после двоеточия пропускается любая череда «/» и «\», даже пустая: «https:\\evil…», «https:/\evil…» и
@@ -210,6 +211,50 @@ def _readings(text: str, markdown: bool = False) -> tuple[str, ...]:
 # «www.» до пробела, табуляции или перевода строки (mdast-util-gfm-autolink-literal, transformGfmAutolinkLiterals).
 _WORD = re.compile(r"[^ \t\r\n]+")
 _PROSE_START = re.compile(r"https?://|www\.", re.IGNORECASE)
+# Ссылка без схемы и без «www.», которую делает markdown-it с linkify (linkify-it 5, fuzzyLink включён по умолчанию; это
+# markdown-it 14 — предпросмотр VS Code и чаты на нём; linkify-it 6 и markdown-it 15 его выключили): имя с точкой, последняя
+# часть которого — домен верхнего уровня из списка linkify-it без учёта регистра: двухбуквенный из его таблицы, один из
+# длинных или «xn--…» («.py» и «.md» в нём есть, «.js» и «.dev» — нет). Ищется в восстановленном тексте — его и покажут —
+# цепочка букв и «-» через точки с точкой внутри, целиком: не после буквы, «-» и «.». Буква для linkify-it — любой знак,
+# кроме пробелов, знаков препинания, управляющих, «<», «>» и «｜»: и «$», «=», «~», и «©», знак ударения, мягкий перенос
+# («q=.py/…» — ссылка на узел «q=.py»). Каждый шаг атомарен, поиск линеен.
+def _letter_class() -> str:
+    """Класс букв linkify-it. Знаки препинания, пробелы и управляющие вне ASCII берутся из таблицы Юникода базовой
+    плоскости; знак вне неё — буква: имя с ним длиннее, чем у linkify-it, и не наше — в сторону ссылки."""
+    ranges, first = [], None
+    for code in range(0x80, 0x10000):
+        category = unicodedata.category(chr(code))
+        if (category[0] in "PZ" or category == "Cc") and first is None:
+            first = code
+        elif not (category[0] in "PZ" or category == "Cc") and first is not None:
+            ranges.append(f"{chr(first)}-{chr(code - 1)}")
+            first = None
+    return r"[^\s\x00-\x1f\x7f!\"#%&'()*,\-./:;<>?@\[\\\]_{}\uff5c" + "".join(ranges) + "]"
+
+
+_FUZZY_LETTER = _letter_class()
+_FUZZY_TLD = re.compile(
+    r"biz|com|edu|gov|net|org|pro|web|xxx|aero|asia|coop|info|museum|name|shop|рф|xn--[a-z0-9-]{1,59}"
+    r"|a[cdefgilmnoqrstuwxz]|b[abdefghijmnorstvwyz]|c[acdfghiklmnoruvwxyz]|d[ejkmoz]|e[cegrstu]|f[ijkmor]"
+    r"|g[abdefghilmnpqrstuwy]|h[kmnrtu]|i[delmnoqrst]|j[emop]|k[eghimnprwyz]|l[abcikrstuvy]|m[acdeghklmnopqrstuvwxyz]"
+    r"|n[acefgilopruz]|om|p[aefghklmnrstwy]|qa|r[eosuw]|s[abcdeghijklmnortuvxyz]|t[cdfghjklmnortvwz]|u[agksyz]"
+    r"|v[aceginu]|w[fs]|y[et]|z[amw]",
+    re.IGNORECASE,
+)
+_FUZZY_NAME = re.compile(
+    rf"(?<!{_FUZZY_LETTER})(?<![-.])(?:{_FUZZY_LETTER}|-)*+(?:\.++(?:{_FUZZY_LETTER}|-)++)++\.*+"
+)
+_FUZZY_PREFIXES = "$+=^`|"      # буквы, после которых ссылка linkify-it может начаться, но с которых — нет
+# Путь ссылки — за «/», «?» или «#» сразу после имени или порта; без них ссылка — одно имя. Путь у linkify-it кончается не
+# дальше пробела, управляющего знака, «<», «>» и «｜» — до них он и берётся: знак препинания в конце, который linkify-it
+# в ссылку не берёт, — в сторону ссылки.
+_FUZZY_PATH_START = re.compile(r"(?::\d++)?+[/?#]")
+_FUZZY_PATH = re.compile(rf"{_FUZZY_PATH_START.pattern}[^\s<>\uff5c\x00-\x1f\x7f-\x9f]*+")
+_RESTORED = frozenset({"restored", "altered", "derived"})
+_COUNTER = {
+    "restored": "restored", "altered": "altered", "derived": "derived", "unknown": "unknown", "kept_by_policy": "kept",
+    "foreign_link": "foreign_links",
+}
 # Вне тегов HTML — текст до первого «<» и участки от «>» до ближайшего «<» или кавычки, если между «<» и
 # этой «>» кавычек нет. Кавычка оставляет атрибут в теге: «>» могла стоять в значении («<a title="a>b"
 # href=…»). Любой «<», не только «<буква», и любая кавычка — в сторону ссылки; поиск линеен: каждая
@@ -279,12 +324,55 @@ def _nowhere(token: str) -> bool:
     )
 
 
+def _fuzzy_host(text: str, start: int, dot: int) -> int | None:
+    """Начало хоста ссылки linkify-it в имени, которое начинается в start (dot — его последняя точка); None — ссылка в
+    нём не начинается. Как у linkify-it — самое левое начало: начало имени, если перед ним не «:», «/», «\\», «@» и не
+    «_» после буквы или цифры («test_evil.ru» — не ссылка; «__evil.ru/x__» — ссылка: «_» открывает выделение и с ним
+    текстовый кусок markdown-it), иначе — после «$», «=» и подобных (_FUZZY_PREFIXES): «/a$b.ru/x» и «.py`b.ru/x» —
+    ссылки на b.ru, а «a$b.ru/x» — на «a$b.ru», «~~b.ru/x» — на «~~b.ru». С «.», «-» и этих знаков ссылка не начинается."""
+    before = text[start - 1] if start else ""
+    valid = before not in (":", "/", "\\", "@")
+    if before == "_":
+        first = start - 1
+        while first and text[first - 1] == "_":
+            first -= 1
+        valid = not (first and text[first - 1].isalnum())
+    for position in range(start, dot):
+        char = text[position]
+        if char in _FUZZY_PREFIXES:
+            valid = True
+        elif valid and char not in ".-":
+            return position
+        else:
+            valid = False
+    return None
+
+
+def _at(starts: list[int], position: int) -> int:
+    """Номер куска, в котором стоит знак position; starts — начала кусков в тексте и его длина в конце."""
+    return bisect.bisect_right(starts, position) - 1
+
+
+def _written(pieces: list[Piece], starts: list[int], start: int, end: int) -> str | None:
+    """Запись в ответе того, что восстановление поставило в text[start:end]; None, если граница делит замену."""
+    out = []
+    for i in range(_at(starts, start), _at(starts, end - 1) + 1):
+        text, _, raw = pieces[i]
+        if text == raw:
+            out.append(raw[max(start - starts[i], 0):end - starts[i]])
+        elif start <= starts[i] and starts[i + 1] <= end:
+            out.append(raw)
+        else:
+            return None
+    return "".join(out)
+
+
 def _split(pieces: list[Piece], pattern: re.Pattern[str] | surrogates.Finder, handler: Handler) -> list[Piece]:
     """Применяет handler к совпадениям pattern в ещё не обработанных кусках."""
     out: list[Piece] = []
-    for text, kind in pieces:
+    for text, kind, raw in pieces:
         if kind is not None:
-            out.append((text, kind))
+            out.append((text, kind, raw))
             continue
         position = 0
         for m in pattern.finditer(text):
@@ -292,11 +380,11 @@ def _split(pieces: list[Piece], pattern: re.Pattern[str] | surrogates.Finder, ha
             if replaced is None:
                 continue
             if m.start() > position:
-                out.append((text[position:m.start()], None))
-            out.append(replaced)
+                out.append((text[position:m.start()], None, text[position:m.start()]))
+            out.append((*replaced, m.group()))
             position = m.end()
         if position < len(text):
-            out.append((text[position:], None))
+            out.append((text[position:], None, text[position:]))
     return out
 
 
@@ -360,14 +448,99 @@ class _Restorer:
         pieces = _split(pieces, self.exact, self._exact)
         pieces = _split(pieces, _TOLERANT, self._label)
         pieces = _split(pieces, _IPV4, self._derived_ip)
-        return _split(pieces, _MAC, self._mac)
+        pieces = _split(pieces, _MAC, self._mac)
+        return self._fuzzy(pieces) if links else pieces
 
     def _inner(self, text: str) -> str:
         """Что получилось бы из text без учёта ссылок; счётчики не трогает."""
         saved = dict(self.counters)
-        result = "".join(piece for piece, _ in self.run([(text, None)], links=False))
+        result = "".join(piece for piece, _, _ in self.run([(text, None, text)], links=False))
         self.counters = saved
         return result
+
+    def _fuzzy(self, pieces: list[Piece]) -> list[Piece]:
+        """Ссылки linkify-it без схемы и без «www.» (_FUZZY_NAME) — в уже восстановленном тексте: её начало видно только в
+        нём («<TERM_1>/?q=…», «host-1.domain-1.example/…» — «.example» нет в списке linkify-it, а «.ru» есть). Внутри
+        чужой ссылки, как у _link, остаётся запись ответа, и вся ссылка помечается foreign_link."""
+        if not any(kind in _RESTORED for _, kind, _ in pieces):
+            return pieces
+        text = "".join(piece for piece, _, _ in pieces)
+        starts = [0]
+        for piece, _, _ in pieces:
+            starts.append(starts[-1] + len(piece))
+        links, position = [], 0
+        while m := _FUZZY_NAME.search(text, position):
+            position = m.end()
+            name = m.group().rstrip(".")
+            host_end = m.start() + len(name)
+            if not _FUZZY_PATH_START.match(text, host_end):
+                continue        # без пути оригинал в ссылке — разве что в хосте
+            dot = m.start() + name.rfind(".")
+            start = _fuzzy_host(text, m.start(), dot)
+            if start is None or text[dot - 1] == "." or not _FUZZY_TLD.fullmatch(name, dot + 1 - m.start()):
+                continue        # путь читается только у ссылки: иначе «/a.ru/a.ru/…» читался бы с каждого имени
+            position = _FUZZY_PATH.match(text, host_end).end()      # имена в пути — часть ссылки, как у linkify-it
+            if self._fuzzy_foreign(pieces, starts, start, host_end, position):
+                links.append((start, position))
+        return self._foreign_links(pieces, starts, links) if links else pieces
+
+    def _fuzzy_foreign(self, pieces: list[Piece], starts: list[int], start: int, host_end: int, end: int) -> bool:
+        """Уйдёт ли оригинал по ссылке linkify-it text[start:end] с путём на чужой узел. Оригинал только в хосте
+        («Петров.md/x», «newbox.contoso.ru» — имя, выведенное из частей, 7, шаг 4) запросом не уходит; ссылка, которую
+        целиком дало одно значение, — запись пользователя. Иначе хост должен быть нашим, как у ссылки со схемой: его
+        запись в ответе проверяет _host_is_ours, а хост, граница которого делит замену, — чужой."""
+        if _at(starts, start) == _at(starts, end - 1):
+            return False
+        if not any(pieces[i][1] in _RESTORED for i in range(_at(starts, host_end), _at(starts, end - 1) + 1)):
+            return False
+        host = _written(pieces, starts, start, host_end)
+        return host is None or not self._host_is_ours(host)
+
+    def _foreign_links(self, pieces: list[Piece], starts: list[int], links: list[tuple[int, int]]) -> list[Piece]:
+        """Каждая ссылка links (начало и конец в тексте кусков) — один кусок foreign_link с записью ответа. Обработанный
+        кусок на краю ссылки входит в неё целиком, необработанный делится; ссылки, которые после этого пересеклись,
+        сливаются. Счётчики вошедших кусков возвращаются."""
+        spans: list[tuple[int, int]] = []
+        for start, end in links:
+            first, last = _at(starts, start), _at(starts, end - 1)
+            start = start if pieces[first][1] is None else starts[first]
+            end = end if pieces[last][1] is None else starts[last + 1]
+            if spans and start < spans[-1][1]:
+                spans[-1] = (spans[-1][0], max(end, spans[-1][1]))
+            else:
+                spans.append((start, end))
+        out: list[Piece] = []
+        position, i = 0, 0      # до position текст уже выдан; кусок i — первый, выданный не целиком
+
+        def rest(k: int) -> Piece:
+            """Кусок k без выданного начала: начало бывает выдано только у необработанного."""
+            cut = max(position - starts[k], 0)
+            return pieces[k] if not cut else (pieces[k][0][cut:], None, pieces[k][2][cut:])
+
+        for start, end in spans:
+            while starts[i + 1] <= start:
+                out.append(rest(i))
+                i += 1
+            if max(position, starts[i]) < start:
+                head = pieces[i][0][max(position, starts[i]) - starts[i]:start - starts[i]]
+                out.append((head, None, head))
+            written = []
+            while True:
+                piece, kind, raw = pieces[i]
+                if kind is None:
+                    written.append(raw[max(start, starts[i]) - starts[i]:end - starts[i]])
+                else:
+                    written.append(raw)
+                    self.counters[_COUNTER[kind]] -= 1
+                if starts[i + 1] >= end:
+                    break
+                i += 1
+            out.append(("".join(written), "foreign_link", "".join(written)))
+            self.counters["foreign_links"] += 1
+            position = end
+            if starts[i + 1] == end:
+                i += 1
+        return out + [rest(k) for k in range(i, len(pieces))]
 
     def _hidden(self, type_: EntityType) -> bool:
         return self.settings.policies.get(type_) is Policy.HIDE
@@ -479,13 +652,13 @@ class _Restorer:
             return False        # «//TODO:…» в коде: и после восстановления адрес не ведёт на внешний узел
         return restored != m.group()        # иначе — если в ней есть что восстанавливать
 
-    def _link(self, m: re.Match[str]) -> Piece | None:
+    def _link(self, m: re.Match[str]) -> Replaced | None:
         if not self._foreign(m):
             return None
         self.counters["foreign_links"] += 1
         return m.group(), "foreign_link"
 
-    def _prose(self, m: re.Match[str]) -> Piece | None:
+    def _prose(self, m: re.Match[str]) -> Replaced | None:
         """Адрес в простом тексте, начало которого видно только после раскрытия ссылок на знаки и экранирований
         («https&colon;&sol;&sol;evil…», «www&period;evil…», «https\\:\\/\\/evil…»): _LINK его не находит, а remark-gfm
         делает ссылкой. Ссылкой считается всё слово — и часть перед началом адреса: границ ссылки в исходной записи
@@ -529,7 +702,7 @@ class _Restorer:
             return self.state.entities[surrogate.entity_id].restore_value       # метка
         return self._fixed(surrogate) or surrogate.original
 
-    def _exact(self, m: surrogates.Hit) -> Piece:
+    def _exact(self, m: surrogates.Hit) -> Replaced:
         text = m.group()
         surrogate = self.state.surrogates[m.key]
         # Политика каждой части составного имени: часть, которую не восстанавливают, оставляет заменой всё имя —
@@ -556,7 +729,7 @@ class _Restorer:
         self.counters[kind] += 1
         return original, kind
 
-    def _label(self, m: re.Match[str]) -> Piece | None:
+    def _label(self, m: re.Match[str]) -> Replaced | None:
         if m.group() in self.state.foreign_labels:
             return None
         type_ = EntityType(m.group("type").replace("\\", "").upper())
@@ -574,7 +747,7 @@ class _Restorer:
         self.counters["altered"] += 1
         return _one_prefix(entity.restore_value, entity.type, m.string, m.end()), "altered"
 
-    def _derived_ip(self, m: re.Match[str]) -> Piece | None:
+    def _derived_ip(self, m: re.Match[str]) -> Replaced | None:
         try:
             ip = ipaddress.IPv4Address(m.group())
         except ValueError:
@@ -589,7 +762,7 @@ class _Restorer:
         self.counters["derived"] += 1
         return str(ipaddress.IPv4Address(original)), "derived"
 
-    def _mac(self, m: re.Match[str]) -> Piece | None:
+    def _mac(self, m: re.Match[str]) -> Replaced | None:
         surrogate = self.macs.get(macsid.mac_key(m.group()))
         if surrogate is None:
             return None
@@ -612,7 +785,7 @@ def restore(state: ChatState, answer: str, settings: Settings) -> RestoreResult:
     parts: list[str] = []
     segments: list[Segment] = []
     position = 0
-    for piece, kind in restorer.run([(answer, None)], links=True):
+    for piece, kind, _ in restorer.run([(answer, None, answer)], links=True):
         if kind is not None:
             segments.append(Segment(position, position + len(piece), kind))
         parts.append(piece)
