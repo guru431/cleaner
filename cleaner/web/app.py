@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import timezone, tzinfo
 from pathlib import Path
@@ -15,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from cleaner.clock import Clock
+from cleaner.egress import cloud
 from cleaner.service import ChatService
 from cleaner.storage.repo import Repository
 from cleaner.web import auth, routes_auth, routes_chats, routes_review, routes_settings
@@ -35,6 +37,7 @@ SECURITY_HEADERS = {
 # Только по TLS: браузер запомнит, что этот узел открывается лишь по HTTPS. Без includeSubDomains.
 HSTS = "max-age=31536000"
 _STATUS_TEXT = {404: "Страница не найдена", 405: "Такое действие здесь не поддерживается"}
+SEND_WORKERS = 4
 
 
 _UPLOAD_HEADROOM = 1024 * 1024      # поля формы и заголовки частей multipart сверх самого файла
@@ -82,15 +85,23 @@ def _interrupt(repo: Repository) -> None:
 def create_app(
     repo: Repository, clock: Clock, *, secure_cookies: bool, max_text_chars: int = 500_000,
     tz: tzinfo = timezone.utc, engines: Any = None, jobs: Jobs | None = None, max_file_mb: int = 50,
+    sends: Jobs | None = None, cloud_send: Any = None,
 ) -> FastAPI:
     jobs = jobs or Jobs()
+    # Отправки облаку — свой пул: в общем пуле из двух потоков сканы идут десятки минут (раздел 14).
+    sends = sends or Jobs(ThreadPoolExecutor(max_workers=SEND_WORKERS, thread_name_prefix="cleaner-send"))
+    service = ChatService(
+        repo, max_text_chars, engines, submit=jobs.submit, send_submit=sends.submit, cloud_send=cloud_send or cloud.send,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
         # Остановка: соединение с базой закрывается после этого (__main__). Недождавшиеся задания помечаются
         # здесь, пока оно открыто, — а не случайной ошибкой записи в закрытую базу и пометкой при следующем старте.
+        service.live.cancel_all()            # идущие ответы облака сохраняются неполными
         jobs.shutdown()
+        sends.shutdown()
         _interrupt(repo)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -99,7 +110,7 @@ def create_app(
     app.state.engines = engines                      # cleaner.engines.Engines; в тестах — заглушка
     app.state.jobs = jobs
     app.state.max_file_bytes = max_file_mb * 1024 * 1024
-    app.state.service = ChatService(repo, max_text_chars, engines, submit=jobs.submit)
+    app.state.service = service
     app.state.throttle = auth.Throttle(clock)
     app.state.secure_cookies = secure_cookies
     app.state.tz = tz

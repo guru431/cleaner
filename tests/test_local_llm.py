@@ -62,6 +62,12 @@ def test_completion_failures_have_codes(response, code):
     assert raised.value.code == code
 
 
+def test_answer_to_a_question_may_be_cut_by_length():
+    """FR-9.4: обрезанный ответ на вопрос пользователя полезнее отказа; слою 5 он по-прежнему не годится."""
+    answer = client(lambda request: chat_answer("начало ответа", "length"))
+    assert answer.complete([{"role": "user", "content": "x"}], max_tokens=8, truncated_ok=True) == "начало ответа"
+
+
 def test_unreachable_gateway_is_unavailable():
     def handler(request):
         raise httpx.ConnectError("connection refused")

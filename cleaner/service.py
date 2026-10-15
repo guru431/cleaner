@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -10,13 +11,17 @@ from typing import Any
 
 from cleaner.core import leakcheck, risk
 from cleaner.core.detect.base import DetectorError
+from cleaner.core.detect.llm import CompletionError
 from cleaner.core.entities import ops
 from cleaner.core.leakcheck import Leak
 from cleaner.core.match import normalize
-from cleaner.core.pipeline import Layers, SanitizeResult, sanitize
+from cleaner.core.pipeline import (
+    Layers, NotSendable, Outgoing, OutgoingContext, SanitizeResult, Turn, build_outgoing, probe_context, sanitize,
+)
 from cleaner.core.restore import RestoreResult, restore
 from cleaner.core.types import ChatState, EntityType, Policy, Settings, Span
-from cleaner.storage.repo import Item, Repository, StaleState
+from cleaner.egress import ProviderError, cloud
+from cleaner.storage.repo import Item, Provider, Repository, StaleState
 
 log = logging.getLogger("cleaner.service")
 
@@ -26,6 +31,9 @@ _INTERNAL = "Внутренняя ошибка очистки: текст не �
 _BUSY = "Чат меняли одновременно, текст не обработан — запустите его ещё раз"
 _IN_PROGRESS = "текст ещё обрабатывается"
 _RISK_IDLE = ("", "done", "failed", "interrupted")     # состояния проверки риска, из которых её можно запустить
+INPUT_SOURCES = ("paste", "instruction")                # вставленный текст и инструкция пользователя для модели (FR-8.5)
+LOCAL_ANSWER_TOKENS = 4096
+_SEND_INTERNAL = "Внутренняя ошибка отправки"
 
 Work = Callable[[ChatState, list[Item], Settings], tuple[list[Item], list[Item]]]
 Submit = Callable[..., None]
@@ -97,14 +105,82 @@ def _cached_layers(item: Item, on: dict[str, bool]) -> tuple[Layers, list[str]]:
     return Layers(cached=spans), ran
 
 
+class SendRefused(EditRefused):
+    """Отправка невозможна; причина без данных пользователя."""
+
+
+@dataclass
+class Preview:
+    """Экран подтверждения (FR-8.4): ровно то, что уйдёт, и что в запрос не вошло."""
+
+    outgoing: Outgoing
+    provider: Provider
+    skipped: list[tuple[int, str]]      # номер элемента в чате и причина
+
+
+class LiveAnswer:
+    """Ответ облака, пока он идёт: фрагменты копятся в памяти, страница получает их событиями сервера."""
+
+    def __init__(self) -> None:
+        self._parts: list[str] = []
+        self._lock = threading.Lock()
+        self.cancel = threading.Event()
+        self.finished = False
+
+    def append(self, piece: str) -> None:
+        with self._lock:
+            self._parts.append(piece)
+
+    def text(self) -> str:
+        with self._lock:
+            return "".join(self._parts)
+
+
+class LiveAnswers:
+    def __init__(self) -> None:
+        self._answers: dict[str, LiveAnswer] = {}
+        self._lock = threading.Lock()
+
+    def start(self, item_id: str) -> LiveAnswer:
+        with self._lock:
+            return self._answers.setdefault(item_id, LiveAnswer())
+
+    def get(self, item_id: str) -> LiveAnswer | None:
+        with self._lock:
+            return self._answers.get(item_id)
+
+    def finish(self, item_id: str) -> None:
+        with self._lock:
+            answer = self._answers.pop(item_id, None)
+        if answer is not None:
+            answer.finished = True
+
+    def cancel_all(self) -> None:
+        """Остановка службы: идущие ответы прерываются и сохраняются неполными."""
+        with self._lock:
+            for answer in self._answers.values():
+                answer.cancel.set()
+
+
+def link(provider: Provider) -> cloud.Connection:
+    return cloud.Connection(
+        provider.protocol, provider.base_url, provider.auth_style, provider.api_key, provider.max_tokens,
+        provider.extra_body,
+    )
+
+
 class ChatService:
     def __init__(
         self, repo: Repository, max_text_chars: int = 500_000, engines: Any = None, submit: Submit = run_now,
+        send_submit: Submit = run_now, cloud_send: Callable[..., Iterable[str]] = cloud.send,
     ):
         self.repo = repo
         self.max_text_chars = max_text_chars
         self.engines = engines          # cleaner.engines.Engines или заглушка тестов; None — без слоёв 4–5
         self.submit = submit
+        self.send_submit = send_submit  # свой пул: облако не ждёт за сканами в общем (раздел 14)
+        self.cloud_send = cloud_send
+        self.live = LiveAnswers()
 
     def _check_length(self, text: str) -> None:
         if len(text) > self.max_text_chars:
@@ -151,9 +227,11 @@ class ChatService:
 
     # --- входные тексты: очередь и задание (раздел 14) ----------------------------
 
-    def add_input(self, chat_id: str, user_id: str, text: str) -> Item:
+    def add_input(self, chat_id: str, user_id: str, text: str, source: str = "paste") -> Item:
         self._check_length(text)
-        item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", text, None, source="paste", status="queued"))
+        if source not in INPUT_SOURCES:
+            raise EditRefused("неизвестный вид текста")
+        item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", text, None, source=source, status="queued"))
         self.submit(self.process, chat_id, item.id, user_id)
         return self.repo.item(chat_id, item.id) or item
 
@@ -333,9 +411,206 @@ class ChatService:
                     and settings.policies.get(state.entities[span["entity_id"]].type) is Policy.BLOCK
                 ]
                 views.append(InputView(item, leaks, blocked))
+            elif item.source == "local":
+                # Локальная модель видела оригиналы: в её ответе нет замен, и «восстанавливать» в нём нечего —
+                # настоящий адрес в выданной подсети иначе приняли бы за выведенный (FR-7.6).
+                views.append(AnswerView(item, RestoreResult(item.original, [], {})))
             else:
                 views.append(AnswerView(item, restore(state, item.original, settings)))
         return ChatView(state, settings, views)
+
+    # --- облачная модель (FR-8) и локальная вместо облачной (FR-9.4) --------------------------
+
+    def _connection(self, chat_id: str) -> tuple[Provider, str]:
+        provider_id, model = self.repo.chat_provider(chat_id)
+        provider = self.repo.provider(provider_id) if provider_id else None
+        if provider is None:
+            raise SendRefused("Выберите подключение и модель для этого чата")
+        if not provider.enabled:
+            raise SendRefused(f"Подключение «{provider.name}» выключено администратором")
+        if model not in provider.models:
+            raise SendRefused("Этой модели больше нет в подключении: выберите модель заново")
+        return provider, model
+
+    def set_provider(self, chat_id: str, provider_id: str | None, model: str) -> None:
+        """FR-8.3: подключение и модель чата; None — ручной режим."""
+        if provider_id is not None:
+            provider = self.repo.provider(provider_id)
+            if provider is None or not provider.enabled or model not in provider.models:
+                raise SendRefused("Такого подключения или модели нет")
+        self.repo.set_chat_provider(chat_id, provider_id, model if provider_id else "")
+
+    def _turns(self, chat_id: str, items: list[Item]) -> tuple[list[Turn], list[int], list[tuple[int, str]]]:
+        """Ходы запроса из элементов чата, номера их элементов и то, что в запрос не войдёт, с причиной."""
+        on = self._enabled(chat_id)
+        turns, seqs, skipped = [], [], []
+        for item in items:
+            if item.kind == "input":
+                if item.status in ("queued", "running"):
+                    raise SendRefused(f"Текст {item.seq} ещё обрабатывается: дождитесь очистки")
+                if item.status != "done":
+                    skipped.append((item.seq, "текст не очищен"))
+                    continue
+                layers, _ = _cached_layers(item, on)
+                role = "system" if item.source == "instruction" else "user"
+                turns.append(Turn(role, item.original, layers.cached or ()))
+            elif item.source == "local":
+                skipped.append((item.seq, "ответ локальной модели: в нём оригиналы"))
+                continue
+            elif item.status in ("done", "partial") and item.original:
+                turns.append(Turn("assistant", item.original))
+            else:
+                skipped.append((item.seq, "ответа нет"))
+                continue
+            seqs.append(item.seq)
+        return turns, seqs, skipped
+
+    def _build(self, chat_id: str, state: ChatState, items: list[Item], settings: Settings, provider: Provider, model: str) -> Preview:
+        turns, seqs, skipped = self._turns(chat_id, items)
+        try:
+            outgoing = build_outgoing(state, turns, settings, provider.id, model)
+        except NotSendable as exc:
+            raise SendRefused(str(exc)) from None
+        skipped += [(seqs[number], "ответ до первого вопроса") for number in outgoing.skipped]
+        return Preview(outgoing, provider, sorted(skipped))
+
+    def outgoing(self, chat_id: str) -> Preview:
+        """Экран подтверждения: запрос, как он уйдёт сейчас. Состояние чата не записывается."""
+        provider, model = self._connection(chat_id)
+        state, _ = self.repo.load_state(chat_id)
+        return self._build(chat_id, state, self.repo.items(chat_id), self.repo.settings(), provider, model)
+
+    def send(self, chat_id: str, user_id: str, digest: str) -> Item:
+        """FR-8.4: запрос собирается заново и уходит, только если он совпал с показанным на экране подтверждения."""
+        provider, model = self._connection(chat_id)
+        built: dict[str, OutgoingContext] = {}
+
+        def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
+            outgoing = self._build(chat_id, state, items, settings, provider, model).outgoing
+            if outgoing.context.digest() != digest:
+                raise SendRefused("Запрос изменился после показа: проверьте его ещё раз")
+            if not outgoing.sendable:
+                raise SendRefused("В запросе найден оригинал или фрагмент запрещённого типа: отправка заблокирована")
+            built["context"] = outgoing.context
+            meta = {"provider": provider.name, "model": model}
+            return [Item(uuid.uuid4().hex, 0, "answer", "", None, source="api", status="running", meta=meta)], []
+
+        [item] = self._apply(chat_id, work)
+        context = built["context"]
+        self.repo.audit(
+            "cloud_send", user_id, chat_id, provider=provider.id, model=model, messages=len(context.messages),
+            chars=sum(len(text) for text in context.texts()),
+        )
+        self.live.start(item.id)
+        self.send_submit(self.run_send, chat_id, item.id, user_id, context, link(provider))
+        return item
+
+    def run_send(self, chat_id: str, item_id: str, user_id: str, context: OutgoingContext, connection: cloud.Connection) -> None:
+        """Задание: поток ответа — в память для страницы, по окончании — в элемент чата. Обрыв сохраняет полученное."""
+        live = self.live.start(item_id)
+        outcome: dict = {}
+        error = ""
+        state, settings = None, None
+        try:
+            state, _ = self.repo.load_state(chat_id)
+            settings = self.repo.settings()
+            for piece in self.cloud_send(context, connection, state, settings, cancel=live.cancel, outcome=outcome):
+                live.append(piece)
+            if live.cancel.is_set():
+                error = "Остановлено"
+            elif outcome.get("truncated"):
+                error = "Ответ обрезан пределом длины, заданным в подключении"
+        except cloud.LeakDetected as exc:
+            error = "В исходящем тексте найден оригинал: запрос не отправлен"
+            self.repo.audit("leak", user_id, chat_id, count=exc.count, stage="send")
+        except ProviderError as exc:
+            error = str(exc)
+            self.repo.audit("error", user_id, chat_id, kind="ProviderError", stage="send", status=exc.status)
+        except Exception as exc:
+            if isinstance(exc, KeyError) and self.repo.chat(chat_id) is None:
+                self.live.finish(item_id)
+                return                                    # чат удалили, пока шёл ответ
+            log.error("отправка: %s", type(exc).__name__)
+            error = _SEND_INTERNAL
+            self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="send")
+        text = live.text()
+        status = "done" if not error else "partial" if text else "failed"
+        try:
+            item = self.repo.item(chat_id, item_id)
+            if item is not None:
+                meta = {key: value for key, value in item.meta.items() if key != "error"} | ({"error": error} if error else {})
+                self.repo.finish_answer(chat_id, item_id, text, status, meta)
+        except KeyError:
+            pass                                          # чат удалили
+        finally:
+            self.live.finish(item_id)
+        if text and state is not None:
+            self.repo.audit("restore", user_id, chat_id, **restore(state, text, settings).counters)
+
+    def stop(self, chat_id: str, item_id: str) -> None:
+        """FR-8.6: генерацию можно остановить; полученная часть сохраняется неполной."""
+        item = self.repo.item(chat_id, item_id)
+        live = self.live.get(item_id) if item is not None and item.source == "api" else None
+        if live is None:
+            raise KeyError(item_id)
+        live.cancel.set()
+
+    def check_provider(self, provider: Provider, model: str) -> str:
+        """FR-8.2: проверочный запрос без данных пользователя. ProviderError — отказ провайдера."""
+        context = probe_context(provider.id, model)
+        return "".join(self.cloud_send(context, link(provider), None, None))[:500]
+
+    def _local_messages(self, chat_id: str, items: list[Item]) -> list[dict[str, str]]:
+        """FR-9.4: локальной модели — оригиналы; ответы облака — восстановленными, локальные — как есть."""
+        state, _ = self.repo.load_state(chat_id)
+        settings = self.repo.settings()
+        system, messages = [], []
+        for item in items:
+            if item.kind == "input":
+                if not item.original:
+                    continue
+                if item.source == "instruction":
+                    system.append(item.original)
+                    continue
+                role, text = "user", item.original
+            elif item.original and item.status in ("done", "partial"):
+                text = item.original if item.source == "local" else restore(state, item.original, settings).text
+                role = "assistant"
+            else:
+                continue
+            if messages and messages[-1]["role"] == role:
+                messages[-1]["content"] += "\n\n" + text
+            elif messages or role == "user":
+                messages.append({"role": role, "content": text})
+        if not messages or messages[-1]["role"] != "user":
+            raise SendRefused("Последним в чате должен быть вопрос: вставьте текст")
+        return ([{"role": "system", "content": "\n\n".join(system)}] if system else []) + messages
+
+    def ask_local(self, chat_id: str, user_id: str) -> Item:
+        """FR-9.4: вопрос локальной модели вместо облачной. Текст не очищается: он не покидает сервер."""
+        if self.engines is None:
+            raise SendRefused("Локальная модель не подключена")
+        messages = self._local_messages(chat_id, self.repo.items(chat_id))
+        item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "answer", "", None, source="local", status="queued"))
+        self.repo.audit("local_answer", user_id, chat_id, messages=len(messages))
+        self.submit(self.run_local, chat_id, item.id, user_id, messages)
+        return item
+
+    def run_local(self, chat_id: str, item_id: str, user_id: str, messages: list[dict[str, str]]) -> None:
+        try:
+            self.repo.set_item_status(chat_id, item_id, "running")
+            text = self.engines.client().complete(messages, max_tokens=LOCAL_ANSWER_TOKENS, truncated_ok=True)
+            self.repo.finish_answer(chat_id, item_id, text, "done", {})
+        except KeyError:
+            return                                        # чат удалили, пока ждали модель
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, (DetectorError, CompletionError)) else _SEND_INTERNAL
+            log.error("ответ локальной модели: %s", type(exc).__name__)
+            try:
+                self.repo.finish_answer(chat_id, item_id, "", "failed", {"error": reason})
+            except KeyError:
+                return
+            self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="local_answer")
 
     # --- правки (FR-6) -------------------------------------------------------------
 

@@ -113,8 +113,12 @@ class LocalLLM:
         except httpx.HTTPError:
             raise LocalLLMError("unavailable", "локальная модель недоступна") from None
 
-    def complete(self, messages: list[dict[str, str]], *, max_tokens: int, json_schema: dict | None = None) -> str:
-        """Ответ модели одним текстом; температура 0; схема JSON — параметром response_format (раздел 11)."""
+    def complete(
+        self, messages: list[dict[str, str]], *, max_tokens: int, json_schema: dict | None = None,
+        truncated_ok: bool = False,
+    ) -> str:
+        """Ответ модели одним текстом; температура 0; схема JSON — параметром response_format (раздел 11).
+        truncated_ok — ответ на вопрос пользователя (FR-9.4): обрезанный по длине отдаётся, а не отклоняется."""
         body: dict = {"model": self.config.model, "messages": messages, "temperature": 0, "max_tokens": max_tokens}
         if json_schema is not None:
             body["response_format"] = {
@@ -127,7 +131,7 @@ class LocalLLM:
             content, finish = choice["message"].get("content"), choice.get("finish_reason")
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             raise LocalLLMError("bad_response", "ответ шлюза не разбирается") from None
-        if finish == "length":
+        if finish == "length" and not truncated_ok:
             raise LocalLLMError("length", "ответ локальной модели обрезан по длине")
         if not isinstance(content, str) or not content.strip():
             raise LocalLLMError("empty", "локальная модель вернула пустой ответ")

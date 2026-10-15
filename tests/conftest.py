@@ -113,7 +113,7 @@ class FakeCompleter:
         self.requests: list[dict] = []
         self.error: Exception | None = None
 
-    def complete(self, messages, *, max_tokens, json_schema=None) -> str:
+    def complete(self, messages, *, max_tokens, json_schema=None, truncated_ok=False) -> str:
         self.requests.append({"messages": messages, "max_tokens": max_tokens, "json_schema": json_schema})
         if self.error is not None:
             raise self.error
