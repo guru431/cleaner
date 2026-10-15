@@ -4,6 +4,3 @@ pytest-timeout
 httpx
 # тестовый клиент Starlette: с httpx он устарел (StarletteDeprecationWarning)
 httpx2
-# выложены 06.10 и 12.10.2026 — моложе 14 дней (deploy/lock_linux.py); снять после 26.10.2026
-iniconfig<2.3.1
-truststore<0.10.5

@@ -7,16 +7,17 @@ pip сам считает по машине, где запущен (Windows, Pyt
 сервера (SERVER), а нужный серверу набор ещё раз пересчитывается по ним из метаданных, которые pip вернул.
 
 Версии берутся из файлов машины разработки — на сервере работает тот же проверенный код; контрольные
-суммы — оттуда же: pip-compile --generate-hashes записывает суммы всех файлов версии, в том числе
+суммы — оттуда же: uv pip compile --generate-hashes записывает суммы всех файлов версии, в том числе
 колёс для Linux.
 
     python deploy/lock_linux.py requirements.in requirements-linux.txt requirements.txt
     python deploy/lock_linux.py requirements-dev.in requirements-dev-linux.txt requirements-dev.txt requirements.txt
 
 Версия, выложенная на PyPI меньше MIN_AGE_DAYS дней назад, не принимается: скомпрометированный релиз
-замечают не в первый день (инцидент с LiteLLM, SEC-14), а pip-compile берёт самый новый. Отказ называет
-пакет — закрепите в .in предыдущую версию (`пакет<версия`) и пересоберите файлы. Отсечь их сразу при
-разрешении нельзя: pip --uploaded-prior-to отказывает целиком, если индекс без времени выкладки (сборки torch).
+замечают не в первый день (инцидент с LiteLLM, SEC-14). Файлы машины разработки отсекают такие версии уже
+при разрешении (uv --exclude-newer), кроме torch: индекс его сборок без CUDA не публикует время выкладки.
+Здесь проверка повторяется по версиям на PyPI — для torch она единственная. Отказ называет пакет —
+закрепите в .in предыдущую версию (`пакет<версия`) и пересоберите файлы.
 """
 from __future__ import annotations
 
@@ -41,7 +42,7 @@ SERVER = {
     "platform_system": "Linux", "platform_version": "", "python_full_version": "3.12.3",
     "python_version": "3.12", "sys_platform": "linux",
 }
-# pip-compile пишет закреплённый пакет с дополнениями так: docling-slim[format-pdf,…]==2.139.0
+# Закреплённый пакет бывает записан с дополнениями (так писал pip-compile): docling-slim[format-pdf,…]==2.139.0
 _PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==(\S+)")
 _HASH = re.compile(r"--hash=(sha256:[0-9a-f]{64})")
 MIN_AGE_DAYS = 14
@@ -61,7 +62,7 @@ def canonical(name: str) -> str:
 
 
 def read_lock(path: Path) -> dict[str, tuple[str, list[str]]]:
-    """Пакет → (версия, контрольные суммы) из файла pip-compile --generate-hashes."""
+    """Пакет → (версия, контрольные суммы) из файла uv pip compile --generate-hashes."""
     pins: dict[str, tuple[str, list[str]]] = {}
     current = None
     for line in path.read_text(encoding="utf-8").splitlines():

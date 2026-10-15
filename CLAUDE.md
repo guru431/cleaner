@@ -31,9 +31,13 @@ set -a; . data/cleaner.env; set +a          # главный ключ — в о�
 Сервер описан в `D:\vsc\vLLM` (его правила действуют и здесь); установщик, юнит и проверка — в `deploy/`. Доступ с этой машины (сеть `example/19`): `ssh -i ~/.ssh/example -p 34012 example@example`, у `example` sudo без пароля.
 
 ```bash
-# Зависимости сервера — после каждой пересборки requirements.txt / requirements-dev.txt
-# (pip-compile --allow-unsafe --generate-hashes --cache-dir D:/pip-cache …; кэш по умолчанию на C: переполнял диск).
-# lock_linux.py отказывает, если версия выложена на PyPI меньше 14 дней назад: закрепить в .in предыдущую.
+# Файлы машины разработки: uv (стоит в .venv, uv==0.12.21) не берёт версии моложе 14 дней; кэш — на D:
+# (кэш по умолчанию на C: переполнял диск). Обновить пакет — дописать --upgrade-package <имя>.
+for f in requirements requirements-dev; do .venv/Scripts/uv.exe pip compile $f.in --generate-hashes --emit-index-url \
+  --python .venv/Scripts/python.exe --index https://pypi.org/simple --index-strategy unsafe-best-match \
+  --exclude-newer "14 days" --exclude-newer-package torch=false --cache-dir D:/uv-cache -o $f.txt; done
+# Зависимости сервера — после каждой пересборки requirements.txt / requirements-dev.txt.
+# lock_linux.py отказывает, если версия выложена на PyPI меньше 14 дней назад (так проверяется и torch).
 .venv/Scripts/python.exe deploy/lock_linux.py requirements.in requirements-linux.txt requirements.txt
 .venv/Scripts/python.exe deploy/lock_linux.py requirements-dev.in requirements-dev-linux.txt requirements-dev.txt requirements.txt
 
