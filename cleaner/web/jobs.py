@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from concurrent.futures import Executor, Future, ThreadPoolExecutor, wait
 
@@ -41,9 +42,11 @@ def shutdown(*pools: Jobs) -> int:
     прерванными вызывающий, пока соединение с базой открыто (app.lifespan)."""
     for pool in pools:
         pool._executor.shutdown(wait=False, cancel_futures=True)
-    pending = set().union(*(pool._pending for pool in pools))
-    _, unfinished = wait(pending, timeout=max(pool._stop_wait for pool in pools))
-    return len(unfinished)
+    started, unfinished = time.monotonic(), 0
+    for pool in pools:                   # срок у каждого пула свой, отсчёт — от общего начала
+        _, left = wait(set(pool._pending), timeout=max(0.0, pool._stop_wait - (time.monotonic() - started)))
+        unfinished += len(left)
+    return unfinished
 
 
 def _run(fn: Callable[..., None], args: tuple[object, ...]) -> None:
