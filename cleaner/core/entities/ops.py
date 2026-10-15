@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from cleaner.core.entities.names import FIXED_RANK
-from cleaner.core.types import ChatRule, ChatState, EntityType
+from cleaner.core.types import ChatRule, ChatState, Entity, EntityType
 
 
 def _forget(state: ChatState, value: str) -> None:
@@ -35,11 +35,26 @@ def retype(state: ChatState, entity_id: str, new_type: EntityType) -> None:
     entity.forms = []
 
 
+def _final(state: ChatState, entity: Entity) -> Entity:
+    """Сущность, в которую entity уже влита прежними объединениями, или она сама."""
+    for _ in range(len(state.key_alias)):       # петля в таблице не зациклит
+        target = state.entities.get(state.key_alias.get(f"{entity.type.value}:{entity.key}", ""))
+        if target is None or target is entity:
+            break
+        entity = target
+    return entity
+
+
 def merge_entities(state: ChatState, keep_id: str, drop_id: str) -> None:
     """Дальше оба значения получают замену сущности keep."""
     keep, drop = state.entities[keep_id], state.entities[drop_id]
     if keep.type is not drop.type:
         raise ValueError("объединять можно только сущности одного типа")
+    # Уже влитая сущность своей замены не выдаёт: объединение идёт с той, куда её влили, иначе
+    # цепочка merge(a, b), merge(b, c) оставила бы c под меткой b, которой в тексте уже нет.
+    keep, drop = _final(state, keep), _final(state, drop)
+    if keep is drop:
+        return
     keep.forms += [form for form in drop.forms if form not in keep.forms]
     drop.forms = []
     for value in [*drop.parts.values(), *drop.words]:

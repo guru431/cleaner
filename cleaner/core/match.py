@@ -6,9 +6,17 @@ import unicodedata
 from collections.abc import Iterable
 from typing import TypeVar
 
+import regex
+
 T = TypeVar("T")
 _TOKEN = re.compile(r"[^\W\d_]+|\d+")
 _SPACE_RUN = re.compile(r"\s+")
+# Невидимые знаки: форматирующие (мягкий перенос, пробел нулевой ширины, метки направления) и знак
+# ударения. Ударение выпадает, только если не вошло в букву при сборке NFC: у русских гласных букв
+# с ударением нет, а «é» — одна буква и остаётся собой.
+_STRESS = "\N{COMBINING ACUTE ACCENT}"
+_FORMAT = regex.compile(r"\p{Cf}+")
+_FORMAT_OR_STRESS = regex.compile(r"[\p{Cf}" + _STRESS + "]+")
 
 
 def _lower(text: str) -> str:
@@ -26,7 +34,10 @@ def _fold(char: str) -> str:
 
 
 def _normalize_decomposed(text: str) -> tuple[str, list[int], list[int]]:
-    """Медленный путь для текста не в NFC: буква с комбинирующими знаками собирается в одну."""
+    """Медленный путь для текста не в NFC: буква с комбинирующими знаками собирается в одну.
+
+    Ударение, которое в букву не вошло, выпадает, а буква накрывает его в исходном тексте.
+    """
     chars: list[str] = []
     starts: list[int] = []
     ends: list[int] = []
@@ -45,20 +56,46 @@ def _normalize_decomposed(text: str) -> tuple[str, list[int], list[int]]:
         while j < n and unicodedata.combining(text[j]):
             j += 1
         for char in unicodedata.normalize("NFC", text[i:j]):
-            chars.append(_fold(char))
-            starts.append(i)
-            ends.append(j)
+            if char != _STRESS:
+                chars.append(_fold(char))
+                starts.append(i)
+                ends.append(j)
         i = j
     return "".join(chars), starts, ends
+
+
+def _without(text: str, invisible: regex.Pattern[str]) -> tuple[str, list[int], list[int]]:
+    """Нормализация текста без невидимых знаков; позиции — в исходном тексте.
+
+    Знаки вырезаются одним проходом выражения, остальное идёт обычным путём. Знак накрывает и
+    невидимые знаки за ним: ударение на последней букве уходит под замену вместе с ней.
+    """
+    pieces: list[str] = []
+    origin: list[int] = []          # позиция каждого оставшегося знака в исходном тексте и конец текста
+    position = 0
+    for m in invisible.finditer(text):
+        pieces.append(text[position:m.start()])
+        origin.extend(range(position, m.start()))
+        position = m.end()
+    pieces.append(text[position:])
+    origin.extend(range(position, len(text) + 1))
+    lowered, starts, ends = _normalize("".join(pieces))
+    return lowered, [origin[s] for s in starts], [origin[e] for e in ends]
 
 
 def _normalize(text: str) -> tuple[str, list[int], list[int]]:
     """Текст для сравнения и границы каждого его знака в исходном тексте.
 
     Нижний регистр, «ё» как «е», буквы в NFC, любая цепочка пробельных знаков (в том числе
-    неразрывный пробел и перевод строки) — один пробел.
+    неразрывный пробел и перевод строки) — один пробел, невидимых знаков и отдельного ударения нет.
     """
-    if not unicodedata.is_normalized("NFC", text):
+    nfc = unicodedata.is_normalized("NFC", text)
+    # В тексте NFC отдельное ударение в букву уже не вошло; в остальном оно выпадает после сборки
+    # букв медленным путём — иначе «e» с ударением перестала бы быть «é».
+    invisible = _FORMAT_OR_STRESS if nfc else _FORMAT
+    if invisible.search(text):
+        return _without(text, invisible)
+    if not nfc:
         return _normalize_decomposed(text)
     lowered = _lower(text).replace("ё", "е")
     pieces: list[str] = []
