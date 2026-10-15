@@ -1,28 +1,36 @@
 {% extends "base.html" %}
 {% block title %}Отправка — {{ chat.title }} — Cleaner{% endblock %}
 {% block main %}
-<p><a href="/chats/{{ chat.id }}">← К чату</a></p>
-<h1>Отправка: {{ provider.name }} — {{ model }}</h1>
-<p>Ниже ровно то, что уйдёт провайдеру. Оригиналов в нём быть не должно: проверьте замены. Ответ придёт в чат восстановленным.</p>
+<div class="bar">
+  <nav class="crumbs"><a href="/chats/{{ chat.id }}">{{ chat.title }}</a><span class="sep">/</span><span class="here">Отправка</span></nav>
+</div>
+<h1>{{ provider.name }} — {{ model }}</h1>
+<p class="lead">Ниже ровно то, что уйдёт провайдеру. Оригиналов в нём быть не должно: проверьте замены. Ответ придёт в чат восстановленным.</p>
 {% if skipped %}
-<p class="warn">Не войдут в запрос: {% for seq, reason in skipped %}элемент {{ seq }} — {{ reason }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>
+<p class="flash warn">Не войдут в запрос: {% for seq, reason in skipped %}элемент {{ seq }} — {{ reason }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>
 {% endif %}
 {% if not sendable %}
-<p class="error">Отправка заблокирована:{% if leaks %} найдено оригиналов — {{ leaks }} (выделены);{% endif %}{% if blocked %} фрагментов запрещённого типа — {{ blocked }};{% endif %} уберите их на экранах проверки текстов.</p>
+<p class="flash bad">Отправка заблокирована:{% if leaks %} найдено оригиналов — {{ leaks }} (выделены);{% endif %}{% if blocked %} фрагментов запрещённого типа — {{ blocked }};{% endif %} уберите их на экранах проверки текстов.</p>
 {% endif %}
-<h2>Системная часть</h2>
-<pre>
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Системная часть</h2></header>
+  <pre class="text">
 {{ system }}</pre>
+</section>
 {% for role, html in messages %}
-<h2>{% if role == "user" %}Вопрос{% else %}Ответ модели{% endif %}</h2>
-<pre>
+<section class="panel">
+  <header class="panel-head"><h2 class="title">{% if role == "user" %}Вопрос{% else %}Ответ модели{% endif %}</h2></header>
+  <pre class="text">
 {{ html }}</pre>
+</section>
 {% endfor %}
 {% if sendable %}
-<form method="post" action="/chats/{{ chat.id }}/send">
-  {% include "_csrf.html" %}
-  <input type="hidden" name="digest" value="{{ digest }}">
-  <button>Отправить {{ provider.name }} — {{ model }}</button>
-</form>
+<div class="sticky-bottom">
+  <form method="post" action="/chats/{{ chat.id }}/send">
+    {% include "_csrf.html" %}
+    <input type="hidden" name="digest" value="{{ digest }}">
+    <button class="primary">Отправить {{ provider.name }} — {{ model }}</button>
+  </form>
+</div>
 {% endif %}
 {% endblock %}

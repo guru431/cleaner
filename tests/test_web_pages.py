@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from cleaner.core.types import EntityType as T
+
 WEB = Path(__file__).resolve().parent.parent / "cleaner" / "web"
 TEMPLATES = sorted((WEB / "templates").glob("*.html"))
 # Под CSP `default-src 'self'` такие места молча не работают: стиль не применяется, обработчик не вызывается.
@@ -55,3 +57,28 @@ def test_layer_switch_states_its_layer_and_state(ivan):
     assert 'aria-pressed="true" title="Слой 4 — модели распознавания имён: включён"' in page
     ivan.post(f"/chats/{chat_id}/layers", layer="ner", enabled="no")
     assert 'aria-pressed="false" title="Слой 4 — модели распознавания имён: выключен"' in ivan.get(f"/chats/{chat_id}").text
+
+
+def review_page(browser_, repo) -> str:
+    chat_id = browser_.chat()
+    browser_.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    return browser_.get(f"/chats/{chat_id}/items/{repo.items(chat_id)[0].id}").text
+
+
+def test_review_keeps_the_multiline_mask_field_and_every_tab(ivan, boss, repo):
+    """Выделение через перевод строки приходит в поле целиком только в textarea; вкладки — все в разметке,
+    «Замены» выбраны без JS и без запомненного выбора."""
+    page = review_page(ivan, repo)
+    assert '<textarea id="mask-value" name="value"' in page
+    assert re.findall(r'data-tab="([a-z]+)"', page) == ["fragments", "risk", "gold"]
+    assert "data-tabs data-tabs-remember" in page
+    assert 'class="tab-panel on" role="tabpanel" data-tab-panel="fragments"' in page
+    assert re.findall(r'data-tab="([a-z]+)"', review_page(boss, repo)) == ["fragments", "risk", "dictionary", "gold"]
+
+
+def test_review_of_a_blocked_text_offers_no_copy(ivan, repo):
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="клиент Ромашка")
+    repo.add_dictionary("always", "Ромашка", T.ORG)
+    page = ivan.get(f"/chats/{chat_id}/items/{repo.items(chat_id)[0].id}").text
+    assert "data-copy" not in page and "/download" not in page and "Выдача заблокирована" in page
