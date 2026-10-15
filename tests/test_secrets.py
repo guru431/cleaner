@@ -393,6 +393,59 @@ def test_numbers_and_words_after_token_or_code_in_prose_are_left_alone():
         assert found(text) == set(), text
 
 
+def test_error_event_or_classifier_code_of_six_to_eight_digits_is_left_alone():
+    """Ревью правила «токен или код в тексте»: восьмизначный код ошибки Windows (HRESULT) и код классификатора скрывались
+    на своём месте, а это суть вопроса в поддержке."""
+    for text in (
+        "код ошибки 80070005 при обновлении", "error code 80244022", "Windows Update error code 80244022",
+        "ошибка с кодом 80070005", "Установка завершилась с кодом ошибки 80073712", "exited with status code 13370001",
+        "Код ОКТМО 45380000", "код по ОКПО 12345678", "код по окуд 0710001", "код события 1000001 в журнале",
+    ):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("код подтверждения 847593", "847593"), ("ошибка входа, пришёл код 847593", "847593"),
+        ("Error: verification code 73921456", "73921456"), ("Ошибка: код 847593 не подходит", "847593"),
+        ("в ответ пришёл код 847593", "847593"),
+    ],
+    ids=["confirmation", "error_far_before", "error_before_another_word", "error_before_a_colon", "reply"],
+)
+def test_one_time_code_next_to_an_error_word_is_still_hidden_in_its_place(text, value):
+    assert finds(text) == {(value, False)}
+
+
+def test_identifier_of_words_after_token_key_or_code_is_left_alone():
+    """Ревью правила «токен или код в тексте»: имя из слов через «_», «/», «-» (столбец, модуль, модель) было токеном
+    и скрывалось во всём чате."""
+    for text in (
+        "The primary key is customer_order_line_v2_id", "код в модуле cleaner/core/detect/secrets2",
+        "tokens for model gpt4o_mini_2024_07_18", "the key column order_items_2024_archive",
+        "ключ настройки Security-Policy-Level-2-Strict", "код функции getUserById_v2_handler",
+        "ключ API_KEY_2024_PRODUCTION_V2 в файле .env", "tokens for gpt-4o-mini-2024-07-18",
+    ):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("токен доступа token_c5b6a7f8e9d0c1b2a3f4", "token_c5b6a7f8e9d0c1b2a3f4"),
+        ("токен Zx81kLmN02pQ-aB_cD3eF4gH", "Zx81kLmN02pQ-aB_cD3eF4gH"),
+        ("ключ продукта W269N-WFGWX-YVC9B-WJ6CQ-T83GX", "W269N-WFGWX-YVC9B-WJ6CQ-T83GX"),
+        ("пароль от почты Summer_Holidays_2024", "Summer_Holidays_2024"),
+        ("Password for the mailbox correct-horse-battery-42", "correct-horse-battery-42"),
+    ],
+    ids=["random_part", "base64url", "product_key", "password_words", "password_passphrase"],
+)
+def test_token_with_a_random_part_or_a_password_of_words_is_still_found(text, value):
+    """Имя из слов открыто только после «токен», «ключ», «код»: после «пароль» это пароль из слов, а часть без вида слова
+    (шестнадцатеричная, base64, группа ключа продукта с цифрами между заглавными) делает значение токеном."""
+    assert finds(text) == {(value, True)}
+
+
 def test_english_state_and_pointer_words_after_a_dash_are_left_alone():
     """Ревью правила тире: частые английские слова состояния и указания — проза, а не пароль."""
     for text in (

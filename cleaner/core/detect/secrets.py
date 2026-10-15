@@ -164,13 +164,30 @@ _PROSE = re.compile(r"(?<!\w)(?:пароль|password)(?:\s+is)?\s+(?P<bare>(?!-
 # только на своём месте. Четыре-пять цифр — код события или ошибки («код события 4625», «код ошибки 18456»).
 # Значение и проверки вида — знаки ASCII, слова перед ним — любые; слова берутся по одному, от ближайшего.
 _TOKEN_PHRASE = re.compile(
-    r"(?<!\w)(?:токе?н(?:а|у|ом|е|ы|ов|ам|ами|ах)?|tokens?|(?P<code>код(?:а|у|ом|е|ы|ов|ам|ами|ах)?|codes?)"
-    r"|ключ(?:а|у|ом|е|и|ей|ам|ами|ах)?|keys?|парол(?:ь|я|ю|ем|е|и|ей)|passwords?)"
+    r"(?<!\w)(?P<word>токе?н(?:а|у|ом|е|ы|ов|ам|ами|ах)?|tokens?|(?P<code>код(?:а|у|ом|е|ы|ов|ам|ами|ах)?|codes?)"
+    r"|ключ(?:а|у|ом|е|и|ей|ам|ами|ах)?|keys?|(?P<password>парол(?:ь|я|ю|ем|е|и|ей)|passwords?))"
     r"(?:[ \t]++[\w-]++){0,4}?(?:[ \t]*+:[ \t]*+|[ \t]++)"
     r"(?P<bare>(?=[A-Za-z0-9_+/-]*?\d)(?=[A-Za-z0-9_+/-]*?[A-Za-z])(?:[0-9a-fA-F]{16,}+|[A-Za-z0-9][A-Za-z0-9_+/-]{19,}+=*+)"
     r"|(?(code)\d{6,8}+|(?!)))(?![\w+/=-])(?!\.\w)",
     re.IGNORECASE,
 )
+# Код из цифр после слова ошибки, события, выхода, состояния или классификатора — не одноразовый: «код ошибки 80070005»
+# (HRESULT Windows), «error code 80244022», «ошибка с кодом 80070005», «код по ОКТМО 45380000». Слово стоит между «код» и
+# числом или прямо перед «код» (и через «с», «со», with); «ошибка входа, пришёл код 847593» — одноразовый код.
+_STATUS_WORD = re.compile(
+    r"(?<!\w)(?:ошибк\w*|событи\w*|возврат\w*|завершени\w*|выхода|состояни\w*|статус\w*|сбо(?:й|я|ю|ем|е)|исключени\w*"
+    r"|errors?|exit|status|return\w*|events?|hresult|result|stop|exception|fault|failure|bugcheck"
+    r"|ок(?:по|тмо|ато|вэд2?|огу|фс|опф|уд|пд2?|дп|см|в|еи|оф)|кбк)(?!\w)",
+    re.IGNORECASE,
+)
+_PREPOSITIONS = frozenset({"с", "со", "with"})
+# Имя из слов, а не токен: части через «_», «/», «-» — слово (строчное, с заглавной, заглавное, camelCase) с числом в конце
+# или без, число до восьми цифр со словом за ним или без, строчное слово с числом внутри («gpt4o», «k8s»):
+# «customer_order_line_v2_id», «cleaner/core/detect/secrets2», «gpt-4o-mini-2024-07-18», «API_KEY_2024_PRODUCTION_V2».
+# Часть со случайными знаками («c5b6a7f8», «Zx81kLmN», «W269N» ключа продукта) делает значение токеном.
+_NAME_WORD = r"[A-Z]*+[a-z]*+(?:[A-Z][a-z]++)*+"
+_NAME_PART = rf"(?:{_NAME_WORD}(?:\d{{1,8}}+)?+|\d{{1,8}}+{_NAME_WORD}|[a-z]++\d{{1,8}}+[a-z]++)(?![^_/-])"
+_IDENTIFIER = re.compile(rf"{_NAME_PART}(?:[_/-]{_NAME_PART})++")
 # Русское слово через дефис («по-прежнему», «кто-то») похоже на пароль только дефисом, а то же слово
 # без дефиса паролем в тексте и так не считается.
 _HYPHENATED_WORD = re.compile(r"[а-яё]+(?:-[а-яё]+)+", re.IGNORECASE)
@@ -587,5 +604,20 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         if bounds and _looks_like_password(text[bounds[0]:bounds[1]]) and not _HYPHENATED_WORD.fullmatch(text, *bounds):
             spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _TOKEN_PHRASE.finditer(text):
-        spans.append(Span(*m.span("bare"), EntityType.SECRET, name, searchable=_looks_like_password(m.group("bare"))))
+        value = m.group("bare")
+        # Код ошибки — не секрет; имя из слов — не токен, но после «пароль» это пароль из слов.
+        if _status_code(text, m) if value.isdigit() else (m.group("password") is None and _IDENTIFIER.fullmatch(value)):
+            continue
+        spans.append(Span(*m.span("bare"), EntityType.SECRET, name, searchable=_looks_like_password(value)))
     return spans + _library_spans(text, spans)
+
+
+def _status_code(text: str, m: re.Match[str]) -> bool:
+    """Код из цифр после «код» (_TOKEN_PHRASE) — код ошибки или классификатора (_STATUS_WORD): слово такого кода между «код»
+    и числом или прямо перед «код». Слово перед ним ищется в сорока знаках: поиск по всему тексту назад был бы квадратичным."""
+    if _STATUS_WORD.search(text, m.end("word"), m.start("bare")):
+        return True
+    before = text[max(0, m.start() - 40):m.start()].split()
+    if before and before[-1].lower() in _PREPOSITIONS:
+        before.pop()
+    return bool(before) and _STATUS_WORD.fullmatch(before[-1]) is not None
