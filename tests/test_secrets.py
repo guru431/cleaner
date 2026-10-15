@@ -191,6 +191,15 @@ def test_library_rules_still_see_a_key_after_a_run_of_spaces():
     assert found(text) == {key}
 
 
+@pytest.mark.parametrize("line_break", ["\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x85", " "])
+def test_library_rule_anchored_at_a_line_start_is_found_after_any_line_break(line_break):
+    """Правила detect-secrets идут по строкам только после совпадения во всём тексте; «^» и «(?<=^)» начала строки
+    там видят знак конца предыдущей строки как «\\s» и «\\W»."""
+    key = "Zx81kLmN02pQ" * 3 + "Ab1-Cd2_"
+    for value, line in ((ARTIFACTORY, ARTIFACTORY), (key, f"ibm_cloud_iam_key = {key}")):
+        assert found(f"первая строка{line_break}{line}{line_break}") == {value}, repr(line)
+
+
 @pytest.mark.parametrize(
     "text, value",
     [

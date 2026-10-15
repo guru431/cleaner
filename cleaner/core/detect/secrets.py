@@ -296,11 +296,11 @@ def _library_rules() -> tuple[re.Pattern[str], ...]:
     )
 
 
-def _library_hits(squeezed: str) -> dict[str, list[int]]:
+def _library_hits(squeezed: str, rules: tuple[re.Pattern[str], ...]) -> dict[str, list[int]]:
     """Значения правил в строке -> их начала, в порядке analyze_string. Значение — как у него: findall отдаёт
     непустые группы совпадения, а у выражения без групп — всё совпадение (здесь — без краёв, см. _LEADING_EDGE)."""
     hits: dict[str, list[int]] = {}
-    for regex in _library_rules():
+    for regex in rules:
         groups = range(1, regex.groups + 1) if regex.groups else (0,)
         for m in regex.finditer(squeezed):
             for group in groups:
@@ -332,6 +332,13 @@ def _unsqueezed(line: str) -> Callable[[int], int]:
 
 def _library_spans(text: str, own: list[Span]) -> list[Span]:
     """Токены известных сервисов по правилам detect-secrets — там, где свои правила ничего не нашли."""
+    # По строкам идут только правила, которые нашли что-то во всём тексте: вызов правила на строке стоит около 0,4 мкс,
+    # и 50 000 коротких строк шли 0,66 с, хотя токенов в них нет. Совпадение в строке — совпадение и в тексте на том же
+    # месте: «^» и «(?<=^)» у правил стоят рядом с «\s» и «(?<=\W)», а знак конца строки — пробельный и не буквенный.
+    squeezed = _SPACES.sub(" ", text)
+    rules = tuple(regex for regex in _library_rules() if regex.search(squeezed))
+    if not rules:
+        return []
     spans: list[Span] = []
     # Занятые знаки — картой, а не перебором найденного: токен, повторённый на строке выгрузки сотни
     # раз, давал кубическое время (каждое повторение сверялось с каждым найденным, и столько же раз).
@@ -340,7 +347,7 @@ def _library_spans(text: str, own: list[Span]) -> list[Span]:
         taken[span.start:span.end] = b"\x01" * (span.end - span.start)
     offset = 0
     for line in text.splitlines(keepends=True):
-        hits = _library_hits(_SPACES.sub(" ", line))
+        hits = _library_hits(_SPACES.sub(" ", line), rules)
         original = _unsqueezed(line) if len(hits) > _REPEATS else None
         for index, (value, starts) in enumerate(hits.items()):
             if original is None or index < _REPEATS:
