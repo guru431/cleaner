@@ -41,6 +41,28 @@ def test_dictionary_entries_are_added_shown_escaped_and_deleted(boss, repo):
     assert boss.post("/settings/dictionary", list="always", value="Без типа").status_code == 400
 
 
+def test_value_already_in_the_same_list_is_refused(boss, repo):
+    """Самопроверка плана 1Б: повтор значения в том же списке — отказ, а не вторая строка (как при импорте CSV)."""
+    boss.post("/settings/dictionary", list="always", value="Ромашка", type="ORG")
+    duplicate = boss.post("/settings/dictionary", list="always", value=" ромашка ", type="PERSON")
+    assert duplicate.status_code == 400 and "уже есть" in duplicate.text
+    assert boss.post("/settings/dictionary", list="never", value="Ромашка").status_code == 303
+    chat_id = boss.chat()
+    assert boss.post(f"/chats/{chat_id}/dictionary", value="РОМАШКА", list="never").status_code == 400
+    assert sorted((r.list, r.value) for r in repo.dictionary()) == [("always", "Ромашка"), ("never", "Ромашка")]
+    assert len(repo.audit_events("dictionary_changed")) == 2
+
+
+def test_deleting_an_unknown_pattern_is_not_found_and_not_logged(boss, repo):
+    """Самопроверка плана 1Б: удаление несуществующего шаблона — 404, как у словаря, без записи в журнал."""
+    pattern_id = repo.add_pattern("Инвентарный", r"INV-\d{6}", T.TERM)
+    assert boss.post(f"/settings/patterns/{'0' * 32}/delete").status_code == 404
+    assert boss.post(f"/settings/patterns/{pattern_id}/delete").status_code == 303
+    assert boss.post(f"/settings/patterns/{pattern_id}/delete").status_code == 404
+    assert repo.patterns() == []
+    assert [e.details for e in repo.audit_events("pattern_changed")] == [{"action": "delete"}]
+
+
 def test_csv_import_shows_a_preview_before_writing(boss, repo):
     repo.add_dictionary("never", "known.example")
     csv_text = "﻿Name;DNSHostName\r\nsrv1;srv1.corp.example\r\nsrv2;known.example\r\nsrv3;srv1.corp.example\r\n"

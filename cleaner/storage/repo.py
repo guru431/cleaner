@@ -567,6 +567,12 @@ class Repository:
             for row in self._all("SELECT * FROM dictionary ORDER BY created_at, id")
         ]
 
+    def in_dictionary(self, list_: str, value: str) -> bool:
+        """Значение уже есть в списке — без учёта регистра, как при импорте CSV. Значения зашифрованы,
+        поэтому сравнение — после расшифровки."""
+        wanted = value.lower()
+        return any(row.list == list_ and row.value.lower() == wanted for row in self.dictionary())
+
     def delete_dictionary(self, entry_id: str) -> None:
         self._run("DELETE FROM dictionary WHERE id = ?", entry_id)
 
@@ -581,8 +587,8 @@ class Repository:
             for row in self._all("SELECT * FROM patterns ORDER BY name")
         ]
 
-    def delete_pattern(self, pattern_id: str) -> None:
-        self._run("DELETE FROM patterns WHERE id = ?", pattern_id)
+    def delete_pattern(self, pattern_id: str) -> bool:
+        return self._run("DELETE FROM patterns WHERE id = ?", pattern_id) == 1
 
     def policies(self) -> dict[EntityType, Policy]:
         result = default_policies()
