@@ -89,6 +89,26 @@ def test_tokens_by_shape():
     assert found(f"export GH={github}") == {github}
 
 
+GITLAB_BODY = "a1B2c3D4e5F6g7H8i9J0"            # 20 знаков, как Devise.friendly_token
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["glpat-", "gldt-", "glft-", "glsoat-", "glrt-", "glrtr-", "glcbt-", "glcbt-64_", "glffct-", "glimt-", "glptt-",
+     "glagent-", "gloas-"],
+)
+def test_gitlab_tokens_of_every_kind_are_found(prefix):
+    """Находка «Layer 2 misses PuTTY and SSH2 private keys and GitLab tokens»: у правила detect-secrets значение — группа
+    префикса короче 8 знаков, а правила с точной длиной (glimt-, glptt-, gloas-) не видят токен другой длины."""
+    token = prefix + GITLAB_BODY
+    assert found(f"в CI лежит {token} для сборки") == {token}
+
+
+def test_gitlab_prefix_in_prose_is_not_a_token():
+    for text in ("префиксы glrt- и glcbt- выдаёт GitLab", "gldt-abc12 короче двадцати знаков", "glft-токен"):
+        assert found(text) == set(), text
+
+
 def test_password_in_prose():
     assert found("Временный пароль Qwerty123 действует сутки") == {"Qwerty123"}
     assert found("Пароль администратора: Summer2024") == {"Summer2024"}
@@ -191,8 +211,9 @@ def test_key_ending_in_a_secret_word_is_never_skipped(text, value):
 
 def test_stop_listed_keys_still_hold_no_secret():
     for text in ("bypass=Zx81kLmN02pQ", "context_tokens: 8192", "token_url: https://login.example/t",
-                 "password_reset: weekly", "compass_heading: 270"):
+                 "password_reset: weekly", "compass_heading: 270", "Argon2-Passes: 13", "num_passes=3"):
         assert found(text) == set(), text
+    assert found("passes_secret: Zx81kLmN02pQ") == {"Zx81kLmN02pQ"}
 
 
 @pytest.mark.parametrize(
@@ -599,6 +620,83 @@ def test_bare_private_key_header_without_a_body_is_not_a_secret():
     for text in (
         "Строка BEGIN RSA PRIVATE KEY\nа за ней тело ключа", "BEGIN PRIVATE KEY\nthen the body follows",
         "BEGIN RSA PRIVATE KEY-----", "Ключ: XBEGIN RSA PRIVATE KEY\nMIIEowIBAAKCAQEA",
+    ):
+        assert found(text) == set(), text
+
+
+KEY_LINE = "AAAAB3NzaC1yc2EAAAADAQABAAABAQCx" * 2                 # строка тела ключа, 64 знака base64 (вымышленная)
+PPK_2 = (
+    "PuTTY-User-Key-File-2: ssh-rsa\nEncryption: none\nComment: rsa-key-20261015\nPublic-Lines: 2\n"
+    f"{KEY_LINE}\n{KEY_LINE[:20]}\nPrivate-Lines: 2\n{KEY_LINE}\n{KEY_LINE[:24]}\n"
+    "Private-MAC: 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+)
+PPK_3 = (
+    "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: aes256-cbc\nComment: eddsa-key-20261015\nPublic-Lines: 2\n"
+    f"{KEY_LINE}\n{KEY_LINE[:8]}\nKey-Derivation: Argon2id\nArgon2-Memory: 8192\nArgon2-Passes: 13\n"
+    f"Argon2-Parallelism: 1\nArgon2-Salt: 0f1e2d3c4b5a69788796a5b4c3d2e1f0\nPrivate-Lines: 1\n{KEY_LINE}\n"
+    "Private-MAC: 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+)
+SSH2_KEY = (
+    '---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\nComment: "rsa-key-20261015"\n'
+    f"P2/56wAAAi4AAAA3aWYtbW9kbntzaWdu\n{KEY_LINE}\n---- END SSH2 ENCRYPTED PRIVATE KEY ----"
+)
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        (f"ключ:\n{PPK_2}\nдальше", PPK_2), (f"ключ:\n{PPK_3}\nдальше", PPK_3), (f"ключ:\n{SSH2_KEY}\nдальше", SSH2_KEY),
+        ("ключ:\r\n" + PPK_2.replace("\n", "\r\n") + "\r\nдальше", PPK_2.replace("\n", "\r\n")),
+        (PPK_2.rsplit("\n", 1)[0] + "\n\nдальше", PPK_2.rsplit("\n", 1)[0]),
+        ("ключ:\n" + SSH2_KEY.replace("---- ", "").replace(" ----", "") + "\nдальше",
+         SSH2_KEY.replace("---- ", "").replace(" ----", "")),
+    ],
+    ids=["putty_2", "putty_3", "ssh2", "putty_crlf", "putty_without_mac", "ssh2_without_runs"],
+)
+def test_putty_and_ssh2_private_keys_are_one_fragment(text, value):
+    """Находка «Layer 2 misses PuTTY and SSH2 private keys and GitLab tokens»: ключ PuTTY не скрывало ни одно правило,
+    а у заголовка SSH2 ряды отделены пробелом, и шаблон PEM его не видел."""
+    assert found(text) == {value}
+
+
+def test_putty_and_ssh2_headers_without_a_key_body_are_not_secrets():
+    for text in (
+        "Файл начинается со строки PuTTY-User-Key-File-3: ssh-ed25519, за ней идут поля",
+        "PuTTY-User-Key-File-2: ssh-rsa\nEncryption: none\nComment: тело ключа не вставлено",
+        "Формат ---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ---- открывает PuTTYgen",
+        "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\nа дальше идёт тело ключа",
+        f'---- BEGIN SSH2 PUBLIC KEY ----\nComment: "rsa-key"\n{KEY_LINE}\n---- END SSH2 PUBLIC KEY ----',
+    ):
+        assert found(text) == set(), text
+
+
+PGP_LINE = "lQOYBF0abcdEFGHlQOYBF0abcdEFGH"
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        (f"ключ:\nBEGIN PGP PRIVATE KEY BLOCK\nVersion: GnuPG v2\n\n{PGP_LINE}\n=AbCd\nEND PGP PRIVATE KEY BLOCK\nдальше",
+         f"BEGIN PGP PRIVATE KEY BLOCK\nVersion: GnuPG v2\n\n{PGP_LINE}\n=AbCd\nEND PGP PRIVATE KEY BLOCK"),
+        (f"BEGIN PGP PRIVATE KEY BLOCK\r\n\r\n{PGP_LINE}\r\n\r\nдальше", f"BEGIN PGP PRIVATE KEY BLOCK\r\n\r\n{PGP_LINE}"),
+        ("-----BEGIN RSA PRIVATE KEY\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0F1E2D3C4B5A6978\n\n"
+         "MIIEowIBAAKCAQEA\n\nдальше",
+         "-----BEGIN RSA PRIVATE KEY\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0F1E2D3C4B5A6978\n\nMIIEowIBAAKCAQEA"),
+    ],
+    ids=["pgp_armour", "pgp_empty_line", "pem_headers"],
+)
+def test_key_body_after_armour_headers_and_an_empty_line_is_one_fragment(text, value):
+    """Находка «Layers 2 and 4 review round: small leftovers»: заголовок без рядов, за которым идут строки «Имя: значение»
+    брони PGP или шифрованного PEM и пустая строка, не находился, и тело ключа уходило открытым."""
+    assert found(text) == {value}
+
+
+def test_key_header_followed_by_prose_after_an_empty_line_is_not_a_secret():
+    for text in (
+        "BEGIN PGP PRIVATE KEY BLOCK\n\nЭто строка заголовка брони, за ней пустая строка",
+        "BEGIN PGP PRIVATE KEY BLOCK\nVersion: GnuPG v2\n\nа дальше идёт тело",
+        "BEGIN RSA PRIVATE KEY\nNote: the body follows\n\nsee the attachment",
+        f"BEGIN PGP PRIVATE KEY BLOCK\n\n\n{PGP_LINE}",
     ):
         assert found(text) == set(), text
 

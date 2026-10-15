@@ -37,6 +37,13 @@ from cleaner.core.types import ChatState, Settings
         # Заголовок ключа с рядами дефисов или тире, без них и тело ключа.
         "BEGIN " * 20000, "-" * 100000, "—–BEGIN PRIVATE KEY—–\n" * 5000, "BEGIN PRIVATE KEY\n" * 10000,
         "BEGIN PRIVATE KEY\nMIIEowIBAAKCAQEA\n" + "-" * 100000, "BEGIN PRIVATE KEY\nMIIEowIBAAKCAQEA\nEND PRIVATE KEY\n" * 5000,
+        # Строки «Имя: значение» перед телом ключа, ряды через пробел (SSH2), ключи PuTTY, токены GitLab.
+        # Строк немного: правила detect-secrets сами стоят около 12 мкс на строку.
+        "BEGIN PRIVATE KEY\nA: b\n" * 5000, "BEGIN PRIVATE KEY\n" + "X: BEGIN PRIVATE KEY\n" * 10000,
+        "BEGIN PRIVATE KEY\nA: " + "b" * 200000 + "\n", "---- BEGIN PRIVATE KEY ----\nMIIEowIBAAKCAQEA\n" * 5000,
+        "- " * 50000 + "BEGIN PRIVATE KEY\nMIIEowIBAAKCAQEA", "PuTTY-User-Key-File-2: x\n" * 8000,
+        "PuTTY-User-Key-File-2:" + "\nA: b" * 15000, "PuTTY-User-Key-File-2" * 10000,
+        "PuTTY-User-Key-File-2: x\n" + ("AAAAB3NzaC1yc2EA" * 8 + "\n") * 2000, "gldt-" * 20000,
         # Имя, часть которого — метка (5.7, шаг 4).
         "<ORG_1>." * 20000, "a.<ORG_1>." * 10000, "<ORG_1>a." * 15000, "<ORG_1" * 20000, "<ORG_1>." + "a.b." * 25000,
     ],
@@ -50,6 +57,8 @@ from cleaner.core.types import ChatState, Settings
         "password_distinct_words", "closing_brackets", "attribute_chain", "call_names", "bracket_pairs",
         "camel_attribute", "pem_begins", "dashes", "pem_dashed_headers", "pem_bare_headers", "pem_dashed_body",
         "pem_bare_blocks",
+        "pem_header_lines", "pem_nested_headers", "pem_long_header_line", "pem_spaced_runs", "pem_spaced_hyphens",
+        "putty_headers", "putty_fields", "putty_names", "putty_body", "gitlab_prefixes",
         "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail",
     ],
 )

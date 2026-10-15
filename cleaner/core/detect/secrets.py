@@ -18,21 +18,36 @@ name = "secrets"
 # строки END или пустой строки: «Файл начинается со строки BEGIN RSA PRIVATE KEY» в прозе — не секрет. Ряд перед
 # заголовком досчитывается назад кодом (_private_keys): выражение, начатое с ряда, перебирало бы «-----…» от каждого
 # дефиса. Слов перед PRIVATE не больше трёх (SSH2 ENCRYPTED): «BEGIN BEGIN …» иначе перебирался бы до конца от каждого.
+# Тело может идти после строк «Имя: значение» (_PEM_ARMOUR: броня PGP — Version:, Comment:; шифрованный PEM — Proc-Type:,
+# DEK-Info:; SSH2 — Comment:) и одной пустой строки. Ряды, отделённые от заголовка пробелом («---- BEGIN SSH2 ENCRYPTED
+# PRIVATE KEY ----»), — тоже заголовок с телом, а не блок до конца текста: «-- BEGIN RSA PRIVATE KEY --» бывает и тире.
 _DASHES = "-—–"
 _PEM_BEGIN = re.compile(r"(?<!\w)BEGIN (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?(?P<dashes>[-—–]{2,}+)?")
 _PEM_END = re.compile(r"(?<!\w)END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?[-—–]*+")
+_PEM_ARMOUR = re.compile(r"[ \t]*+(?:[-—–]++[ \t]*+)?(?:\r?\n[ \t]*+[A-Za-z][\w-]*+:[ \t][^\r\n]*+)*+")
 _PEM_BODY = re.compile(
-    r"[ \t]*(?=\r?\n[ \t]*[A-Za-z0-9+/]{16})(?:\r?\n(?![ \t]*[-—–]*+END )[ \t]*\S[^\r\n]*)++"
-    r"(?:\r?\n[ \t]*[-—–]*+END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?[-—–]*+)?"
+    r"(?:\r?\n[ \t]*+(?=\r?\n))?(?=\r?\n[ \t]*[A-Za-z0-9+/]{16})(?:\r?\n(?![ \t]*+(?:[-—–]++[ \t]?)?END )[ \t]*\S[^\r\n]*)++"
+    r"(?:\r?\n[ \t]*+(?:[-—–]++[ \t]?)?END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?(?:[ \t]?[-—–]++)?)?"
 )
+# Ключ PuTTY (версии 2 и 3): строка «PuTTY-User-Key-File-3: ssh-ed25519», поля «Имя: значение» и строки base64 — до поля
+# Private-MAC включительно или до строки другого вида (пустой, прозы). Секрет — только блок со строкой тела (_KEY_LINE):
+# заголовок в прозе («файл начинается с PuTTY-User-Key-File-3: ssh-ed25519») ключом не считается.
+_PUTTY = re.compile(
+    r"(?<![\w-])PuTTY-User-Key-File-\d++:[^\r\n]*+"
+    r"(?:\r?\n[ \t]*+(?!Private-MAC:)(?:[A-Z][\w-]*+:[^\r\n]*+|[A-Za-z0-9+/]++=*+[ \t]*+(?![^\r\n])))*+"
+    r"(?:\r?\n[ \t]*+Private-MAC:[^\r\n]*+)?"
+)
+_KEY_LINE = re.compile(r"\n[ \t]*+[A-Za-z0-9+/]{16}")
 # Подпись может быть пустой («alg: none»): такой токен раньше находило правило JWT из detect-secrets.
 _JWT = re.compile(r"(?<![\w-])eyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]*")
+# Токены GitLab всех видов — от 20 знаков после префикса (Devise.friendly_token): у правила detect-secrets значение — группа
+# префикса («gldt», короче 8 знаков, отбрасывается), а правила glimt-, glptt-, gloas- ждут токен ровно своей длины.
 _TOKEN = re.compile(
     r"""(?<![\w-])(?:
         AKIA[0-9A-Z]{16}
       | gh[pousr]_[A-Za-z0-9]{36,}
       | github_pat_[A-Za-z0-9_]{40,}
-      | glpat-[\w-]{20,}
+      | gl(?:pat|dt|ft|soat|rtr?|cbt|ffct|imt|ptt|agent|oas)-[\w-]{20,}
       | xox[baprs]-[A-Za-z0-9-]{10,}
       | sk_live_[A-Za-z0-9]{16,}
       | AIza[\w-]{35}
@@ -64,13 +79,13 @@ _KEY_WORD = re.compile(
 )
 _VALUE_AT = re.compile(_VALUE)
 # Имена ключей, которые содержат те же слова, но хранят не секрет: счётчики токенов,
-# политики паролей, атрибуты Active Directory, обычные слова с «pass».
+# политики паролей, атрибуты Active Directory, обычные слова с «pass» (passes — число проходов: Argon2-Passes ключа PuTTY).
 _NOT_SECRET_KEY = re.compile(
     r"""(?:[\w.-]*[_.-])?(?:max|min|num|total|prompt|completion|input|output|context)[_.-]?tokens?
       | tokens
       | (?:[\w.-]*[_.-])?tokens?[_.-]?(?:type|count|limit|usage|budget|endpoint|url|uri|ttl|lifetime|expir\w*)
       | [\w.-]*tokeniz\w*
-      | [\w.-]*(?:bypass|compass|passive|passed|passage|passenger|pass[_.-]?through)[\w.-]*
+      | [\w.-]*(?:bypass|compass|passive|passed|passes|passage|passenger|pass[_.-]?through)[\w.-]*
       | (?:bad|max|min)?pwd(?:lastset|properties|historylength|count|age|length)
       | badpasswordtime
       | [\w.-]*password[_.-]?(?:policy|length|min\w*|max\w*|expir\w*|age|complexity|history
@@ -396,10 +411,11 @@ def _in_code(text: str, key: str, key_start: int, value_end: int) -> bool:
 
 
 def _private_keys(text: str) -> list[Span]:
-    """Блоки приватных ключей (_PEM_BEGIN). Поиск идёт после конца предыдущего блока: заголовок внутри блока до конца
-    текста иначе снова искал бы END до конца — квадратичное время на тексте из одних заголовков."""
+    """Блоки приватных ключей (_PEM_BEGIN, _PUTTY). Поиск идёт после конца предыдущего блока: заголовок внутри блока до
+    конца текста иначе снова искал бы END до конца — квадратичное время на тексте из одних заголовков. По той же причине
+    заголовок внутри строк «Имя: значение» заголовка без тела (failed_until) тело не ищет: его строки кончаются там же."""
     spans: list[Span] = []
-    position = 0
+    position = failed_until = 0
     while (m := _PEM_BEGIN.search(text, position)) is not None:
         start = m.start()
         while start > position and text[start - 1] in _DASHES:
@@ -407,12 +423,24 @@ def _private_keys(text: str) -> list[Span]:
         if m.start() - start >= 2 and m.group("dashes"):
             end = _PEM_END.search(text, m.end())
             position = end.end() if end else len(text)
-        elif body := _PEM_BODY.match(text, m.end()):
-            position = body.end()
-        else:
+        elif m.end() <= failed_until:
             position = m.end()
             continue
+        elif body := _PEM_BODY.match(text, armour := _PEM_ARMOUR.match(text, m.end()).end()):
+            if start == m.start() and start > position and text[start - 1] in " \t":    # ряд через пробел — SSH2
+                run = start - 1
+                while run > position and text[run - 1] in _DASHES:
+                    run -= 1
+                start = run if start - 1 - run >= 2 else start
+            position = body.end()
+        else:
+            failed_until, position = armour, m.end()
+            continue
         spans.append(Span(start, position, EntityType.SECRET, name, validated=True))
+    spans += [
+        Span(m.start(), m.end(), EntityType.SECRET, name, validated=True)
+        for m in _PUTTY.finditer(text) if _KEY_LINE.search(text, m.start(), m.end())
+    ]
     return spans
 
 
