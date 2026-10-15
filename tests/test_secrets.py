@@ -346,6 +346,44 @@ def test_prose_or_a_time_after_four_to_six_words_and_a_colon_is_left_alone():
         assert found(text) == set(), text
 
 
+HEX32 = "3f8e9a1b2c4d5e6f7a8b9c0d1e2f3a4b"                       # вымышленный токен
+API_KEY = "api_3f8e9a1b2c4d5e6f7a8b9c0d1e2f"
+
+
+@pytest.mark.parametrize(
+    "text, value, searchable",
+    [
+        (f"пришёл код восстановления {HEX32}, не могу войти", HEX32, True),
+        (f"Подтвердите действие токеном {HEX32}", HEX32, True),
+        (f"Используйте API ключ {API_KEY} для доступа", API_KEY, True),
+        (f"токен для верификации личности: {HEX32}", HEX32, True),
+        ("API-ключ для доступа к эндпоинту Zx81kLmN02pQZx81kLmN02pQ", "Zx81kLmN02pQZx81kLmN02pQ", True),
+        (f"токен {HEX32} для пользователя ivanov", HEX32, True),
+        (f"verification token for the account {HEX32}", HEX32, True),
+        ("получил смс с кодом 847593, всё верно?", "847593", False),
+        ("recovery code 73921456", "73921456", False),
+        (f"вот токн подтверждения {HEX32}", HEX32, True),
+    ],
+    ids=["code_word", "instrumental", "api_key", "colon", "hyphenated_key", "nearest", "english", "sms_code",
+         "english_code", "typo"],
+)
+def test_token_or_code_after_its_word_in_prose_is_found(text, value, searchable):
+    """Находка «Layers 2 and 4 leftovers round: what it leaves»: токены и коды в прозе после «токен», «код
+    восстановления» не находились (полнота секретов на hivetrace — 0,179). Код из цифр скрывается только на своём месте."""
+    assert finds(text) == {(value, searchable)}
+
+
+def test_numbers_and_words_after_token_or_code_in_prose_are_left_alone():
+    for text in (
+        "код ошибки 1603", "код события 4625 в журнале", "код ошибки 18456 при входе", "код 0x80070005",
+        "токен истёк, выпустите новый", "код 2024 года", "штрихкод 46012345", "ключ реестра HKLM\\SOFTWARE\\Microsoft",
+        "ключ /etc/ssh/ssh_host_ed25519_key на месте", "токен abcdefghijklmnopqrstuvwxyz", "код товара 4601234567890",
+        f"токен в файле token.{HEX32}.json", f"ключ 12345678 и {HEX32[:12]}", "token type Bearer",
+        f"токен нужно срочно обновить потому что {HEX32}",
+    ):
+        assert found(text) == set(), text
+
+
 def test_english_state_and_pointer_words_after_a_dash_are_left_alone():
     """Ревью правила тире: частые английские слова состояния и указания — проза, а не пароль."""
     for text in (
