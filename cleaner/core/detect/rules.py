@@ -33,18 +33,26 @@ _URL_SERVICE_LOGINS = frozenset({
     "пользователь",
 })
 _IPV4_DOMAIN = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
-# +7 или 8 и ровно десять цифр с любыми разделителями: «8 (4852) 12-34-56», «+7 916 1234567».
-_PHONE_RU = re.compile(r"(?<![\w+])(?:\+7|8)(?:[\s()-]{0,3}\d){10}(?!\d)")
+# +7 или 8 и ровно десять цифр с любыми разделителями в одной строке: «8 (4852) 12-34-56», «+7 916 1234567».
+# Перевод строки телефон не переходит: «8» в конце строки и число на следующей — разные значения.
+_PHONE_RU = re.compile(r"(?<![\w+])(?:\+7|8)(?:(?:[^\S\r\n]|[()-]){0,3}\d){10}(?!\d)")
 # «8 2024-10-14 12:00» — дата в журнале, а не телефон.
 _DATE_INSIDE = re.compile(r"(?:19|20)\d\d-[01]\d-[0-3]\d")
 _PHONE_INTL = re.compile(
-    r"(?<![\w+])\+\d{1,3}[\s(-]{0,2}\d{2,4}[\s)-]{0,2}\d{2,4}(?:[\s-]?\d{2,4}){1,3}(?!\d)"
+    r"(?<![\w+])\+\d{1,3}(?:[^\S\r\n]|[(-]){0,2}\d{2,4}(?:[^\S\r\n]|[)-]){0,2}\d{2,4}"
+    r"(?:(?:[^\S\r\n]|-)?\d{2,4}){1,3}(?!\d)"
 )
-_PHONE_LOCAL = re.compile(r"(?<![\w+])\(?\d{3}\)?[\s-]{0,2}\d{3}[\s-]?\d{2}[\s-]?\d{2}(?!\d)")
+_PHONE_LOCAL = re.compile(
+    r"(?<![\w+])\(?\d{3}\)?(?:[^\S\r\n]|-){0,2}\d{3}(?:[^\S\r\n]|-)?\d{2}(?:[^\S\r\n]|-)?\d{2}(?!\d)"
+)
 # Группы цифр через одиночный пробел или дефис; номер карты ищется окнами внутри такой цепочки,
 # потому что рядом бывают срок действия, CVV или чужая группа («от 2024 4111 1111 1111 1111»).
 _DIGIT_RUN = re.compile(r"(?<![\w-])\d+(?:[ -]\d+)*(?![\w-])")
 _DIGIT_GROUP = re.compile(r"\d+")
+# Окно номера карты среди других четырёхзначных групп — список (порты, коды), а не карта: в нём каждое
+# десятое окно проходит проверку Луна. Такое окно принимается только при словах о карте рядом.
+_CARD_WORDS = re.compile(r"карт|кредитк|card|visa|master|maestro|amex|cvv|cvc|\bмир\b", re.IGNORECASE)
+_YEAR = re.compile(r"(?:19|20)\d\d")
 # Запятая рядом с номером — разделитель CSV, а не десятичная дробь: отсеивают контрольные разряды.
 _NUMBER = re.compile(r"(?<![\w.])\d{9,20}(?!\w|\.\d)")
 _SNILS = re.compile(r"(?<![\w-])\d{3}-\d{3}-\d{3}[ -]\d{2}(?!\d)")
@@ -89,6 +97,23 @@ def _valid_date(m: re.Match[str]) -> bool:
     return True
 
 
+def _phone_groups(value: str) -> bool:
+    """После +7/8 код от трёх цифр и группы от двух: «8 10 12 9 11 7 15» — счёт, а не телефон.
+
+    Группа из одной цифры бывает в местном номере после пятизначного кода в скобках: «8 (34396) 5-12-34».
+    """
+    groups = _DIGIT_GROUP.findall(value[2:] if value.startswith("+") else value[1:])
+    return len(groups[0]) >= 3 and ("(" in value or min(len(group) for group in groups) >= 2)
+
+
+def _listed(groups: list[tuple[int, int, str]], first: int, last: int) -> bool:
+    """Стоит ли окно из нескольких групп среди других четырёхзначных групп цепочки, кроме года («от 2024 …»)."""
+    if first == last:
+        return False                                    # 13–19 цифр слитно — номер сам по себе
+    neighbours = [groups[i][2] for i in (first - 1, last + 1) if 0 <= i < len(groups)]
+    return any(len(group) == 4 and not _YEAR.fullmatch(group) for group in neighbours)
+
+
 def _card_shape(parts: list[str]) -> bool:
     """Похожа ли последовательность групп на запись номера карты."""
     if len(parts) == 1:
@@ -117,7 +142,12 @@ def _cards(text: str, m: re.Match[str], add: Add) -> None:
             if len(digits) > 19:
                 break
             parts = [group[2] for group in groups[first:last + 1]]
-            if len(digits) >= 13 and _card_shape(parts) and validators.luhn(digits):
+            if (
+                len(digits) >= 13 and _card_shape(parts) and validators.luhn(digits)
+                and (not _listed(groups, first, last) or _CARD_WORDS.search(
+                    text[max(0, m.start() - _BEFORE):m.start()] + " " + text[m.end():m.end() + _AFTER]
+                ))
+            ):
                 add(groups[first][0], groups[last][1], EntityType.CARD, True)
             if not _extendable(parts):
                 break
@@ -165,6 +195,8 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             add(m.start("login"), m.end("login"), EntityType.ACCOUNT)
     for pattern in (_PHONE_RU, _PHONE_INTL):
         for m in pattern.finditer(text):
+            if pattern is _PHONE_RU and not _phone_groups(m.group()):
+                continue
             if 8 <= len(_digits(m.group())) <= 15 and not _DATE_INSIDE.search(m.group()):
                 add(m.start(), m.end(), EntityType.PHONE)
     for m in _PHONE_LOCAL.finditer(text):

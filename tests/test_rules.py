@@ -84,11 +84,39 @@ def test_lone_eight_before_a_date_is_not_a_phone():
     assert T.PHONE not in types("pid 8 2024-10-14 12:00:01 запуск")
 
 
+@pytest.mark.parametrize("text", ["8-916-123-45-67", "+7 (916) 123 45 67", "8 (34396) 5-12-34", "89161234567"])
+def test_phone_groups_after_the_code(text):
+    """Одна цифра в группе — только в местном номере после кода в скобках."""
+    assert (T.PHONE, text) in found("тел. " + text)
+
+
+def test_list_of_numbers_after_an_eight_is_not_a_phone():
+    """FINDINGS P2 «false … PHONE, CARD …»: у телефона после «8» код от трёх цифр и группы от двух."""
+    assert T.PHONE not in types("Счёт по сетам: 8 10 12 9 11 7 15")
+    assert T.PHONE not in types("Счёт по сетам: 8 10 12 19 11 17 15")
+    assert T.PHONE not in types("Счёт по сетам: 8 10 12 9\n11 7 15")
+
+
+def test_phone_does_not_cross_a_line_break():
+    assert T.PHONE not in types("Итого строк: 8\n916 123 45 67 — код заказа")
+    assert T.PHONE not in types("Итого: +7\n916 123 45 67")
+    assert T.PHONE not in types("Телефонов в справочнике: 495\n123 45 67")
+
+
 def test_card_next_to_an_expiry_date_a_cvv_or_another_group():
     """Обзор 1А, P1: хвост после номера или группа перед ним не должны срывать проверку Луна."""
     assert (T.CARD, "4111 1111 1111 1111") in found("карта 4111 1111 1111 1111 12/27")
     assert (T.CARD, "4111 1111 1111 1111") in found("карта 4111 1111 1111 1111 123")
     assert (T.CARD, "4111 1111 1111 1111") in found("от 2024 4111 1111 1111 1111")
+    assert (T.CARD, "4111 1111 1111 1111") in found("4111 1111 1111 1111 12/27 123")
+
+
+def test_card_window_inside_a_list_of_four_digit_numbers_needs_card_words():
+    """FINDINGS P2: в списке портов окно «1521 3306 5432 6379» проходит проверку Луна случайно."""
+    assert T.CARD not in types("порты: 1433 1521 3306 5432 6379")
+    assert T.CARD not in types("порты: 1521 3306 5432 6379 1433")
+    assert (T.CARD, "4111 1111 1111 1111") in found("по карте 3306 4111 1111 1111 1111")
+    assert (T.CARD, "4111 1111 1111 1111") in found("Visa 4111 1111 1111 1111 3306")
 
 
 def test_card_is_not_cut_out_of_a_longer_digit_group():

@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from cleaner.core.detect import rules
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.pipeline import DETECTORS, sanitize
 from cleaner.core.restore import restore
@@ -26,6 +27,11 @@ def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
         started = time.perf_counter()
         detector.detect(text, ctx)
         assert time.perf_counter() - started < 0.5, detector.name
+
+
+def test_run_of_eights_gives_no_phones():
+    """FINDINGS P2 «false … PHONE, CARD …»: «8 8 8 …» давал тысячи ложных телефонов, очистка шла две секунды."""
+    assert rules.detect("8 " * 50000, DetectContext(Settings())) == []
 
 
 def test_restore_is_fast_on_a_host_name_of_many_parts():
