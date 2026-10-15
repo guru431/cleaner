@@ -3,7 +3,7 @@ import pytest
 
 from cleaner.core.types import EntityType as T
 from cleaner.egress import ProviderError, cloud
-from cleaner.service import ChatService, SendRefused
+from cleaner.service import AnswerView, ChatService, SendRefused
 from cleaner.storage.repo import Item, Provider
 
 KEY = "sk-test-0123456789abcd"
@@ -178,6 +178,25 @@ def test_answer_cut_by_a_provider_error_is_left_out_and_the_question_can_go_agai
     preview = service.outgoing(chat[1])
     assert preview.skipped == [(2, "ответ оборван ошибкой провайдера")]
     assert [m.role for m in preview.outgoing.context.messages] == ["user"]
+
+
+@pytest.mark.parametrize("cut", [(), ("Начало ",)], ids=["failed", "aborted"])
+def test_cloud_answer_counts_the_replacements_since_the_previous_answer(repo, chat, provider, cut):
+    """FR-7.5: замены во входных текстах после предыдущего ответа. Ответ локальной модели — граница, но своего
+    счётчика у него нет: модель видела оригиналы. Отказ и ответ, оборванный ошибкой провайдера, — не граница:
+    вопрос уходит снова, и в запросе следующего ответа те же замены."""
+    user, chat_id = chat
+    send(ready(repo, chat, provider, FakeCloud("Ответ <EMAIL_1>"), text="почта a@x.example и b@x.example"), chat)
+    service = service_with(repo, FakeCloud(*cut, error=ProviderError(status=502)))
+    service.add_input(chat_id, user, "ещё c@x.example")
+    repo.add_item(chat_id, Item("l" * 32, 0, "answer", "Локальный ответ", None, source="local"))
+    service.add_input(chat_id, user, "и d@x.example")
+    send(service, chat)
+    send(service_with(repo, FakeCloud("Ответ <EMAIL_4>")), chat)
+    answers = [e for e in service.view(chat_id).items if isinstance(e, AnswerView)]
+    assert [(e.item.source, e.result.counters.get("in_request")) for e in answers] == [
+        ("api", 2), ("local", None), ("api", 1), ("api", 1),
+    ]
 
 
 def test_answer_longer_than_the_text_limit_is_cut(repo, chat, provider):
