@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import bisect
+import functools
 import html
 import ipaddress
 import re
@@ -148,6 +149,13 @@ def _charref(ref: str, reader: str) -> str:
             # html.unescape на 4300 цифрах и больше падает с ValueError.
             return "\N{REPLACEMENT CHARACTER}"
         return html.unescape(f"&#{'x' if hexadecimal else ''}{digits or '0'};")
+    return _named_charref(ref, reader)
+
+
+@functools.lru_cache(maxsize=4096)
+def _named_charref(ref: str, reader: str) -> str:
+    """Именованная ссылка — не длиннее 34 знаков (_CHARREF), поэтому её раскрытие кэшируется: в длинном ответе одни и
+    те же «&colon;» и «&sol;» встречаются тысячи раз, и каждое слово читается в нескольких прочтениях."""
     name = ref[1:]
     end = next((end for end in range(len(name), 1, -1) if name[:end] in _ENTITIES), 0)
     if not end:
@@ -159,17 +167,37 @@ def _charref(ref: str, reader: str) -> str:
     return _ENTITIES[name[:end]] + name[end:]
 
 
-def _readings(text: str) -> tuple[str, ...]:
+# Экранирование CommonMark: «\» перед знаком препинания ASCII — сам этот знак, и в тексте, и в цели ссылки.
+_MD_DECODED = re.compile(rf"\\[!-/:-@\[-`{{-~]|{_CHARREF.pattern}")
+
+
+def _md(text: str) -> str:
+    """Текст так, как его прочтёт CommonMark: ссылки на знаки по его правилам и экранирования «\\» («https\\:\\/\\/…» —
+    это «https://…»). Одним проходом слева направо, как у него: «\\&colon;» — это «&colon;», а не «:»."""
+    return _MD_DECODED.sub(lambda m: m.group()[1] if m.group()[0] == "\\" else _charref(m.group(), "md"), text)
+
+
+def _readings(text: str, markdown: bool = False) -> tuple[str, ...]:
     """Текст ссылки так, как его прочтут: как есть (CSS в элементе style и в файле, простой текст), в тексте HTML,
     в значении атрибута HTML и в цели ссылки CommonMark. Ссылки на знаки браузер и CommonMark раскрывают до разбора
     адреса: «&#47;&#47;evil…» в атрибуте — это «//evil…», «наш&commat;evil…» — «наш@evil…». Где окажется ответ,
     неизвестно, поэтому ссылка наша, только если наша при каждом прочтении. Одного html.unescape мало: в атрибуте
     «&#47;&#47;наш&nbspevil…» — один хост с «&nbsp» внутри, а html.unescape раскрыл бы «&nbsp» в пробел, и хост
-    оборвался бы на нашем имени. Одинаковые прочтения проверяются один раз."""
-    if "&" not in text:
+    оборвался бы на нашем имени. markdown — цель ссылки Markdown или адрес простого текста для remark-gfm: в них
+    CommonMark раскрывает и экранирования «\\» (_md). В остальных местах «\\» остаётся собой: «file:\\\\\\C:\\…» в коде —
+    три косые и локальный файл, а не узел «C». Одинаковые прочтения проверяются один раз."""
+    if "&" not in text and not (markdown and "\\" in text):
         return (text,)
-    readings = [_CHARREF.sub(lambda m: _charref(m.group(), reader), text) for reader in ("html", "attr", "md")]
-    return tuple(dict.fromkeys((text, *readings)))
+    readings = [_CHARREF.sub(lambda m: _charref(m.group(), reader), text) for reader in ("html", "attr")]
+    md = _md(text) if markdown else _CHARREF.sub(lambda m: _charref(m.group(), "md"), text)
+    return tuple(dict.fromkeys((text, *readings, md)))
+
+
+# Слово простого текста и начало адреса, которое в нём ищет remark-gfm (react-markdown — во многих чатах): он
+# раскрывает ссылки на знаки и экранирования «\» и уже в раскрытом тексте делает ссылкой «http://», «https://» и
+# «www.» до пробела, табуляции или перевода строки (mdast-util-gfm-autolink-literal, transformGfmAutolinkLiterals).
+_WORD = re.compile(r"[^ \t\r\n]+")
+_PROSE_START = re.compile(r"https?://|www\.", re.IGNORECASE)
 # Вне тегов HTML — текст до первого «<» и участки от «>» до ближайшего «<» или кавычки, если между «<» и
 # этой «>» кавычек нет. Кавычка оставляет атрибут в теге: «>» могла стоять в значении («<a title="a>b"
 # href=…»). Любой «<», не только «<буква», и любая кавычка — в сторону ссылки; поиск линеен: каждая
@@ -198,6 +226,16 @@ def _tolerant_pattern() -> re.Pattern[str]:
 
 
 _TOLERANT = _tolerant_pattern()
+_PREFIX_AFTER = re.compile(r"/\d")
+
+
+def _one_prefix(original: str, type_: EntityType, text: str, end: int) -> str:
+    """Сеть, за заменой которой ответ сам пишет длину префикса, восстанавливается без своей: подмена-адрес сети IPv6 и
+    публичной IPv4 из правила пользователя и метка сети длины префикса не несут, и «<IP_1>/64» иначе дало бы
+    «…/64/64». Остаётся длина, которую написал ответ."""
+    if type_ is EntityType.IP and "/" in original and _PREFIX_AFTER.match(text, end):
+        return original.split("/")[0]
+    return original
 
 
 @dataclass(frozen=True)
@@ -284,6 +322,7 @@ class _Restorer:
     def run(self, pieces: list[Piece], links: bool) -> list[Piece]:
         if links:
             pieces = _split(pieces, _LINK, self._link)
+            pieces = _split(pieces, _WORD, self._prose)
         pieces = _split(pieces, self.exact, self._exact)
         pieces = _split(pieces, _TOLERANT, self._label)
         pieces = _split(pieces, _IPV4, self._derived_ip)
@@ -322,13 +361,13 @@ class _Restorer:
                     reachable.add(last)
         return len(labels_) in reachable
 
-    def _is_own(self, target: str) -> bool:
+    def _is_own(self, target: str, markdown: bool = False) -> bool:
         """Не уведёт ли ссылка оригиналы на чужой узел. Наша — если наши все адреса внутри неё:
         за нашим адресом в том же атрибуте может стоять чужой (srcset, незакрытая кавычка,
         «?next=https://…»), а совпадение целиком дальше не проверяется. Значение без адреса —
         не ссылка (data="…" в коде), его восстанавливают как обычный текст. Ссылки на знаки раскрываются до
         разбора адреса, и цель должна быть нашей при каждом их прочтении (_readings)."""
-        return all(self._is_own_reading(reading) for reading in _readings(target))
+        return all(self._is_own_reading(reading) for reading in _readings(target, markdown))
 
     def _is_own_reading(self, target: str) -> bool:
         target = re.sub(r"[\t\r\n]", "", target.strip())   # браузер выбрасывает их из адреса
@@ -379,7 +418,8 @@ class _Restorer:
             # Вложенный документ iframe: браузер раскрывает ссылки на знаки дважды (атрибут, затем сама страница),
             # и «&amp;#47;&amp;#47;evil» внутри — это «//evil». Нашим он не бывает.
             return self._inner(m.group()) != m.group()
-        if self._is_own(target) and not (css and any("\\" in reading for reading in _readings(m.group()))):
+        markdown = any(m.group(name) is not None for name in ("md", "ref", "dest"))
+        if self._is_own(target, markdown) and not (css and any("\\" in reading for reading in _readings(m.group()))):
             return False        # ссылка на наш же узел восстанавливается как обычный текст
         restored = self._inner(m.group())
         if (
@@ -394,6 +434,21 @@ class _Restorer:
             return None
         self.counters["foreign_links"] += 1
         return m.group(), "foreign_link"
+
+    def _prose(self, m: re.Match[str]) -> Piece | None:
+        """Адрес в простом тексте, начало которого видно только после раскрытия ссылок на знаки и экранирований
+        («https&colon;&sol;&sol;evil…», «www&period;evil…», «https\\:\\/\\/evil…»): _LINK его не находит, а remark-gfm
+        делает ссылкой. Ссылкой считается всё слово — и часть перед началом адреса: границ ссылки в исходной записи
+        не видно. Слово проверяется, как ссылка, во всех прочтениях (_is_own)."""
+        word = m.group()
+        if "&" not in word and "\\" not in word:
+            return None
+        if len(_PROSE_START.findall(_md(word))) <= len(_PROSE_START.findall(word)):
+            return None         # начало адреса записано как есть — такой адрес уже проверил _LINK
+        if self._inner(word) == word or self._is_own(word, markdown=True):
+            return None         # восстанавливать нечего (так чаще всего) или ссылка наша
+        self.counters["foreign_links"] += 1
+        return word, "foreign_link"
 
     def _fixed(self, surrogate: Surrogate | None) -> str | None:
         """Значение для восстановления, заданное пользователем (FR-6.4), если оно задано."""
@@ -433,7 +488,9 @@ class _Restorer:
         if any(self._hidden(self.state.entities[owner.entity_id].type) for owner in owners):
             self.counters["kept"] += 1
             return text, "kept_by_policy"
-        original = self._original(m.key, surrogate)
+        original = _one_prefix(
+            self._original(m.key, surrogate), self.state.entities[surrogate.entity_id].type, m.string, m.end(),
+        )
         kind = "restored"
         if surrogate.kind in ("host", "label"):
             if surrogate.kind == "host" and text.isupper():
@@ -463,7 +520,7 @@ class _Restorer:
             self.counters["kept"] += 1
             return canonical, "kept_by_policy"
         self.counters["altered"] += 1
-        return entity.restore_value, "altered"
+        return _one_prefix(entity.restore_value, entity.type, m.string, m.end()), "altered"
 
     def _derived_ip(self, m: re.Match[str]) -> Piece | None:
         try:

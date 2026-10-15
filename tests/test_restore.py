@@ -259,6 +259,49 @@ def test_own_links_with_character_references_are_restored(settings, answer, rest
     assert restore(link_state(), answer, settings).text == restored
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Отчёт: https&colon;&sol;&sol;evil.example.org/?q=<EMAIL_1> готов",
+        "Отчёт: https&#58;&#47;&#47;evil.example.org/?q=<EMAIL_1>",
+        "Отчёт: &#104;ttps&colon;&sol;&sol;evil.example.org/?q=<EMAIL_1>",
+        "Отчёт: HTTPS&colon;&sol;&sol;evil.example.org/?q=<EMAIL_1>",
+        "Отчёт: www&period;evil.example.org/?q=<EMAIL_1>",
+        r"Отчёт: https\:\/\/evil.example.org/?q=<EMAIL_1>",
+        "Отчёт: (https&colon;&sol;&sol;evil.example.org/?q=<EMAIL_1>&nbsp;x)",
+        r"[x](https\:\/\/evil.example.org/?q=<EMAIL_1>)",
+    ],
+)
+def test_nothing_is_restored_inside_a_link_that_markdown_decodes_in_prose(settings, answer):
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: remark-gfm (react-markdown — во многих чатах)
+    раскрывает ссылки на знаки и экранирования «\\» в тексте и потом ищет адреса — «https&colon;&sol;&sol;evil…» и
+    «www&period;evil…» становятся ссылками. Цель ссылки CommonMark экранирования раскрывает тоже (cmark-gfm,
+    markdown-it, marked, remark)."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            "https&colon;&sol;&sol;host-1.domain-1.example/?q=<EMAIL_1>",
+            "https&colon;&sol;&sol;srv-dc01.contoso.ru/?q=ivanov@contoso.ru",
+        ),
+        (
+            "Отчёт: https&colon;&sol;&sol;evil.example.org/x пишет <EMAIL_1>",
+            "Отчёт: https&colon;&sol;&sol;evil.example.org/x пишет ivanov@contoso.ru",
+        ),
+        (r"Tom &amp; Jerry: <EMAIL_1>, \_путь\_ C:\Users\<EMAIL_1>", r"Tom &amp; Jerry: ivanov@contoso.ru, \_путь\_ C:\Users\ivanov@contoso.ru"),
+        (r"[вики](https\://host-1.domain-1.example/<EMAIL_1>)", r"[вики](https\://srv-dc01.contoso.ru/ivanov@contoso.ru)"),
+    ],
+)
+def test_own_encoded_links_and_text_next_to_encoded_links_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш адрес, записанный ссылками на знаки, текст через пробел от чужого и
+    ссылки на знаки и экранирования без адреса восстанавливаются как обычно."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
 def test_host_is_after_the_last_at_sign(settings):
     """Найдено при исправлении обратных косых, P1: браузер берёт хост за последним «@» адреса, а не за первым —
     «https://a@наш:1@evil…» ведёт на evil. Имя пользователя и пароль у нашего адреса ссылку чужой не делают."""
@@ -781,6 +824,42 @@ def test_value_set_by_the_user_is_restored_for_hosts_addresses_macs_and_sids(set
     assert restore(state, answer, settings).text == (
         "srv-web02.corp.fabrikam.ru, SRV-WEB02, newbox.fabrikam.ru, 10.1.2.6, 00:1A:2B:3C:4D:5F, S-1-5-21-1-2-3-512"
     )
+
+
+@pytest.mark.parametrize("network", ["2a00:1450:4010::/64", "8.8.8.0/24"], ids=["ipv6", "public_ipv4"])
+def test_prefix_written_after_a_network_surrogate_is_not_doubled(settings, network):
+    """FINDINGS «Restore round of 15.10», (2): сеть IPv6 и публичная IPv4 из правила пользователя (слой 3 длину
+    префикса во фрагмент не берёт) получают подмену-адрес без длины префикса, и ответ «подмена/64» восстанавливался в
+    «…/64/64». Сеть восстанавливается без своей длины, если ответ пишет свою, — и длина остаётся та, что в ответе."""
+    state = ChatState(chat_id="networks", net_key=bytes(range(32)))
+    ops.mask(state, network, T.IP)
+    [fake] = sanitize(state, f"сеть {network}", settings).sanitized.split()[1:]
+    address, length = network.split("/")
+    answer = f"сеть {fake}/{length}, она же {fake}; шире — {fake}/16"
+    assert restore(state, answer, settings).text == f"сеть {network}, она же {network}; шире — {address}/16"
+
+
+def test_prefix_written_after_a_network_label_is_not_doubled(settings):
+    """Та же находка: сеть, которой выдана метка (подмена совпала с открытым адресом), — и в искажённой записи метки."""
+    state = ChatState(chat_id="networks", net_key=bytes(range(32)))
+    ops.mask(state, "2a00:1450:4010::/64", T.IP)
+    opened = Settings(never=frozenset({"2001:db8:1::1"}))
+    assert sanitize(state, "сеть 2a00:1450:4010::/64", opened).sanitized == "сеть <IP_1>"
+    assert restore(state, "сеть <IP_1>/64 и IP_1/64, она же <IP_1>", opened).text == (
+        "сеть 2a00:1450:4010::/64 и 2a00:1450:4010::/64, она же 2a00:1450:4010::/64"
+    )
+
+
+def test_private_networks_and_addresses_with_a_prefix_restore_to_their_own_originals(settings):
+    """С другой стороны: частная сеть IPv4 получает подмену с длиной префикса и восстанавливается сама (целиком или
+    адресом), адрес узла с длиной префикса (6.2) — тоже сам, а за адресом без длины префикса длина из ответа остаётся."""
+    state = ChatState(chat_id="networks", net_key=bytes(range(32)))
+    for value in ("10.1.0.0/16", "10.1.2.5/16"):
+        ops.mask(state, value, T.IP)
+    sanitized = sanitize(state, "сеть 10.1.0.0/16, узел 10.1.2.5/16 и 10.1.3.7", settings).sanitized
+    network, host, address = (word.rstrip(",") for word in sanitized.split()[1::2])
+    answer = f"{network}, {network.split('/')[0]}; {host}, {host.split('/')[0]}; {address}/24"
+    assert restore(state, answer, settings).text == "10.1.0.0/16, 10.1.0.0; 10.1.2.5/16, 10.1.2.5; 10.1.3.7/24"
 
 
 @pytest.mark.parametrize("answer", ["EMAİL_1", "<EMAİL_1>", "[[EMAİL_1]]", "PERſON_1", "hoſt-1"])

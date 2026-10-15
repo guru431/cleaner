@@ -104,6 +104,17 @@ def test_replacements_in_the_request_are_counted_since_the_previous_answer(repo,
     assert in_request(service, chat_id) == [3, 1, 0]
 
 
+def test_pasted_answer_audit_has_the_replacements_of_its_request(repo, chat):
+    """FR-11.1: «замен в запросе» — и в записи журнала о восстановлении вставленного ответа, как в чате."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    service.add_input(chat_id, user, "почта a@x.example и b@x.example")
+    service.add_answer(chat_id, user, "Ответ про <EMAIL_1>")
+    service.add_input(chat_id, user, "ещё c@x.example")
+    service.add_answer(chat_id, user, "Ответ про <EMAIL_3>")
+    assert [e.details["in_request"] for e in reversed(repo.audit_events("restore"))] == in_request(service, chat_id) == [2, 1]
+
+
 def test_instruction_before_an_answer_is_part_of_its_request(repo, chat):
     user, chat_id = chat
     service = ChatService(repo)

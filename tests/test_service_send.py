@@ -199,6 +199,25 @@ def test_cloud_answer_counts_the_replacements_since_the_previous_answer(repo, ch
     ]
 
 
+def test_restore_audit_has_the_replacements_of_the_request(repo, chat, provider):
+    """FINDINGS «Restore round of 15.10», (3), FR-11.1: в журнал — счётчики восстановления, и «замен в запросе»
+    (FR-7.5) тоже. Число — запроса, ушедшего при отправке: текст, вставленный, пока идёт ответ, в него не входил."""
+    user, chat_id = chat
+    jobs = []
+    service = ready(
+        repo, chat, provider, FakeCloud("Ответ <EMAIL_1>"), text="почта a@x.example и b@x.example",
+        send_submit=lambda fn, *args: jobs.append((fn, args)),
+    )
+    send(service, chat)
+    service.add_input(chat_id, user, "ещё c@x.example")
+    fn, args = jobs[0]
+    fn(*args)
+    assert repo.audit_events("restore")[0].details == {
+        "restored": 1, "altered": 0, "derived": 0, "unknown": 0, "kept": 0, "foreign_links": 0, "in_request": 2,
+    }
+    assert [e.result.counters["in_request"] for e in service.view(chat_id).items if isinstance(e, AnswerView)] == [2]
+
+
 def test_answer_longer_than_the_text_limit_is_cut(repo, chat, provider):
     fake = FakeCloud(*(["слово "] * 50))
     service = ready(repo, chat, provider, fake, max_text_chars=60)

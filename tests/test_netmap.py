@@ -73,6 +73,13 @@ def test_network_with_a_short_prefix_keeps_zero_host_bits(state):
     assert fake.startswith("10.") and fake.endswith(".0.0/16")
 
 
+def test_address_with_a_prefix_keeps_its_host_bits(state):
+    """Раздел 6.2: биты после длины префикса обнуляются в подмене, только если они нулевые в оригинале. Иначе адрес
+    узла «10.1.2.5/16» получал подмену сети «10.1.0.0/16», и один из двух оригиналов восстанавливался другим."""
+    host, network = netmap.fake_ip("10.1.2.5/16", state), netmap.fake_ip("10.1.0.0/16", state)
+    assert host == f"{mapped('10.1.2.5')}/16" and host != network
+
+
 def test_ipv6_keeps_the_64_bit_subnet(state):
     assert netmap.fake_ip("2a00:1450:4010::65", state) == "2001:db8:1::1"
     assert netmap.fake_ip("2a00:1450:4010::66", state) == "2001:db8:1::2"
