@@ -18,9 +18,10 @@ from cleaner.core.types import ChatState, Settings
     [
         "a.b." * 5000, "CN=a," * 5000, "x" * 20000, "1," * 10000, "a:" * 10000, "token" * 20000 + "=Zx81kLmN02pQ",
         "token" * 4000, "pwd" * 7000, "a_pass" * 3500, "8 " * 50000, "1 - " * 25000, "123.456/" * 12500,
+        "д.р. 11.11.11 " * 7000,
     ],
     ids=["dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights",
-         "spaced_dashes", "dots_slashes"],
+         "spaced_dashes", "dots_slashes", "short_dates"],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
     ctx = DetectContext(Settings())

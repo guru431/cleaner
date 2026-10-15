@@ -184,6 +184,20 @@ def test_birthdate_needs_context_and_a_real_date():
     assert T.BIRTHDATE not in types("31.02.1980 г.р.")
 
 
+def test_birthdate_with_a_two_digit_year():
+    """FINDINGS P3 «false positives that damage the text, and smaller recall gaps»: «д.р. 01.02.90»."""
+    assert (T.BIRTHDATE, "01.02.90") in found("Петров П. П., д.р. 01.02.90")
+    assert (T.BIRTHDATE, "29.02.00") in found("д.р. 29.02.00")
+    assert T.BIRTHDATE not in types("д.р. 31.02.90")
+    assert T.BIRTHDATE not in types("Встреча 01.02.26")
+    assert T.BIRTHDATE not in types("Проект родился в 2019, версия 1.2.10")
+
+
+def test_card_grouped_four_six_five():
+    """Тот же обзор: «карты 4-6-5 не находятся» — не воспроизвелось, проверка остаётся."""
+    assert (T.CARD, "3717 860313 72159") in found("оплата 3717 860313 72159")
+
+
 def test_login_in_a_url_is_an_account_not_an_email():
     """Обзор пакета исправлений 1А, P1: «схема://ivanov@хост» — вход, и его скрывают."""
     for text, login in (

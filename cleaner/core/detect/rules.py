@@ -66,8 +66,10 @@ _PASSPORT = re.compile(r"(?<![\w-])\d{2} ?\d{2} ?(?:№ ?)?\d{6}(?![\w-])")
 _PASSPORT_WORDS = re.compile(
     r"сери[яи]\s*(\d{2}\s?\d{2})\s*,?\s*(?:номер|№|n)\s*(\d{6})(?!\d)", re.IGNORECASE
 )
+# Год из двух цифр («д.р. 01.02.90») — только при двузначных дне и месяце: «1.2.10» — скорее версия.
 _DATE = re.compile(
-    r"(?<![\w.])(?:(\d{1,2})[./-](\d{1,2})[./-](\d{4})|(\d{4})-(\d{2})-(\d{2}))(?!\w|\.\d)"
+    r"(?<![\w.])(?:(\d{1,2})[./-](\d{1,2})[./-](\d{4})|(\d{4})-(\d{2})-(\d{2})|(\d{2})[./-](\d{2})[./-](\d{2}))"
+    r"(?!\w|\.\d)"
 )
 
 _PHONE_WORDS = ("тел", "моб", "phone", "tel.", "tel:", "звон", "номер")
@@ -90,8 +92,10 @@ def _digits(value: str) -> str:
 def _valid_date(m: re.Match[str]) -> bool:
     if m.group(1):
         day, month, year = m.group(1), m.group(2), m.group(3)
-    else:
+    elif m.group(4):
         day, month, year = m.group(6), m.group(5), m.group(4)
+    else:                   # век неважен: високосные годы 19xx и 20xx совпадают, кроме 1900 — а 29.02.00 бывает
+        day, month, year = m.group(7), m.group(8), "20" + m.group(9)
     try:
         date(int(year), int(month), int(day))
     except ValueError:
