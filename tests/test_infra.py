@@ -172,6 +172,28 @@ def test_hyphenated_spaced_profile_name_is_taken_whole():
     assert accounts(r"C:\Users\Ivan Petrov-Vodkin\Documents") == {"Ivan Petrov-Vodkin"}
 
 
+@pytest.mark.parametrize(
+    "text, name",
+    [
+        (r"C:\Users\Dan O'Brien\Desktop", "Dan O'Brien"),
+        (r"C:\Users\Il'ya Petrov\Desktop", "Il'ya Petrov"),
+        ("C:\\Users\\Dan O\u2019Brien\\Desktop", "Dan O\u2019Brien"),
+        (r"'C:\Users\Dan O'Brien'", "Dan O'Brien"),
+        (r"C:\Users\o'brien\Desktop", "o'brien"),
+        ("'/home/ivanov'", "ivanov"),
+        ("\u2018/home/ivan petrov\u2019", "ivan petrov"),
+    ],
+)
+def test_apostrophe_inside_a_profile_name_and_a_quote_after_it(text, name):
+    """FINDINGS P3 «Profile names with apostrophes are split»: апостроф внутри слова — часть имени,
+    кавычка после имени — нет."""
+    assert accounts(text) == {name}
+
+
+def test_profile_name_with_an_apostrophe_followed_by_prose_is_one_word():
+    assert accounts(r"профиль C:\Users\Dan O'Brien лежит на диске") == {"Dan"}
+
+
 @pytest.mark.parametrize("domain", ["SA", "APP", "USER", "GIT"])
 def test_domain_login_is_found_whatever_the_domain_name(domain):
     """Обзор партии P1: общий список стандартных учётных записей прятал «SA\petrov»."""
