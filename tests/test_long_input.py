@@ -55,3 +55,35 @@ def test_restore_is_fast_on_many_reference_brackets():
     started = time.perf_counter()
     restore(state, "]: <" * 25000, Settings())
     assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['url("' * 20000, "url(" * 25000, "@import '" * 12000, 'url("\\' * 16000, "url(\\" * 20000, "url('\\'" * 12000],
+    ids=["quoted", "unquoted", "import", "quoted_escape", "unquoted_escape", "escaped_quotes"],
+)
+def test_restore_is_fast_on_unclosed_css_urls(text):
+    """CSS url() и @import без закрывающей кавычки или скобки не дают квадратичного времени."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "почта ivanov@contoso.ru", Settings())
+    started = time.perf_counter()
+    restore(state, text + "<EMAIL_1>", Settings())
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<" * 50000, "<a>, data='x' " * 10000, "<a " * 20000 + "f(a, data='x')",
+        "EMAIL_1" + " " * 50000, "//x:<EMAIL_1> " * 5000, "file:///" * 20000, "//" * 50000,
+    ],
+    ids=["brackets", "arguments", "open_tags", "spaced_label", "bare_links", "file_links", "slashes"],
+)
+def test_restore_is_fast_on_many_tags_arguments_and_bare_links(text):
+    """Участки вне тегов считаются один раз на ответ, а не для каждого атрибута; метка без ограничителей,
+    адреса без схемы и «file:///» проверяются за линейное время."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "почта ivanov@contoso.ru", Settings())
+    started = time.perf_counter()
+    restore(state, text + "<EMAIL_1>", Settings())
+    assert time.perf_counter() - started < 0.5
