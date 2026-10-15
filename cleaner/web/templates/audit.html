@@ -16,9 +16,9 @@
     <tbody>
     {% for r in rows %}
     <tr>
-      <td class="mono">{{ r.ts | local(tz) }}</td>
+      <td class="mono nowrap">{{ r.ts | local(tz) }}</td>
       <td>{{ logins.get(r.user_id, "") }}</td>
-      <td class="mono">{{ (r.chat_id or "")[:8] }}</td>
+      <td class="mono nowrap">{{ (r.chat_id or "")[:8] }}</td>
       <td class="event">{{ r.event }}</td>
       <td>{% for key, value in r.details.items() %}{{ key }}: {{ value }}{% if not loop.last %}; {% endif %}{% endfor %}</td>
     </tr>

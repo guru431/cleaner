@@ -9,7 +9,7 @@
     <tbody>
     {% for row in rows %}
     <tr>
-      <td class="mono">{{ row.created_at | local(tz) }}</td><td>{{ row.login }}</td><td class="num">{{ row.length }}</td><td>{{ row.types }}</td>
+      <td class="mono nowrap">{{ row.created_at | local(tz) }}</td><td>{{ row.login }}</td><td class="num">{{ row.length }}</td><td>{{ row.types }}</td>
       <td class="actions"><form method="post" action="/settings/gold/{{ row.id }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form></td>
     </tr>
     {% else %}

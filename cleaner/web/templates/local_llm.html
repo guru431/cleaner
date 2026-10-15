@@ -26,9 +26,12 @@
         <option value="response_format"{% if current.schema %} selected{% endif %}>параметром response_format</option>
         <option value="prompt"{% if not current.schema %} selected{% endif %}>только в тексте запроса</option>
       </select></label>
-      <div class="buttons"><button class="primary">Сохранить</button></div>
+      <div class="buttons">
+        <button class="primary">Сохранить</button>
+        <button form="local-check">Проверить сохранённую настройку</button>
+      </div>
     </form>
-    <form method="post" action="/settings/local-llm/check" class="buttons">{% include "_csrf.html" %}<button>Проверить сохранённую настройку</button></form>
+    <form method="post" action="/settings/local-llm/check" id="local-check" hidden>{% include "_csrf.html" %}</form>
   </div>
 </section>
 <section class="panel">

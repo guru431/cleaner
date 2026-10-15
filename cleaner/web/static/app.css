@@ -175,16 +175,17 @@ details.raw pre.text { margin-top: 8px; padding: 8px 12px; border: 1px solid var
 /* --- таблицы ------------------------------------------------------------------- */
 
 table { width: 100%; border-collapse: collapse; }
-th, td { padding: 6px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
+th, td { padding: 6px 12px; text-align: left; vertical-align: baseline; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
 th { background: var(--bg-sub); color: var(--muted); font-weight: 600; white-space: nowrap; border-bottom-color: var(--line); }
 tbody tr:last-child td { border-bottom: 0; }
 .panel > table thead th:first-child { border-top-left-radius: var(--radius); }
 .panel > table thead th:last-child { border-top-right-radius: var(--radius); }
 th.num, td.num { text-align: right; }
 td.actions { white-space: nowrap; overflow-wrap: normal; }
-td.actions > form, td.actions > details { display: inline-flex; vertical-align: top; margin: 0 4px 0 0; }
+td.actions > form, td.actions > details { display: inline-flex; margin: 0 4px 0 0; }
 td form { margin: 0; display: inline-flex; align-items: center; gap: 6px; }
 td.mono, td.event { font-family: var(--mono); font-size: 12.5px; }
+td.nowrap, td.event { white-space: nowrap; overflow-wrap: normal; }
 td.empty { color: var(--muted); }
 .sub { color: var(--muted); font-size: 12px; }
 td .sub { margin-top: 2px; }
@@ -229,8 +230,9 @@ details[open].menu > summary, details[open].inline > summary { background: var(-
 }
 details.menu > .pop { right: 0; }
 details.inline > .pop { left: 0; }
-.pop form { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.pop input:not([type="checkbox"]), .pop select { flex: 1 1 160px; min-width: 0; }
+.pop form { margin: 0; }
+.pop form:not(.form) { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pop form:not(.form) input:not([type="checkbox"]), .pop form:not(.form) select { flex: 1 1 160px; min-width: 0; }
 table.grid tbody tr { position: relative; }
 table.grid details.inline { position: static; }
 table.grid details.inline > .pop { left: 8px; right: 8px; top: calc(100% - 2px); }
@@ -249,8 +251,9 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 
 /* --- чаты --------------------------------------------------------------------- */
 
-.side-new { display: flex; gap: 6px; margin: 0; }
-.side-new input { flex: 1; min-width: 0; }
+.side-new { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.side-new input { flex: 1 1 100%; min-width: 0; }
+.side-new button { flex: 1; }
 .search { position: relative; margin: 0; }
 .search .icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
 .search input { width: 100%; padding-left: 28px; }
@@ -267,7 +270,7 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 .chat-head { flex: none; display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
 .chat-head h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-head summary.btn { padding: 0 7px; }
-.chat-head .pop { min-width: 320px; }
+.chat-head .pop { min-width: 440px; }
 .layers { display: flex; gap: 6px; margin-left: 8px; }
 .layers form { margin: 0; }
 .feed { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
@@ -313,7 +316,7 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 .card:hover { border-color: var(--accent); text-decoration: none; }
 .card strong { display: block; color: var(--accent); font-weight: 600; }
 .card span { color: var(--muted); font-size: 12px; }
-.form { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.form { margin: 0; display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
 .field { margin: 0; display: grid; grid-template-columns: 160px minmax(0, 480px); align-items: start; gap: 4px 12px; }
 .field > span:first-child { padding-top: 5px; }
 .field .control { display: flex; flex-direction: column; gap: 2px; }

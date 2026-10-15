@@ -144,8 +144,7 @@
       {% if local %}
       <form method="post" action="/chats/{{ chat.id }}/ask-local" class="ask-local">
         {% include "_csrf.html" %}
-        <span class="hint">без очистки: текст не покидает сервер</span>
-        <button>Спросить локальную модель</button>
+        <button title="Без очистки: текст не покидает сервер">Спросить локальную модель</button>
       </form>
       {% endif %}
     </div>
