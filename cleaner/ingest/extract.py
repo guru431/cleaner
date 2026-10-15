@@ -294,6 +294,19 @@ class _Text:
             self.chars += len("".join(data.split()))
 
 
+def _is_markup(package: zipfile.ZipFile, part: zipfile.ZipInfo) -> bool:
+    """Разметка — по содержимому, а не по имени: python-docx находит основную часть по связям, и переименованная
+    (`word/document.bin`) обошла бы предел по расширению `.xml`. Часть, которую не прочесть, считается разметкой."""
+    if part.is_dir() or part.file_size == 0:
+        return False
+    try:
+        with package.open(part) as handle:
+            head = handle.read(64)
+    except (zipfile.BadZipFile, NotImplementedError, RuntimeError, OSError, EOFError):
+        return True
+    return head.replace(b"\x00", b"").lstrip(b"\xef\xbb\xbf\xff\xfe \t\r\n").startswith(b"<")
+
+
 def _check_package(data: bytes, kind: str, max_chars: int) -> int:
     """Отказ до Docling, когда разбор не уместится в память службы (MemoryMax) или его текст всё равно будет
     отклонён: ZIP-бомба, слишком много XML, таблица с заведомо длинным текстом или огромной областью листов,
@@ -322,7 +335,7 @@ def _check_package(data: bytes, kind: str, max_chars: int) -> int:
                         f"Таблица слишком большая для разбора: в областях данных листов больше {_SHEET_AREA} клеток. "
                         f"{_SPLIT_TABLE}"
                     )
-        if sum(part.file_size for part in parts if part.filename.lower().endswith((".xml", ".rels", ".vml"))) > _MARKUP:
+        if sum(part.file_size for part in parts if _is_markup(package, part)) > _MARKUP:
             raise ExtractError(
                 f"Документ слишком большой для разбора: его разметка без сжатия больше {_MARKUP // 2**20} МБ. "
                 "Разделите его на части"

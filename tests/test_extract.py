@@ -207,6 +207,13 @@ def test_markup_is_limited_separately_from_pictures():
     assert documents.calls == ["docx"]
 
 
+def test_markup_under_another_name_counts_too():
+    """Основную часть DOCX можно переименовать — python-docx найдёт её по связям; предел разметки — по содержимому."""
+    renamed = declared(package({"word/document.bin": "<w:document/>"}), 33 * 2**20)
+    with pytest.raises(ExtractError, match="разметка без сжатия больше 32 МБ"):
+        Extractor(Documents(), Ocr()).extract("renamed.docx", renamed)
+
+
 def test_spreadsheet_whose_text_must_exceed_the_limit_is_refused_before_docling():
     """Ячейка со значением — не меньше трёх знаков Markdown: 101 ячейка при пределе 300 знаков — отказ сразу."""
     from openpyxl import Workbook
