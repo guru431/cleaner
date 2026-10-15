@@ -783,6 +783,42 @@ def test_value_set_by_the_user_is_restored_for_hosts_addresses_macs_and_sids(set
     )
 
 
+@pytest.mark.parametrize("network", ["2a00:1450:4010::/64", "8.8.8.0/24"], ids=["ipv6", "public_ipv4"])
+def test_prefix_written_after_a_network_surrogate_is_not_doubled(settings, network):
+    """FINDINGS «Restore round of 15.10», (2): сеть IPv6 и публичная IPv4 из правила пользователя (слой 3 длину
+    префикса во фрагмент не берёт) получают подмену-адрес без длины префикса, и ответ «подмена/64» восстанавливался в
+    «…/64/64». Сеть восстанавливается без своей длины, если ответ пишет свою, — и длина остаётся та, что в ответе."""
+    state = ChatState(chat_id="networks", net_key=bytes(range(32)))
+    ops.mask(state, network, T.IP)
+    [fake] = sanitize(state, f"сеть {network}", settings).sanitized.split()[1:]
+    address, length = network.split("/")
+    answer = f"сеть {fake}/{length}, она же {fake}; шире — {fake}/16"
+    assert restore(state, answer, settings).text == f"сеть {network}, она же {network}; шире — {address}/16"
+
+
+def test_prefix_written_after_a_network_label_is_not_doubled(settings):
+    """Та же находка: сеть, которой выдана метка (подмена совпала с открытым адресом), — и в искажённой записи метки."""
+    state = ChatState(chat_id="networks", net_key=bytes(range(32)))
+    ops.mask(state, "2a00:1450:4010::/64", T.IP)
+    opened = Settings(never=frozenset({"2001:db8:1::1"}))
+    assert sanitize(state, "сеть 2a00:1450:4010::/64", opened).sanitized == "сеть <IP_1>"
+    assert restore(state, "сеть <IP_1>/64 и IP_1/64, она же <IP_1>", opened).text == (
+        "сеть 2a00:1450:4010::/64 и 2a00:1450:4010::/64, она же 2a00:1450:4010::/64"
+    )
+
+
+def test_private_networks_and_addresses_with_a_prefix_restore_to_their_own_originals(settings):
+    """С другой стороны: частная сеть IPv4 получает подмену с длиной префикса и восстанавливается сама (целиком или
+    адресом), адрес узла с длиной префикса (6.2) — тоже сам, а за адресом без длины префикса длина из ответа остаётся."""
+    state = ChatState(chat_id="networks", net_key=bytes(range(32)))
+    for value in ("10.1.0.0/16", "10.1.2.5/16"):
+        ops.mask(state, value, T.IP)
+    sanitized = sanitize(state, "сеть 10.1.0.0/16, узел 10.1.2.5/16 и 10.1.3.7", settings).sanitized
+    network, host, address = (word.rstrip(",") for word in sanitized.split()[1::2])
+    answer = f"{network}, {network.split('/')[0]}; {host}, {host.split('/')[0]}; {address}/24"
+    assert restore(state, answer, settings).text == "10.1.0.0/16, 10.1.0.0; 10.1.2.5/16, 10.1.2.5; 10.1.3.7/24"
+
+
 @pytest.mark.parametrize("answer", ["EMAİL_1", "<EMAİL_1>", "[[EMAİL_1]]", "PERſON_1", "hoſt-1"])
 def test_letters_that_fold_to_ascii_are_not_label_letters(settings, answer):
     """FINDINGS P3 «Restore: small defects»: «İ» и «ſ» при поиске без учёта регистра совпадали с «I» и «S»,

@@ -198,6 +198,16 @@ def _tolerant_pattern() -> re.Pattern[str]:
 
 
 _TOLERANT = _tolerant_pattern()
+_PREFIX_AFTER = re.compile(r"/\d")
+
+
+def _one_prefix(original: str, type_: EntityType, text: str, end: int) -> str:
+    """Сеть, за заменой которой ответ сам пишет длину префикса, восстанавливается без своей: подмена-адрес сети IPv6 и
+    публичной IPv4 из правила пользователя и метка сети длины префикса не несут, и «<IP_1>/64» иначе дало бы
+    «…/64/64». Остаётся длина, которую написал ответ."""
+    if type_ is EntityType.IP and "/" in original and _PREFIX_AFTER.match(text, end):
+        return original.split("/")[0]
+    return original
 
 
 @dataclass(frozen=True)
@@ -433,7 +443,9 @@ class _Restorer:
         if any(self._hidden(self.state.entities[owner.entity_id].type) for owner in owners):
             self.counters["kept"] += 1
             return text, "kept_by_policy"
-        original = self._original(m.key, surrogate)
+        original = _one_prefix(
+            self._original(m.key, surrogate), self.state.entities[surrogate.entity_id].type, m.string, m.end(),
+        )
         kind = "restored"
         if surrogate.kind in ("host", "label"):
             if surrogate.kind == "host" and text.isupper():
@@ -463,7 +475,7 @@ class _Restorer:
             self.counters["kept"] += 1
             return canonical, "kept_by_policy"
         self.counters["altered"] += 1
-        return entity.restore_value, "altered"
+        return _one_prefix(entity.restore_value, entity.type, m.string, m.end()), "altered"
 
     def _derived_ip(self, m: re.Match[str]) -> Piece | None:
         try:
