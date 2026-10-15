@@ -79,6 +79,16 @@ def test_retype_and_refused_edits(ivan, repo):
     assert ivan.post(f"/chats/{chat_id}/entities/missing/retype", type="ORG").status_code == 404
 
 
+def test_retyping_a_host_part_keeps_the_full_name(ivan, repo):
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="узел srv01.contoso.ru и srv01")
+    host = next(e for e in repo.load_state(chat_id)[0].entities.values() if e.key == "srv01")
+    ivan.post(f"/chats/{chat_id}/entities/{host.id}/retype", type="TERM")
+    assert repo.items(chat_id)[0].sanitized == "узел <TERM_1>.domain-1.example и <TERM_1>"
+    ivan.post(f"/chats/{chat_id}/answer", answer="Перезагрузите <TERM_1>.domain-1.example")
+    assert "srv01.contoso.ru" in ivan.get(f"/chats/{chat_id}").text
+
+
 def test_admin_adds_a_value_to_the_dictionary_from_the_review(boss, ivan, repo):
     chat_id = boss.chat()
     boss.post(f"/chats/{chat_id}/input", text="клиент Ромашка")

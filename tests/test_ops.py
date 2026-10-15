@@ -31,6 +31,58 @@ def test_retype_gives_a_label_of_the_new_type_and_keeps_the_old_one_restorable(s
     assert restore(state, "<ORG_1>", settings).text == "Ромашка"
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("узел srv01.contoso.ru и srv01", "узел <TERM_1>.domain-1.example и <TERM_1>"),
+    ("узел srv01.corp.contoso.ru и srv01", "узел <TERM_1>.sub-2.domain-1.example и <TERM_1>"),
+], ids=["host-domain", "host-sub-domain"])
+def test_retyping_a_host_part_keeps_the_rest_of_the_name(state, settings, text, expected):
+    """Решение владельца 15.10.2026: тип меняется только у части, строение полного имени остаётся (5.7)."""
+    sanitize(state, text, settings)
+    host = next(e for e in state.entities.values() if e.key == "srv01")
+    ops.retype(state, host.id, T.TERM)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, text, settings).sanitized == expected          # тот же оригинал — тот же результат
+    assert sanitize(state, expected, settings).sanitized == expected      # повторная вставка (5.10)
+    restored = restore(state, expected.split()[1], settings)
+    assert (restored.text, [s.kind for s in restored.segments]) == (text.split()[1], ["restored"])  # имя из запроса
+    assert restore(state, "<TERM_1>", settings).text == "srv01"
+
+
+def test_retyping_a_middle_part_of_a_name_takes_effect(state, settings):
+    """Средняя часть отдельно не ищется и написаний не имеет: в правило идёт её значение для восстановления."""
+    text = "узел srv-01.msk.contoso.ru"
+    sanitize(state, text, settings)
+    part = next(e for e in state.entities.values() if e.key == "msk")
+    ops.retype(state, part.id, T.TERM)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "узел host-1.<TERM_1>.domain-1.example" and result.deliverable
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert restore(state, "host-1.<TERM_1>.domain-1.example", settings).text == "srv-01.msk.contoso.ru"
+    term = next(e for e in state.entities.values() if e.type is T.TERM)
+    ops.set_restore_value(state, term.id, "spb")         # имя целиком — с заданным значением части
+    assert restore(state, "host-1.<TERM_1>.domain-1.example", settings).text == "srv-01.spb.contoso.ru"
+
+
+def test_retyping_the_domain_of_a_name_keeps_its_host_part(state, settings):
+    text = "узел srv01.contoso.ru и srv01, сайт contoso.ru"
+    sanitize(state, text, settings)
+    domain = next(e for e in state.entities.values() if e.type is T.DOMAIN)
+    ops.retype(state, domain.id, T.ORG)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "узел host-1.<ORG_1> и host-1, сайт <ORG_1>" and result.deliverable
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert restore(state, "host-1.<ORG_1>", settings).text == "srv01.contoso.ru"
+
+
+@pytest.mark.parametrize("value", ["srv0", "contoso", "srv01.contoso", "srv01.contoso.ru"],
+                         ids=["inside-part", "half-domain", "two-parts", "whole"])
+def test_rule_off_the_part_boundaries_still_takes_the_whole_name(state, settings, value):
+    """Не целая часть имени — как прежде: старший тип правила поглощает имя целиком (FR-3.3)."""
+    ops.mask(state, value, T.TERM)
+    assert sanitize(state, "узел srv01.contoso.ru", settings).sanitized == "узел <TERM_1>"
+
+
 def test_merged_entities_share_one_label(state, settings):
     ops.mask(state, "Иванов", T.PERSON)
     ops.mask(state, "Ivanov", T.PERSON)

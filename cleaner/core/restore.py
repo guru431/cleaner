@@ -407,7 +407,8 @@ class _Restorer:
         if surrogate.kind == "host" and key not in self.issued and 2 < len(fakes) <= len(parts):
             left = len(fakes) - 2           # части слева от domain-N.example; остальное — домен оригинала
             pairs = [*zip(fakes[:left], parts), (".".join(fakes[left:]), ".".join(parts[left:]))]
-            return ".".join(self._fixed(self.state.surrogates.get(fake.lower())) or part for fake, part in pairs)
+            table = self.state.surrogates       # метка части — в своём регистре, подмена — в нижнем
+            return ".".join(self._fixed(table.get(fake) or table.get(fake.lower())) or part for fake, part in pairs)
         if surrogate.original is None:
             return self.state.entities[surrogate.entity_id].restore_value       # метка
         return self._fixed(surrogate) or surrogate.original

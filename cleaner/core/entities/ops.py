@@ -28,9 +28,10 @@ def set_restore_value(state: ChatState, entity_id: str, value: str) -> None:
 
 
 def retype(state: ChatState, entity_id: str, new_type: EntityType) -> None:
-    """Сменить тип: написания переходят в правила с новым типом, старая метка остаётся в таблице."""
+    """Сменить тип: написания переходят в правила с новым типом, старая метка остаётся в таблице.
+    У средней части имени узла написаний нет (отдельно она не ищется) — в правило идёт её значение."""
     entity = state.entities[entity_id]
-    for form in entity.forms:
+    for form in entity.forms or [entity.restore_value]:
         mask(state, form, new_type)
     entity.forms = []
 
