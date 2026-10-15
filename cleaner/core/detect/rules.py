@@ -45,9 +45,10 @@ _PHONE_INTL = re.compile(
 _PHONE_LOCAL = re.compile(
     r"(?<![\w+])\(?\d{3}\)?(?:[^\S\r\n]|-){0,2}\d{3}(?:[^\S\r\n]|-)?\d{2}(?:[^\S\r\n]|-)?\d{2}(?!\d)"
 )
-# Группы цифр через одиночный пробел или дефис; номер карты ищется окнами внутри такой цепочки,
-# потому что рядом бывают срок действия, CVV или чужая группа («от 2024 4111 1111 1111 1111»).
-_DIGIT_RUN = re.compile(r"(?<![\w-])\d+(?:[ -]\d+)*(?![\w-])")
+# Группы цифр через одиночный пробел, дефис, « - », точку или косую черту («6271 - 8855 - 1122 - 3344»,
+# «77/11/222/333/44»); номер карты ищется окнами внутри такой цепочки, потому что рядом бывают срок
+# действия, CVV или чужая группа («от 2024 4111 1111 1111 1111»).
+_DIGIT_RUN = re.compile(r"(?<![\w-])\d+(?:(?: - |[ ./\u2011-])\d+)*(?![\w-])")
 _DIGIT_GROUP = re.compile(r"\d+")
 # Окно номера карты среди других четырёхзначных групп — список (порты, коды), а не карта: в нём каждое
 # десятое окно проходит проверку Луна. Такое окно принимается только при словах о карте рядом.
@@ -55,7 +56,8 @@ _CARD_WORDS = re.compile(r"карт|кредитк|card|visa|master|maestro|amex
 _YEAR = re.compile(r"(?:19|20)\d\d")
 # Запятая рядом с номером — разделитель CSV, а не десятичная дробь: отсеивают контрольные разряды.
 _NUMBER = re.compile(r"(?<![\w.])\d{9,20}(?!\w|\.\d)")
-_SNILS = re.compile(r"(?<![\w-])\d{3}-\d{3}-\d{3}[ -]\d{2}(?!\d)")
+# «112-233-445 95», «178 - 481 - 192 10», «123.456.789.01»: разделитель первых трёх групп один и тот же.
+_SNILS = re.compile(r"(?<![\w.-])\d{3}(-| - |\.)\d{3}\1\d{3}(?:[ -]| - |\.)\d{2}(?!\d|\.\d)")
 _BIK = re.compile(r"(?<!\d)04\d{7}(?!\d)")
 _IBAN = re.compile(
     r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?(?![A-Za-z0-9])"
@@ -95,6 +97,11 @@ def _valid_date(m: re.Match[str]) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _ipv4(value: str) -> bool:
+    """«192.168.100.65» — адрес IPv4: его скрывает слой 3, даже если цифры проходят проверку СНИЛС или ИНН."""
+    return bool(_IPV4_DOMAIN.fullmatch(value)) and all(int(part) <= 255 for part in value.split("."))
 
 
 def _phone_groups(value: str) -> bool:
@@ -153,6 +160,28 @@ def _cards(text: str, m: re.Match[str], add: Add) -> None:
                 break
 
 
+def _grouped(text: str, m: re.Match[str], add: Add) -> None:
+    """ИНН и СНИЛС группами («77 07 08 38 93», «50 - 0100732259») — только рядом со своим словом.
+
+    Без слова сгруппированных десяти цифр с верной суммой ИНН слишком много: каждый десятый номер
+    телефона без кода, версия «1.234.567.890». В реквизитах и журналах рядом с ИНН стоят и паспорт
+    (группы 4-6 и 2-2-6), и адрес, и дата со временем — их цифры тоже проходят проверку.
+    Слитную запись проверяет _number.
+    """
+    value = m.group()
+    digits = _digits(value)
+    if len(digits) == len(value) or _ipv4(value) or any(_valid_date(date_) for date_ in _DATE.finditer(value)):
+        return
+    passport = [len(group) for group in _DIGIT_GROUP.findall(value)] in ([4, 6], [2, 2, 6])
+    if (
+        len(digits) in (10, 12) and not passport and validators.inn(digits)
+        and _near(text, m.start(), m.end(), ("инн",))
+    ):
+        add(m.start(), m.end(), EntityType.INN, True)
+    elif len(digits) == 11 and validators.snils(digits) and _near(text, m.start(), m.end(), ("снилс",)):
+        add(m.start(), m.end(), EntityType.SNILS, True)
+
+
 def _number(text: str, m: re.Match[str], add: Add) -> None:
     digits, start, end = m.group(), m.start(), m.end()
     if len(digits) in (10, 12) and validators.inn(digits):
@@ -204,8 +233,9 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             add(m.start(), m.end(), EntityType.PHONE)
     for m in _DIGIT_RUN.finditer(text):
         _cards(text, m, add)
+        _grouped(text, m, add)
     for m in _SNILS.finditer(text):
-        if validators.snils(_digits(m.group())):
+        if not _ipv4(m.group()) and validators.snils(_digits(m.group())):
             add(m.start(), m.end(), EntityType.SNILS, True)
     for m in _NUMBER.finditer(text):
         _number(text, m, add)

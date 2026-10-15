@@ -119,6 +119,56 @@ def test_card_window_inside_a_list_of_four_digit_numbers_needs_card_words():
     assert (T.CARD, "4111 1111 1111 1111") in found("Visa 4111 1111 1111 1111 3306")
 
 
+@pytest.mark.parametrize("card", ["5859 - 0413 - 9685 - 9907", "5859.0413.9685.9907", "5859/0413/9685/9907"])
+def test_card_groups_after_a_spaced_dash_a_dot_or_a_slash(card):
+    """FINDINGS P3 «valid numbers in spaced notations…»."""
+    assert (T.CARD, card) in found("оплата " + card)
+
+
+@pytest.mark.parametrize(
+    "text, type_, value",
+    [
+        ("Держи ИНН: 28 49 15 49 35.", T.INN, "28 49 15 49 35"),
+        ("ИНН 52 50 96 69 28 77, КПП 770701001", T.INN, "52 50 96 69 28 77"),
+        ("наш ИНН: № 28\u20114915\u20114935", T.INN, "28\u20114915\u20114935"),
+        ("ИНН ( 52 - 5096692877 )", T.INN, "52 - 5096692877"),
+        ("ИНН 52/50/966/928/77", T.INN, "52/50/966/928/77"),
+        ("СНИЛС 96 18 44 77 86 1", T.SNILS, "96 18 44 77 86 1"),
+    ],
+)
+def test_grouped_inn_and_snils_next_to_their_word(text, type_, value):
+    assert (type_, value) in found(text)
+
+
+def test_passport_next_to_an_inn_is_not_an_inn():
+    """Серия и номер паспорта, 4-6 или 2-2-6, проходят проверку ИНН в одном случае из десяти."""
+    for passport in ("2849 154935", "28 49 154935"):
+        result = found(f"Паспорт {passport}, ИНН 7707083893")
+        assert (T.PASSPORT, passport) in result
+        assert (T.INN, passport) not in result
+
+
+@pytest.mark.parametrize("value", ["10.10.100.101", "2026-01-01 02", "01.01.2026 06"])
+def test_address_or_date_next_to_an_inn_is_not_an_inn(value):
+    """Цифры адреса и даты со временем проходят проверку ИНН, а в реквизитах слово «ИНН» рядом."""
+    assert (T.INN, value) not in found(f"ИНН 7707083893, сервер и выписка: {value}:00")
+
+
+def test_snils_with_spaced_dashes_or_dots():
+    assert (T.SNILS, "961 - 844 - 778 61") in found("номер 961 - 844 - 778 61")
+    assert (T.SNILS, "961.844.778.61") in found("номер 961.844.778.61")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["заказ 28 49 15 49 35", "ряды 96 18 44 77 86 1", "сборка 2.849.154.935", "узел 192.168.100.65",
+     "встреча 12.10.2026", "архив 2024/10/14", "диапазон 2019 - 2024"],
+)
+def test_grouped_look_alikes_stay_open(text):
+    """Пары цифр, версия и IP проходят контрольную сумму ИНН или СНИЛС, но без слова рядом это не номера."""
+    assert found(text) == set()
+
+
 def test_card_is_not_cut_out_of_a_longer_digit_group():
     assert T.CARD not in types("счёт 40702810200000000001")
 
