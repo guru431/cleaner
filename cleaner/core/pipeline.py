@@ -6,7 +6,7 @@ import bisect
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import ModuleType
 from typing import Protocol
 
@@ -53,6 +53,8 @@ def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext
     value = text[start:end]
     if not _WORD.search(value):
         return None         # одни разделители
+    if any(start < ruled_end and ruled_start < end for ruled_start, ruled_end in span.ruled):
+        return MergedSpan(start, end, span.type, span.sources)      # часть, которую задело правило пользователя
     if span.type is EntityType.DN:
         # Имя атрибута без значения («CN=» перед заменой) ничего не выдаёт.
         return MergedSpan(start, end, EntityType.DN, span.sources) if "=" in value else None
@@ -77,18 +79,44 @@ def _outside(
     last = first
     while last < len(ranges) and ranges[last][0] < span.end:
         last += 1
-    if first == last or span.type not in _COMPOSED:
+    if first == last:
+        return _placed(text, span, ranges, starts, ctx)
+    if span.type not in _COMPOSED and not span.ruled:
         return [span]
-    if span.type not in _SPLIT:
+    if span.type not in _SPLIT and not span.ruled:
         return []
+    bounds = ranges[first:last]
+    at = text.find("@", span.start, span.end) if span.type is EntityType.EMAIL else -1
+    if at >= 0:
+        bounds = sorted([*bounds, (at, at + 1)])        # имя входа и имя узла — разные части, и рядом с заменой
     pieces, position = [], span.start
-    for start, end in [*ranges[first:last], (span.end, span.end)]:
+    for start, end in [*bounds, (span.end, span.end)]:
         if start > position:
             piece = _piece(text, span, position, min(start, span.end), ctx)
             if piece:
-                pieces.append(piece)
+                pieces += _placed(text, piece, ranges, starts, ctx)
         position = max(position, end)
     return pieces
+
+
+def _placed(
+    text: str, span: MergedSpan, ranges: list[tuple[int, int]], starts: list[int], ctx: DetectContext,
+) -> list[MergedSpan]:
+    """Имя, которое стоит через точку после выданной замены или метки или перед ней, — часть имени (5.10): части перед
+    заменой — части слева от домена, часть после неё — не первая, и отдельным написанием (5.4) она не становится.
+    Одни служебные части перед заменой («www.mail.<TERM_1>…») не скрываются, как и «www» сам по себе."""
+    if span.type not in (EntityType.HOST, EntityType.DOMAIN):
+        return [span]
+    after = bisect.bisect_left(starts, span.end + 1)
+    precedes = text[span.end:span.end + 1] == "." and after < len(starts) and starts[after] == span.end + 1
+    before = bisect.bisect_right(starts, span.start - 2) - 1        # замена, которая кончается перед точкой
+    follows = text[span.start - 1:span.start] == "." and before >= 0 and ranges[before][1] == span.start - 1
+    if not (follows or precedes):
+        return [span]
+    labels_ = text[span.start:span.end].lower().split(".")
+    if (precedes or len(labels_) == 1) and all(label in ctx.builtin.generic_labels for label in labels_):
+        return []
+    return [replace(span, follows=follows, precedes=precedes)]
 
 
 class SecondPass(Protocol):

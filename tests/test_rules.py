@@ -20,6 +20,21 @@ def test_email_without_trailing_dot():
     assert (T.EMAIL, "i.ivanov@corp.example") in found("Пишите на i.ivanov@corp.example.")
 
 
+@pytest.mark.parametrize("text, email", [
+    ("пишите ivanov@<TERM_1>.fabrikam.ru.", "ivanov@<TERM_1>.fabrikam.ru"),
+    ("пишите ivanov@host-1.[[ORG_1]], ответит", "ivanov@host-1.[[ORG_1]]"),
+    ("пишите ivanov@<ORG_1>", "ivanov@<ORG_1>"),
+    ("пишите ivanov@<PERSON_1>", None),
+    ("пишите ivanov@localhost, a@b@c.example", "b@c.example"),
+], ids=["label-first", "label-last", "domain-label", "other-label", "no-dot"])
+def test_email_with_a_label_in_its_domain(text, email):
+    """FINDINGS «Retyping a host name part: what it leaves» (2): часть домена бывает меткой — части дали другой тип.
+    Метка сама по себе — домен, только если выдана домену в имени (<org_1> из host-1.<ORG_1>)."""
+    ctx = DetectContext(Settings(), issued_domains=frozenset({"domain-1.example", "<org_1>"}))
+    emails = [text[span.start:span.end] for span in rules.detect(text, ctx) if span.type is T.EMAIL]
+    assert emails == ([email] if email else [])
+
+
 def test_phone_in_two_notations():
     result = found("Тел. +7 (916) 123-45-67, запасной 89161234567")
     assert (T.PHONE, "+7 (916) 123-45-67") in result

@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections.abc import Iterator
+from functools import lru_cache
 
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities import hostmap, netmap
@@ -133,13 +134,30 @@ def _is_address(value: str) -> bool:
     return True
 
 
+@lru_cache(maxsize=16)
+def _longest(listed: frozenset[str]) -> int:
+    return max(map(len, listed), default=0)
+
+
 def well_known(value: str, ctx: DetectContext) -> bool:
-    """Общеизвестное имя или имя из списка «никогда не скрывать», включая поддомены."""
-    parts = value.lower().strip(".").split(".")
-    listed = ctx.builtin.well_known_domains | ctx.settings.never
-    if len(parts) == 1:
-        return parts[0] in listed or parts[0] in ctx.builtin.generic_labels
-    return any(".".join(parts[i:]) in listed for i in range(len(parts)))
+    """Общеизвестное имя или имя из списка «никогда не скрывать», включая поддомены. Суффиксы сверяются справа и не
+    длиннее самого длинного значения списков: цепочка из тысяч частей («abc.def.…») иначе проверялась бы
+    квадратичное время."""
+    name = value.lower().strip(".")
+    known, never = ctx.builtin.well_known_domains, ctx.settings.never
+    if "." not in name:
+        return name in known or name in never or name in ctx.builtin.generic_labels
+    longest = max(_longest(known), _longest(never))
+    end = len(name)
+    while end >= 0:
+        dot = name.rfind(".", 0, end)
+        if len(name) - dot - 1 > longest:
+            return False
+        suffix = name[dot + 1:]
+        if suffix in known or suffix in never:
+            return True
+        end = dot
+    return False
 
 
 def _under_issued(value: str, ctx: DetectContext) -> bool:

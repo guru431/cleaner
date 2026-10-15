@@ -56,16 +56,19 @@ class Finder:
     def __init__(self, state: ChatState, loose: bool = False):
         self.table = state.surrogates
         self.loose = loose
-        self.hosts: dict[str, str] = {}
+        # Имена узлов — деревом частей в нижнем регистре; None — замена, которой кончается цепочка.
+        self.hosts: dict[str | None, dict | str] = {}
         self.macs: dict[str, str] = {}
         self.macs_by_digits: dict[str, str] = {}
         for key, surrogate in state.surrogates.items():
             if surrogate.kind == "host":
-                self.hosts[key.lower()] = key
+                node = self.hosts
+                for part in key.lower().split("."):
+                    node = node.setdefault(part, {})
+                node[None] = key
             elif surrogate.kind == "mac":
                 self.macs[key.lower()] = key
                 self.macs_by_digits.setdefault(macsid.mac_key(key), key)
-        self.depth = max((key.count(".") + 1 for key in self.hosts), default=0)
 
     def finditer(self, text: str) -> list[Hit]:
         if not self.table:
@@ -132,7 +135,9 @@ class Finder:
         return hits
 
     def _names(self, text: str) -> list[Hit]:
-        """Имена узлов: самые длинные цепочки частей через точку, которые есть в таблице."""
+        """Имена узлов: самые длинные цепочки частей через точку, которые есть в таблице. Цепочка проходится по дереву
+        частей, пока она — начало какой-нибудь замены: перебор всех цепочек до длины самой длинной замены был бы
+        кубическим на длинной цепочке («a.a.a…»), если в таблице есть имя из тысяч частей."""
         if not self.hosts:
             return []
         hits = []
@@ -141,14 +146,17 @@ class Finder:
             offsets = [m.start()]
             for part in parts:
                 offsets.append(offsets[-1] + len(part) + 1)
+            lowered = [part.lower() for part in parts]      # «İ» в нижнем регистре длиннее: позиции — по тексту
             first = 0
             while first < len(parts):
-                for last in range(min(len(parts), first + self.depth), first, -1):
-                    key = self.hosts.get(".".join(parts[first:last]).lower())
-                    if key is not None:
-                        hits.append(Hit(offsets[first], offsets[last] - 1, key, text))
-                        first = last
-                        break
+                node, last, found = self.hosts, first, None
+                while last < len(parts) and (node := node.get(lowered[last])) is not None:
+                    last += 1
+                    if None in node:
+                        found = last, node[None]
+                if found:
+                    hits.append(Hit(offsets[first], offsets[found[0]] - 1, found[1], text))
+                    first = found[0]
                 else:
                     first += 1
         return hits

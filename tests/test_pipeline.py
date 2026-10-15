@@ -289,7 +289,12 @@ def test_new_values_next_to_an_issued_surrogate_are_masked(state, settings):
     ("domain", "Проверь <ORG_1>.fabrikam.ru", "Проверь <ORG_1>.domain-2.example"),
     ("domain", "Проверь srv-db02.<ORG_1>", "Проверь host-2.<ORG_1>"),
     ("domain", "Проверь srv-db02.host-1.<ORG_1>", "Проверь host-2.host-1.<ORG_1>"),
-], ids=["domain-after", "part-before", "foreign-label", "domain-after-org", "part-before-org", "part-before-name"])
+    ("host", "Проверь <TERM_1>.corp.domain-1.example, corp wiki", "Проверь <TERM_1>.sub-2.domain-1.example, corp wiki"),
+    ("host", "Проверь <TERM_1>.corp.fabrikam.ru", "Проверь <TERM_1>.sub-2.domain-2.example"),
+], ids=[
+    "domain-after", "part-before", "foreign-label", "domain-after-org", "part-before-org", "part-before-name",
+    "part-between", "name-after",
+])
 def test_real_name_next_to_a_label_part_is_masked(state, settings, retype, text, expected):
     """Обзор, Minor 8: после смены типа части имени метка стоит в имени (<TERM_1>.domain-1.example, host-1.<ORG_1>),
     и пользователь может вписать рядом настоящее имя. Скрывается часть вне замены, сама метка остаётся (5.10)."""
@@ -308,6 +313,47 @@ def test_real_name_next_to_a_label_part_is_masked(state, settings, retype, text,
     assert (len(state.entities), len(state.surrogates)) == counts
 
 
+def test_name_longer_than_a_dns_name_is_masked_and_restored_by_parts(state, settings):
+    """FINDINGS P2 «Layer 3 takes quadratic time on a long dotted run»: имя длиннее 253 знаков целиком в таблицу не
+    записывается — поиск замен перебирал бы цепочки частей до его длины, — но скрывается и восстанавливается по частям."""
+    text = "цепочка " + "srv-01." * 40 + "contoso.ru"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "цепочка " + "host-1." * 40 + "domain-1.example" and result.deliverable
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert restore(state, result.sanitized, settings).text == text
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Проверь srv-02.msk.domain-1.example", "Проверь host-2.sub-3.domain-1.example"),
+    ("Проверь www.srv-02.domain-1.example", "Проверь www.host-2.domain-1.example"),
+    ("Проверь host-1.ru, ru и msk", "Проверь host-1.sub-2, ru и msk"),
+    ("Проверь host-1.fabrikam.ru", "Проверь host-1.domain-2.example"),
+], ids=["parts-before", "generic-before", "part-after", "domain-after"])
+def test_part_cut_off_an_issued_replacement_keeps_its_place_in_the_name(state, settings, text, expected):
+    """FINDINGS «Retyping a host name part: what it leaves» (1): часть вне выданной замены разбиралась как имя само по
+    себе — «srv-02.msk» получал подмену домена, а одиночная часть («ru» после host-1) — искомой и скрывалась везде.
+    Части перед заменой — части слева от домена, часть после неё — не первая; домен после замены — домен."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, expected, settings).sanitized == expected        # повторная вставка ничего не меняет
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, expected, settings).text == text.replace("host-1", "srv01").replace("domain-1.example", "contoso.ru")
+
+
+def test_first_part_after_generic_ones_is_the_leading_part(state, settings):
+    """FINDINGS «Review fixes round of 15.10: small leftovers»: первой считалась только часть на месте 0, и у
+    www.srv02.corp.contoso.ru часть srv02 получала sub-N и не становилась искомой — отдельное srv02 оставалось открытым.
+    Первая — первая не служебная часть; средняя часть искомой не становится, как прежде."""
+    text = "узел www.srv02.corp.contoso.ru, позже srv02, mail.corp.contoso.ru и corp wiki"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == (
+        "узел www.host-1.sub-2.domain-1.example, позже host-1, mail.sub-2.domain-1.example и corp wiki"
+    )
+    assert restore(state, result.sanitized, settings).text == text
+
+
 def test_rule_inside_a_name_with_a_label_part_leaves_the_label(state, settings):
     """Правило пользователя поглощает фрагмент целиком (5.7): метка во фрагмент имени не входит и остаётся (FR-5.9)."""
     sanitize(state, "узел srv01.contoso.ru и srv01", settings)
@@ -315,6 +361,67 @@ def test_rule_inside_a_name_with_a_label_part_leaves_the_label(state, settings):
     sanitize(state, "узел srv01.contoso.ru и srv01", settings)
     ops.mask(state, "fabrikam", T.TERM)
     assert sanitize(state, "Проверь <TERM_1>.fabrikam.ru", settings).sanitized == "Проверь <TERM_1>.<TERM_2>"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Проверь host-1.fabrikam.ru", "Проверь host-1.<TERM_1>"),
+    ("Проверь srv-db02.host-1.fabrikam.ru", "Проверь host-2.host-1.<TERM_1>"),
+    ("Проверь srv02.fabrikam.ru", "Проверь <TERM_1>"),
+], ids=["part-before", "parts-around", "no-replacement"])
+def test_selection_inside_a_name_leaves_the_issued_replacement_next_to_it(state, settings, text, expected):
+    """FINDINGS «Retyping a host name part: what it leaves» (3): выделение не на целой части поглощало имя вместе с
+    выданной заменой — <TERM_1> восстанавливался в «host-1.fabrikam.ru», с подменой вместо оригинала. Замену правило не
+    трогает (FR-5.9) и поглощает только задетые им части; имя без замены — целиком, как прежде (5.7)."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    ops.mask(state, "fabrikam", T.TERM)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert restore(state, expected, settings).text == text.replace("host-1", "srv01")
+
+
+def test_email_with_a_retyped_host_part_stays_an_email(state, settings):
+    """FINDINGS «Retyping a host name part: what it leaves» (2): правило смены типа части имени поглощало адрес e-mail с
+    этой частью — он становился меткой TERM. Правило на целой части имени после «@» адрес не поглощает (5.7, шаг 4)."""
+    text = "узел srv01.contoso.ru и srv01, почта ivanov@srv01.contoso.ru"
+    assert sanitize(state, text, settings).sanitized.endswith("почта <EMAIL_1>")
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.TERM)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "узел <TERM_1>.domain-1.example и <TERM_1>, почта <EMAIL_1>"
+    assert restore(state, result.sanitized, settings).text == text
+    ops.mask(state, "srv0", T.TERM)        # выделение не на целой части поглощает адрес, как прежде
+    assert sanitize(state, "почта ivanov@srv01.contoso.ru", settings).sanitized == "почта <TERM_2>"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("почта ivanov@<TERM_1>.northwind.ru", "почта <ACCOUNT_1>@<TERM_1>.domain-3.example"),
+    ("почта ivanov@host-1.<ORG_1>", "почта <ACCOUNT_1>@host-1.<ORG_1>"),
+    ("почта ivanov@<ORG_1>", "почта <ACCOUNT_1>@<ORG_1>"),
+    ("почта postmaster@<TERM_1>.domain-1.example", "почта postmaster@<TERM_1>.domain-1.example"),
+    ("звонил <PERSON_1>, ivanov@<PERSON_1>", "звонил <PERSON_1>, ivanov@<PERSON_1>"),
+    ("почта ivanov@srv02.<ORG_1>", "почта <ACCOUNT_1>@host-2.<ORG_1>"),
+    ("почта ivanov@srv03.domain-1.example", "почта <ACCOUNT_1>@host-3.domain-1.example"),
+], ids=["label-and-name", "name-and-label", "domain-label", "role-mailbox", "not-a-domain", "part-and-label", "part-and-domain"])
+def test_email_with_a_label_in_its_domain_is_found(state, settings, text, expected):
+    """FINDINGS «Retyping a host name part: what it leaves» (2): правило e-mail не брало метку в домене, и в
+    «ivanov@<TERM_1>.fabrikam.ru» оставались открытыми и логин, и домен. Метка, выданная домену в имени (<ORG_1> из
+    host-1.<ORG_1>), — домен и сама по себе; другая метка после «@» доменом не считается."""
+    sanitize(state, "узел srv01.contoso.ru и srv01, узел srv02.fabrikam.ru, сайт fabrikam.ru", settings)
+    for key, type_ in (("srv01", T.TERM), ("fabrikam.ru", T.ORG)):
+        ops.retype(state, next(e for e in state.entities.values() if e.key == key).id, type_)
+    sanitize(state, "узел srv01.contoso.ru и srv01, узел srv02.fabrikam.ru, сайт fabrikam.ru", settings)
+    ops.mask(state, "Петров", T.PERSON)
+    sanitize(state, "звонил Петров", settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, expected, settings).sanitized == expected
+
+
+def test_email_without_an_at_sign_next_to_a_replacement_does_not_stop_sanitizing(state, settings):
+    """Фрагмент типа EMAIL без «@» бывает — правило пользователя с этим типом; рядом с заменой он делится, как прежде."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    ops.mask(state, "host-1 fabrikam", T.EMAIL)
+    assert sanitize(state, "узел host-1 fabrikam", settings).sanitized == "узел host-1 <ACCOUNT_1>"
 
 
 def test_labels_with_dots_outside_names_stay_as_they_are(state, settings):
