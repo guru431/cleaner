@@ -86,15 +86,19 @@ fi
 # читает только группа aidash, а в SAN нет example. Отпечаток в документы не
 # выписывается — его печатают этот установщик и check-cleaner.sh.
 if [[ ! -s "$TLS/cert.pem" || ! -s "$TLS/key.pem" ]]; then
-    (
+    # Вывод openssl (точки генерации ключа) показывается, только если выпуск не удался.
+    if ! out=$(
         umask 077
         openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
             -keyout "$TLS/key.pem" -out "$TLS/cert.pem" \
             -subj "/CN=example Cleaner" \
             -addext "subjectAltName=IP:${HOST_IP},DNS:example" \
             -addext "keyUsage=digitalSignature,keyEncipherment" \
-            -addext "extendedKeyUsage=serverAuth" 2>/dev/null
-    )
+            -addext "extendedKeyUsage=serverAuth" 2>&1
+    ); then
+        echo "$out" >&2
+        fail "сертификат не выпущен — причина в выводе openssl выше"
+    fi
     chown root:cleaner "$TLS/key.pem" "$TLS/cert.pem"
     chmod 0640 "$TLS/key.pem"
     chmod 0644 "$TLS/cert.pem"
@@ -156,6 +160,10 @@ if ! cmp -s "$SRC/requirements-linux.txt" "$APP/.venv/requirements-linux.txt"; t
         PREV_VENV="$APP/.venv.prev"
     fi
     mv "$APP/.venv.new" "$APP/.venv"
+    # Окружение собрано под именем .venv.new, чтобы работающая служба до замены не лишилась пакетов,
+    # которые она подгружает лениво. Пути в заголовках скриптов bin/ (pip и др.) и в activate
+    # переписываются на настоящее имя; ссылки на интерпретатор grep -r не открывает.
+    { grep -rlF "$APP/.venv.new" "$APP/.venv/bin" || true; } | xargs -r sed -i "s|$APP/\.venv\.new|$APP/.venv|g"
     log "окружение собрано по requirements-linux.txt"
 else
     log "зависимости не менялись — окружение прежнее"
@@ -182,6 +190,10 @@ done
 if [[ -f "$UNIT" ]] && ! cmp -s "$SRC/deploy/cleaner.service" "$UNIT"; then
     PREV_UNIT="$UNIT.bak-$STAMP"
     cp -a "$UNIT" "$PREV_UNIT"
+    mapfile -t units < <(ls -1t "$UNIT".bak-* 2>/dev/null || true)
+    for old in "${units[@]:3}"; do
+        rm -f "$old"                   # хранятся три последние копии, как у кода
+    done
 fi
 install -o root -g root -m 0644 "$SRC/deploy/cleaner.service" "$UNIT"
 install -o root -g root -m 0755 "$SRC/deploy/check-cleaner.sh" "$CHECK"
@@ -248,7 +260,11 @@ else
     systemctl reset-failed ufw-failsafe.timer ufw-failsafe.service >/dev/null 2>&1 || true
     systemd-run --on-active=10m --unit=ufw-failsafe /usr/sbin/ufw --force disable >/dev/null \
         || fail "страховка ufw-failsafe не поставлена — правила не тронуты"
-    ufw allow proto tcp from "$CLIENTS" to any port "$PORT" comment 'cleaner' >/dev/null
+    # Без этой проверки set -e молча вышел бы с взведённой страховкой, и ufw выключился бы через 10 минут.
+    if ! ufw allow proto tcp from "$CLIENTS" to any port "$PORT" comment 'cleaner' >/dev/null; then
+        systemctl stop ufw-failsafe.timer >/dev/null 2>&1 || true
+        fail "правило ufw для ${PORT} не добавлено; страховка снята, экран не тронут — служба недоступна клиентам"
+    fi
     systemctl try-restart ai-egress-guard.service >/dev/null 2>&1 || true
     log "правило ufw добавлено: ${PORT}/tcp из ${CLIENTS}; страховка ufw-failsafe — 10 минут"
     log "ТЕПЕРЬ откройте НОВОЕ SSH-подключение и убедитесь, что оно проходит."

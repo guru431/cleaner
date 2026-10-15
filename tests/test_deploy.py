@@ -55,6 +55,19 @@ def test_server_dependencies_pin_the_versions_tested_on_the_dev_machine():
         assert all("--hash=sha256:" in block for block in blocks), name
 
 
+@pytest.mark.parametrize("source, lock", [
+    ("requirements.in", "requirements-linux.txt"), ("requirements-dev.in", "requirements-dev-linux.txt"),
+])
+def test_server_lock_carries_every_top_level_requirement(source, lock):
+    """Обзор плана 1В: подмножество версий машины разработки — ещё не полнота. Зависимость, забытая
+    в замке сервера, обнаружилась бы только при установке, а то и при первом импорте в службе."""
+    names = set()
+    for line in (ROOT / source).read_text(encoding="utf-8").splitlines():
+        if match := re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", line):
+            names.add(re.sub(r"[-_.]+", "-", match.group()).lower())
+    assert names and names - set(_pins(ROOT / lock)) == set()
+
+
 @pytest.mark.parametrize("script", ["check-cleaner.sh", "install-cleaner.sh"])
 def test_scripts_use_the_addresses_and_paths_of_the_unit_and_the_config(script):
     """Установщик и проверка живут отдельно от юнита и настроек: адрес, порт и каталоги у них общие."""
