@@ -1,6 +1,7 @@
 """Восстановление: обратная подстановка оригиналов в ответ модели."""
 from __future__ import annotations
 
+import bisect
 import ipaddress
 import re
 from collections.abc import Callable
@@ -45,6 +46,11 @@ _URL_HOSTS = re.compile(
     r"(?:(?:[a-z][a-z0-9+.-]{0,31}:)?//(?:[^/?#\\@\s]*@)?|(?<![\w.-])(?=www\.))(\[[^\]]+\]|[^/\\:?#\s]+)",
     re.IGNORECASE,
 )
+# Вне тегов HTML — текст до первого «<» и участки от «>» до ближайшего «<» или кавычки, если между «<» и
+# этой «>» кавычек нет. Кавычка оставляет атрибут в теге: «>» могла стоять в значении («<a title="a>b"
+# href=…»). Любой «<», не только «<буква», и любая кавычка — в сторону ссылки; поиск линеен: каждая
+# попытка кончается на ближайшем «<».
+_OUTSIDE_TAGS = re.compile(r"<[^<>\"']*>([^<\"']*)")
 _HOST_TYPES = frozenset({EntityType.IP, EntityType.HOST, EntityType.DOMAIN})
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 _MAC = re.compile(
@@ -131,6 +137,7 @@ class _Restorer:
         self.counters = dict.fromkeys(
             ("restored", "altered", "derived", "unknown", "kept", "foreign_links"), 0
         )
+        self.tags: tuple[str, list[tuple[int, int]], list[int]] | None = None    # ответ и участки вне тегов
 
     def run(self, pieces: list[Piece], links: bool) -> list[Piece]:
         if links:
@@ -173,15 +180,39 @@ class _Restorer:
             return address in self.state.surrogates          # без параметров: в них может быть что угодно
         return all(self._host_is_ours(m.group(1)) for m in _URL_HOSTS.finditer(target))
 
-    def _link(self, m: re.Match[str]) -> Piece | None:
+    def _outside_tags(self, text: str, position: int) -> bool:
+        if self.tags is None or self.tags[0] is not text:
+            first = text.find("<")
+            spans = [(0, len(text) if first < 0 else first), *(m.span(1) for m in _OUTSIDE_TAGS.finditer(text))]
+            self.tags = (text, spans, [start for start, _ in spans])
+        _, spans, starts = self.tags
+        i = bisect.bisect_right(starts, position) - 1
+        return i >= 0 and position < spans[i][1]
+
+    def _argument(self, m: re.Match[str]) -> bool:
+        """Не атрибут тега, а именованный аргумент вызова в коде: «post(url, data="…")», «form(action="…")».
+        Всё, что может оказаться атрибутом тега, — по-прежнему ссылка: и «<img alt=a, src=…», и сам по себе
+        «src="…"» в тексте, который вставят в тег."""
+        before = m.string[max(0, m.start() - 64):m.start()].rstrip()
+        return before.endswith(("(", ",")) and self._outside_tags(m.string, m.start())
+
+    def _foreign(self, m: re.Match[str]) -> bool:
+        """Ведёт ли ссылка на чужой узел и есть ли в ней что восстанавливать."""
+        if m.group("attr") is not None and self._argument(m):
+            # Значение аргумента — строка кода: ссылки в нём проверяются как в обычном тексте, а найденная
+            # чужая оставляет метки во всём значении.
+            return any(self._foreign(inner) for inner in _LINK.finditer(m.string, m.start("attr"), m.end("attr")))
         target = next((
             m.group(name) for name in ("md", "ref", "attr", "css", "cssu", "mailto", "dq", "sq", "url")
             if m.group(name)
         ), "")
         if self._is_own(target):
-            return None         # ссылка на наш же узел восстанавливается как обычный текст
-        if self._inner(m.group()) == m.group():
-            return None         # восстанавливать в ней нечего
+            return False        # ссылка на наш же узел восстанавливается как обычный текст
+        return self._inner(m.group()) != m.group()      # иначе — если в ней есть что восстанавливать
+
+    def _link(self, m: re.Match[str]) -> Piece | None:
+        if not self._foreign(m):
+            return None
         self.counters["foreign_links"] += 1
         return m.group(), "foreign_link"
 

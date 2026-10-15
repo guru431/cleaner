@@ -58,3 +58,17 @@ def test_restore_is_fast_on_unclosed_css_urls(text):
     started = time.perf_counter()
     restore(state, text + "<EMAIL_1>", Settings())
     assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["<" * 50000, "<a>, data='x' " * 10000, "<a " * 20000 + "f(a, data='x')"],
+    ids=["brackets", "arguments", "open_tags"],
+)
+def test_restore_is_fast_on_many_tags_and_arguments(text):
+    """Участки вне тегов считаются один раз на ответ, а не для каждого атрибута."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "почта ivanov@contoso.ru", Settings())
+    started = time.perf_counter()
+    restore(state, text + "<EMAIL_1>", Settings())
+    assert time.perf_counter() - started < 0.5
