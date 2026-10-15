@@ -76,6 +76,7 @@ _DATE = re.compile(
 _PHONE_WORDS = ("тел", "моб", "phone", "tel.", "tel:", "звон", "номер")
 _ACCOUNT_WORDS = ("счёт", "счет", "р/с", "к/с", "account")
 _PASSPORT_CONTEXT = ("паспорт", "серия", "выдан")
+_OMS_WORDS = ("полис", "омс")
 _BIRTH_WORDS = ("дата рождения", "д.р.", "г.р.", "родил", "born", "dob", "date of birth", "birthday")
 
 Add = Callable[..., None]
@@ -180,7 +181,11 @@ def _cards(text: str, m: re.Match[str], add: Add) -> None:
     ):
         windows = _unlisted(groups, windows)
     for first, last in windows:
-        add(groups[first][0], groups[last][1], EntityType.CARD, True)
+        start, end = groups[first][0], groups[last][1]
+        # Контрольный разряд полиса ОМС единого образца — Mod10 (ISO/HL7 27931), тот же алгоритм Луна. Шестнадцать
+        # цифр рядом со словом о полисе — полис: иначе подтверждённая карта брала бы верх над ним при слиянии.
+        oms = sum(len(group[2]) for group in groups[first:last + 1]) == 16 and _near(text, start, end, _OMS_WORDS)
+        add(start, end, EntityType.OMS if oms else EntityType.CARD, True)
 
 
 def _grouped(text: str, m: re.Match[str], add: Add) -> None:
@@ -221,7 +226,7 @@ def _number(text: str, m: re.Match[str], add: Add) -> None:
             add(start, end, EntityType.BANK_ACCOUNT)
     elif len(digits) == 9 and _near(text, start, end, ("кпп",)):
         add(start, end, EntityType.KPP)
-    elif len(digits) == 16 and _near(text, start, end, ("полис", "омс")):
+    elif len(digits) == 16 and _near(text, start, end, _OMS_WORDS):
         add(start, end, EntityType.OMS)
 
 
