@@ -2,8 +2,9 @@ import pytest
 
 from cleaner.core.detect import secrets
 from cleaner.core.detect.base import DetectContext
+from cleaner.core.detect.merge import merge
 from cleaner.core.pipeline import sanitize
-from cleaner.core.types import Settings
+from cleaner.core.types import EntityType, Settings, Span
 
 CTX = DetectContext(Settings())
 
@@ -231,6 +232,110 @@ def test_prose_after_a_dash_is_left_alone():
         "password — minimum 8 characters", "Password - never expires",
     ):
         assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("Пароль — это Qwerty123", "Qwerty123"),
+        ("пароль — это: Zx81kLmN", "Zx81kLmN"),
+        ("Password - is Summer2024", "Summer2024"),
+        ("Пароль — это sunflower", "sunflower"),
+        ('Пароль — это "временный"', "временный"),
+        ("Пароль для входа в систему — sunflower", "sunflower"),
+        ("Пароль от учётной записи в новой системе — sunflower", "sunflower"),
+        ("Пароль -- qwerty", "qwerty"),
+        ("password -- Summer2024 for guests", "Summer2024"),
+        ("Пароль - Qwerty - временный", "Qwerty"),
+        ("Пароль - sunflower - для гостей", "sunflower"),
+        ("Пароль — Qwerty123!", "Qwerty123!"),
+    ],
+    ids=["copula", "copula_colon", "english_copula", "copula_word", "copula_quoted", "four_words", "six_words",
+         "double_hyphen", "double_hyphen_clause", "second_hyphen", "second_hyphen_clause", "trailing_mark"],
+)
+def test_password_after_a_copula_a_long_lead_or_a_double_hyphen_is_found(text, value):
+    """Ревью правила тире: после «это» значение — следующее слово, перед тире до шести слов, «--» — тоже тире.
+    Слово перед тире не начинается с дефиса: иначе «Пароль - Qwerty - временный» брал значение после второго."""
+    assert found(text) == {value}
+
+
+def test_prose_after_a_copula_a_long_lead_or_a_double_hyphen_is_left_alone():
+    for text in (
+        "Пароль — это не важно", "Пароль — это просто", "Пароль — это ваша дата рождения", "Пароль — это",
+        "Password - is required", "Password — is still the same",
+        "Пароль для входа в систему — тот же, что и раньше", "Сбросил пароль в личном кабинете вчера вечером — не помогло",
+        "Password for the shared mailbox — see below", "password for the VPN account — expired",
+        "Пароль -- см. выше", "Password -- please ask the admin", "mysqldump --password --verbose crm",
+        "Password - here!", "Пароль — какой?", "Пароль — неверный!", "Пароль от почты — прежний…", "Пароль — ???",
+    ):
+        assert found(text) == set(), text
+
+
+def test_english_state_and_pointer_words_after_a_dash_are_left_alone():
+    """Ревью правила тире: частые английские слова состояния и указания — проза, а не пароль."""
+    for text in (
+        "Password - here is the new link", "Password — there in the vault", "password - below", "Password - above",
+        "Password - attached", "password — sent by SMS", "Password - needs to be changed", "Password — needed",
+        "Password - please contact IT", "password - incorrect", "Password - wrong again", "password — invalid",
+        "Password - error 401", "password - unknown", "Password — expires tomorrow", "Password - expired",
+        "Password - n/a", "Password - TBD", "password — TODO", "Password - see above", "Password - same as before",
+        "Password - as usual", "Password - doesn't work", "Password - isn't set",
+    ):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, searchable",
+    [
+        ("Пароль — Windows не принимает", False), ("Пароль — 2024 года не менялся", False),
+        ("Пароль от Wi-Fi — sunflower для гостей", False), ("Пароль — Zx81kLmN", True), ('Пароль — "Windows"', True),
+        ("Пароль — это sunflower", False), ("password: sunflower", True), ("пароль = sunflower", True),
+    ],
+    ids=["product", "year", "word", "password_like", "quoted", "copula_word", "colon", "equals"],
+)
+def test_only_a_password_like_or_quoted_value_after_a_dash_is_searchable(text, searchable):
+    """Ревью правила тире: обычное слово после тире скрывается на своём месте, но не ищется в других текстах чата."""
+    assert {span.searchable for span in secrets.detect(text, CTX)} == {searchable}
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("Пароль — Windows не принимает", "После обновления Windows не стартует служба."),
+        ("Password — Outlook keeps asking", "Outlook не запускается, перезапустите Outlook."),
+        ("Пароль — 2024 года не менялся", "Отчёт за 2024 год готов."),
+    ],
+    ids=["windows", "outlook", "year"],
+)
+def test_ordinary_word_after_a_dash_is_hidden_only_in_its_place(state, settings, first, second):
+    """Ревью правила тире: ложный SECRET после тире становился известным написанием на весь чат и не восстанавливался."""
+    word = first.split()[2]
+    assert word not in sanitize(state, first, settings).sanitized
+    assert sanitize(state, second, settings).sanitized == second
+    assert sanitize(state, f"{first}. {second}", settings).sanitized.count(word) == second.count(word)
+
+
+def test_password_after_a_colon_makes_the_dash_value_searchable(state, settings):
+    """То же слово, найденное потом после «:», — та же сущность, и с этого места оно ищется во всех текстах."""
+    first = sanitize(state, "Пароль от Wi-Fi — sunflower для гостей", settings).sanitized
+    assert sanitize(state, "Цветок sunflower на заставке", settings).sanitized == "Цветок sunflower на заставке"
+    assert sanitize(state, "Пароль: sunflower1", settings).sanitized == "Пароль: <SECRET_2>"
+    assert sanitize(state, "Цветок sunflower на заставке", settings).sanitized == "Цветок sunflower на заставке"
+    assert sanitize(state, "password: sunflower", settings).sanitized == "password: <SECRET_1>"
+    assert first == "Пароль от Wi-Fi — <SECRET_1> для гостей"
+    assert sanitize(state, "Цветок sunflower на заставке", settings).sanitized == "Цветок <SECRET_1> на заставке"
+
+
+def test_merged_dash_value_is_searchable_if_any_find_of_its_type_is():
+    """Слияние (5.7): искомым значение делает находка того же типа (словарь чата), а не другого (имя слоя 4)."""
+    weak = Span(9, 15, EntityType.SECRET, "secrets", searchable=False)
+    assert merge("Пароль — Иванов", [weak, Span(9, 15, EntityType.PERSON, "ner")], CTX)[0].searchable is False
+    assert merge("Пароль — Иванов", [weak, Span(9, 15, EntityType.SECRET, "dict")], CTX)[0].searchable is True
+
+
+def test_password_like_value_after_a_dash_stays_searchable(state, settings):
+    sanitize(state, "Пароль — Zx81kLmN", settings)
+    assert sanitize(state, "повторю: Zx81kLmN", settings).sanitized == "повторю: <SECRET_1>"
 
 
 @pytest.mark.parametrize(

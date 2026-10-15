@@ -16,6 +16,7 @@ class MergedSpan:
     end: int
     type: EntityType
     sources: tuple[str, ...]
+    searchable: bool = True    # Span.searchable
 
 
 def _rank(span: Span) -> int:
@@ -130,5 +131,7 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
                 if netmap.canonical_forms(value) & opened:
                     continue
         type_ = (senior.source == "manual" and _name_kept(text, group, start, end)) or senior.type
-        merged.append(MergedSpan(start, end, type_, sources))
+        # Искомым значение делает любая находка того же типа: слово после «Пароль —», которое нашли и словарём чата.
+        searchable = any(s.searchable for s in group if s.type is senior.type)
+        merged.append(MergedSpan(start, end, type_, sources, searchable))
     return _join_names(text, merged)

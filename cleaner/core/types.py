@@ -61,6 +61,7 @@ class Span:
     source: str                # rules | secrets | infra | dict | manual
     score: float = 1.0
     validated: bool = False    # подтверждён контрольной суммой или строгим форматом
+    searchable: bool = True    # значение становится искомым написанием чата (5.4); нет — слово после «Пароль —» (5.3)
 
 
 @dataclass

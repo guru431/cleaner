@@ -140,7 +140,7 @@ class Resolver:
         # None — значение не того вида (например, ручное правило): обычная метка. Вид проверяется до
         # первой записи в состояние: исключение посреди подмены оставило бы сущность без замены и номер.
         resolved = special(value, span.type, origin) if special else None
-        entity, surrogate = resolved or self._labelled(span.type, value, origin)
+        entity, surrogate = resolved or self._labelled(span.type, value, origin, span.searchable)
         return ResolvedSpan(span.start, span.end, entity.id, surrogate, span.sources)
 
     # --- сущности ---------------------------------------------------------
@@ -199,9 +199,9 @@ class Resolver:
 
         return self._issue(entity, "label", make)
 
-    def _labelled(self, type_: EntityType, value: str, origin: str) -> tuple[Entity, str]:
+    def _labelled(self, type_: EntityType, value: str, origin: str, searchable: bool = True) -> tuple[Entity, str]:
         key = self.alias.get((type_, normalize(value))) or canonical_key(type_, value)
-        entity = self._person(key, value, origin) if type_ is T.PERSON else self._entity(type_, key, value, origin)
+        entity = self._person(key, value, origin) if type_ is T.PERSON else self._entity(type_, key, value, origin, searchable)
         return entity, self._label(entity)
 
     def _person(self, key: str, value: str, origin: str) -> Entity:

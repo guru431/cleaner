@@ -115,11 +115,19 @@ _SECURE = re.compile(
 # После тире или дефиса в прозе часто идёт не пароль («Пароль — это строка…»). Такое значение
 # отбрасывается, только если это слово прозы (_prose_word) и на пароль оно не похоже; продолжение фразы
 # за ним не в счёт: «Пароль от Wi-Fi — sunflower для гостей» — пароль. После «:» и «=» берётся любое.
+# Перед тире — до шести слов («Пароль для входа в систему — …»), перед «:» и «=» — до трёх: значение после двоеточия
+# на прозу не проверяется, и заголовок «Password policy for domain users: minimum…» скрыл бы minimum во всём чате.
+# Слово перед тире начинается не с дефиса: иначе «Пароль - Qwerty - временный» брал значение после второго.
 _PHRASE = re.compile(
-    r"(?<!\w)(?:пароль|password)(?:[ \t]+[\w-]+){0,3}"
-    r"(?P<sep>[ \t]*[:=][ \t]*|[ \t]*[—–][ \t]*|[ \t]+-[ \t]+)" + _VALUE,
+    r"(?<!\w)(?:пароль|password)(?:(?:[ \t]+[\w-]+){0,3}(?P<sep>[ \t]*[:=][ \t]*)"
+    r"|(?:[ \t]+\w[\w-]*){0,6}(?P<dash>[ \t]*[—–][ \t]*|[ \t]+--?[ \t]+))" + _VALUE,
     re.IGNORECASE,
 )
+# После связки значение — следующее слово: «Пароль — это Qwerty123», «пароль — это: Zx81kLmN».
+_COPULAS = frozenset({"это", "is", "was"})
+_NEXT_VALUE = re.compile(r"[ \t]+" + _VALUE)
+# Знаки в конце — не часть слова прозы: «Password - here!», «Пароль — какой?», «это:».
+_TRAILING = "?!:;,.…"
 _PROSE = re.compile(r"(?<!\w)(?:пароль|password)(?:\s+is)?\s+(?P<bare>(?!-)[^\s,;:=]+)", re.IGNORECASE)
 # Русское слово через дефис («по-прежнему», «кто-то») похоже на пароль только дефисом, а то же слово
 # без дефиса паролем в тексте и так не считается.
@@ -136,6 +144,10 @@ _PROSE_WORDS = _LINKING_WORDS | frozenset({
     "also", "only", "just", "still", "are", "be", "has", "have", "will", "should", "must", "can", "never",
     "minimum", "min", "maximum", "more", "less", "old", "new", "empty", "blank", "temporary", "current",
     "previous", "initial", "usual", "standard", "unchanged", "changed", "expired", "reset", "sent", "stored",
+    "here", "there", "below", "above", "attached", "needs", "needed", "please", "incorrect", "wrong", "invalid",
+    "error", "unknown", "expires", "missing", "updated", "n/a", "tbd", "todo",
+    # Отрезанные апострофом: значение без кавычек кончается перед «'» («doesn't work» -> doesn).
+    "isn", "doesn", "don", "didn", "wasn",
 })
 _RUSSIAN_WORD = re.compile(r"[а-яё]+(?:-[а-яё]+)*", re.IGNORECASE)
 _AUTH = re.compile(
@@ -312,6 +324,25 @@ def _prose_word(value: str) -> bool:
     )
 
 
+def _after_dash(m: re.Match[str]) -> Span | None:
+    """Значение после «Пароль —» или None — там проза. Знаки в конце в проверку не входят, но скрываются со значением.
+    Обычное слово, не похожее на пароль, скрывается только на этом месте и искомым написанием чата (5.4) не становится:
+    «Пароль — Windows не принимает» иначе скрыло бы Windows во всех текстах чата, без восстановления в ответах.
+    Значение в кавычках написано как есть, а не словом фразы, — оно искомое."""
+    if (m.group("bare") or "").rstrip(_TRAILING).lower() in _COPULAS:
+        m = _NEXT_VALUE.match(m.string, m.end())
+    bounds = _value(m) if m else None
+    if not bounds:
+        return None
+    if m.group("bare") is None:
+        return Span(*bounds, EntityType.SECRET, name)
+    word = m.string[bounds[0]:bounds[1]].rstrip(_TRAILING)
+    # Русское слово через дефис похоже на пароль только дефисом («по-прежнему», см. _HYPHENATED_WORD) — его решает словарь.
+    if _looks_like_password(word) and not _HYPHENATED_WORD.fullmatch(word):
+        return Span(*bounds, EntityType.SECRET, name)
+    return None if not word or _prose_word(word) else Span(*bounds, EntityType.SECRET, name, searchable=False)
+
+
 def _secret_key(key: str) -> bool:
     return bool(_KEY_WORD.search(key)) and not (_NOT_SECRET_KEY.fullmatch(key) and not _SECRET_END.search(key))
 
@@ -361,16 +392,13 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             if bounds and not (pattern in (_AUTH, _BEARER) and _WORDS.fullmatch(text, *bounds)):
                 spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PHRASE.finditer(text):
-        bounds = _value(m)
-        if not bounds:
-            continue
-        value = text[bounds[0]:bounds[1]]
-        dashed = m.group("sep").strip() in ("—", "–", "-")
-        # Значение в кавычках написано как есть, а не словом фразы. Русское слово через дефис похоже на пароль
-        # только дефисом («по-прежнему», см. _HYPHENATED_WORD) — его решает словарь.
-        looks = _looks_like_password(value) and not _HYPHENATED_WORD.fullmatch(value)
-        if not dashed or m.group("bare") is None or looks or not _prose_word(value):
-            spans.append(Span(*bounds, EntityType.SECRET, name))
+        if m.group("dash") is not None:
+            span = _after_dash(m)
+        else:
+            bounds = _value(m)
+            span = Span(*bounds, EntityType.SECRET, name) if bounds else None
+        if span:
+            spans.append(span)
     for m in _PROSE.finditer(text):
         bounds = _value(m)
         if bounds and _looks_like_password(text[bounds[0]:bounds[1]]) and not _HYPHENATED_WORD.fullmatch(text, *bounds):
