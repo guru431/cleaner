@@ -62,11 +62,12 @@ def test_restore_is_fast_on_many_reference_brackets():
     [
         'url("' * 20000, "url(" * 25000, "@import '" * 12000, 'url("\\' * 16000, "url(\\" * 20000, "url('\\'" * 12000,
         "image-set(" * 10000, 'image-set("' * 10000, "src(/*" * 15000, "image-set((((()" * 6000,
-        "src(" + "(" * 20000 + ")" * 20000, "image-set(a)" * 8000,
+        "src(" + "(" * 20000 + ")" * 20000, "image-set(a)" * 8000, "@import '" + "\\'url(\"" * 15000,
     ],
     ids=[
         "quoted", "unquoted", "import", "quoted_escape", "unquoted_escape", "escaped_quotes",
         "image_sets", "image_set_strings", "src_comments", "deep_image_sets", "deep_balanced_src", "closed_image_sets",
+        "string_to_the_end",
     ],
 )
 def test_restore_is_fast_on_unclosed_css_urls(text):
