@@ -50,6 +50,9 @@ _PHONE_LOCAL = re.compile(
 # действия, CVV или чужая группа («от 2024 4111 1111 1111 1111»).
 _DIGIT_RUN = re.compile(r"(?<![\w-])\d+(?:(?: - |[ ./\u2011-])\d+)*(?![\w-])")
 _DIGIT_GROUP = re.compile(r"\d+")
+# Точка между цифрами у слитной группы — десятичная: «3.14159265358984», «4111111111111111.5».
+_POINT_AFTER_DIGIT = re.compile(r"\d\.$")
+_POINT_BEFORE_DIGIT = re.compile(r"\.\d")
 # Окно номера карты среди других четырёхзначных групп — список (порты, коды), а не карта: в нём каждое
 # десятое окно проходит проверку Луна. Такое окно принимается только при словах о карте рядом
 # или если соседние группы сами складываются в карты (_unlisted).
@@ -157,6 +160,12 @@ def _extendable(parts: list[str]) -> bool:
     return all(len(part) == 4 for part in parts) or [len(part) for part in parts] == [4, 6]
 
 
+def _decimal_part(text: str, start: int, end: int) -> bool:
+    """Слитные цифры — целая или дробная часть числа с точкой, а не номер карты. Карта с точками записывается
+    группами по четыре цифры («4111.1111.1111.1111»), такие окна сюда не попадают."""
+    return bool(_POINT_AFTER_DIGIT.match(text, max(0, start - 2), start) or _POINT_BEFORE_DIGIT.match(text, end))
+
+
 def _cards(text: str, m: re.Match[str], add: Add) -> None:
     """Все окна подряд идущих групп, которые выглядят как номер карты и проходят проверку Луна.
 
@@ -172,7 +181,9 @@ def _cards(text: str, m: re.Match[str], add: Add) -> None:
             if len(digits) > 19:
                 break
             parts = [group[2] for group in groups[first:last + 1]]
-            if len(digits) >= 13 and _card_shape(parts) and validators.luhn(digits):
+            if len(digits) >= 13 and _card_shape(parts) and validators.luhn(digits) and not (
+                first == last and _decimal_part(text, groups[first][0], groups[first][1])
+            ):
                 windows.append((first, last))
             if not _extendable(parts):
                 break

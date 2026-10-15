@@ -218,6 +218,19 @@ def test_same_number_without_oms_words_is_a_card(text):
     assert types(text) == {T.CARD}
 
 
+@pytest.mark.parametrize(
+    "text", ["pi = 3.14159265358984", "x = 4111111111111111.5", "доля 0.4111111111111111 от", "v1.2.4111111111111111"],
+)
+def test_part_of_a_decimal_number_is_not_a_card(text):
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: дробная часть числа проходила проверку Луна."""
+    assert T.CARD not in types(text)
+
+
+@pytest.mark.parametrize("text", ["карта 4111111111111111.", "4111111111111111. Дальше", "4111.1111.1111.1111 и 1.5"])
+def test_card_before_a_full_stop_is_still_a_card(text):
+    assert T.CARD in types(text)
+
+
 def test_card_is_not_cut_out_of_a_longer_digit_group():
     assert T.CARD not in types("счёт 40702810200000000001")
 
