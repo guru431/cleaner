@@ -200,6 +200,21 @@ def test_domain_login_is_found_whatever_the_domain_name(domain):
     assert accounts(f"учётка {domain}\petrov") == {"petrov"}
 
 
+@pytest.mark.parametrize(
+    "text", ['{"msg": "Backup DONE\\\\n"}', r"Backup DONE\n", r"ERROR\t", r"FAILED\\r", r'"ID\d+"', r"CONTOSO\i"],
+)
+def test_one_letter_after_a_backslash_is_not_a_login(text):
+    """FINDINGS P2 «Detection: false SECRET, PHONE, CARD and login hits that damage code and lists»: «DONE\\n»
+    становился учётной записью «n», и потом каждое «n» в тексте заменялось."""
+    assert values(text) == set()
+    ctx = DetectContext(Settings(), known=(("contoso", T.DOMAIN),))
+    assert T.ACCOUNT not in {type_ for type_, _ in found(r"вход contoso\n", ctx)}
+
+
+def test_short_login_after_a_domain_is_still_found():
+    assert accounts(r"вход CONTOSO\ab, CONTOSO\nikolaev, ERROR\tester") == {"ab", "nikolaev", "tester"}
+
+
 @pytest.mark.parametrize("closer", ["»", "”", "**", "}", "…"])
 def test_host_after_a_url_login_is_found_before_any_closer(closer):
     text = f"«ssh://ivanov@srv-db01.corp.contoso.ru{closer} дальше"

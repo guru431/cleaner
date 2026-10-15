@@ -175,6 +175,8 @@ def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:
             continue
         if not login or _FILE_EXT.search(login) or (login[0] in "ntr" and login[1:2].isupper()):
             continue        # путь к файлу или экранированный перевод строки, а не учётная запись
+        if len(login) == 1:
+            continue        # «DONE\\n», «\d» в шаблоне; написание из одной буквы скрывалось бы во всём чате
         yield Span(m.start("dom"), m.end("dom"), EntityType.DOMAIN, name)
         if login.lower() not in builtin:
             start = m.start("login")
