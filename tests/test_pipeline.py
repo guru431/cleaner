@@ -804,6 +804,35 @@ def test_windows_paths_with_dot_folders_keep_their_meaning(state, settings):
     assert restore(state, result.sanitized, settings).text == text
 
 
+def test_email_written_with_escaped_dots_is_masked_and_restored_with_them(state, settings):
+    """Второе ревью, P2: в «^ivanov@contoso\\.ru$» скрывался только домен, а имя входа уходило в облако. Адрес через «\\.»
+    — адрес; его значение — как написано, и метка восстанавливается с «\\.»: тот же адрес в прозе — своя метка со своим
+    написанием. Повторная вставка ничего не меняет, известный адрес через «\\.» проверка утечек видит."""
+    text = r'if address :regex "from" "^i\.ivanov@contoso\.ru$" и почта i.ivanov@contoso.ru'
+    result = sanitize(state, text, settings)
+    assert result.sanitized == r'if address :regex "from" "^<EMAIL_1>$" и почта <EMAIL_2>' and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, result.sanitized, settings).text == text
+    planted = r"^I\.Ivanov@Contoso\.ru$"
+    assert {planted[leak.start:leak.end] for leak in leakcheck.check(planted, state, settings)} == {planted[1:-1]}
+
+
+@pytest.mark.parametrize("text, expected", [
+    (r"^ivanov@domain-1\.example$", r"^<ACCOUNT_1>@domain-1\.example$"),
+    (r"^ivanov@srv02\.domain-1\.example$", r"^<ACCOUNT_1>@host-2\.domain-1\.example$"),
+], ids=["issued-domain", "part-before-issued"])
+def test_email_with_escaped_dots_next_to_a_replacement_keeps_them(state, settings, text, expected):
+    """Адрес через «\\.» рядом с выданной заменой делится, как через точку (5.10): имя входа — ACCOUNT, часть перед
+    заменой — часть имени, и разделитель остаётся тем же."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert restore(state, expected, settings).text == text.replace("domain-1", "contoso").replace("example", "ru")
+
+
 class Marks:
     """Слой 4 для теста: помечает заданные строки и считает вызовы."""
 
