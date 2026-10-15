@@ -1,8 +1,10 @@
 [Unit]
 Description=Cleaner: очистка данных перед облачными LLM
 # Адрес example должен уже быть на интерфейсе: служба слушает только его.
-After=network-online.target
-Wants=network-online.target
+# Границы выхода наружу (этап 3) ставит cleaner-egress.service; Requires= не годится: перезапуск
+# цепочки после ufw reload перезапускал бы и службу.
+After=network-online.target cleaner-egress.service
+Wants=network-online.target cleaner-egress.service
 
 [Service]
 User=cleaner
@@ -16,6 +18,9 @@ Environment="TRANSFORMERS_OFFLINE=1"
 Environment="HF_HUB_DISABLE_TELEMETRY=1"
 Environment="DO_NOT_TRACK=1"
 Environment="TOKENIZERS_PARALLELISM=false"
+# Без входа в цепочку CLEANER-EGRESS выход наружу не ограничен — тогда служба не стартует.
+# «+» — проверка от root: правила iptables учётной записи cleaner не видны.
+ExecStartPre=+/usr/local/sbin/cleaner-egress.sh check
 ExecStart=/opt/cleaner/.venv/bin/python -m cleaner serve
 MemoryMax=8G
 Nice=10
@@ -28,12 +33,8 @@ RestrictSUIDSGID=yes
 ReadWritePaths=/var/lib/cleaner
 Restart=always
 RestartSec=20
-# До этапа 3 — как у остальных служб сервера. Этап 3 убирает эти четыре строки,
-# границы выхода наружу задаёт cleaner-egress.service.
-IPAddressDeny=any
-IPAddressAllow=localhost
-IPAddressAllow=example/19
-IPAddressAllow=172.16.0.0/12
+# Выход наружу (этап 3, SEC-15): только TCP 443 — цепочка CLEANER-EGRESS (cleaner-egress.sh) по учётной
+# записи cleaner; IPAddressDeny=, как у остальных служб сервера, закрыл бы и его.
 
 [Install]
 WantedBy=multi-user.target

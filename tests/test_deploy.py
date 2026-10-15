@@ -30,11 +30,55 @@ def test_unit_declares_what_the_spec_and_the_server_checks_expect():
         'Environment="HOME=/var/lib/cleaner"', "ExecStart=/opt/cleaner/.venv/bin/python -m cleaner serve",
         'Environment="HF_HUB_OFFLINE=1"', 'Environment="TRANSFORMERS_OFFLINE=1"', 'Environment="TOKENIZERS_PARALLELISM=false"',
         "ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes", "NoNewPrivileges=yes", "RestrictSUIDSGID=yes",
-        "ReadWritePaths=/var/lib/cleaner", "Restart=always", "After=network-online.target",
-        "WantedBy=multi-user.target", "IPAddressDeny=any", "IPAddressAllow=localhost",
-        "IPAddressAllow=example/19", "IPAddressAllow=172.16.0.0/12",
+        "ReadWritePaths=/var/lib/cleaner", "Restart=always", "After=network-online.target cleaner-egress.service",
+        "Wants=network-online.target cleaner-egress.service", "WantedBy=multi-user.target",
+        "ExecStartPre=+/usr/local/sbin/cleaner-egress.sh check",
     ):
         assert line in lines, line
+    # Этап 3: выход наружу ограничивает цепочка CLEANER-EGRESS; IPAddressDeny= закрыл бы и порт 443.
+    assert not [line for line in lines if line.startswith(("IPAddressDeny", "IPAddressAllow"))]
+
+
+EGRESS = DEPLOY / "cleaner-egress.sh"
+_INTERNAL = re.compile(r'^INTERNAL="(?:\$\{[A-Z_]+:-)?([^}"]*)\}?"$', re.MULTILINE)
+
+
+def _internal(path: Path) -> set[str]:
+    return set(_INTERNAL.search(path.read_text(encoding="utf-8")).group(1).split())
+
+
+def test_egress_chain_allows_internal_nets_and_443_and_rejects_the_rest():
+    """Раздел 15 спецификации, SEC-15: внутренние сети, затем 443 с записью, остальное — запись и отказ."""
+    text = EGRESS.read_text(encoding="utf-8")
+    assert text.startswith("#!/usr/bin/env bash\n") and "\r" not in text
+    assert _internal(EGRESS) == {
+        "127.0.0.0/8", "example/24", "example/24", "example/19", "example/24", "172.16.0.0/12",
+    }
+    order = [text.index(part) for part in (
+        '-d "$net" -j RETURN', '--log-prefix "cleaner-out: "', '--dport 443 -j RETURN',
+        '--log-prefix "cleaner-egress: "', "-j REJECT --reject-with tcp-reset",
+    )]
+    assert order == sorted(order)
+    assert '-I OUTPUT 1 -m owner --uid-owner "$USER_NAME" -j "$CHAIN"' in text
+    assert 'ip6tables -A "$CHAIN" -d ::1/128 -j RETURN' in text
+    unit = (DEPLOY / "cleaner-egress.service").read_text(encoding="utf-8").splitlines()
+    for line in ("Type=oneshot", "RemainAfterExit=yes", "ExecStart=/usr/local/sbin/cleaner-egress.sh",
+                 "After=ufw.service network-online.target", "Before=cleaner.service", "WantedBy=multi-user.target"):
+        assert line in unit, line
+
+
+def test_egress_internal_nets_match_the_servers_guard():
+    """Правило vLLM: все копии списка внутренних сетей меняются вместе. Тест vLLM видит только свой репозиторий."""
+    guard = Path("D:/vsc/vLLM/dashboard/deploy/ai-egress-guard.sh")
+    if not guard.exists():
+        pytest.skip("репозитория vLLM рядом нет (сервер); там сверяет check-cleaner.sh")
+    assert _internal(EGRESS) == _internal(guard)
+
+
+def test_installer_sets_the_egress_chain_before_the_service_restarts():
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    assert 'install -o root -g root -m 0755 "$SRC/deploy/cleaner-egress.sh" "$EGRESS"' in text
+    assert text.index("systemctl restart cleaner-egress.service") < text.index("systemctl restart cleaner.service\ncode=")
 
 
 def _pins(path: Path) -> dict[str, str]:

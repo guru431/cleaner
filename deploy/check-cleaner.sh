@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Проверка Cleaner фактом на живом example: служба, права файлов, вход по HTTPS, экран,
-# исходящие из контрольной группы службы, самопроверка. Образец — check-egress.sh и
+# исходящие службы (с этапа 3 — только TCP 443), самопроверка. Образец — check-egress.sh и
 # check-rerank.sh репозитория vLLM: проверяется то, что происходит, а не то, что написано.
 #
 #   sudo bash /usr/local/sbin/check-cleaner.sh [канарейка]
@@ -104,14 +104,49 @@ else
     ok "страховка ufw-failsafe не взведена"
 fi
 
-echo "5. Исходящие из контрольной группы службы"
+echo "5. Исходящие службы (этап 3: наружу только TCP 443)"
 procs="/sys/fs/cgroup/system.slice/${UNIT}/cgroup.procs"
+# Проба — от учётной записи cleaner внутри контрольной группы службы: цепочка CLEANER-EGRESS выбирает
+# пакеты по учётной записи, и проба от root прошла бы мимо неё. setpriv, а не runuser: без PAM процесс
+# остаётся в группе службы.
 probe() {  # $1 — адрес, $2 — порт. Код: 0 — соединение есть, 97 — не вошли в группу, иное — отказ
-    bash -c "echo \$\$ > '$procs' || exit 97; exec timeout 4 bash -c '</dev/tcp/$1/$2'" >/dev/null 2>&1
+    bash -c "echo \$\$ > '$procs' || exit 97; exec setpriv --reuid=cleaner --regid=cleaner --init-groups \
+        timeout 4 bash -c '</dev/tcp/$1/$2'" >/dev/null 2>&1
 }
+if [[ "$(systemctl is-active cleaner-egress.service)" == "active" ]]; then
+    ok "cleaner-egress.service ставит границы выхода"
+else
+    bad "cleaner-egress.service не активен"
+fi
+output=$(iptables -S OUTPUT 2>/dev/null || true)
+jump=$(grep -n -- "-m owner --uid-owner $(id -u cleaner) -j CLEANER-EGRESS" <<< "$output" | head -1 | cut -d: -f1)
+first_ufw=$(grep -n -- "-j ufw" <<< "$output" | head -1 | cut -d: -f1)
+if [[ -z "$jump" ]]; then
+    bad "в OUTPUT нет входа в CLEANER-EGRESS — выход наружу не ограничен (ufw reload без try-restart cleaner-egress?)"
+elif [[ -n "$first_ufw" && "$jump" -gt "$first_ufw" ]]; then
+    bad "вход в CLEANER-EGRESS стоит после цепочек ufw — новые соединения его минуют"
+else
+    ok "вход в CLEANER-EGRESS стоит раньше цепочек ufw"
+fi
+if ip6tables -S OUTPUT 2>/dev/null | grep -q -- "-j CLEANER-EGRESS" && ip6tables -S CLEANER-EGRESS 2>/dev/null | grep -q -- "-j REJECT"; then
+    ok "IPv6 наружу отклоняется"
+else
+    bad "нет цепочки CLEANER-EGRESS для IPv6"
+fi
+nets() { sed -n "s/^${2}=\"\(\${[A-Z_]*:-\)\{0,1\}\([^}\"]*\)}\{0,1\}\"$/\2/p" "$1" | tr ' ' '\n' | sort | tr '\n' ' '; }
+ours=$(nets /usr/local/sbin/cleaner-egress.sh INTERNAL)
+guard=$(nets /usr/local/sbin/ai-egress-guard.sh INTERNAL)
+if [[ -z "$guard" ]]; then
+    miss "нет /usr/local/sbin/ai-egress-guard.sh — список внутренних сетей не сверен"
+elif [[ "$ours" == "$guard" ]]; then
+    ok "внутренние сети совпадают с ai-egress-guard.sh"
+else
+    bad "внутренние сети расходятся с ai-egress-guard.sh: ${ours}≠ ${guard}"
+fi
 if [[ ! -w "$procs" ]]; then
     miss "контрольная группа $UNIT недоступна — пробы не выполнены"
 else
+    since=$(date +%s)
     # Положительный контроль: свой же порт. Без него «не соединилось» ничего не доказывает.
     probe "$HOST_IP" "$PORT"
     case $? in
@@ -125,14 +160,30 @@ else
         97) miss "войти в контрольную группу не удалось" ;;
         *) bad "шлюз сервера ${GATEWAY} недостижим" ;;
     esac
-    for port in 443 80; do
-        probe "$EXTERNAL" "$port"
-        case $? in
-            0) bad "${EXTERNAL}:${port} доступен — выход наружу открыт (до этапа 3 его быть не должно)" ;;
-            97) miss "войти в контрольную группу не удалось" ;;
-            *) ok "${EXTERNAL}:${port} недоступен" ;;
-        esac
-    done
+    probe "$EXTERNAL" 443
+    case $? in
+        0) ok "${EXTERNAL}:443 доступен — выход к провайдерам открыт" ;;
+        97) miss "войти в контрольную группу не удалось" ;;
+        *) bad "${EXTERNAL}:443 недоступен — облачные подключения работать не будут" ;;
+    esac
+    probe "$EXTERNAL" 80
+    case $? in
+        0) bad "${EXTERNAL}:80 доступен — выход наружу шире порта 443" ;;
+        97) miss "войти в контрольную группу не удалось" ;;
+        *) ok "${EXTERNAL}:80 отклонён" ;;
+    esac
+    sleep 1
+    kernel=$(journalctl -k --since "@$since" --no-pager 2>/dev/null || true)
+    if grep -q "cleaner-egress: .*DST=${EXTERNAL} .*DPT=80 " <<< "$kernel"; then
+        ok "отказ на порт 80 записан в журнал ядра"
+    else
+        bad "отказа на порт 80 нет в журнале ядра (cleaner-egress:)"
+    fi
+    if grep -q "cleaner-out: .*DST=${EXTERNAL} .*DPT=443 " <<< "$kernel"; then
+        ok "соединение на 443 записано в журнал ядра — проба шла через цепочку"
+    else
+        bad "соединения на 443 нет в журнале ядра (cleaner-out:) — проба прошла мимо цепочки"
+    fi
 fi
 if [[ -x /usr/local/sbin/check-egress.sh ]]; then
     bash /usr/local/sbin/check-egress.sh >"$WORK/egress.txt" 2>&1

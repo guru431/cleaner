@@ -25,6 +25,8 @@ CONF=$ETC/cleaner.toml
 TLS=$ETC/tls
 UNIT=/etc/systemd/system/cleaner.service
 CHECK=/usr/local/sbin/check-cleaner.sh
+EGRESS=/usr/local/sbin/cleaner-egress.sh
+EGRESS_UNIT=/etc/systemd/system/cleaner-egress.service
 HOST_IP=example
 PORT=5464
 CLIENTS=example/19
@@ -147,7 +149,7 @@ rollback() {
 trap 'rollback "сбой в строке $LINENO"' ERR
 
 # --- окружение Python: пересобирается, только если изменился файл зависимостей ---
-# Пакеты качает установщик от root, а не служба: её юнит закрыт IPAddressDeny=any.
+# Пакеты качает установщик от root, а не служба: её выход наружу ограничен портом 443 и записывается.
 if ! cmp -s "$SRC/requirements-linux.txt" "$APP/.venv/requirements-linux.txt"; then
     rm -rf "$APP/.venv.new"
     python3.12 -m venv "$APP/.venv.new"
@@ -197,7 +199,12 @@ if [[ -f "$UNIT" ]] && ! cmp -s "$SRC/deploy/cleaner.service" "$UNIT"; then
 fi
 install -o root -g root -m 0644 "$SRC/deploy/cleaner.service" "$UNIT"
 install -o root -g root -m 0755 "$SRC/deploy/check-cleaner.sh" "$CHECK"
+# Границы выхода наружу (этап 3): цепочка ставится до перезапуска службы — без неё служба не стартует.
+install -o root -g root -m 0755 "$SRC/deploy/cleaner-egress.sh" "$EGRESS"
+install -o root -g root -m 0644 "$SRC/deploy/cleaner-egress.service" "$EGRESS_UNIT"
 systemctl daemon-reload
+systemctl enable cleaner-egress.service >/dev/null 2>&1
+systemctl restart cleaner-egress.service
 
 # --- первая установка: база, главный ключ, первый администратор -------------------
 if [[ ! -f "$ENVF" && ! -f "$DATA/cleaner.db" ]]; then

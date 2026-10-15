@@ -1,0 +1,14 @@
+[Unit]
+Description=Cleaner: границы выхода наружу (порт 443, журнал отказов)
+# После ufw: он перестраивает OUTPUT и убирает оттуда чужие переходы.
+After=ufw.service network-online.target
+Wants=network-online.target
+Before=cleaner.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cleaner-egress.sh
+
+[Install]
+WantedBy=multi-user.target
