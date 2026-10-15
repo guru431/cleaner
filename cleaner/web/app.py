@@ -21,7 +21,7 @@ from cleaner.service import ChatService
 from cleaner.storage.repo import Repository
 from cleaner.web import auth, routes_auth, routes_chats, routes_review, routes_send, routes_settings
 from cleaner.web.deps import MAX_BODY_BYTES, LoginRequired, page
-from cleaner.web.jobs import INTERRUPTED, Jobs
+from cleaner.web.jobs import INTERRUPTED, Jobs, shutdown
 
 log = logging.getLogger("cleaner.web")
 
@@ -106,9 +106,7 @@ def create_app(
         # Остановка: соединение с базой закрывается после этого (__main__). Недождавшиеся задания помечаются
         # здесь, пока оно открыто, — а не случайной ошибкой записи в закрытую базу и пометкой при следующем старте.
         service.live.cancel_all()            # идущие ответы облака сохраняются неполными
-        jobs.shutdown()
-        sends.shutdown()
-        files.shutdown()
+        shutdown(jobs, sends, files)
         _interrupt(repo)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)

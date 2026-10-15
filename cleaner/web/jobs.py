@@ -31,12 +31,19 @@ class Jobs:
         future.add_done_callback(self._pending.discard)
 
     def shutdown(self) -> int:
-        """Остановка службы: новые задания не принимаются, ждущие в очереди отменяются, идущие — ждём не
-        дольше stop_wait секунд. Возвращает число недождавшихся: их элементы помечает прерванными
-        вызывающий, пока соединение с базой открыто (app.lifespan)."""
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        _, unfinished = wait(set(self._pending), timeout=self._stop_wait)
-        return len(unfinished)
+        return shutdown(self)
+
+
+def shutdown(*pools: Jobs) -> int:
+    """Остановка службы: новые задания не принимаются, ждущие в очереди отменяются сразу во всех пулах, идущие —
+    ждём вместе не дольше stop_wait секунд. По очереди пул файлов брал бы следующий скан, пока ждётся общий,
+    а остановка росла бы на stop_wait с каждым пулом. Возвращает число недождавшихся: их элементы помечает
+    прерванными вызывающий, пока соединение с базой открыто (app.lifespan)."""
+    for pool in pools:
+        pool._executor.shutdown(wait=False, cancel_futures=True)
+    pending = set().union(*(pool._pending for pool in pools))
+    _, unfinished = wait(pending, timeout=max(pool._stop_wait for pool in pools))
+    return len(unfinished)
 
 
 def _run(fn: Callable[..., None], args: tuple[object, ...]) -> None:

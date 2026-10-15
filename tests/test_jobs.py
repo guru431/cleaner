@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from cleaner.ingest.extract import ExtractError
 from cleaner.storage.repo import Item
 from cleaner.web.app import FILE_WORKERS, create_app
-from cleaner.web.jobs import INTERRUPTED, WORKERS, Jobs
+from cleaner.web.jobs import INTERRUPTED, WORKERS, Jobs, shutdown
 
 
 def blocking_job():
@@ -126,6 +126,40 @@ def test_shutdown_drops_queued_jobs_refuses_new_ones_and_counts_the_unfinished()
         jobs.submit(seen.append, "после остановки")
     release.set()
     executor.shutdown(wait=True)
+    assert seen == ["done"]
+
+
+class Stoppable(ThreadPoolExecutor):
+    """Пул из одного потока, который сообщает, что его остановили."""
+
+    def __init__(self):
+        super().__init__(max_workers=1)
+        self.stopped = threading.Event()
+
+    def shutdown(self, wait=True, *, cancel_futures=False):
+        super().shutdown(wait=wait, cancel_futures=cancel_futures)
+        self.stopped.set()
+
+
+def test_service_stop_closes_every_pool_before_waiting_for_any():
+    """Пулы ждались по очереди: пока шло ожидание общего пула, пул файлов брал из очереди следующий скан,
+    а худшая остановка росла на 30 с с каждым пулом."""
+    shared, files = Stoppable(), Stoppable()
+    running, scan, release, seen = blocking_job()
+    other, scan_started, scan_release, _ = blocking_job()
+    pools = [Jobs(shared, stop_wait=5), Jobs(files, stop_wait=5)]
+    pools[0].submit(running)
+    pools[1].submit(other)
+    pools[1].submit(seen.append, "следующий скан")
+    assert scan.wait(5) and scan_started.wait(5)
+    stopping = threading.Thread(target=shutdown, args=pools)
+    stopping.start()
+    try:
+        assert files.stopped.wait(1)                 # общий пул ещё занят, а пул файлов уже закрыт
+    finally:
+        scan_release.set()
+        release.set()
+        stopping.join(5)
     assert seen == ["done"]
 
 
