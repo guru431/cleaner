@@ -60,6 +60,9 @@ _TOKEN = re.compile(
     )(?![\w-])""",
     re.VERBOSE,
 )
+# Ключ восстановления BitLocker — восемь групп по шесть цифр через дефис; группа — шестнадцать бит, умноженные на 11, то
+# есть делится на 11 и меньше 720 896 (_bitlocker). Без проверки так выглядел бы любой ряд чисел.
+_BITLOCKER = re.compile(r"(?<![\w-])\d{6}(?:-\d{6}){7}(?![\w-])")
 
 # Значение без кавычек тянется до пробела. «;», «&» и «,» внутри пароля законны; концом значения
 # они служат, только если за ними пробел, конец текста или следующее поле вида «имя=»
@@ -184,6 +187,14 @@ _STATUS_WORD = re.compile(
     re.IGNORECASE,
 )
 _PREPOSITIONS = frozenset({"с", "со", "with"})
+# ПИН-код — от четырёх до восьми цифр после «ПИН», «ПИН-код», PIN, PIN code, до двух слов между ними, «:», «=», тире
+# или пробел: «ПИН-код 4821», «PIN: 4821», «пин-код от карты 48213». Скрывается только на своём месте, как код из цифр.
+# «PIN-диод», «пин 3 разъёма», «PIN-1234» на плате — не ПИН-код.
+_PIN = re.compile(
+    r"(?<![\w-])(?:пин|pin)(?:[ -]?(?:код(?:а|у|ом|е|ы|ов)?|code))?(?:[ \t]++[\w-]++){0,2}?"
+    r"(?:[ \t]*+[:=—–][ \t]*+|[ \t]++(?:-[ \t]++)?)(?P<bare>\d{4,8}+)(?![\w+/=-])(?!\.\w)",
+    re.IGNORECASE,
+)
 # Имя из слов, а не токен: части через «_», «/», «-» — слово (строчное, с заглавной, заглавное, camelCase) с числом в конце
 # или без, число до восьми цифр со словом за ним или без, строчное слово с числом внутри («gpt4o», «k8s»):
 # «customer_order_line_v2_id», «cleaner/core/detect/secrets2», «gpt-4o-mini-2024-07-18», «API_KEY_2024_PRODUCTION_V2».
@@ -561,8 +572,8 @@ def _not_a_value(key: str, value: str) -> bool:
 def detect(text: str, ctx: DetectContext) -> list[Span]:
     spans = _private_keys(text) + [
         Span(m.start(), m.end(), EntityType.SECRET, name, validated=True)
-        for pattern in (_JWT, _TOKEN)
-        for m in pattern.finditer(text)
+        for pattern in (_JWT, _TOKEN, _BITLOCKER)
+        for m in pattern.finditer(text) if pattern is not _BITLOCKER or _bitlocker(m.group())
     ]
     parsed_until = 0
     for m in _KEY_NAME.finditer(text):
@@ -612,7 +623,12 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         if _status_code(text, m) if value.isdigit() else (m.group("password") is None and _IDENTIFIER.fullmatch(value)):
             continue
         spans.append(Span(*m.span("bare"), EntityType.SECRET, name, searchable=_looks_like_password(value)))
+    spans += [Span(*m.span("bare"), EntityType.SECRET, name, searchable=False) for m in _PIN.finditer(text)]
     return spans + _library_spans(text, spans)
+
+
+def _bitlocker(key: str) -> bool:
+    return all(int(group) % 11 == 0 and int(group) < 65536 * 11 for group in key.split("-"))
 
 
 def _status_code(text: str, m: re.Match[str]) -> bool:

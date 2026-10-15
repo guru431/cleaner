@@ -446,6 +446,52 @@ def test_token_with_a_random_part_or_a_password_of_words_is_still_found(text, va
     assert finds(text) == {(value, True)}
 
 
+BITLOCKER = "135795-258016-380237-502458-624679-013574-720885-008547"   # вымышленный: каждая группа — число до 65 536, × 11
+
+
+@pytest.mark.parametrize(
+    "text", [f"Ключ восстановления BitLocker: {BITLOCKER}", BITLOCKER, f"ключ ({BITLOCKER}) не подошёл"],
+    ids=["after_words", "alone", "in_brackets"],
+)
+def test_bitlocker_recovery_key_is_found(text):
+    """Находка «BitLocker recovery keys and PIN codes are not found»: в ключе нет букв, и правило «токен или код в тексте»
+    его не видело."""
+    assert finds(text) == {(BITLOCKER, True)}
+
+
+def test_numbers_shaped_like_a_bitlocker_key_that_fail_its_check_are_left_alone():
+    for text in (
+        "123456-123456-123456-123456-123456-123456-123456-123456",          # группы не делятся на 11
+        "720896-258016-380237-502458-624679-013574-720885-008547",          # 65 536 × 11 — больше шестнадцати бит
+        "135795-258016-380237-502458-624679-013574-720885",                 # семь групп
+        f"{BITLOCKER}-135795", f"{BITLOCKER}1",
+    ):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("ПИН-код 4821", "4821"), ("PIN: 4821", "4821"), ("пин-код от карты 48213", "48213"),
+        ("PIN code 48213579", "48213579"), ("мой пин 4821, не говорите никому", "4821"), ("ПИН-код — 4821", "4821"),
+        ("пинкод: 4821", "4821"),
+    ],
+    ids=["pin_code", "colon", "two_words", "english_code", "comma", "dash", "glued"],
+)
+def test_pin_code_is_hidden_in_its_place(text, value):
+    """Находка «BitLocker recovery keys and PIN codes are not found»: четыре-пять цифр ниже порога кода. ПИН скрывается
+    только на своём месте: то же число в другом месте чата — год или счётчик."""
+    assert finds(text) == {(value, False)}
+
+
+def test_pin_words_and_pin_like_numbers_elsewhere_are_left_alone():
+    for text in (
+        "PIN-диод 1N4148 в схеме", "пин 3 разъёма", "код 4821 в журнале", "отчёт за 2024 год", "SPIN 4821",
+        "Пинг 4821 мс", "pinout 1234", "PIN-1234 на плате",
+    ):
+        assert found(text) == set(), text
+
+
 def test_english_state_and_pointer_words_after_a_dash_are_left_alone():
     """Ревью правила тире: частые английские слова состояния и указания — проза, а не пароль."""
     for text in (

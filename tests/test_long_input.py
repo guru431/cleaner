@@ -42,6 +42,8 @@ from cleaner.core.types import EntityType as T
         "токен " * 20000, "код a " * 30000, "ключ " * 4 + "a" * 100000, "код " + "1" * 100000, "token " + "a1" * 100000,
         # Слово кода ошибки перед «код» (поиск назад до начала текста — 4,6 с) и имя из тысяч частей.
         "код 1234567 " * 10000, "token " + "a1_" * 50000,
+        # Слова после «пин» (без предела их числа — 3,6 с) и группы ключа BitLocker.
+        "пин а " * 5000, "123456-" * 5000,
         # Скобки в конце значения, атрибут и вызов с именами после ключа.
         "password=" + ")" * 100000, "password=" + "a." * 50000 + "1", "password=f(" + "a," * 50000 + "1)",
         "pwd=" + "(a)" * 30000, "password = self." + "aB" * 50000, "password=" + "(" * 50000 + "a" + ")" * 50000,
@@ -73,7 +75,7 @@ from cleaner.core.types import EntityType as T
         "password_words", "password_hyphenated_word", "password_double_hyphens", "password_copulas",
         "password_distinct_words", "password_colon_copulas", "password_long_leads", "password_long_lead_run",
         "token_words", "code_words", "key_letters", "code_digits", "token_run",
-        "digit_codes", "identifier_parts",
+        "digit_codes", "identifier_parts", "pin_words", "bitlocker_groups",
         "closing_brackets", "attribute_chain", "call_names", "bracket_pairs",
         "camel_attribute", "nested_brackets", "pem_begins", "dashes", "pem_dashed_headers", "pem_bare_headers", "pem_dashed_body",
         "pem_bare_blocks",
