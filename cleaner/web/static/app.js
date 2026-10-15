@@ -26,6 +26,17 @@ document.addEventListener("selectionchange", () => {
   field.value = selection.toString().trim();
 });
 
+// Ответ облачной модели по мере получения (раздел 14): события сервера несут весь восстановленный к этому
+// моменту текст; по «done» страница перезагружается и показывает полное восстановление с выделением.
+document.querySelectorAll("[data-stream]").forEach((element) => {
+  const source = new EventSource(element.dataset.stream);
+  source.onmessage = (event) => {
+    element.classList.remove("muted");
+    element.textContent = JSON.parse(event.data).text;
+  };
+  source.addEventListener("done", () => { source.close(); window.location.reload(); });
+});
+
 // Опрос фоновой обработки (раздел 14): пока задание в очереди или в работе — раз в секунду, потом перезагрузка.
 document.querySelectorAll("[data-poll]").forEach((element) => {
   const field = element.dataset.pollField || "status";

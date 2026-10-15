@@ -57,11 +57,20 @@ def _entries(view: ChatView) -> list[dict[str, object]]:
             })
         else:
             entries.append({
-                "kind": "answer", "id": item.id, "seq": item.seq, "raw": item.original,
-                "counters": entry.result.counters,
+                "kind": "answer", "id": item.id, "seq": item.seq, "raw": item.original, "source": item.source,
+                "status": item.status, "error": item.meta.get("error", ""), "model": item.meta.get("model", ""),
+                "provider": item.meta.get("provider", ""), "counters": entry.result.counters,
                 "html": render.highlight(entry.result.text, render.restored_marks(entry.result.segments)),
             })
     return entries
+
+
+def _choices(request: Request) -> list[tuple[str, str]]:
+    """Подключения и модели для выбора в чате (FR-8.3): значение «id|модель» и подпись."""
+    return [
+        (f"{provider.id}|{model}", f"{provider.name} — {model}")
+        for provider in repo_of(request).providers() if provider.enabled for model in provider.models
+    ]
 
 
 @router.get("/chats")
@@ -82,10 +91,13 @@ def create_chat(request: Request, form: dict[str, str] = Depends(get_form), view
 def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depends(get_viewer)) -> Response:
     chat = own_chat(request, chat_id, viewer)
     view = service_of(request).view(chat_id)
+    provider_id, model = repo_of(request).chat_provider(chat_id)
     return page(
         request, "chat.html", viewer, chat=chat, chats=chat_list(request, viewer, q), q=q, entries=_entries(view),
         max_file_mb=request.app.state.max_file_bytes // (1024 * 1024),
         layers=service_of(request).layers(chat_id), layer_names=LAYER_NAMES,
+        choices=_choices(request), chosen=f"{provider_id}|{model}" if provider_id else "",
+        local=request.app.state.engines is not None,
     )
 
 
@@ -122,9 +134,11 @@ def add_input(request: Request, chat_id: str, form: dict[str, str] = Depends(get
     if not text.strip():
         raise HTTPException(400, "Вставьте текст")
     try:
-        item = service_of(request).add_input(chat_id, viewer.user.id, text)
+        item = service_of(request).add_input(chat_id, viewer.user.id, text, form.get("source", "paste"))
     except TextTooLong as exc:
         raise HTTPException(413, str(exc)) from None
+    except EditRefused as exc:
+        raise HTTPException(400, str(exc)) from None
     return RedirectResponse(f"/chats/{chat_id}/items/{item.id}", status_code=303)
 
 

@@ -72,6 +72,11 @@ def sanitized_marks(
     return marks
 
 
+def leak_marks(leaks: list[Leak]) -> list[Mark]:
+    """Оригиналы, найденные проверкой утечек в исходящем тексте (FR-8.7)."""
+    return [(leak.start, leak.end, {"class": "leak", "title": "Оригинал в исходящем тексте"}) for leak in leaks]
+
+
 def restored_marks(segments: list[Segment]) -> list[Mark]:
     return [(s.start, s.end, {"class": f"r-{s.kind}", "title": SEGMENT_NAMES.get(s.kind, s.kind)}) for s in segments]
 

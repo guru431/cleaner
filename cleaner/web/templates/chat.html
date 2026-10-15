@@ -27,7 +27,7 @@
     {% for e in entries %}
     <article class="item" id="item-{{ e.id }}">
       {% if e.kind == "input" %}
-      <h3>{% if e.source == "file" %}Файл{% else %}Текст{% endif %} {{ e.seq }}{% if e.status == "done" %} · <a href="/chats/{{ chat.id }}/items/{{ e.id }}">проверка</a>{% endif %}</h3>
+      <h3>{% if e.source == "file" %}Файл{% elif e.source == "instruction" %}Инструкция для модели{% else %}Текст{% endif %} {{ e.seq }}{% if e.status == "done" %} · <a href="/chats/{{ chat.id }}/items/{{ e.id }}">проверка</a>{% endif %}</h3>
       {% if e.status in ("queued", "running") %}
       <p class="muted" data-poll="/chats/{{ chat.id }}/items/{{ e.id }}/status">{% if e.status == "queued" %}В очереди{% else %}Обрабатывается{% endif %}… <span data-progress>{{ e.progress }}</span></p>
       {% elif e.status == "failed" %}
@@ -50,13 +50,29 @@
       {% endif %}
       {% endif %}
       {% else %}
-      <h3>Ответ модели {{ e.seq }}</h3>
+      <h3>{% if e.source == "api" %}Ответ {{ e.provider }} — {{ e.model }}{% elif e.source == "local" %}Ответ локальной модели{% else %}Ответ модели{% endif %} {{ e.seq }}</h3>
+      {% if e.status in ("queued", "running") and e.source == "api" %}
+      <pre id="text-{{ e.id }}" data-stream="/chats/{{ chat.id }}/items/{{ e.id }}/stream" class="muted">Ждём ответ…</pre>
+      <form method="post" action="/chats/{{ chat.id }}/items/{{ e.id }}/stop">{% include "_csrf.html" %}<button>Остановить</button></form>
+      {% elif e.status in ("queued", "running") %}
+      <p class="muted" data-poll="/chats/{{ chat.id }}/items/{{ e.id }}/status">{% if e.status == "queued" %}В очереди{% else %}Модель отвечает{% endif %}… <span data-progress></span></p>
+      {% elif e.status == "failed" %}
+      <p class="error">Ответ не получен: {{ e.error }}</p>
+      {% else %}
+      {% if e.status == "partial" %}<p class="warn">Ответ неполный: {{ e.error }}</p>{% endif %}
+      {% if e.source == "local" %}
+      <p class="counters">Локальная модель видела оригиналы: ответ показан как получен, восстанавливать в нём нечего.</p>
+      {% else %}
       <p class="counters">Восстановлено: {{ e.counters.restored }}, из искажённой записи: {{ e.counters.altered }}, выведено: {{ e.counters.derived }}, неизвестных меток: {{ e.counters.unknown }}, оставлено по политике: {{ e.counters.kept }}, посторонних ссылок: {{ e.counters.foreign_links }}.</p>
+      {% endif %}
       <pre id="text-{{ e.id }}">
 {{ e.html }}</pre>
       <button type="button" data-copy="text-{{ e.id }}">Скопировать</button>
+      {% if e.source != "local" %}
       <details><summary>Как получено</summary><pre>
 {{ e.raw }}</pre></details>
+      {% endif %}
+      {% endif %}
       {% endif %}
     </article>
     {% endfor %}
@@ -71,9 +87,34 @@
       <label>Файл до {{ max_file_mb }} МБ: DOCX, XLSX, PPTX, PDF (и скан), EML, MSG, HTML, CSV, текст, PNG, JPEG <input type="file" name="file" required></label>
       <button>Загрузить и очистить</button>
     </form>
+    <form method="post" action="/chats/{{ chat.id }}/input">
+      {% include "_csrf.html" %}
+      <input type="hidden" name="source" value="instruction">
+      <label>Инструкция для модели — очищается так же и уходит в системную часть запроса <textarea name="text" rows="2" required></textarea></label>
+      <button>Добавить инструкцию</button>
+    </form>
+    <section class="send">
+      <h2>Отправка</h2>
+      {% if choices %}
+      <form method="post" action="/chats/{{ chat.id }}/provider">
+        {% include "_csrf.html" %}
+        <label>Облачная модель <select name="choice">
+          <option value="">— ручной режим —</option>
+          {% for value, label in choices %}<option value="{{ value }}"{% if value == chosen %} selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select></label>
+        <button>Выбрать</button>
+      </form>
+      {% if chosen %}<p><a href="/chats/{{ chat.id }}/send">Отправить очищенный чат…</a> — сначала экран подтверждения с тем, что уйдёт.</p>{% endif %}
+      {% else %}
+      <p class="muted">Подключений к облачным моделям нет: очищенный текст копируется вручную, ответ вставляется ниже.</p>
+      {% endif %}
+      {% if local %}
+      <form method="post" action="/chats/{{ chat.id }}/ask-local">{% include "_csrf.html" %}<button>Спросить локальную модель</button> <span class="muted">— без очистки: текст не покидает сервер</span></form>
+      {% endif %}
+    </section>
     <form method="post" action="/chats/{{ chat.id }}/answer">
       {% include "_csrf.html" %}
-      <label>Ответ модели <textarea name="answer" rows="6" required></textarea></label>
+      <label>Ответ модели, полученный вручную <textarea name="answer" rows="6" required></textarea></label>
       <button>Восстановить</button>
     </form>
     <form method="post" action="/chats/{{ chat.id }}/delete" class="danger">

@@ -44,6 +44,11 @@ def test_answer_is_not_searched_by_detectors_only_by_known_values(state, setting
     assert not state.entities
 
 
+def test_instruction_added_after_the_question_still_lets_it_go(state, settings):
+    context = build_outgoing(state, [Turn("user", "Вопрос"), Turn("system", "Кратко")], settings, "p1", "m1").context
+    assert context.system.endswith("Кратко") and [m.text for m in context.messages] == ["Вопрос"]
+
+
 def test_instruction_goes_after_the_service_prompt(state, settings):
     turns = [Turn("system", "Отвечай кратко, автор — Сидоров", (Span(24, 31, T.PERSON, "ner"),)), Turn("user", "Вопрос")]
     context = build_outgoing(state, turns, settings, "p1", "m1").context

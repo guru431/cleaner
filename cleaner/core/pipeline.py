@@ -283,7 +283,8 @@ def build_outgoing(
     в ответах модели заменяются известные значения (FR-8.11). Соседние ходы одной роли склеиваются:
     Anthropic требует чередования. Ответы до первого вопроса пропускаются — первым идёт вопрос.
     """
-    if not any(turn.role == "user" for turn in turns) or turns[-1].role != "user":
+    dialogue = [turn.role for turn in turns if turn.role != "system"]      # инструкция — не ход диалога
+    if not dialogue or dialogue[-1] != "user":
         raise NotSendable("Последним в чате должен быть вопрос: вставьте текст и дождитесь очистки")
     system = [system_prompt(state.label_style)]
     messages: list[list[str]] = []
