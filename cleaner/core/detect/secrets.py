@@ -18,21 +18,36 @@ name = "secrets"
 # строки END или пустой строки: «Файл начинается со строки BEGIN RSA PRIVATE KEY» в прозе — не секрет. Ряд перед
 # заголовком досчитывается назад кодом (_private_keys): выражение, начатое с ряда, перебирало бы «-----…» от каждого
 # дефиса. Слов перед PRIVATE не больше трёх (SSH2 ENCRYPTED): «BEGIN BEGIN …» иначе перебирался бы до конца от каждого.
+# Тело может идти после строк «Имя: значение» (_PEM_ARMOUR: броня PGP — Version:, Comment:; шифрованный PEM — Proc-Type:,
+# DEK-Info:; SSH2 — Comment:) и одной пустой строки. Ряды, отделённые от заголовка пробелом («---- BEGIN SSH2 ENCRYPTED
+# PRIVATE KEY ----»), — тоже заголовок с телом, а не блок до конца текста: «-- BEGIN RSA PRIVATE KEY --» бывает и тире.
 _DASHES = "-—–"
 _PEM_BEGIN = re.compile(r"(?<!\w)BEGIN (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?(?P<dashes>[-—–]{2,}+)?")
 _PEM_END = re.compile(r"(?<!\w)END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?[-—–]*+")
+_PEM_ARMOUR = re.compile(r"[ \t]*+(?:[-—–]++[ \t]*+)?(?:\r?\n[ \t]*+[A-Za-z][\w-]*+:[ \t][^\r\n]*+)*+")
 _PEM_BODY = re.compile(
-    r"[ \t]*(?=\r?\n[ \t]*[A-Za-z0-9+/]{16})(?:\r?\n(?![ \t]*[-—–]*+END )[ \t]*\S[^\r\n]*)++"
-    r"(?:\r?\n[ \t]*[-—–]*+END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?[-—–]*+)?"
+    r"(?:\r?\n[ \t]*+(?=\r?\n))?(?=\r?\n[ \t]*[A-Za-z0-9+/]{16})(?:\r?\n(?![ \t]*+(?:[-—–]++[ \t]?)?END )[ \t]*\S[^\r\n]*)++"
+    r"(?:\r?\n[ \t]*+(?:[-—–]++[ \t]?)?END (?:[A-Z0-9]++ ){0,3}PRIVATE KEY(?: BLOCK)?(?:[ \t]?[-—–]++)?)?"
 )
+# Ключ PuTTY (версии 2 и 3): строка «PuTTY-User-Key-File-3: ssh-ed25519», поля «Имя: значение» и строки base64 — до поля
+# Private-MAC включительно или до строки другого вида (пустой, прозы). Секрет — только блок со строкой тела (_KEY_LINE):
+# заголовок в прозе («файл начинается с PuTTY-User-Key-File-3: ssh-ed25519») ключом не считается.
+_PUTTY = re.compile(
+    r"(?<![\w-])PuTTY-User-Key-File-\d++:[^\r\n]*+"
+    r"(?:\r?\n[ \t]*+(?!Private-MAC:)(?:[A-Z][\w-]*+:[^\r\n]*+|[A-Za-z0-9+/]++=*+[ \t]*+(?![^\r\n])))*+"
+    r"(?:\r?\n[ \t]*+Private-MAC:[^\r\n]*+)?"
+)
+_KEY_LINE = re.compile(r"\n[ \t]*+[A-Za-z0-9+/]{16}")
 # Подпись может быть пустой («alg: none»): такой токен раньше находило правило JWT из detect-secrets.
 _JWT = re.compile(r"(?<![\w-])eyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]*")
+# Токены GitLab всех видов — от 20 знаков после префикса (Devise.friendly_token): у правила detect-secrets значение — группа
+# префикса («gldt», короче 8 знаков, отбрасывается), а правила glimt-, glptt-, gloas- ждут токен ровно своей длины.
 _TOKEN = re.compile(
     r"""(?<![\w-])(?:
         AKIA[0-9A-Z]{16}
       | gh[pousr]_[A-Za-z0-9]{36,}
       | github_pat_[A-Za-z0-9_]{40,}
-      | glpat-[\w-]{20,}
+      | gl(?:pat|dt|ft|soat|rtr?|cbt|ffct|imt|ptt|agent|oas)-[\w-]{20,}
       | xox[baprs]-[A-Za-z0-9-]{10,}
       | sk_live_[A-Za-z0-9]{16,}
       | AIza[\w-]{35}
@@ -47,8 +62,9 @@ _TOKEN = re.compile(
 # они служат, только если за ними пробел, конец текста или следующее поле вида «имя=»
 # (строка подключения, параметры адреса). Имя поля пробелов не содержит: в «pwd=Qw,er7y retries=3»
 # запятая — часть пароля. Исключение — «;» перед словами с заглавной буквы через пробел и «=»:
-# это поля ADO.NET («;Persist Security Info=», «;User ID=»).
-_BARE = r"(?P<bare>(?:[^\s;&,\"'<>]|[;&,](?![\s;&,]|[\w.-]+=|(?<=;)[A-Z][\w.-]*(?: [A-Z][\w.-]*)+=|$))+)"
+# это поля ADO.NET («;Persist Security Info=», «;User ID=»; _ADO_FIELD, его же видит _NEXT_FIELD).
+_ADO_FIELD = r"[A-Z][\w.-]*(?: [A-Z][\w.-]*)+="
+_BARE = rf"(?P<bare>(?:[^\s;&,\"'<>]|[;&,](?![\s;&,]|[\w.-]+=|(?<=;){_ADO_FIELD}|$))+)"
 _VALUE = rf"""(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)'|{_BARE})"""
 # Имя ключа содержит слово целиком или склеенным: db_password, dbpass, userpwd, accessToken.
 # Имя берётся целиком одним проходом без возвратов («++»), а слово секрета ищется в нём кодом:
@@ -63,13 +79,13 @@ _KEY_WORD = re.compile(
 )
 _VALUE_AT = re.compile(_VALUE)
 # Имена ключей, которые содержат те же слова, но хранят не секрет: счётчики токенов,
-# политики паролей, атрибуты Active Directory, обычные слова с «pass».
+# политики паролей, атрибуты Active Directory, обычные слова с «pass» (passes — число проходов: Argon2-Passes ключа PuTTY).
 _NOT_SECRET_KEY = re.compile(
     r"""(?:[\w.-]*[_.-])?(?:max|min|num|total|prompt|completion|input|output|context)[_.-]?tokens?
       | tokens
       | (?:[\w.-]*[_.-])?tokens?[_.-]?(?:type|count|limit|usage|budget|endpoint|url|uri|ttl|lifetime|expir\w*)
       | [\w.-]*tokeniz\w*
-      | [\w.-]*(?:bypass|compass|passive|passed|passage|passenger|pass[_.-]?through)[\w.-]*
+      | [\w.-]*(?:bypass|compass|passive|passed|passes|passage|passenger|pass[_.-]?through)[\w.-]*
       | (?:bad|max|min)?pwd(?:lastset|properties|historylength|count|age|length)
       | badpasswordtime
       | [\w.-]*password[_.-]?(?:policy|length|min\w*|max\w*|expir\w*|age|complexity|history
@@ -122,21 +138,39 @@ _SECURE = re.compile(
 )
 # После тире или дефиса в прозе часто идёт не пароль («Пароль — это строка…»). Такое значение
 # отбрасывается, только если это слово прозы (_prose_word) и на пароль оно не похоже; продолжение фразы
-# за ним не в счёт: «Пароль от Wi-Fi — sunflower для гостей» — пароль. После «:» и «=» берётся любое.
-# Перед тире — до шести слов («Пароль для входа в систему — …»), перед «:» и «=» — до трёх: значение после двоеточия
-# на прозу не проверяется, и заголовок «Password policy for domain users: minimum…» скрыл бы minimum во всём чате.
+# за ним не в счёт: «Пароль от Wi-Fi — sunflower для гостей» — пароль. После «:» и «=» берётся любое, кроме связки.
+# Перед тире — до шести слов («Пароль для входа в систему — …»), перед «:» и «=» — до трёх: значение там на прозу не
+# проверяется. От четырёх до шести слов перед «:» с пробелом после него (colon; «at 10:30» — время) значение проверяется,
+# как после тире: заголовок «Password policy for domain users: minimum…» не скрывает minimum во всём чате.
 # Слово перед тире начинается не с дефиса: иначе «Пароль - Qwerty - временный» брал значение после второго.
 _PHRASE = re.compile(
     r"(?<!\w)(?:пароль|password)(?:(?:[ \t]+[\w-]+){0,3}(?P<sep>[ \t]*[:=][ \t]*)"
-    r"|(?:[ \t]+\w[\w-]*){0,6}(?P<dash>[ \t]*[—–][ \t]*|[ \t]+--?[ \t]+))" + _VALUE,
+    r"|(?:[ \t]+\w[\w-]*){0,6}(?P<dash>[ \t]*[—–][ \t]*|[ \t]+--?[ \t]+)"
+    r"|(?:[ \t]++\w[\w-]*+){4,6}(?P<colon>[ \t]*+:[ \t]++))" + _VALUE,
     re.IGNORECASE,
 )
-# После связки значение — следующее слово: «Пароль — это Qwerty123», «пароль — это: Zx81kLmN».
+# После связки значение — следующее слово: «Пароль — это Qwerty123», «пароль — это: Zx81kLmN», «Пароль: это Zx81kLmN»;
+# связка без слова за ней («Пароль: это») — не значение.
 _COPULAS = frozenset({"это", "is", "was"})
 _NEXT_VALUE = re.compile(r"[ \t]+" + _VALUE)
 # Знаки в конце — не часть слова прозы: «Password - here!», «Пароль — какой?», «это:».
 _TRAILING = "?!:;,.…"
 _PROSE = re.compile(r"(?<!\w)(?:пароль|password)(?:\s+is)?\s+(?P<bare>(?!-)[^\s,;:=]+)", re.IGNORECASE)
+# Токен или код в тексте без ключа присваивания: «пришёл код восстановления 3f8e…», «Подтвердите действие токеном 8c7b…»,
+# «API-ключ для доступа к эндпоинту api_3f…», «смс с кодом 847593». После слова «токен», «код», «ключ», «пароль» (token,
+# code, key, password) в любом падеже — до четырёх слов без знаков препинания, «:» или пробел и ближайшее значение вида
+# токена. Проверка прозы, как после «пароль —», здесь в самом виде: шестнадцатеричное от 16 знаков или строка от 20 знаков
+# с цифрой и буквой похожи на пароль и ищутся во всём чате; код из 6–8 цифр — только после «код» и code и скрывается
+# только на своём месте. Четыре-пять цифр — код события или ошибки («код события 4625», «код ошибки 18456»).
+# Значение и проверки вида — знаки ASCII, слова перед ним — любые; слова берутся по одному, от ближайшего.
+_TOKEN_PHRASE = re.compile(
+    r"(?<!\w)(?:токе?н(?:а|у|ом|е|ы|ов|ам|ами|ах)?|tokens?|(?P<code>код(?:а|у|ом|е|ы|ов|ам|ами|ах)?|codes?)"
+    r"|ключ(?:а|у|ом|е|и|ей|ам|ами|ах)?|keys?|парол(?:ь|я|ю|ем|е|и|ей)|passwords?)"
+    r"(?:[ \t]++[\w-]++){0,4}?(?:[ \t]*+:[ \t]*+|[ \t]++)"
+    r"(?P<bare>(?=[A-Za-z0-9_+/-]*?\d)(?=[A-Za-z0-9_+/-]*?[A-Za-z])(?:[0-9a-fA-F]{16,}+|[A-Za-z0-9][A-Za-z0-9_+/-]{19,}+=*+)"
+    r"|(?(code)\d{6,8}+|(?!)))(?![\w+/=-])(?!\.\w)",
+    re.IGNORECASE,
+)
 # Русское слово через дефис («по-прежнему», «кто-то») похоже на пароль только дефисом, а то же слово
 # без дефиса паролем в тексте и так не считается.
 _HYPHENATED_WORD = re.compile(r"[а-яё]+(?:-[а-яё]+)+", re.IGNORECASE)
@@ -217,7 +251,7 @@ _SECRET_NAME = re.compile(
 )
 # Поле строки подключения: «;» прямо перед ключом или после значения перед следующим полем, как их видит _BARE
 # («Server=db;Password=…», «Password=…;User ID=app»). Значение поля — строка как есть, а не код.
-_NEXT_FIELD = re.compile(r";(?:[\w.-]+=|[A-Z][\w.-]*(?: [A-Z][\w.-]*)+=)")
+_NEXT_FIELD = re.compile(rf";(?:[\w.-]+=|{_ADO_FIELD})")
 
 # Правила по энтропии и по ключевым словам шумят на обычном тексте; контекст у нас свой.
 # Правила npm, JWT и OpenAI без начала слова перебирают строку от каждого «//», «eyJ», «sk-» —
@@ -362,7 +396,14 @@ def _trimmed_end(string: str, start: int, end: int) -> int:
 
 
 def _code(string: str, start: int, end: int) -> bool:
-    """Значение без кавычек string[start:end] — вызов, индекс или атрибут в коде (см. _CALL)."""
+    """Значение без кавычек string[start:end] — вызов, индекс или атрибут в коде (см. _CALL), и в скобках тоже:
+    «(input())». Скобки снимаются только парой по краям; «(Qw1)», «(Ab(1))» внутри — не код, «(a)(b)» — тоже. Снятое
+    берётся копией: знак за ним (_CALL, «f(password=abc)») — своя скобка, а не текст после значения."""
+    inner = start
+    while end - inner > 2 and string[inner] == "(" and string[end - 1] == ")":
+        inner, end = inner + 1, end - 1
+    if inner > start:
+        string, start, end = string[inner:end], 0, end - inner
     call = _CALL.match(string, start, end)
     if call is None:
         attribute = _ATTRIBUTE.fullmatch(string, start, end)
@@ -395,10 +436,11 @@ def _in_code(text: str, key: str, key_start: int, value_end: int) -> bool:
 
 
 def _private_keys(text: str) -> list[Span]:
-    """Блоки приватных ключей (_PEM_BEGIN). Поиск идёт после конца предыдущего блока: заголовок внутри блока до конца
-    текста иначе снова искал бы END до конца — квадратичное время на тексте из одних заголовков."""
+    """Блоки приватных ключей (_PEM_BEGIN, _PUTTY). Поиск идёт после конца предыдущего блока: заголовок внутри блока до
+    конца текста иначе снова искал бы END до конца — квадратичное время на тексте из одних заголовков. По той же причине
+    заголовок внутри строк «Имя: значение» заголовка без тела (failed_until) тело не ищет: его строки кончаются там же."""
     spans: list[Span] = []
-    position = 0
+    position = failed_until = 0
     while (m := _PEM_BEGIN.search(text, position)) is not None:
         start = m.start()
         while start > position and text[start - 1] in _DASHES:
@@ -406,12 +448,24 @@ def _private_keys(text: str) -> list[Span]:
         if m.start() - start >= 2 and m.group("dashes"):
             end = _PEM_END.search(text, m.end())
             position = end.end() if end else len(text)
-        elif body := _PEM_BODY.match(text, m.end()):
-            position = body.end()
-        else:
+        elif m.end() <= failed_until:
             position = m.end()
             continue
+        elif body := _PEM_BODY.match(text, armour := _PEM_ARMOUR.match(text, m.end()).end()):
+            if start == m.start() and start > position and text[start - 1] in " \t":    # ряд через пробел — SSH2
+                run = start - 1
+                while run > position and text[run - 1] in _DASHES:
+                    run -= 1
+                start = run if start - 1 - run >= 2 else start
+            position = body.end()
+        else:
+            failed_until, position = armour, m.end()
+            continue
         spans.append(Span(start, position, EntityType.SECRET, name, validated=True))
+    spans += [
+        Span(m.start(), m.end(), EntityType.SECRET, name, validated=True)
+        for m in _PUTTY.finditer(text) if _KEY_LINE.search(text, m.start(), m.end())
+    ]
     return spans
 
 
@@ -435,12 +489,17 @@ def _prose_word(value: str) -> bool:
     )
 
 
+def _copula(m: re.Match[str]) -> bool:
+    return (m.group("bare") or "").rstrip(_TRAILING).lower() in _COPULAS
+
+
 def _after_dash(m: re.Match[str]) -> Span | None:
-    """Значение после «Пароль —» или None — там проза. Знаки в конце в проверку не входят, но скрываются со значением.
+    """Значение после «Пароль —» (а также после связки за «:» и после четырёх слов и «:», см. _PHRASE) или None — там
+    проза. Знаки в конце в проверку не входят, но скрываются со значением.
     Обычное слово, не похожее на пароль, скрывается только на этом месте и искомым написанием чата (5.4) не становится:
     «Пароль — Windows не принимает» иначе скрыло бы Windows во всех текстах чата, без восстановления в ответах.
     Значение в кавычках написано как есть, а не словом фразы, — оно искомое."""
-    if (m.group("bare") or "").rstrip(_TRAILING).lower() in _COPULAS:
+    if _copula(m):
         m = _NEXT_VALUE.match(m.string, m.end())
     bounds = _value(m) if m else None
     if not bounds:
@@ -490,6 +549,10 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         if not value:
             continue
         parsed_until = value.end()
+        if _copula(value):                     # «Пароль: это строка» — значение после связки, как после тире
+            if span := _after_dash(value):
+                spans.append(span)
+            continue
         bounds = _value(value, minimum=2, code=_in_code(text, key, m.start(), value.end()))
         if bounds and not _not_a_value(key, text[bounds[0]:bounds[1]]):
             spans.append(Span(*bounds, EntityType.SECRET, name))
@@ -503,7 +566,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             if bounds and not (pattern in (_AUTH, _BEARER) and _WORDS.fullmatch(text, *bounds)):
                 spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PHRASE.finditer(text):
-        if m.group("dash") is not None:
+        if m.group("sep") is None or _copula(m):
             span = _after_dash(m)
         else:
             # «password = …» без слов перед «=» — тот же ключ присваивания, что видит _KEY_NAME.
@@ -516,4 +579,6 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         bounds = _value(m)
         if bounds and _looks_like_password(text[bounds[0]:bounds[1]]) and not _HYPHENATED_WORD.fullmatch(text, *bounds):
             spans.append(Span(*bounds, EntityType.SECRET, name))
+    for m in _TOKEN_PHRASE.finditer(text):
+        spans.append(Span(*m.span("bare"), EntityType.SECRET, name, searchable=_looks_like_password(m.group("bare"))))
     return spans + _library_spans(text, spans)

@@ -89,6 +89,26 @@ def test_tokens_by_shape():
     assert found(f"export GH={github}") == {github}
 
 
+GITLAB_BODY = "a1B2c3D4e5F6g7H8i9J0"            # 20 знаков, как Devise.friendly_token
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["glpat-", "gldt-", "glft-", "glsoat-", "glrt-", "glrtr-", "glcbt-", "glcbt-64_", "glffct-", "glimt-", "glptt-",
+     "glagent-", "gloas-"],
+)
+def test_gitlab_tokens_of_every_kind_are_found(prefix):
+    """Находка «Layer 2 misses PuTTY and SSH2 private keys and GitLab tokens»: у правила detect-secrets значение — группа
+    префикса короче 8 знаков, а правила с точной длиной (glimt-, glptt-, gloas-) не видят токен другой длины."""
+    token = prefix + GITLAB_BODY
+    assert found(f"в CI лежит {token} для сборки") == {token}
+
+
+def test_gitlab_prefix_in_prose_is_not_a_token():
+    for text in ("префиксы glrt- и glcbt- выдаёт GitLab", "gldt-abc12 короче двадцати знаков", "glft-токен"):
+        assert found(text) == set(), text
+
+
 def test_password_in_prose():
     assert found("Временный пароль Qwerty123 действует сутки") == {"Qwerty123"}
     assert found("Пароль администратора: Summer2024") == {"Summer2024"}
@@ -191,8 +211,9 @@ def test_key_ending_in_a_secret_word_is_never_skipped(text, value):
 
 def test_stop_listed_keys_still_hold_no_secret():
     for text in ("bypass=Zx81kLmN02pQ", "context_tokens: 8192", "token_url: https://login.example/t",
-                 "password_reset: weekly", "compass_heading: 270"):
+                 "password_reset: weekly", "compass_heading: 270", "Argon2-Passes: 13", "num_passes=3"):
         assert found(text) == set(), text
+    assert found("passes_secret: Zx81kLmN02pQ") == {"Zx81kLmN02pQ"}
 
 
 @pytest.mark.parametrize(
@@ -267,6 +288,98 @@ def test_prose_after_a_copula_a_long_lead_or_a_double_hyphen_is_left_alone():
         "Password for the shared mailbox — see below", "password for the VPN account — expired",
         "Пароль -- см. выше", "Password -- please ask the admin", "mysqldump --password --verbose crm",
         "Password - here!", "Пароль — какой?", "Пароль — неверный!", "Пароль от почты — прежний…", "Пароль — ???",
+    ):
+        assert found(text) == set(), text
+
+
+def finds(text: str) -> set[tuple[str, bool]]:
+    return {(text[span.start:span.end], span.searchable) for span in secrets.detect(text, CTX)}
+
+
+@pytest.mark.parametrize(
+    "text, value, searchable",
+    [
+        ("Пароль: это Zx81kLmN", "Zx81kLmN", True), ("password: is Summer2024", "Summer2024", True),
+        ("Пароль: это: Zx81kLmN", "Zx81kLmN", True), ("пароль = это sunflower", "sunflower", False),
+        ('Пароль: это "временный"', "временный", True), ("password: isAdmin1", "isAdmin1", True),
+    ],
+    ids=["copula", "english", "copula_colon", "equals_word", "quoted", "no_copula"],
+)
+def test_value_after_a_colon_and_a_copula_is_the_next_word(text, value, searchable):
+    """Находка «Review fixes round of 15.10: small leftovers»: после «:» значением бралась связка — «Пароль: это строка»
+    скрывал «это» во всём чате. Слово после связки проверяется, как после тире."""
+    assert finds(text) == {(value, searchable)}
+
+
+def test_prose_after_a_colon_and_a_copula_is_left_alone():
+    for text in (
+        "Пароль: это строка из 8 символов", "Пароль: это", "password: is required", "Пароль: это ваша дата рождения",
+        "Password: was changed yesterday", "пароль = это тот же",
+    ):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value, searchable",
+    [
+        ("Пароль для входа в систему: sunflower", "sunflower", False),
+        ("Пароль от учётной записи в новой системе: Zx81kLmN", "Zx81kLmN", True),
+        ("Password for the shared mailbox account: Summer2024!", "Summer2024!", True),
+        ('Пароль для входа в систему: "временный"', "временный", True),
+        ("Пароль для входа в систему: это Qwerty123", "Qwerty123", True),
+    ],
+    ids=["four_words", "six_words", "english", "quoted", "copula"],
+)
+def test_password_after_four_to_six_words_and_a_colon_is_found(text, value, searchable):
+    """Находка «Review fixes round of 15.10: small leftovers»: перед «:» бралось не больше трёх слов. Дальше — до шести,
+    с проверкой прозы, как после тире: обычное слово скрывается только на своём месте."""
+    assert finds(text) == {(value, searchable)}
+
+
+def test_prose_or_a_time_after_four_to_six_words_and_a_colon_is_left_alone():
+    for text in (
+        "Password policy for domain users: minimum 8 characters", "Пароль для входа в систему: тот же, что и раньше",
+        "Password for the shared mailbox: see below", "Password reset for user ivanov at 10:30",
+        "Password change failed for user ivanov at 10:30:15", "Пароль для входа в систему=sunflower",
+        "Пароль от учётной записи пользователя в новой системе: sunflower",
+    ):
+        assert found(text) == set(), text
+
+
+HEX32 = "3f8e9a1b2c4d5e6f7a8b9c0d1e2f3a4b"                       # вымышленный токен
+API_KEY = "api_3f8e9a1b2c4d5e6f7a8b9c0d1e2f"
+
+
+@pytest.mark.parametrize(
+    "text, value, searchable",
+    [
+        (f"пришёл код восстановления {HEX32}, не могу войти", HEX32, True),
+        (f"Подтвердите действие токеном {HEX32}", HEX32, True),
+        (f"Используйте API ключ {API_KEY} для доступа", API_KEY, True),
+        (f"токен для верификации личности: {HEX32}", HEX32, True),
+        ("API-ключ для доступа к эндпоинту Zx81kLmN02pQZx81kLmN02pQ", "Zx81kLmN02pQZx81kLmN02pQ", True),
+        (f"токен {HEX32} для пользователя ivanov", HEX32, True),
+        (f"verification token for the account {HEX32}", HEX32, True),
+        ("получил смс с кодом 847593, всё верно?", "847593", False),
+        ("recovery code 73921456", "73921456", False),
+        (f"вот токн подтверждения {HEX32}", HEX32, True),
+    ],
+    ids=["code_word", "instrumental", "api_key", "colon", "hyphenated_key", "nearest", "english", "sms_code",
+         "english_code", "typo"],
+)
+def test_token_or_code_after_its_word_in_prose_is_found(text, value, searchable):
+    """Находка «Layers 2 and 4 leftovers round: what it leaves»: токены и коды в прозе после «токен», «код
+    восстановления» не находились (полнота секретов на hivetrace — 0,179). Код из цифр скрывается только на своём месте."""
+    assert finds(text) == {(value, searchable)}
+
+
+def test_numbers_and_words_after_token_or_code_in_prose_are_left_alone():
+    for text in (
+        "код ошибки 1603", "код события 4625 в журнале", "код ошибки 18456 при входе", "код 0x80070005",
+        "токен истёк, выпустите новый", "код 2024 года", "штрихкод 46012345", "ключ реестра HKLM\\SOFTWARE\\Microsoft",
+        "ключ /etc/ssh/ssh_host_ed25519_key на месте", "токен abcdefghijklmnopqrstuvwxyz", "код товара 4601234567890",
+        f"токен в файле token.{HEX32}.json", f"ключ 12345678 и {HEX32[:12]}", "token type Bearer",
+        f"токен нужно срочно обновить потому что {HEX32}",
     ):
         assert found(text) == set(), text
 
@@ -550,6 +663,22 @@ def test_closing_bracket_stays_with_the_value_when_its_pair_is_inside(text, valu
     assert found(text) == {value}
 
 
+@pytest.mark.parametrize("text", ["password = (input())", "pwd = (get_secret(name))", "token = (os.environ[KEY])"])
+def test_code_in_brackets_under_a_secret_key_is_code(text):
+    """Находка «Layers 2 and 4 leftovers round: what it leaves»: вызов или индекс в скобках («(input())») был секретом
+    и скрывался во всём чате."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [("password=((Qw1))", "((Qw1))"), ("password=(Ab(1))", "(Ab(1))"), ("password=(a)(b)", "(a)(b)"),
+     ("password=(Ab()", "(Ab()"), ("Пароль: (input())", "(input())")],
+)
+def test_password_in_brackets_is_still_found(text, value):
+    assert found(text) == {value}
+
+
 def test_word_or_number_in_brackets_is_still_prose():
     for text in (
         "password: (optional)", "Пароль (временный) действует сутки", "password: (empty)", "token: (N/A)",
@@ -599,6 +728,83 @@ def test_bare_private_key_header_without_a_body_is_not_a_secret():
     for text in (
         "Строка BEGIN RSA PRIVATE KEY\nа за ней тело ключа", "BEGIN PRIVATE KEY\nthen the body follows",
         "BEGIN RSA PRIVATE KEY-----", "Ключ: XBEGIN RSA PRIVATE KEY\nMIIEowIBAAKCAQEA",
+    ):
+        assert found(text) == set(), text
+
+
+KEY_LINE = "AAAAB3NzaC1yc2EAAAADAQABAAABAQCx" * 2                 # строка тела ключа, 64 знака base64 (вымышленная)
+PPK_2 = (
+    "PuTTY-User-Key-File-2: ssh-rsa\nEncryption: none\nComment: rsa-key-20261015\nPublic-Lines: 2\n"
+    f"{KEY_LINE}\n{KEY_LINE[:20]}\nPrivate-Lines: 2\n{KEY_LINE}\n{KEY_LINE[:24]}\n"
+    "Private-MAC: 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+)
+PPK_3 = (
+    "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: aes256-cbc\nComment: eddsa-key-20261015\nPublic-Lines: 2\n"
+    f"{KEY_LINE}\n{KEY_LINE[:8]}\nKey-Derivation: Argon2id\nArgon2-Memory: 8192\nArgon2-Passes: 13\n"
+    f"Argon2-Parallelism: 1\nArgon2-Salt: 0f1e2d3c4b5a69788796a5b4c3d2e1f0\nPrivate-Lines: 1\n{KEY_LINE}\n"
+    "Private-MAC: 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+)
+SSH2_KEY = (
+    '---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\nComment: "rsa-key-20261015"\n'
+    f"P2/56wAAAi4AAAA3aWYtbW9kbntzaWdu\n{KEY_LINE}\n---- END SSH2 ENCRYPTED PRIVATE KEY ----"
+)
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        (f"ключ:\n{PPK_2}\nдальше", PPK_2), (f"ключ:\n{PPK_3}\nдальше", PPK_3), (f"ключ:\n{SSH2_KEY}\nдальше", SSH2_KEY),
+        ("ключ:\r\n" + PPK_2.replace("\n", "\r\n") + "\r\nдальше", PPK_2.replace("\n", "\r\n")),
+        (PPK_2.rsplit("\n", 1)[0] + "\n\nдальше", PPK_2.rsplit("\n", 1)[0]),
+        ("ключ:\n" + SSH2_KEY.replace("---- ", "").replace(" ----", "") + "\nдальше",
+         SSH2_KEY.replace("---- ", "").replace(" ----", "")),
+    ],
+    ids=["putty_2", "putty_3", "ssh2", "putty_crlf", "putty_without_mac", "ssh2_without_runs"],
+)
+def test_putty_and_ssh2_private_keys_are_one_fragment(text, value):
+    """Находка «Layer 2 misses PuTTY and SSH2 private keys and GitLab tokens»: ключ PuTTY не скрывало ни одно правило,
+    а у заголовка SSH2 ряды отделены пробелом, и шаблон PEM его не видел."""
+    assert found(text) == {value}
+
+
+def test_putty_and_ssh2_headers_without_a_key_body_are_not_secrets():
+    for text in (
+        "Файл начинается со строки PuTTY-User-Key-File-3: ssh-ed25519, за ней идут поля",
+        "PuTTY-User-Key-File-2: ssh-rsa\nEncryption: none\nComment: тело ключа не вставлено",
+        "Формат ---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ---- открывает PuTTYgen",
+        "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\nа дальше идёт тело ключа",
+        f'---- BEGIN SSH2 PUBLIC KEY ----\nComment: "rsa-key"\n{KEY_LINE}\n---- END SSH2 PUBLIC KEY ----',
+    ):
+        assert found(text) == set(), text
+
+
+PGP_LINE = "lQOYBF0abcdEFGHlQOYBF0abcdEFGH"
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        (f"ключ:\nBEGIN PGP PRIVATE KEY BLOCK\nVersion: GnuPG v2\n\n{PGP_LINE}\n=AbCd\nEND PGP PRIVATE KEY BLOCK\nдальше",
+         f"BEGIN PGP PRIVATE KEY BLOCK\nVersion: GnuPG v2\n\n{PGP_LINE}\n=AbCd\nEND PGP PRIVATE KEY BLOCK"),
+        (f"BEGIN PGP PRIVATE KEY BLOCK\r\n\r\n{PGP_LINE}\r\n\r\nдальше", f"BEGIN PGP PRIVATE KEY BLOCK\r\n\r\n{PGP_LINE}"),
+        ("-----BEGIN RSA PRIVATE KEY\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0F1E2D3C4B5A6978\n\n"
+         "MIIEowIBAAKCAQEA\n\nдальше",
+         "-----BEGIN RSA PRIVATE KEY\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0F1E2D3C4B5A6978\n\nMIIEowIBAAKCAQEA"),
+    ],
+    ids=["pgp_armour", "pgp_empty_line", "pem_headers"],
+)
+def test_key_body_after_armour_headers_and_an_empty_line_is_one_fragment(text, value):
+    """Находка «Layers 2 and 4 review round: small leftovers»: заголовок без рядов, за которым идут строки «Имя: значение»
+    брони PGP или шифрованного PEM и пустая строка, не находился, и тело ключа уходило открытым."""
+    assert found(text) == {value}
+
+
+def test_key_header_followed_by_prose_after_an_empty_line_is_not_a_secret():
+    for text in (
+        "BEGIN PGP PRIVATE KEY BLOCK\n\nЭто строка заголовка брони, за ней пустая строка",
+        "BEGIN PGP PRIVATE KEY BLOCK\nVersion: GnuPG v2\n\nа дальше идёт тело",
+        "BEGIN RSA PRIVATE KEY\nNote: the body follows\n\nsee the attachment",
+        f"BEGIN PGP PRIVATE KEY BLOCK\n\n\n{PGP_LINE}",
     ):
         assert found(text) == set(), text
 
