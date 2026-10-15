@@ -12,6 +12,7 @@ tests:
   full: .venv/Scripts/python.exe -m pytest -m "not manual"
 
 Данные в тестах — только вымышленные. Настоящие тексты в репозиторий не попадают.
+Правка слоёв 1–3 — ещё `.venv/Scripts/python.exe -m pytest tests/test_long_input.py -m integration`: обход всех слоёв по длинным рядам (19 с) вынесен из быстрого набора ради нормы 60 с.
 
 ## Запуск для разработки
 
