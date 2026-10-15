@@ -7,6 +7,7 @@ from collections.abc import Iterator
 
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities import hostmap, netmap
+from cleaner.core.entities.labels import SHAPE as _LABEL
 from cleaner.core.types import EntityType, Span
 
 name = "infra"
@@ -49,6 +50,10 @@ _REMOTE_SWITCH = re.compile(
 )
 _MACHINE = re.compile(r"(?<![\w.$-])(?P<host>(?=[A-Za-z-]*\d)[A-Za-z0-9][A-Za-z0-9-]{1,14})\$(?![\w$])")
 _DOTTED = re.compile(r"(?<![\w.$@-])(?:\w(?:[\w-]{0,61}\w)?\.)+[^\W\d_][\w-]{1,62}(?![\w-]|\.\w)")
+# Имя, часть которого — метка: части, которой пользователь дал другой тип, выдана метка (<TERM_1>.domain-1.example,
+# host-1.<ORG_1>). Рядом с ней может стоять настоящее имя: «<TERM_1>.fabrikam.ru», «srv-db02.<TERM_1>.domain-1.example».
+_PART = rf"(?:[\w-]+|{_LABEL.pattern})"
+_LABELLED = re.compile(rf"(?<![\w.$@-])(?:{_PART}\.)*(?:{_LABEL.pattern})(?:\.{_PART})*")
 
 # Перед доменом может стоять двоеточие ключа команды («/user:CONTOSO\ivanov»); обратная косая
 # бывает удвоена (журналы JSON). Имя входа может быть и кириллицей («CORP\иванов»).
@@ -138,11 +143,14 @@ def well_known(value: str, ctx: DetectContext) -> bool:
 
 
 def _under_issued(value: str, ctx: DetectContext) -> bool:
-    """Имя под выданной чатом подменой домена («srv-db02.domain-1.example»): «example» в нём общеизвестно,
-    но части перед подменой вписал человек — это настоящие имена. Выданные части («host-1») и
-    общеизвестные («www») конвейер оставляет как есть (pipeline._outside)."""
+    """Имя под выданной чатом подменой домена («srv-db02.domain-1.example») или под меткой, выданной домену в
+    имени («srv-db02.<ORG_1>» рядом с host-1.<ORG_1>): «example» в нём общеизвестно, но части перед подменой
+    вписал человек — это настоящие имена. Выданные части («host-1») и общеизвестные («www») конвейер оставляет
+    как есть (pipeline._outside)."""
     parts = value.lower().split(".")
-    return len(parts) > 2 and ".".join(parts[-2:]) in ctx.issued_domains
+    return (len(parts) > 2 and ".".join(parts[-2:]) in ctx.issued_domains) or (
+        len(parts) > 1 and parts[-1] in ctx.issued_domains      # метка — одна часть
+    )
 
 
 def _name_type(value: str) -> EntityType:
@@ -164,6 +172,21 @@ def _plausible(value: str, text: str, end: int, ctx: DetectContext) -> bool:
     return hostmap.has_known_suffix(value)
 
 
+def _plain_runs(parts: list[str], start: int) -> Iterator[tuple[int, int]]:
+    """Позиции цепочек обычных частей имени между метками; start — позиция первой части в тексте."""
+    position, run = start, None
+    for part in parts:
+        if _LABEL.fullmatch(part):
+            if run is not None:
+                yield run, position - 1
+            run = None
+        elif run is None:
+            run = position
+        position += len(part) + 1
+    if run is not None:
+        yield run, position - 1
+
+
 def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
     for pattern in (_URL_HOST, _UNC_HOST, _PARAM_HOST, _REMOTE_SWITCH):
         for m in pattern.finditer(text):
@@ -181,6 +204,25 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
         value = m.group()
         if _under_issued(value, ctx) or (not well_known(value, ctx) and _plausible(value, text, m.end(), ctx)):
             yield Span(m.start(), m.end(), _name_type(value), name)
+    # Имя с меткой — если оно под выданной подменой домена (или меткой домена) либо после последней метки стоит имя
+    # с точкой, как у _DOTTED; «<PERSON_1>.docx» и «<ORG_1>.ru» — не имена. Фрагменты — цепочки частей между метками:
+    # фрагмент с меткой правило пользователя поглотило бы целиком вместе с ней (5.7), а выданную замену в цепочке
+    # отрежет конвейер (pipeline._outside).
+    for m in _LABELLED.finditer(text):
+        value = m.group()
+        if "." not in value or len(value) > 253:
+            continue        # метка сама по себе; длиннее имени DNS — не имя, а проверка частей квадратична
+        parts = value.split(".")
+        last = max(i for i, part in enumerate(parts) if _LABEL.fullmatch(part))
+        tail = ".".join(parts[last + 1:])
+        if not _under_issued(value, ctx) and not (
+            "." in tail and not well_known(tail, ctx) and _plausible(tail, text, m.end(), ctx)
+        ):
+            continue
+        for start, end in _plain_runs(parts, m.start()):
+            run = text[start:end]
+            if _under_issued(run, ctx) or not well_known(run, ctx):      # «www», выданный «domain-1.example» — нет
+                yield Span(start, end, EntityType.HOST, name)
 
 
 def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:

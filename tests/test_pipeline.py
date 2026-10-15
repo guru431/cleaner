@@ -282,6 +282,48 @@ def test_new_values_next_to_an_issued_surrogate_are_masked(state, settings):
     )
 
 
+@pytest.mark.parametrize("retype, text, expected", [
+    ("host", "Проверь <TERM_1>.fabrikam.ru", "Проверь <TERM_1>.domain-2.example"),
+    ("host", "Проверь srv-db02.<TERM_1>.domain-1.example", "Проверь host-2.<TERM_1>.domain-1.example"),
+    ("host", "Проверь <ORG_7>.fabrikam.ru", "Проверь <ORG_7>.domain-2.example"),
+    ("domain", "Проверь <ORG_1>.fabrikam.ru", "Проверь <ORG_1>.domain-2.example"),
+    ("domain", "Проверь srv-db02.<ORG_1>", "Проверь host-2.<ORG_1>"),
+    ("domain", "Проверь srv-db02.host-1.<ORG_1>", "Проверь host-2.host-1.<ORG_1>"),
+], ids=["domain-after", "part-before", "foreign-label", "domain-after-org", "part-before-org", "part-before-name"])
+def test_real_name_next_to_a_label_part_is_masked(state, settings, retype, text, expected):
+    """Обзор, Minor 8: после смены типа части имени метка стоит в имени (<TERM_1>.domain-1.example, host-1.<ORG_1>),
+    и пользователь может вписать рядом настоящее имя. Скрывается часть вне замены, сама метка остаётся (5.10)."""
+    if retype == "host":
+        sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+        ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.TERM)
+        sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    else:
+        sanitize(state, "узел srv01.contoso.ru, сайт contoso.ru", settings)
+        ops.retype(state, next(e for e in state.entities.values() if e.type is T.DOMAIN).id, T.ORG)
+        sanitize(state, "узел srv01.contoso.ru, сайт contoso.ru", settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, expected, settings).sanitized == expected        # повторная вставка ничего не меняет
+    assert (len(state.entities), len(state.surrogates)) == counts
+
+
+def test_rule_inside_a_name_with_a_label_part_leaves_the_label(state, settings):
+    """Правило пользователя поглощает фрагмент целиком (5.7): метка во фрагмент имени не входит и остаётся (FR-5.9)."""
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.TERM)
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    ops.mask(state, "fabrikam", T.TERM)
+    assert sanitize(state, "Проверь <TERM_1>.fabrikam.ru", settings).sanitized == "Проверь <TERM_1>.<TERM_2>"
+
+
+def test_labels_with_dots_outside_names_stay_as_they_are(state, settings):
+    sanitize(state, "узел srv01.contoso.ru, сайт contoso.ru", settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.type is T.DOMAIN).id, T.ORG)
+    text = "узел host-1.<ORG_1>, сайт <ORG_1>, файл <ORG_1>.docx, сайт <ORG_1>.ru, <ORG_1>.example.com"
+    assert sanitize(state, text, settings).sanitized == text
+
+
 def test_well_known_part_next_to_a_surrogate_is_not_masked(state, settings):
     """Часть рядом с заменой, которая сама общеизвестна («example» после NetBIOS-имени, «www»),
     не скрывается и не становится искомым написанием для следующих текстов."""

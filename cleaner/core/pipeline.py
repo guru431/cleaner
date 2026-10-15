@@ -138,8 +138,19 @@ def _context(state: ChatState, settings: Settings) -> DetectContext:
         known=tuple((form, e.type) for e in state.entities.values() for form in e.forms),
         manual=tuple((r.value, r.type, r.bounds) for r in state.rules if r.action == "mask" and r.type is not None),
         unmask=frozenset(r.value.lower() for r in state.rules if r.action == "unmask"),
-        issued_domains=frozenset(fake.lower() for slot, fake in state.issued.items() if slot.endswith("|dns")),
+        issued_domains=frozenset(fake.lower() for slot, fake in state.issued.items() if slot.endswith("|dns"))
+        | _label_domains(state),
     )
+
+
+def _label_domains(state: ChatState) -> set[str]:
+    """Метки, выданные домену в имени: «<org_1>» у host-1.<ORG_1> после смены типа домена (5.7, шаг 4)."""
+    domains = set()
+    for fake, surrogate in state.surrogates.items():
+        last = fake.rsplit(".", 1)[-1]
+        if surrogate.kind == "host" and last != fake and labels.SHAPE.fullmatch(last):
+            domains.add(last.lower())
+    return domains
 
 
 def _forms(state: ChatState) -> set[str]:
