@@ -22,9 +22,9 @@ _SPACE_RUN = re.compile(r"\s+")
 _STRESS = "\N{COMBINING ACUTE ACCENT}"
 _FORMAT = regex.compile(r"\p{Cf}+")
 _FORMAT_OR_STRESS = regex.compile(r"[\p{Cf}" + _STRESS + "]+")
-# «\.» — точка: имя в регулярном выражении, шаблоне grep, настройке nginx («^srv01\.contoso\.ru$») — то же имя.
-# Экранированная обратная косая («\\.») точку не экранирует.
-_ESCAPED_DOT = re.compile(r"(?<!\\)\\(?=\.)")
+# «\.» — точка: имя в регулярном выражении, шаблоне grep, настройке nginx («^srv01\.contoso\.ru$») — то же имя, и «\\.» —
+# то же выражение внутри строки JSON, Java, C# (hostmap.dotted). Три обратные косые и больше точку не экранируют.
+_ESCAPED_DOT = re.compile(r"(?<!\\)\\{1,2}(?=\.)")
 
 
 def _lower(text: str) -> str:
@@ -138,17 +138,18 @@ def has_invisible(text: str) -> bool:
 
 
 def _unescaped(lowered: str, starts: list[int], ends: list[int]) -> tuple[str, list[int], list[int]]:
-    """Нормализованный текст, в котором «\\.» — точка (_ESCAPED_DOT): обратная косая выпадает, точка накрывает и её."""
+    """Нормализованный текст, в котором «\\.» и «\\\\.» — точка (_ESCAPED_DOT): обратные косые выпадают, точка накрывает
+    и их."""
     pieces: list[str] = []
     kept_starts: list[int] = []
     kept_ends: list[int] = []
     position = 0
     for m in _ESCAPED_DOT.finditer(lowered):
-        slash = m.start()
+        slash, dot = m.start(), m.end()
         pieces += [lowered[position:slash], "."]
         kept_starts += [*starts[position:slash], starts[slash]]
-        kept_ends += [*ends[position:slash], ends[slash + 1]]
-        position = slash + 2
+        kept_ends += [*ends[position:slash], ends[dot]]
+        position = dot + 1
     pieces.append(lowered[position:])
     return "".join(pieces), kept_starts + starts[position:], kept_ends + ends[position:]
 
@@ -173,7 +174,7 @@ def _bounded(text: str, start: int, end: int, mode: str) -> bool:
 
 
 def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int, int, T]]:
-    """Все вхождения написаний без учёта регистра, «ё/е», вида пробелов и формы записи букв; «\\.» — точка.
+    """Все вхождения написаний без учёта регистра, «ё/е», вида пробелов и формы записи букв; «\\.» и «\\\\.» — точка.
 
     forms — тройки (написание, режим границ, полезная нагрузка). Режимы:
     strict — рядом нет букв, цифр, «_» и «-»; letters — рядом нет букв; none — где угодно.

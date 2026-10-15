@@ -17,7 +17,7 @@ _DIGIT_TYPES = frozenset({T.INN, T.SNILS, T.OGRN, T.KPP, T.OMS, T.CARD, T.PASSPO
 # Записи адресов в тексте: IPv4 с длиной префикса и без (и через «\.»), IPv6. Как в слое 3 и при восстановлении, адрес
 # может стоять сразу за подписью («Source:2001:db8:1::1», «Source:203.0.113.1»); подпись в запись не входит.
 _ADDRESS_TOKEN = re.compile(
-    r"(?<![\w.])\d{1,3}(\\?\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?:/\d{1,2})?(?!\w|\\?\.\d)"
+    r"(?<![\w.])\d{1,3}(\\{0,2}\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?:/\d{1,2})?(?!\w|\\{0,2}\.\d)"
     r"|(?<![\w:.])(?:(?=\w*[^\W\dA-Fa-f])\w+:|\w{5,}:)?"
     r"(?P<v6>(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![\w:])"
 )
@@ -298,7 +298,8 @@ class Resolver:
         # IPv6 восстанавливается в записи из текста, где адрес встретился впервые, как и остальные сущности;
         # IPv4 — в простой записи (5.4). Ключ — канонический: одна сущность на адрес в любой записи. Каноническая
         # запись остаётся и среди искомых: по ней известные значения и проверка утечек находили адрес и раньше.
-        # Адрес через «\.» получает ту же подмену через «\.», и восстановление пишет оригинал так же (раздел 7, шаг 2).
+        # Адрес через «\.» («\\.») получает ту же подмену через тот же разделитель, и восстановление пишет оригинал так же
+        # (раздел 7, шаг 2).
         written = value if ip.version == 6 else canonical
         entity = self._entity(T.IP, canonical, written, origin)
         if canonical not in entity.forms:
@@ -324,8 +325,7 @@ class Resolver:
                 self.state.surrogates.setdefault(fake.split("/")[0], bare)
             return fake
 
-        surrogate = self._issue(entity, "ip", make)
-        return entity, surrogate.replace(".", "\\.") if "\\." in value else surrogate
+        return entity, self._issue(entity, "ip", make).replace(".", hostmap.separator(value))
 
     def _address_in_text(self, address: str) -> bool:
         """Стоит ли подмена в тексте как адрес, в любой записи: «2001:0db8:0001::0001» — это 2001:db8:1::1,
@@ -457,10 +457,11 @@ class Resolver:
         self, value: str, type_: EntityType, origin: str, follows: bool = False, precedes: bool = False,
     ) -> tuple[Entity, str] | None:
         """follows, precedes — фрагмент стоит в имени после выданной замены или метки и перед ней (pipeline._placed).
-        Имя через «\\.» (регулярное выражение) разбирается как через точку, а подмена пишется через «\\.» — так её найдёт и
-        восстановит раздел 7 (шаг 2); в таблицу замен оба записываются через точку."""
-        escaped = "\\." in value
-        value = value.replace("\\.", ".")
+        Имя через «\\.» или «\\\\.» (регулярное выражение, в том числе в строке JSON) разбирается как через точку, а подмена
+        пишется тем же разделителем — так её найдёт и восстановит раздел 7 (шаг 2); в таблицу замен оба записываются
+        через точку."""
+        separator = hostmap.separator(value)
+        value = hostmap.dotted(value)
         if not _NAME.fullmatch(value):
             return None
         whole = not (follows or precedes)
@@ -498,4 +499,4 @@ class Resolver:
         # из запроса и тоже не записывается.
         if left and whole and len(value) <= hostmap.MAX_NAME:
             self.state.surrogates.setdefault(surrogate, Surrogate(primary.id, value, "host"))
-        return primary, surrogate.replace(".", "\\.") if escaped else surrogate
+        return primary, surrogate.replace(".", separator)

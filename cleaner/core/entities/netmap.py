@@ -6,6 +6,7 @@ import hmac
 import ipaddress
 from collections.abc import Iterable
 
+from cleaner.core.entities import hostmap
 from cleaner.core.types import ChatState
 
 Address = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -39,8 +40,8 @@ def parse(token: str) -> tuple[Address, int | None]:
     """Адрес и длина префикса (если указана). ValueError, если токен — не адрес.
 
     Запись с нулями впереди читается как обычная (unpadded): у неё та же сущность и та же подмена,
-    а восстанавливается обычная запись адреса. «\\.» — точка: адрес в регулярном выражении («^10\\.1\\.2\\.5$»)."""
-    address, _, prefix = token.replace("\\.", ".").partition("/")
+    а восстанавливается обычная запись адреса. «\\.» и «\\\\.» — точка: адрес в регулярном выражении («^10\\.1\\.2\\.5$»)."""
+    address, _, prefix = hostmap.dotted(token).partition("/")
     return ipaddress.ip_address(unpadded(address.split("%")[0])), (int(prefix) if prefix else None)
 
 

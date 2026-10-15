@@ -1,6 +1,7 @@
 """Разбор доменных имён."""
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 
 import tldextract
@@ -8,6 +9,19 @@ import tldextract
 INTERNAL_SUFFIXES = ("local", "lan", "corp", "internal", "intra", "home", "localdomain", "ad")
 # Предел имени DNS. Имя длиннее целиком не записывается (resolve) и в деревья поиска не берётся (surrogates, restore).
 MAX_NAME = 253
+# Точка в регулярном выражении: «\.» («^srv01\.contoso\.ru$») и «\\.» — то же выражение внутри строки JSON, Java, C#
+# («"^srv01\\.contoso\\.ru$"»). Три обратные косые и больше точку не экранируют: в выражении это обратная косая и знак.
+_ESCAPED_DOT = re.compile(r"(?<!\\)\\{1,2}\.")
+
+
+def dotted(value: str) -> str:
+    """Имя или адрес IPv4 через точку: «\\.» и «\\\\.» — точка."""
+    return _ESCAPED_DOT.sub(".", value) if "\\." in value else value
+
+
+def separator(value: str) -> str:
+    """Разделитель частей, которым записано имя или адрес: «\\\\.», «\\.» или точка. Подмену пишут им же."""
+    return "\\\\." if "\\\\." in value else "\\." if "\\." in value else "."
 
 # Только встроенная копия списка публичных суффиксов: в сеть библиотека не ходит.
 _extract = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, extra_suffixes=INTERNAL_SUFFIXES)

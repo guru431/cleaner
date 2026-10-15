@@ -83,12 +83,17 @@ def test_long_spellings_sharing_whole_chunks_are_told_apart():
 
 def test_escaped_dot_is_a_dot_and_an_escaped_backslash_is_not():
     """Наблюдение раунда 3 имён узлов, P1: имя в регулярном выражении пишут через «\\.» («^srv01\\.contoso\\.ru$»), и
-    известное «contoso.ru» в нём не находилось. «\\.» — точка, и написание с ним находит то же; «\\\\.» — обратная косая
-    и точка, путь Windows («C:\\Users\\ivanov\\.ssh») читается, как прежде."""
-    text = r"^srv01\.contoso\.ru$, CONTOSO\.RU, contoso\\.ru, C:\Users\ivanov\.ssh"
+    известное «contoso.ru» в нём не находилось. «\\.» — точка, и написание с ним находит то же. Второе ревью, P3: в строке
+    JSON, Java, C# то же выражение пишут через «\\\\.» («"^www\\\\.contoso\\\\.ru$"») — это тоже точка; три и четыре
+    обратные косые перед точкой («\\\\\\\\.» в JSON — «\\\\.» выражения) — нет. Путь Windows («C:\\Users\\ivanov\\.ssh») и
+    он же в JSON читаются, как прежде."""
+    text = r'^srv01\.contoso\.ru$, CONTOSO\.RU, "contoso\\.ru", C:\Users\ivanov\.ssh, "C:\\Users\\ivanov\\.ssh"'
     found = hits(text, ("contoso.ru", "strict", 1), ("ivanov", "letters", 2), ("srv01\\.contoso", "strict", 3))
-    assert found == sorted([(r"contoso\.ru", 1), (r"CONTOSO\.RU", 1), ("ivanov", 2), (r"srv01\.contoso", 3)])
+    assert found == sorted([
+        (r"contoso\.ru", 1), (r"CONTOSO\.RU", 1), (r"contoso\\.ru", 1), ("ivanov", 2), ("ivanov", 2), (r"srv01\.contoso", 3),
+    ])
     assert hits("srv01.contoso.ru", ("srv01\\.contoso.ru", "strict", 1)) == [("srv01.contoso.ru", 1)]
+    assert hits(r"contoso\\\.ru contoso\\\\.ru", ("contoso.ru", "strict", 1)) == []
 
 
 def test_yo_and_decomposed_letters_match_their_plain_forms():

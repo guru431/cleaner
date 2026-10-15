@@ -44,18 +44,20 @@ def test_email_with_a_label_in_its_domain(text, email):
     (r"^i\.ivanov@mail\.contoso\.ru$", {(T.EMAIL, r"i\.ivanov@mail\.contoso\.ru")}),
     (r"^ivanov@contoso\.ru\.<TERM_1>", {(T.EMAIL, r"ivanov@contoso\.ru")}),
     (r"ssh ivanov@10\.1\.2\.5", {(T.ACCOUNT, "ivanov")}),
-], ids=["sieve", "escaped-login", "label-after", "address"])
+    (r'{"from": "^i\\.ivanov@contoso\\.ru$"}', {(T.EMAIL, r"i\\.ivanov@contoso\\.ru")}),
+], ids=["sieve", "escaped-login", "label-after", "address", "json"])
 def test_email_written_with_escaped_dots_is_found(text, expected):
     """Второе ревью, P2: в «^ivanov@contoso\\.ru$» (правило почты, регулярное выражение) слой 3 скрывал домен, а имя входа
-    уходило открытым: шаблон e-mail брал только точки. «\\.» — точка и в домене, и в имени входа."""
+    уходило открытым: шаблон e-mail брал только точки. «\\.» — точка и в домене, и в имени входа; в строке JSON, Java,
+    C# то же выражение пишут через «\\\\.» (P3)."""
     assert found(text) == expected
 
 
 @pytest.mark.parametrize("text", [
-    r"ivanov@contoso\\.ru", r"C:\Users\ivanov\.ssh\id_rsa", r"user@ и @media", "a\\." * 3 + "@",
+    r"ivanov@contoso\\\\.ru", r"C:\Users\ivanov\.ssh\id_rsa", r"user@ и @media", "a\\." * 3 + "@",
 ], ids=["escaped-backslash", "path", "no-domain", "no-login"])
 def test_backslash_and_dot_elsewhere_make_no_email(text):
-    """Та же находка с другой стороны: «\\\\.» — обратная косая и точка, а не точка (путь Windows в строке JSON); без
+    """Та же находка с другой стороны: «\\\\\\\\.» (в JSON — обратная косая и любой знак выражения) — не точка; без
     домена с точкой адреса нет."""
     assert T.EMAIL not in types(text)
 

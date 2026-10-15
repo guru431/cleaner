@@ -830,6 +830,32 @@ def test_dotfiles_and_code_after_a_dot_or_at_keep_their_meaning(state, settings)
     assert sanitize(state, text, settings).sanitized == text
 
 
+def test_regex_inside_a_string_literal_is_masked_and_restored_with_its_escapes(state, settings):
+    """Второе ревью, P3: выражение внутри строки JSON, Java, C# пишут через «\\\\.» («\\.» после раскрытия строки), и имя,
+    адрес e-mail и IP в нём уходили в облако. Подмены пишутся тем же разделителем, восстановление возвращает его,
+    повторная вставка ничего не меняет, известное имя в такой записи видит проверка утечек; путь Windows в JSON — путь."""
+    text = (
+        r'{"host": "^www\\.contoso\\.ru$", "node": "^srv01\\.contoso\\.ru$", "from": "^ivanov@contoso\\.ru$", '
+        r'"allow": "^10\\.1\\.2\\.35$", "path": "C:\\Users\\petrov\\.android"}'
+    )
+    result = sanitize(state, text, settings)
+    fake_ip = result.spans[-2].surrogate
+    assert result.sanitized == (
+        r'{"host": "^www\\.domain-1\\.example$", "node": "^host-1\\.domain-1\\.example$", "from": "^<EMAIL_1>$", '
+        rf'"allow": "^{fake_ip}$", "path": "C:\\Users\\<ACCOUNT_1>\\.android"}}'
+    )
+    assert fake_ip.count("\\\\.") == 3 and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, result.sanitized, settings).text == text
+    planted = r'"^Mail\\.Contoso\\.ru$"'
+    assert [planted[leak.start:leak.end] for leak in leakcheck.check(planted, state, settings)] == [r"Contoso\\.ru"]
+    # После знака выражения и между «\\b»: «\\» там восстановление читает началом адреса без схемы (раздел 7, шаг 1).
+    bounded = sanitize(state, r'"\\bsrv01\\.contoso\\.ru\\b", ".*\\.msk\\.contoso\\.ru"', settings).sanitized
+    assert bounded == r'"\\bhost-1\\.domain-1\\.example\\b", ".*\\.host-2\\.domain-1\\.example"'
+
+
 def test_email_written_with_escaped_dots_is_masked_and_restored_with_them(state, settings):
     """Второе ревью, P2: в «^ivanov@contoso\\.ru$» скрывался только домен, а имя входа уходило в облако. Адрес через «\\.»
     — адрес; его значение — как написано, и метка восстанавливается с «\\.»: тот же адрес в прозе — своя метка со своим

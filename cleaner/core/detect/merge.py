@@ -115,7 +115,7 @@ def _join_names(text: str, spans: list[MergedSpan]) -> list[MergedSpan]:
 
 
 _DOTTED_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
-_NAME_PART = re.compile(r"[^.\\]+")         # часть имени через «.» или «\.» (регулярное выражение)
+_NAME_PART = re.compile(r"[^.\\]+")         # часть имени через «.», «\.» или «\\.» (регулярное выражение)
 _NAME_TYPES = (EntityType.HOST, EntityType.DOMAIN)
 
 
@@ -136,7 +136,7 @@ def _name_kept(
         if any(STRICTNESS.get(policies.get(s.type), 0) > own for s in group if s.source == "manual"):
             return None
         start = text.rfind("@", start, end) + 1
-    dotted = text[start:end].replace("\\.", ".")        # имя через «\.» — как через точку
+    dotted = hostmap.dotted(text[start:end])        # имя через «\.» и «\\.» — как через точку
     if name is None or not _DOTTED_NAME.fullmatch(dotted):
         return None
     left, registrable = hostmap.parts(dotted)
@@ -172,7 +172,7 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
         # «010.001.002.005», «10.1.2.0» и «10.1.2.0/24» (длину /24 и больше слой 3 во фрагмент не берёт).
         if "manual" not in sources:
             if senior.type in _NAME_TYPES:
-                value = value.replace("\\.", ".")       # имя через «\.» — то же значение
+                value = hostmap.dotted(value)       # имя через «\.» и «\\.» — то же значение
             if value in ctx.settings.never or value in ctx.unmask:
                 continue
             if senior.type is EntityType.IP:

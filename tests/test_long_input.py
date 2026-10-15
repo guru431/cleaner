@@ -73,6 +73,8 @@ from cleaner.core.types import EntityType as T
         "Ab.Cd." * 10000 + "ru",
         # Имя после ведущей точки, «*.» и «@» (второе ревью, P1): начало только после точки за знаком не из имени.
         ".a" * 15000, "*.ab" * 8000, ">.ab.cd" * 5000,
+        # «\\.» — выражение в строке JSON (второе ревью, P3): имя входа e-mail не начинается со второй «\».
+        "a\\\\.b." * 4000, "1\\\\.2\\\\.3\\\\.4\\\\." * 2000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -92,7 +94,7 @@ from cleaner.core.types import EntityType as T
         "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail", "dotted_words", "email_labels",
         "email_labels_open", "email_labels_after",
         "escaped_mixed", "escaped_after_expressions", "escaped_word_bounds", "escaped_open_word_bound", "escaped_labels",
-        "mixed_case_parts", "leading_dots", "wildcards", "after_label_signs",
+        "mixed_case_parts", "leading_dots", "wildcards", "after_label_signs", "json_mixed", "json_addresses",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
@@ -382,11 +384,14 @@ def test_overlapping_known_values_and_runs_of_names_are_fast_and_not_one_spellin
         "C:\\Users\\a\\.local\\" * 1000, "contoso\\.ru " * 1500, "a\\\\." * 6000,
         # Имя в смешанном регистре с выданной заменой внутри (раунд 3, P3).
         "Petrov\\.host-1\\." * 2000 + "ru", "Petrov.host-1." * 2000 + "Ru",
+        # «\\.» — выражение в строке JSON (второе ревью, P3): после знаков выражения, между «\\b», части замены.
+        ".*\\\\.ab" * 2000, "\\\\bab\\\\.cd\\\\b" * 600, "host-1\\\\." * 1500 + "x",
     ],
     ids=[
         "parts", "letters", "separators", "labels",
         "mixed", "after_expressions", "word_bounds", "open_word_bound", "label_parts", "dot_folders", "known",
         "escaped_backslashes", "issued_inside_escaped", "issued_inside",
+        "json_after_expressions", "json_word_bounds", "json_parts",
     ],
 )
 def test_names_written_with_escaped_dots_are_found_in_linear_time(text):

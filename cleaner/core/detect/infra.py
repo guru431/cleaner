@@ -13,9 +13,9 @@ from cleaner.core.types import EntityType, Span
 
 name = "infra"
 
-# Адрес в регулярном выражении, правиле nginx, шаблоне grep пишут через «\.» («^10\.1\.2\.35$») — все три разделителя
-# одного вида; «\\.» — обратная косая и точка.
-_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(\\?\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?:/\d{1,2})?(?!\w|\\?\.\d)")
+# Адрес в регулярном выражении, правиле nginx, шаблоне grep пишут через «\.» («^10\.1\.2\.35$»), внутри строки JSON,
+# Java, C# — через «\\.» (hostmap.dotted); все три разделителя одного вида.
+_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(\\{0,2}\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?:/\d{1,2})?(?!\w|\\{0,2}\.\d)")
 # Адрес не начинается внутри другой записи через двоеточие, но может стоять сразу за подписью
 # («Source:f54a:…», «IPv6:2a00:…»): за словом, которое не может быть группой адреса, — с буквой
 # не из 0-9a-f или длиннее четырёх знаков. Подпись во фрагмент не входит.
@@ -37,8 +37,10 @@ _MAC_KEEP = frozenset({"ffffffffffff", "000000000000"})
 _URL_HOST = re.compile(
     r"\b[a-z][a-z0-9+.-]{0,31}://(?:[^\s/@]+@)?(?P<host>[^\s/:?#\"'<>\[\]@]+)", re.IGNORECASE
 )
-# Двоеточие перед «\\» — это «C:\\Users» из журнала JSON, а не сетевой путь; путь из JSON — «\\\\host».
-_UNC_HOST = re.compile(r"(?<![\\\w:])\\\\(?:\\\\)?(?P<host>[\w.-]+)(?=\\)")
+# Двоеточие перед «\\» — это «C:\\Users» из журнала JSON, а не сетевой путь; путь из JSON — «\\\\host». Имя узла не
+# начинается с точки, и за ним — ресурс, а не точка выражения: «\\bportal\\.contoso» и «.*\\.corp\\.» — выражение в строке
+# JSON (_ESCAPED), а не узлы «bportal» и «.corp».
+_UNC_HOST = re.compile(r"(?<![\\\w:])\\\\(?:\\\\)?(?P<host>\w[\w.-]*)(?=\\(?!\\?\.))")
 _HOST_PREFIX = re.compile(r"[\w.-]*")     # имя узла без знаков за ним: «», «”», «**», «}», «…»
 # Буква диска после ключа — не узел («dir /s C:\Temp»).
 _PARAM_HOST = re.compile(r"(?<![\w-])(?:-ComputerName|-Server|-cn)[ \t]+(?![a-z]:)(?P<host>[\w.-]+)", re.IGNORECASE)
@@ -62,21 +64,22 @@ _DOTTED = re.compile(rf"{_START}(?:\w(?:[\w-]{{0,61}}\w)?\.)+[^\W\d_][\w-]{{1,62
 # Первая часть — имя такого файла (_dotfile), а за ней одна часть или настройки «…local».
 _DOTFILE = re.compile(r"\w*env|\w{3,}rc|\w*config|\w*profile|aliases|tmux", re.IGNORECASE)
 # Имя в регулярном выражении, шаблоне grep, настройке nginx — части через «\.», бывает и вперемешку с точками
-# («^www\.contoso\.ru$»). Цепочка начинается и после «\.» или точки за знаком выражения («.*\.contoso\.ru»,
-# «(.+)\.contoso\.ru»), но не после «\»: в «C:\Users\ivanov\.local» «\» — разделитель пути, а «.local» — папка профиля.
-# «\\.» — обратная косая и точка, не разделитель. Берутся только цепочки с «\.»: остальные — дело _DOTTED.
-_ESCAPED_CHAIN = r"(?:\w(?:[\w-]{0,61}\w)?\\?\.)+[^\W\d_][\w-]{1,62}(?![\w-]|\\?\.\w)"
-_ESCAPED = re.compile(rf"(?<![\w$\\-])(?<![\w-]\.)(?<![\w-]\\\.){_ESCAPED_CHAIN}")
-# Имя между границами слова выражения («\bcontoso\.ru\b»): «b» — не часть имени. Только парой: «\bob\.local» в
-# «C:\Users\bob\.local» — путь.
-_BOUNDED = re.compile(rf"(?<=\\b)(?<!\\\\b){_ESCAPED_CHAIN}(?=\\b(?!\w))")
+# («^www\.contoso\.ru$»); внутри строки JSON, Java, C# то же выражение пишут через «\\.» («"^www\\.contoso\\.ru$"»,
+# hostmap.dotted). Цепочка начинается и после «\.» или точки за знаком выражения («.*\.contoso\.ru»,
+# «(.+)\.contoso\.ru»), но не после «\»: в «C:\Users\ivanov\.local» «\» — разделитель пути, а «.local» — папка профиля, и
+# в JSON («C:\\Users\\ivanov\\.local») так же. Берутся только цепочки с «\.» или «\\.»: остальные — дело _DOTTED.
+_ESCAPED_CHAIN = r"(?:\w(?:[\w-]{0,61}\w)?\\{0,2}\.)+[^\W\d_][\w-]{1,62}(?![\w-]|\\{0,2}\.\w)"
+_ESCAPED = re.compile(rf"(?<![\w$\\-])(?<![\w-]\.)(?<![\w-]\\\.)(?<![\w-]\\\\\.){_ESCAPED_CHAIN}")
+# Имя между границами слова выражения («\bcontoso\.ru\b», в строке — «\\bcontoso\\.ru\\b»): «b» — не часть имени.
+# Только парой: «\bob\.local» в «C:\Users\bob\.local» — путь.
+_BOUNDED = re.compile(rf"(?<=\\b)(?<!\\\\\\b){_ESCAPED_CHAIN}(?=\\{{1,2}}b(?!\w))")
 # Имя, часть которого — метка: части, которой пользователь дал другой тип, выдана метка (<TERM_1>.domain-1.example,
 # host-1.<ORG_1>). Рядом с ней может стоять настоящее имя: «<TERM_1>.fabrikam.ru», «srv-db02.<TERM_1>.domain-1.example»,
 # и через «\.» тоже.
 _PART = rf"(?:[\w-]+|{_LABEL.pattern})"
-_LABELLED = re.compile(rf"{_START}(?:{_PART}\\?\.)*(?:{_LABEL.pattern})(?:\\?\.{_PART})*")
-_LABEL_BEFORE = re.compile(rf"(?:{_LABEL.pattern})\\?\.$")
-_NAME_PART = re.compile(r"[^.\\]+")         # часть имени через «.» или «\.» — и метка
+_LABELLED = re.compile(rf"{_START}(?:{_PART}\\{{0,2}}\.)*(?:{_LABEL.pattern})(?:\\{{0,2}}\.{_PART})*")
+_LABEL_BEFORE = re.compile(rf"(?:{_LABEL.pattern})\\{{0,2}}\.$")
+_NAME_PART = re.compile(r"[^.\\]+")         # часть имени через «.», «\.» или «\\.» — и метка
 
 # Перед доменом может стоять двоеточие ключа команды («/user:CONTOSO\ivanov»); обратная косая
 # бывает удвоена (журналы JSON). Имя входа может быть и кириллицей («CORP\иванов»).
@@ -168,8 +171,8 @@ def _longest(listed: frozenset[str]) -> int:
 def well_known(value: str, ctx: DetectContext) -> bool:
     """Общеизвестное имя или имя из списка «никогда не скрывать», включая поддомены. Суффиксы сверяются справа и не
     длиннее самого длинного значения списков: цепочка из тысяч частей («abc.def.…») иначе проверялась бы
-    квадратичное время. «\\.» — точка."""
-    name = value.lower().replace("\\.", ".").strip(".")
+    квадратичное время. «\\.» и «\\\\.» — точка."""
+    name = hostmap.dotted(value.lower()).strip(".")
     known, never = ctx.builtin.well_known_domains, ctx.settings.never
     if "." not in name:
         return name in known or name in never or name in ctx.builtin.generic_labels
@@ -233,8 +236,8 @@ def _dotfile(value: str) -> bool:
 
 
 def _plain_runs(value: str, start: int) -> Iterator[tuple[int, int]]:
-    """Позиции цепочек обычных частей имени между метками; value — имя, как написано (через «.» или «\\.»), start — его
-    позиция в тексте."""
+    """Позиции цепочек обычных частей имени между метками; value — имя, как написано (через «.», «\\.» или «\\\\.»), start
+    — его позиция в тексте."""
     run = end = None
     for part in _NAME_PART.finditer(value):
         if _LABEL.fullmatch(part.group()):
@@ -265,7 +268,7 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
     escaped = "\\." in text
     for pattern in (_DOTTED, _ESCAPED, _BOUNDED) if escaped else (_DOTTED,):
         for m in pattern.finditer(text):
-            value = m.group().replace("\\.", ".")       # проверки — как у имени через точку
+            value = hostmap.dotted(m.group())       # проверки — как у имени через точку
             if pattern is not _DOTTED and value == m.group():
                 continue
             if text[m.start() - 1:m.start()] == "." and (
@@ -281,7 +284,7 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
     # фрагмент с меткой правило пользователя поглотило бы целиком вместе с ней (5.7), а выданную замену в цепочке
     # отрежет конвейер (pipeline._outside).
     for m in _LABELLED.finditer(text):
-        value = m.group().replace("\\.", ".")
+        value = hostmap.dotted(m.group())
         if "." not in value or len(value) > 253:
             continue        # метка сама по себе; длиннее имени DNS — не имя, а проверка частей квадратична
         parts = value.split(".")
@@ -292,7 +295,7 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
         )):
             continue
         for start, end in _plain_runs(m.group(), m.start()):
-            run = text[start:end].replace("\\.", ".")
+            run = hostmap.dotted(text[start:end])
             if _under_issued(run, ctx) or not well_known(run, ctx):      # «www», выданный «domain-1.example» — нет
                 yield Span(start, end, EntityType.HOST, name)
 

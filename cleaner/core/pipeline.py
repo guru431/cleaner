@@ -14,7 +14,7 @@ from cleaner.core import leakcheck, surrogates
 from cleaner.core.detect import dictionary, infra, ner, orgs, rules, secrets
 from cleaner.core.detect.base import DetectContext, Detector
 from cleaner.core.detect.merge import MergedSpan, merge
-from cleaner.core.entities import labels
+from cleaner.core.entities import hostmap, labels
 from cleaner.core.entities.resolve import ResolvedSpan, Resolver
 from cleaner.core.leakcheck import Leak
 from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
@@ -37,6 +37,8 @@ _COMPOSED = frozenset({
 _SPLIT = frozenset({EntityType.EMAIL, EntityType.HOST, EntityType.DOMAIN, EntityType.DN})
 _SEPARATORS = ".@,=\\/:;\"' \t\r\n"
 _WORD = re.compile(r"\w")
+_SEPARATOR = re.compile(r"\\{0,2}\.")           # точка между частями имени: и «\.», и «\\.» (hostmap.dotted)
+_SEPARATOR_BEFORE = re.compile(r"\\{0,2}\.$")
 # Служебные ящики (RFC 2142) человека не выдают: «postmaster@domain-1.example» — та же подмена домена.
 _ROLE_MAILBOXES = frozenset({
     "postmaster", "hostmaster", "webmaster", "abuse", "noc", "security", "info", "marketing", "sales",
@@ -107,18 +109,20 @@ def _placed(
     """Имя, которое стоит через точку после выданной замены или метки или перед ней, — часть имени (5.10): части перед
     заменой — части слева от домена, часть после неё — не первая, и отдельным написанием (5.4) она не становится.
     Одни служебные части перед заменой («www.mail.<TERM_1>…») не скрываются, как и «www» сам по себе. Точка бывает и
-    «\\.» (имя в регулярном выражении)."""
+    «\\.» или «\\\\.» (имя в регулярном выражении, в том числе в строке JSON)."""
     if span.type not in (EntityType.HOST, EntityType.DOMAIN):
         return [span]
-    gap = 2 if text.startswith("\\.", span.end) else 1 if text.startswith(".", span.end) else 0
+    separator = _SEPARATOR.match(text, span.end)
+    gap = separator.end() - span.end if separator else 0
     after = bisect.bisect_left(starts, span.end + gap)
     precedes = gap > 0 and after < len(starts) and starts[after] == span.end + gap
-    lead = 2 if text[max(0, span.start - 2):span.start] == "\\." else 1 if text[span.start - 1:span.start] == "." else 0
+    separator = _SEPARATOR_BEFORE.search(text, max(0, span.start - 3), span.start)
+    lead = span.start - separator.start() if separator else 0
     before = bisect.bisect_right(starts, span.start - lead - 1) - 1     # замена, которая кончается перед точкой
     follows = lead > 0 and before >= 0 and ranges[before][1] == span.start - lead
     if not (follows or precedes):
         return [span]
-    labels_ = text[span.start:span.end].lower().replace("\\.", ".").split(".")
+    labels_ = hostmap.dotted(text[span.start:span.end].lower()).split(".")
     if (precedes or len(labels_) == 1) and all(label in ctx.builtin.generic_labels for label in labels_):
         return []
     return [replace(span, follows=follows, precedes=precedes)]

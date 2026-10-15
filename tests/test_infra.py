@@ -174,11 +174,11 @@ def test_ipv4_written_with_escaped_dots_is_found(text, expected):
 
 @pytest.mark.parametrize("text", [
     r"version 1\.2\.3\.4, build 10\.0\.190\.45",r"^\d+\.\d+\.\d+\.\d+$ и [0-9]{1,3}\.[0-9]{1,3}", r"^127\.0\.0\.1$",
-    r"10\\.1\\.2\\.35 и 10\.1\.2\.35\.4", r"C:\Logs\10\.1\.2",
+    r"10\\\\.1\\\\.2\\\\.35 и 10\.1\.2\.35\.4", r"C:\Logs\10\.1\.2",
 ], ids=["versions", "patterns", "loopback", "escaped-backslash-and-longer", "short"])
 def test_backslash_and_dot_elsewhere_make_no_address(text):
-    """Та же находка с другой стороны: номера версий, шаблоны чисел, петля, «\\\\.» (обратная косая и точка), цепочка
-    длиннее адреса и три числа остаются, как через точку."""
+    """Та же находка с другой стороны: номера версий, шаблоны чисел, петля, «\\\\\\\\.» (в JSON — обратная косая и любой
+    знак выражения), цепочка длиннее адреса и три числа остаются, как через точку."""
     assert values(text) == set()
 
 
@@ -502,6 +502,32 @@ def test_leading_dot_or_at_before_a_file_or_code_is_not_a_name(text):
     """Та же находка с другой стороны: файл на точку («.env.local», «.zshrc.local» — первая часть — имя такого файла, за
     ней одна часть или «…local»), точка после разделителя пути, многоточие, «@» в CSS и Java, код остаются."""
     assert values(text) == set()
+
+
+@pytest.mark.parametrize("text, expected", [
+    (r'{"host_regex": "^www\\.contoso\\.ru$"}', {(T.HOST, r"www\\.contoso\\.ru")}),
+    (r'Pattern.compile("\\bportal\\.contoso\\.ru\\b")', {(T.HOST, r"portal\\.contoso\\.ru")}),
+    (r'{"pattern": ".*\\.corp\\.contoso\\.local", "label": "<TERM_1>\\.fabrikam\\.ru"}',
+     {(T.HOST, r"corp\\.contoso\\.local"), (T.HOST, r"fabrikam\\.ru")}),
+    (r'{"allow": "^10\\.1\\.2\\.35$"}', {(T.IP, r"10\\.1\\.2\\.35")}),
+], ids=["json", "java-word-bounds", "after-expression-and-label", "address"])
+def test_name_and_address_in_a_regex_inside_a_string_literal_are_found(text, expected):
+    """Второе ревью, P3: регулярное выражение внутри строки JSON, Java, C#, Python пишут через «\\\\.» — после раскрытия
+    строки это «\\.». Такое имя и адрес уходили в облако, известные — тоже. «\\\\.» — разделитель, как «\\.», с теми же
+    правилами; цепочка не начинается после «\\», поэтому путь Windows в JSON остаётся путём."""
+    ctx = DetectContext(Settings(), issued_domains=frozenset({"<term_1>"}))
+    assert found(text, ctx) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    (r'{"path": "C:\\Users\\ivanov\\.android\\avd", "share": "\\\\fs01\\data\\.azure"}', {"ivanov", "fs01"}),
+    (r'{"cfg": "C:\\Users\\Public\\.aws\\credentials", "bin": "node_modules\\.bin", "dir": "C:\\host\\.local"}', set()),
+    (r'"contoso\\\\.ru", "10\\\\.1\\\\.2\\\\.35", "System\\.Net\\.Http"', set()),
+], ids=["windows-paths", "dot-folders", "escaped-backslashes-and-code"])
+def test_backslashes_in_json_paths_are_not_name_separators(text, expected):
+    """Та же находка с другой стороны: путь Windows в JSON («C:\\\\Users\\\\ivanov\\\\.android») — путь, папки на точку —
+    не имена; «\\\\\\\\.» (в выражении — обратная косая и любой знак) — не разделитель; код остаётся кодом."""
+    assert values(text) == expected
 
 
 def test_name_with_escaped_dots_under_an_issued_domain_or_next_to_a_label_is_found():

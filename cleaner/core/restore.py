@@ -219,7 +219,7 @@ _HOST_TYPES = frozenset({EntityType.IP, EntityType.HOST, EntityType.DOMAIN})
 # Знаки ASCII в конце хоста, которых нет в доменах верхнего уровня и которые браузер не превращает в букву, цифру или
 # точку: без «-», «.» и «%» («%2e» браузер раскрывает в точку до разбора хоста). «/?#\:@» хост и так кончают.
 _UNRESOLVABLE_TAIL = re.compile(r"(?<=[^\W_])[!\"$&'()*+,;<=>^_`{|}~]+$")
-_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(\\?\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?!\w|\\?\.\d)")     # и через «\.»
+_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(\\{0,2}\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?!\w|\\{0,2}\.\d)")   # и через «\.», «\\.»
 _MAC = re.compile(
     r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
     r"|(?<![\w.])[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}(?![\w.])"
@@ -242,7 +242,9 @@ def _tolerant_pattern() -> re.Pattern[str]:
 
 _TOLERANT = _tolerant_pattern()
 _PREFIX_AFTER = re.compile(r"/\d")
-_PART_BEFORE = re.compile(r"[\w>\]-]\\?\.$")     # перед заменой — часть имени или метка и точка (или «\.»)
+# Рядом с заменой — точка (или «\.», «\\.») и часть имени или метка: замена — часть имени.
+_PART_BEFORE = re.compile(r"[\w>\]-]\\{0,2}\.$")
+_PART_AFTER = re.compile(r"\\{0,2}\.[^\W_]")
 
 
 def _one_prefix(original: str, type_: EntityType, text: str, end: int) -> str:
@@ -543,17 +545,13 @@ class _Restorer:
             self._original(m.key, surrogate), self.state.entities[surrogate.entity_id].type, m.string, m.end(),
         )
         kind = "restored"
-        if surrogate.kind == "ip" and "\\." in text:
-            original = original.replace(".", "\\.")         # адрес в регулярном выражении — с тем же разделителем
+        if surrogate.kind in ("host", "ip"):
+            # Имя и адрес в регулярном выражении (и в строке JSON) — с тем же разделителем, «\.» или «\\.».
+            original = original.replace(".", hostmap.separator(text))
         if surrogate.kind in ("host", "label"):
             if surrogate.kind == "host" and text.isupper():
                 original = original.upper()
-            if surrogate.kind == "host" and "\\." in text:
-                original = original.replace(".", "\\.")     # имя в регулярном выражении — с тем же разделителем
-            after = m.string[m.end():m.end() + 3].removeprefix("\\")
-            if _PART_BEFORE.search(m.string, max(0, m.start() - 3), m.start()) or (
-                after[:1] == "." and after[1:2].isalnum()
-            ):
+            if _PART_BEFORE.search(m.string, max(0, m.start() - 4), m.start()) or _PART_AFTER.match(m.string, m.end()):
                 # Часть имени, которого не было в запросе: имя из запроса нашлось бы целиком. Метка тоже бывает
                 # частью имени (части дан другой тип): «<TERM_1>.evil.com» — то же, что «host-1.evil.com». Ведущая
                 # точка после знака, который не часть имени («*.», «domain=.»), — не стык частей.
@@ -581,7 +579,7 @@ class _Restorer:
 
     def _derived_ip(self, m: re.Match[str]) -> Piece | None:
         try:
-            ip = ipaddress.IPv4Address(m.group().replace("\\.", "."))
+            ip = ipaddress.IPv4Address(hostmap.dotted(m.group()))
         except ValueError:
             return None
         bits = netmap.private_bits(ip)
@@ -592,7 +590,7 @@ class _Restorer:
             return m.group(), "kept_by_policy"
         original = str(ipaddress.IPv4Address(netmap.unmap_private(int(ip), bits, self.state.net_key)))
         self.counters["derived"] += 1
-        return (original.replace(".", "\\.") if "\\." in m.group() else original), "derived"
+        return original.replace(".", hostmap.separator(m.group())), "derived"
 
     def _mac(self, m: re.Match[str]) -> Piece | None:
         surrogate = self.macs.get(macsid.mac_key(m.group()))
