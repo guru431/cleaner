@@ -964,6 +964,33 @@ def test_label_ending_a_recorded_name_is_a_domain_whatever_its_suffix(settings):
     assert kinds(result) == ["foreign_link"]
 
 
+def term_state(value: str) -> ChatState:
+    """Метка <TERM_1> со значением value и метка человека."""
+    state = ChatState(chat_id="terms", net_key=bytes(range(32)))
+    ops.mask(state, value, T.TERM)
+    ops.mask(state, "Иван Петров", T.PERSON)
+    assert sanitize(state, f"журнал {value}, пишет Иван Петров", Settings()).sanitized == "журнал <TERM_1>, пишет <PERSON_1>"
+    return state
+
+
+@pytest.mark.parametrize("value", ["deploy.sh", "setup.py", "readme.md", "notes.zip", "photo.mov", "System.Net", "1.2.ru"])
+def test_label_of_a_file_or_code_name_is_not_our_domain_in_a_link(settings, value):
+    """Второе ревью, Minor: доменом считалось любое значение с точкой и известным суффиксом — и имя файла (.sh, .py, .md,
+    .zip, .mov — настоящие домены верхнего уровня): «[журнал](https://<TERM_1>/log?user=<PERSON_1>)» восстанавливалось в
+    ссылку на чужой deploy.sh с именем человека. Значение — домен, только если слой 3 взял бы его именем в тексте (5.4):
+    не расширение файла и не слово кода в конце, не смешанный регистр, не числа перед последней частью."""
+    answer = "[журнал](https://<TERM_1>/log?user=<PERSON_1>)"
+    result = restore(term_state(value), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize("value", ["contoso.ru", "CONTOSO.RU", "srv01.contoso.ru"])
+def test_label_of_a_domain_name_is_still_our_domain_in_a_link(settings, value):
+    """Та же находка с другой стороны: значение, которое слой 3 взял бы именем, — по-прежнему наш домен."""
+    result = restore(term_state(value), "[журнал](https://<TERM_1>/log?user=<PERSON_1>)", settings)
+    assert result.text == f"[журнал](https://{value}/log?user=Иван Петров)" and "foreign_link" not in kinds(result)
+
+
 def test_own_link_in_an_attribute_is_still_restored(settings):
     result = restore(link_state(), '<a href="https://host-1.domain-1.example/?q=<EMAIL_1>">', settings)
     assert result.text == '<a href="https://srv-dc01.contoso.ru/?q=ivanov@contoso.ru">'

@@ -551,6 +551,23 @@ def test_label_of_a_domain_name_is_a_domain_as_in_restore(state, settings, text,
     assert restore(state, expected, settings).text == restored
 
 
+@pytest.mark.parametrize("value, text, expected", [
+    ("contoso.ru", "Проверь srv02.<TERM_1>", "Проверь host-1.<TERM_1>"),
+    ("contoso.ru", "почта ivanov@<TERM_1>", "почта <ACCOUNT_1>@<TERM_1>"),
+    ("deploy.sh", "Проверь srv02.<TERM_1>", "Проверь srv02.<TERM_1>"),
+    ("setup.py", "Проверь srv02.<TERM_1>", "Проверь srv02.<TERM_1>"),
+    ("deploy.sh", "почта ivanov@<TERM_1>", "почта ivanov@<TERM_1>"),
+], ids=["domain", "domain-email", "script", "code", "script-email"])
+def test_label_of_a_file_name_is_not_a_domain_next_to_names(state, settings, value, text, expected):
+    """Второе ревью, Minor: метка, значение которой — имя файла с суффиксом-доменом (deploy.sh, setup.py), считалась
+    меткой доменного имени — и в ссылке ответа, и здесь. Доменом её считают одинаково конвейер и восстановление
+    (labels.domain_labels): только значение, которое слой 3 взял бы именем, — как srv02.deploy.sh в тексте он не скрывает."""
+    ops.mask(state, value, T.TERM)
+    assert sanitize(state, f"журнал {value}", settings).sanitized == "журнал <TERM_1>"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+
+
 def test_chain_of_overlapping_emails_is_hidden_but_not_searched_as_a_whole(state, settings):
     """Наблюдение раунда имён узлов, P2: в «a@b.c.» * N адреса пересекаются (следующий начинается в домене
     предыдущего), и второй проход сливал найденные написания в один фрагмент длиной в текст. Он становился искомым
