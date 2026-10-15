@@ -438,7 +438,11 @@ class Resolver:
     def _name(
         self, value: str, type_: EntityType, origin: str, follows: bool = False, precedes: bool = False,
     ) -> tuple[Entity, str] | None:
-        """follows, precedes — фрагмент стоит в имени после выданной замены или метки и перед ней (pipeline._placed)."""
+        """follows, precedes — фрагмент стоит в имени после выданной замены или метки и перед ней (pipeline._placed).
+        Имя через «\\.» (регулярное выражение) разбирается как через точку, а подмена пишется через «\\.» — так её найдёт и
+        восстановит раздел 7 (шаг 2); в таблицу замен оба записываются через точку."""
+        escaped = "\\." in value
+        value = value.replace("\\.", ".")
         if not _NAME.fullmatch(value):
             return None
         whole = not (follows or precedes)
@@ -476,4 +480,4 @@ class Resolver:
         # из запроса и тоже не записывается.
         if left and whole and len(value) <= hostmap.MAX_NAME:
             self.state.surrogates.setdefault(surrogate, Surrogate(primary.id, value, "host"))
-        return primary, surrogate
+        return primary, surrogate.replace(".", "\\.") if escaped else surrogate

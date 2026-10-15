@@ -51,10 +51,21 @@ _REMOTE_SWITCH = re.compile(
 )
 _MACHINE = re.compile(r"(?<![\w.$-])(?P<host>(?=[A-Za-z-]*\d)[A-Za-z0-9][A-Za-z0-9-]{1,14})\$(?![\w$])")
 _DOTTED = re.compile(r"(?<![\w.$@-])(?:\w(?:[\w-]{0,61}\w)?\.)+[^\W\d_][\w-]{1,62}(?![\w-]|\.\w)")
+# Имя в регулярном выражении, шаблоне grep, настройке nginx — части через «\.», бывает и вперемешку с точками
+# («^www\.contoso\.ru$»). Цепочка начинается и после «\.» или точки за знаком выражения («.*\.contoso\.ru»,
+# «(.+)\.contoso\.ru»), но не после «\»: в «C:\Users\ivanov\.local» «\» — разделитель пути, а «.local» — папка профиля.
+# «\\.» — обратная косая и точка, не разделитель. Берутся только цепочки с «\.»: остальные — дело _DOTTED.
+_ESCAPED_CHAIN = r"(?:\w(?:[\w-]{0,61}\w)?\\?\.)+[^\W\d_][\w-]{1,62}(?![\w-]|\\?\.\w)"
+_ESCAPED = re.compile(rf"(?<![\w$\\-])(?<![\w-]\.)(?<![\w-]\\\.){_ESCAPED_CHAIN}")
+# Имя между границами слова выражения («\bcontoso\.ru\b»): «b» — не часть имени. Только парой: «\bob\.local» в
+# «C:\Users\bob\.local» — путь.
+_BOUNDED = re.compile(rf"(?<=\\b)(?<!\\\\b){_ESCAPED_CHAIN}(?=\\b(?!\w))")
 # Имя, часть которого — метка: части, которой пользователь дал другой тип, выдана метка (<TERM_1>.domain-1.example,
-# host-1.<ORG_1>). Рядом с ней может стоять настоящее имя: «<TERM_1>.fabrikam.ru», «srv-db02.<TERM_1>.domain-1.example».
+# host-1.<ORG_1>). Рядом с ней может стоять настоящее имя: «<TERM_1>.fabrikam.ru», «srv-db02.<TERM_1>.domain-1.example»,
+# и через «\.» тоже.
 _PART = rf"(?:[\w-]+|{_LABEL.pattern})"
-_LABELLED = re.compile(rf"(?<![\w.$@-])(?:{_PART}\.)*(?:{_LABEL.pattern})(?:\.{_PART})*")
+_LABELLED = re.compile(rf"(?<![\w.$@-])(?:{_PART}\\?\.)*(?:{_LABEL.pattern})(?:\\?\.{_PART})*")
+_NAME_PART = re.compile(r"[^.\\]+")         # часть имени через «.» или «\.» — и метка
 
 # Перед доменом может стоять двоеточие ключа команды («/user:CONTOSO\ivanov»); обратная косая
 # бывает удвоена (журналы JSON). Имя входа может быть и кириллицей («CORP\иванов»).
@@ -146,8 +157,8 @@ def _longest(listed: frozenset[str]) -> int:
 def well_known(value: str, ctx: DetectContext) -> bool:
     """Общеизвестное имя или имя из списка «никогда не скрывать», включая поддомены. Суффиксы сверяются справа и не
     длиннее самого длинного значения списков: цепочка из тысяч частей («abc.def.…») иначе проверялась бы
-    квадратичное время."""
-    name = value.lower().strip(".")
+    квадратичное время. «\\.» — точка."""
+    name = value.lower().replace("\\.", ".").strip(".")
     known, never = ctx.builtin.well_known_domains, ctx.settings.never
     if "." not in name:
         return name in known or name in never or name in ctx.builtin.generic_labels
@@ -194,19 +205,21 @@ def _plausible(value: str, text: str, end: int, ctx: DetectContext) -> bool:
     return hostmap.has_known_suffix(value)
 
 
-def _plain_runs(parts: list[str], start: int) -> Iterator[tuple[int, int]]:
-    """Позиции цепочек обычных частей имени между метками; start — позиция первой части в тексте."""
-    position, run = start, None
-    for part in parts:
-        if _LABEL.fullmatch(part):
+def _plain_runs(value: str, start: int) -> Iterator[tuple[int, int]]:
+    """Позиции цепочек обычных частей имени между метками; value — имя, как написано (через «.» или «\\.»), start — его
+    позиция в тексте."""
+    run = end = None
+    for part in _NAME_PART.finditer(value):
+        if _LABEL.fullmatch(part.group()):
             if run is not None:
-                yield run, position - 1
+                yield run, end
             run = None
-        elif run is None:
-            run = position
-        position += len(part) + 1
+            continue
+        if run is None:
+            run = start + part.start()
+        end = start + part.end()
     if run is not None:
-        yield run, position - 1
+        yield run, end
 
 
 def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
@@ -222,16 +235,20 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
     for m in _MACHINE.finditer(text):
         if not m.group("host").isdigit():
             yield Span(m.start("host"), m.end("host"), EntityType.HOST, name)
-    for m in _DOTTED.finditer(text):
-        value = m.group()
-        if _under_issued(value, ctx) or (not well_known(value, ctx) and _plausible(value, text, m.end(), ctx)):
-            yield Span(m.start(), m.end(), _name_type(value), name)
+    escaped = "\\." in text
+    for pattern in (_DOTTED, _ESCAPED, _BOUNDED) if escaped else (_DOTTED,):
+        for m in pattern.finditer(text):
+            value = m.group().replace("\\.", ".")       # проверки — как у имени через точку
+            if pattern is not _DOTTED and value == m.group():
+                continue
+            if _under_issued(value, ctx) or (not well_known(value, ctx) and _plausible(value, text, m.end(), ctx)):
+                yield Span(m.start(), m.end(), _name_type(value), name)
     # Имя с меткой — если оно под выданной подменой домена (или меткой домена) либо после последней метки стоит имя
     # с точкой, как у _DOTTED; «<PERSON_1>.docx» и «<ORG_1>.ru» — не имена. Фрагменты — цепочки частей между метками:
     # фрагмент с меткой правило пользователя поглотило бы целиком вместе с ней (5.7), а выданную замену в цепочке
     # отрежет конвейер (pipeline._outside).
     for m in _LABELLED.finditer(text):
-        value = m.group()
+        value = m.group().replace("\\.", ".")
         if "." not in value or len(value) > 253:
             continue        # метка сама по себе; длиннее имени DNS — не имя, а проверка частей квадратична
         parts = value.split(".")
@@ -241,8 +258,8 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
             "." in tail and not well_known(tail, ctx) and _plausible(tail, text, m.end(), ctx)
         ):
             continue
-        for start, end in _plain_runs(parts, m.start()):
-            run = text[start:end]
+        for start, end in _plain_runs(m.group(), m.start()):
+            run = text[start:end].replace("\\.", ".")
             if _under_issued(run, ctx) or not well_known(run, ctx):      # «www», выданный «domain-1.example» — нет
                 yield Span(start, end, EntityType.HOST, name)
 

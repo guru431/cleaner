@@ -658,6 +658,80 @@ def test_sanitized_text_with_masked_pieces_pasted_back_changes_nothing(state, se
     assert (len(state.entities), len(state.surrogates)) == counts
 
 
+@pytest.mark.parametrize("text, expected, restored", [
+    (r"RewriteCond %{HTTP_HOST} ^www\.contoso\.ru$", r"RewriteCond %{HTTP_HOST} ^www\.domain-1\.example$", None),
+    (r"server_name ~^srv01\.contoso\.ru$;", r"server_name ~^host-1\.domain-1\.example$;", None),
+    (r"server_name ~^(.+)\.corp\.contoso\.local$;", r"server_name ~^(.+)\.host-1\.domain-1\.example$;", None),
+    (r"Select-String '\bsrv01\.contoso\.ru\b'", r"Select-String '\bhost-1\.domain-1\.example\b'", None),
+    (r'if address :regex "from" "@contoso\.ru$"', r'if address :regex "from" "@domain-1\.example$"', None),
+    (r"^srv01\.contoso.ru$", r"^host-1\.domain-1\.example$", r"^srv01\.contoso\.ru$"),
+], ids=["rewrite", "nginx", "nginx-capture", "word-bounds", "sieve", "both-separators"])
+def test_name_written_with_escaped_dots_is_masked_and_restored_with_them(state, settings, text, expected, restored):
+    """Наблюдение раунда 3 имён узлов, P1: имя через «\\.» уходило в облако как есть. Подмена пишется тем же разделителем,
+    и восстановление (раздел 7, шаг 2) возвращает оригинал с ним; имя с обоими разделителями — целиком через «\\.».
+    Повторная вставка ничего не меняет."""
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, expected, settings).text == (restored or text)
+
+
+def test_known_name_written_with_escaped_dots_is_masked_and_caught_by_the_leak_check(state, settings):
+    """Та же находка: после известного srv01.contoso.ru в «^Srv01\\.Contoso\\.ru$» (смешанный регистр — слой 3 имя не
+    берёт) скрывалась только первая часть, а «Contoso\\.ru» уходил открытым; проверка утечек его не видела."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    planted = r"RewriteCond ^Srv01\.Contoso\.ru$"
+    assert [planted[leak.start:leak.end] for leak in leakcheck.check(planted, state, settings)] == ["Srv01", r"Contoso\.ru"]
+    result = sanitize(state, planted, settings)
+    assert result.sanitized == r"RewriteCond ^host-1\.domain-1\.example$" and result.deliverable
+    assert restore(state, result.sanitized, settings).text == r"RewriteCond ^srv01\.contoso\.ru$"
+
+
+def test_opened_name_and_a_retyped_part_act_on_a_name_with_escaped_dots(state, settings):
+    """Через «\\.» действуют те же решения пользователя, что через точку: открытое имя остаётся открытым (5.7, шаг 5), а
+    правило на целой части имени не поглощает его (5.7, шаг 4)."""
+    sanitize(state, "узел srv01.contoso.ru и srv01, узел srv02.contoso.ru", settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.TERM)
+    ops.unmask(state, "srv02.contoso.ru")
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    text = r"^srv01\.contoso\.ru$ и ^srv02\.contoso\.ru$"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == r"^<TERM_1>\.domain-1\.example$ и ^srv02\.contoso\.ru$" and result.deliverable
+    assert restore(state, result.sanitized, settings).text == text
+
+
+@pytest.mark.parametrize("text, expected", [
+    (r"^srv-db02\.<TERM_1>\.domain-1\.example$", r"^host-2\.<TERM_1>\.domain-1\.example$"),
+    (r"^<TERM_1>\.fabrikam\.ru$", r"^<TERM_1>\.domain-2\.example$"),
+    (r"^srv-db02\.msk\.domain-1\.example$", r"^host-2\.sub-3\.domain-1\.example$"),
+], ids=["part-before-label", "domain-after-label", "parts-before-replacement"])
+def test_name_with_escaped_dots_next_to_a_replacement_keeps_its_place(state, settings, text, expected):
+    """Часть рядом с заменой или меткой через «\\.» — часть имени, как через точку (5.10): части перед заменой — части
+    слева от домена, домен после метки — домен."""
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.TERM)
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, expected, settings).text == text.replace("<TERM_1>", "srv01").replace("domain-1", "contoso").replace(
+        "example", "ru"
+    )
+
+
+def test_windows_paths_with_dot_folders_keep_their_meaning(state, settings):
+    """Та же находка с другой стороны: «\\» перед частью — разделитель пути, а не точки; папка на точку с суффиксом из
+    списка («.android», «.azure») именем не становится."""
+    text = r"C:\Users\ivanov\.ssh\config, C:\Users\ivanov\.android\avd и \\fs01\share\.azure"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == r"C:\Users\<ACCOUNT_1>\.ssh\config, C:\Users\<ACCOUNT_1>\.android\avd и \\host-1\share\.azure"
+    assert restore(state, result.sanitized, settings).text == text
+
+
 class Marks:
     """Слой 4 для теста: помечает заданные строки и считает вызовы."""
 

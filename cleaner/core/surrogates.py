@@ -29,6 +29,8 @@ _NAME = re.compile(rf"(?<![\w-]){_PART}(?:\.{_PART})*(?![\w-])")
 # Имя в регулярном выражении, шаблоне grep, настройке nginx — части через «\.» («^host-1\.domain-1\.example$»). Ищется
 # отдельно, только с этим разделителем: восстановление пишет оригинал с ним же, а цепочки через точку — как раньше.
 _ESCAPED_NAME = re.compile(rf"(?<![\w-]){_PART}(?:\\\.{_PART})+(?![\w-])")
+# Перед ней бывает граница слова выражения («\bhost-1\.domain-1\.example\b»): «b» — не часть имени (слой 3, _BOUNDED).
+_BOUNDED_NAME = re.compile(rf"(?<=\\b)(?<!\\\\b){_PART}(?:\\\.{_PART})+(?![\w-])")
 
 
 class Hit:
@@ -146,7 +148,8 @@ class Finder:
         if not self.hosts:
             return []
         hits = []
-        for pattern, separator in ((_NAME, "."), (_ESCAPED_NAME, "\\.")):
+        patterns = [(_NAME, "."), (_ESCAPED_NAME, "\\.")] + ([(_BOUNDED_NAME, "\\.")] if "\\b" in text else [])
+        for pattern, separator in patterns:
             for m in pattern.finditer(text):
                 parts = m.group().split(separator)
                 offsets = [m.start()]

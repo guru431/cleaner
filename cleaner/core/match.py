@@ -18,6 +18,9 @@ _SPACE_RUN = re.compile(r"\s+")
 _STRESS = "\N{COMBINING ACUTE ACCENT}"
 _FORMAT = regex.compile(r"\p{Cf}+")
 _FORMAT_OR_STRESS = regex.compile(r"[\p{Cf}" + _STRESS + "]+")
+# «\.» — точка: имя в регулярном выражении, шаблоне grep, настройке nginx («^srv01\.contoso\.ru$») — то же имя.
+# Экранированная обратная косая («\\.») точку не экранирует.
+_ESCAPED_DOT = re.compile(r"(?<!\\)\\(?=\.)")
 
 
 def _lower(text: str) -> str:
@@ -130,6 +133,22 @@ def has_invisible(text: str) -> bool:
     return _FORMAT_OR_STRESS.search(text) is not None
 
 
+def _unescaped(lowered: str, starts: list[int], ends: list[int]) -> tuple[str, list[int], list[int]]:
+    """Нормализованный текст, в котором «\\.» — точка (_ESCAPED_DOT): обратная косая выпадает, точка накрывает и её."""
+    pieces: list[str] = []
+    kept_starts: list[int] = []
+    kept_ends: list[int] = []
+    position = 0
+    for m in _ESCAPED_DOT.finditer(lowered):
+        slash = m.start()
+        pieces += [lowered[position:slash], "."]
+        kept_starts += [*starts[position:slash], starts[slash]]
+        kept_ends += [*ends[position:slash], ends[slash + 1]]
+        position = slash + 2
+    pieces.append(lowered[position:])
+    return "".join(pieces), kept_starts + starts[position:], kept_ends + ends[position:]
+
+
 def _bounded(text: str, start: int, end: int, mode: str) -> bool:
     if mode == "none":
         return True
@@ -150,13 +169,15 @@ def _bounded(text: str, start: int, end: int, mode: str) -> bool:
 
 
 def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int, int, T]]:
-    """Все вхождения написаний без учёта регистра, «ё/е», вида пробелов и формы записи букв.
+    """Все вхождения написаний без учёта регистра, «ё/е», вида пробелов и формы записи букв; «\\.» — точка.
 
     forms — тройки (написание, режим границ, полезная нагрузка). Режимы:
     strict — рядом нет букв, цифр, «_» и «-»; letters — рядом нет букв; none — где угодно.
     Позиции возвращаются в исходном тексте.
     """
     lowered, starts, ends = _normalize(text)
+    if "\\." in lowered:
+        lowered, starts, ends = _unescaped(lowered, starts, ends)
     # первое слово написания -> длина написания -> написание -> [(режим, нагрузка)].
     # Группировка по длине нужна, чтобы тысячи логинов с общим началом («user00001», «i.ivanov»)
     # проверялись одним обращением к словарю, а не перебором. Написание длиннее _PREFIX — по своему началу:
@@ -166,7 +187,7 @@ def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int
     long: dict[str, dict[str, list[tuple[str, str, T]]]] = {}
     loose: list[tuple[str, str, T]] = []
     for form, mode, payload in forms:
-        needle = _normalize(form)[0]
+        needle = _ESCAPED_DOT.sub("", _normalize(form)[0])
         if not needle.strip():
             continue
         head = _TOKEN.match(needle)

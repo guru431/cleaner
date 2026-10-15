@@ -67,6 +67,8 @@ from cleaner.core.types import EntityType as T
         "abc.def." * 20000,
         # Адрес e-mail с меткой в домене; метки не домена после имени отрезаются.
         "a@<ORG_1>." * 15000, "a@<ORG_1>.<ORG_1" * 10000, "a@b.c" + ".<ORG_1>" * 10000,
+        # Имя через «\.»: цепочка вперемешку с точками, начала после знаков выражения, «\b» без пары, метки.
+        "a\\.b." * 10000, ".*\\.a" * 10000, "\\ba\\." * 10000, "\\b" + "ab\\." * 15000, "x\\.<ORG_1>\\." * 4000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -85,6 +87,7 @@ from cleaner.core.types import EntityType as T
         "putty_headers", "putty_fields", "putty_names", "putty_body", "gitlab_prefixes", "pem_continued_headers",
         "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail", "dotted_words", "email_labels",
         "email_labels_open", "email_labels_after",
+        "escaped_mixed", "escaped_after_expressions", "escaped_word_bounds", "escaped_open_word_bound", "escaped_labels",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
@@ -348,8 +351,19 @@ def test_overlapping_known_values_and_runs_of_names_are_fast_and_not_one_spellin
 
 
 @pytest.mark.parametrize(
-    "text", ["host-1\\." * 3000 + "x", "a\\." * 10000, "\\." * 15000, "<EMAIL_1>\\." * 3000],
-    ids=["parts", "letters", "separators", "labels"],
+    "text",
+    [
+        "host-1\\." * 3000 + "x", "a\\." * 10000, "\\." * 15000, "<EMAIL_1>\\." * 3000,
+        # Имя через «\.» при очистке (раунд 3, P1): вперемешку с точками, после знаков выражения, между «\b», рядом с
+        # меткой, папки на точку в путях, известное имя, экранированная обратная косая.
+        "a\\.b." * 4000, ".*\\.ab" * 5000, "\\bab\\.cd\\b" * 1000, "\\b" + "ab\\." * 6000, "x\\.<ORG_1>\\." * 2000,
+        "C:\\Users\\a\\.local\\" * 1000, "contoso\\.ru " * 1500, "a\\\\." * 6000,
+    ],
+    ids=[
+        "parts", "letters", "separators", "labels",
+        "mixed", "after_expressions", "word_bounds", "open_word_bound", "label_parts", "dot_folders", "known",
+        "escaped_backslashes",
+    ],
 )
 def test_names_written_with_escaped_dots_are_found_in_linear_time(text):
     """Наблюдение раунда имён узлов, P3: имя через «\\.» (регулярное выражение) ищется своим выражением; цепочка из

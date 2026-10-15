@@ -70,6 +70,16 @@ def test_long_spelling_is_found_like_a_short_one():
     assert hits("srv-" + "a" * 70 + "-02 и x" + "srv-" + "a" * 70, ("srv-" + "a" * 70, "strict", 1)) == []
 
 
+def test_escaped_dot_is_a_dot_and_an_escaped_backslash_is_not():
+    """Наблюдение раунда 3 имён узлов, P1: имя в регулярном выражении пишут через «\\.» («^srv01\\.contoso\\.ru$»), и
+    известное «contoso.ru» в нём не находилось. «\\.» — точка, и написание с ним находит то же; «\\\\.» — обратная косая
+    и точка, путь Windows («C:\\Users\\ivanov\\.ssh») читается, как прежде."""
+    text = r"^srv01\.contoso\.ru$, CONTOSO\.RU, contoso\\.ru, C:\Users\ivanov\.ssh"
+    found = hits(text, ("contoso.ru", "strict", 1), ("ivanov", "letters", 2), ("srv01\\.contoso", "strict", 3))
+    assert found == sorted([(r"contoso\.ru", 1), (r"CONTOSO\.RU", 1), ("ivanov", 2), (r"srv01\.contoso", 3)])
+    assert hits("srv01.contoso.ru", ("srv01\\.contoso.ru", "strict", 1)) == [("srv01.contoso.ru", 1)]
+
+
 def test_yo_and_decomposed_letters_match_their_plain_forms():
     """Обзор 1А, P1: «ё» и «е» — одна буква; «ё» из двух знаков (NFD) — тоже."""
     text = "Семенов, Семёнов и СЕМЁНОВ"
