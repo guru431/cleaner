@@ -23,12 +23,16 @@ _END = r"[^\s\"'`.,;:!?)\]}]"
 # Это линейно — поиск каждого атрибута кончается на следующей такой же кавычке. Определение ссылки
 # Markdown — только в начале строки, как в CommonMark, цель в угловых скобках может стоять на
 # следующей строке и содержать пробелы («[1]: <https://… …>»): иначе «[ERROR]: <EMAIL_1>» в журнале
-# считалось бы ссылкой. Нашей ссылка считается, только если наши все адреса в ней (_Restorer._is_own).
+# считалось бы ссылкой. Адрес в CSS url(…) и @import браузер загружает сам — и в атрибуте style, и в
+# элементе style, и в файле CSS: аргумент в кавычках берётся до той же кавычки с учётом «\"», без
+# кавычек — до «)». Нашей ссылка считается, только если наши все адреса в ней (_Restorer._is_own).
 _LINK = re.compile(
     r"\]\((?P<md>(?:[^()\r\n]|\([^()\r\n]*\))*)\)"
     r"|(?m:^)[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*(?:\r?\n[ \t]*)?<(?P<ref>[^\r\n]*)>"
     r"|(?<![\w-])(?:href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content)"
     r"\s*=\s*(?P<quote>[\"'])(?P<attr>[\s\S]*?)(?P=quote)"
+    r"|(?:(?<![\w-])url\(\s*|@import\s*)(?P<cq>[\"'])(?P<css>(?:\\[\s\S]|[^\\])*?)(?P=cq)"
+    r"|(?<![\w-])url\((?P<cssu>(?:\\[\s\S]|[^\\()\"'])*)\)"
     rf"|(?P<mailto>mailto:[^\s\"'`]*{_END})"
     rf"|(?<=\")(?P<dq>{_START}[^\s\"`]*{_END})"
     rf"|(?<=')(?P<sq>{_START}[^\s'`]*{_END})"
@@ -163,9 +167,10 @@ class _Restorer:
         return all(self._host_is_ours(m.group(1)) for m in _URL_HOSTS.finditer(target))
 
     def _link(self, m: re.Match[str]) -> Piece | None:
-        target = next(
-            (m.group(name) for name in ("md", "ref", "attr", "mailto", "dq", "sq", "url") if m.group(name)), ""
-        )
+        target = next((
+            m.group(name) for name in ("md", "ref", "attr", "css", "cssu", "mailto", "dq", "sq", "url")
+            if m.group(name)
+        ), "")
         if self._is_own(target):
             return None         # ссылка на наш же узел восстанавливается как обычный текст
         if self._inner(m.group()) == m.group():

