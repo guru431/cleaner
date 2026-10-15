@@ -5,10 +5,14 @@
 from __future__ import annotations
 
 import io
+import re
+import zipfile
+import zlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Protocol
+from xml.parsers import expat
 
 from cleaner.core.detect.llm import CompletionError
 from cleaner.ingest import textfiles
@@ -23,11 +27,25 @@ _RTF = b"{\\rtf"
 _ZIP = b"PK\x03\x04"
 _PNG = b"\x89PNG\r\n\x1a\n"
 _JPEG = b"\xff\xd8\xff"
+_TEXT_CONTROLS = b"\t\n\v\f\r\x1b"       # управляющие байты, которые бывают в тексте (ESC — цвета в журналах)
 _OFFICE = frozenset({"docx", "xlsx", "pptx"})
 _LEGACY = frozenset({"doc", "xls", "ppt"})
 _MISMATCH = "Файл повреждён или его расширение не соответствует содержимому"
 _LOCKED = "Файл защищён паролем: снимите защиту и загрузите его снова"
 _LEGACY_REFUSED = "Старые форматы Office (.doc, .xls, .ppt) не поддерживаются: сохраните файл как .docx, .xlsx или .pptx"
+# Пределы до Docling (замеры 15.10.2026 на машине разработки): openpyxl грузит книгу целиком, а Docling создаёт
+# объект на каждую клетку области данных, пустую тоже. Плотная таблица — около 2,8 КБ памяти на ячейку
+# (100 000 строк × 6 столбцов: +1,7 ГБ и 9,1 млн знаков текста), клетка объединения — 1,3 КБ, пустая
+# оформленная ячейка — 380 байт, пустая клетка области — 210 байт. DOCX — 19–41 МБ памяти на 1 МБ XML
+# (20 МБ XML, 1,2 МБ в ZIP: +0,8 ГБ, 12 млн знаков, 3 минуты), PPTX — 26; 32 МБ XML — меньше 500 000 знаков текста
+# только при разметке больше 64 байт на знак, а оформление каждого слова отдельно даёт 30.
+_UNPACKED = 512 * 1024 * 1024       # все части документа Office без сжатия, по каталогу ZIP: ZIP-бомба
+_MARKUP = 32 * 1024 * 1024          # части XML без сжатия: их разбор и даёт рост памяти
+_CELL_CHARS = 3                     # ячейка со значением — не меньше стольких знаков Markdown (замер: от 5,25)
+_SHEET_AREA = 1_000_000             # клеток в областях листов вместе с пустыми: до 0,4 ГБ
+_SHEET_MAX = (1_048_576, 16_384)    # строк и столбцов в листе Excel: край для «A:A» и «1:1»
+_COORD = re.compile(r"\$?([A-Za-z]*)\$?([0-9]*)")
+_SPLIT_TABLE = "Загрузите нужную часть таблицы отдельным файлом"
 
 
 class ExtractError(Exception):
@@ -55,6 +73,16 @@ Ocr = Callable[[bytes, str], str]          # изображение, MIME -> Mar
 Progress = Callable[[int, int], None]      # сделано, всего
 
 
+def _pdf_signature(data: bytes, ext: str) -> bool:
+    """«%PDF-» в начале файла. Читатели PDF терпят до 1024 байт мусора перед ним (заголовок MacBinary, ответ
+    HTTP, сохранённый вместе с файлом), но журнал или заметка, где «%PDF-» просто упомянут, — текст: без
+    расширения .pdf сдвинутая сигнатура засчитывается, только если перед ней двоичные байты, а не строки."""
+    at = data.find(b"%PDF-", 0, 1024)
+    if at <= 0:
+        return at == 0
+    return ext == "pdf" or any(byte < 0x20 and byte not in _TEXT_CONTROLS for byte in data[:at])
+
+
 def detect_kind(filename: str, data: bytes) -> str:
     """Вид файла по сигнатуре и расширению. Имя файла используется только здесь и нигде не сохраняется."""
     ext = PurePath(filename).suffix.lower().lstrip(".")
@@ -65,7 +93,7 @@ def detect_kind(filename: str, data: bytes) -> str:
     if ext == "rtf" or data.lstrip()[:5] == _RTF:
         # Русские буквы RTF записывает кодами \'cf\'e5…: как текст его не прочитать ни человеку, ни слоям.
         raise ExtractError("Формат файла не поддерживается: RTF сохраните как .docx или .txt")
-    pdf = b"%PDF-" in data[:1024]
+    pdf = _pdf_signature(data, ext)
     image = data.startswith((_PNG, _JPEG))
     if ext in _OFFICE:
         if data.startswith(_OLE):
@@ -93,6 +121,129 @@ def detect_kind(filename: str, data: bytes) -> str:
     if ext == "eml":
         return "eml"
     return "text"               # журналы, конфигурации, скрипты, CSV — любой текст (FR-2.2)
+
+
+class _NotSheet(Exception):
+    """Часть книги — не лист: общие строки, стили, рисунки. Дальше первого элемента она не читается."""
+
+
+def _point(ref: str, end: bool) -> tuple[int, int]:
+    """«B12» -> (12, 2). У ссылки на столбец или строку целиком («A», «5») недостающее — начало или край листа."""
+    match = _COORD.fullmatch(ref)
+    letters, digits = match.groups() if match else ("", "")
+    column = 0
+    for letter in letters.upper():
+        column = column * 26 + ord(letter) - 64
+    row = int(digits) if digits else (_SHEET_MAX[0] if end else 1)
+    return row, column or (_SHEET_MAX[1] if end else 1)
+
+
+class _Cells:
+    """Ячейки листов XLSX потоком expat: распакованный XML целиком в памяти не держится, чтение останавливается,
+    как только предел превышен. Строки и ячейки нумеруются, как у openpyxl (без атрибута r — следующая по счёту);
+    объединения и ссылки диапазоном openpyxl заполняет объектами ячеек, а Docling обходит всю область данных
+    листа — поэтому считается площадь области, а не число элементов <c>."""
+
+    def __init__(self, max_chars: int):
+        self.max_chars = max_chars
+        self.shown = 0          # клетки, которые попадут в Markdown: со значением и под объединением, во всех листах
+        self.area = 0                                       # клетки областей прочитанных листов
+        self.box: tuple[int, int, int, int] | None = None   # область текущего листа: верх, лево, низ, право
+
+    def cells(self) -> int:
+        if self.box is None:
+            return self.area
+        top, left, bottom, right = self.box
+        return self.area + (bottom - top + 1) * (right - left + 1)
+
+    def text_too_long(self) -> bool:
+        return self.shown * _CELL_CHARS > self.max_chars
+
+    def full(self) -> bool:
+        return self.text_too_long() or self.cells() > _SHEET_AREA
+
+    def read(self, package: zipfile.ZipFile, part: zipfile.ZipInfo) -> None:
+        self.area, self.box = self.cells(), None
+        self.depth = self.row_depth = self.cell_depth = self.row = self.column = 0
+        self.has_value = False
+        parser = expat.ParserCreate()
+        parser.StartElementHandler, parser.EndElementHandler = self._start, self._end
+        try:
+            with package.open(part) as stream:
+                while not self.full() and (chunk := stream.read(1 << 20)):
+                    parser.Parse(chunk, False)
+        except (_NotSheet, expat.ExpatError, ValueError, OverflowError, zipfile.BadZipFile, EOFError, NotImplementedError,
+                RuntimeError, zlib.error):
+            pass        # не лист или часть не читается: такой лист не откроет и openpyxl, откажет Docling
+
+    def _cover(self, top: int, left: int, bottom: int, right: int) -> None:
+        box = self.box or (top, left, bottom, right)
+        self.box = (min(box[0], top), min(box[1], left), max(box[2], bottom), max(box[3], right))
+
+    def _start(self, name: str, attrs: dict[str, str]) -> None:
+        self.depth += 1
+        local = name.rpartition(":")[2]
+        if self.depth == 1 and local != "worksheet":
+            raise _NotSheet
+        if self.row_depth and self.depth == self.row_depth + 1:      # openpyxl считает ячейкой любой элемент строки
+            if "r" in attrs:
+                row, self.column = _point(attrs["r"], False)
+            else:
+                row, self.column = self.row, self.column + 1
+            self._cover(row, self.column, row, self.column)
+            self.cell_depth, self.has_value = self.depth, False
+        elif self.cell_depth and local in ("v", "is"):
+            self.has_value = True
+        elif local == "row":
+            self.row = int(float(attrs["r"])) if "r" in attrs else self.row + 1     # «5.0» openpyxl тоже читает
+            self.column, self.row_depth = 0, self.depth
+        elif local in ("mergeCell", "hyperlink") and "ref" in attrs:
+            first, _, last = attrs["ref"].partition(":")
+            (top, left), (bottom, right) = _point(first, False), _point(last or first, True)
+            self._cover(top, left, bottom, right)
+            if local == "mergeCell":            # текст объединения Docling повторяет в каждой его клетке
+                self.shown += (bottom - top + 1) * (right - left + 1)
+
+    def _end(self, name: str) -> None:
+        if self.depth == self.cell_depth:
+            self.shown += self.has_value
+            self.cell_depth = 0
+        elif self.depth == self.row_depth:
+            self.row_depth = 0
+        self.depth -= 1
+
+
+def _check_package(data: bytes, kind: str, max_chars: int) -> None:
+    """Отказ до Docling, когда разбор не уместится в память службы (MemoryMax) или его текст всё равно будет
+    отклонён: ZIP-бомба, слишком много XML, таблица с заведомо длинным текстом или огромной областью листов.
+    ZIP, который не читается, остаётся Docling: он откажет с причиной «повреждён»."""
+    try:
+        package = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return
+    with package:
+        parts = package.infolist()
+        # Размеры — из каталога, без распаковки: больше заявленного zipfile не отдаст ни Docling, ни openpyxl (CRC).
+        if sum(part.file_size for part in parts) > _UNPACKED:
+            raise ExtractError(f"Документ слишком большой для разбора: без сжатия больше {_UNPACKED // 2**20} МБ")
+        if kind == "xlsx":             # таблица — точнее, по ячейкам: причина отказа понятнее пользователю
+            cells = _Cells(max_chars)
+            for part in parts:
+                cells.read(package, part)      # каждая часть: лист может лежать под любым именем, путь — в связях книги
+                if cells.text_too_long():
+                    raise ExtractError(
+                        f"Таблица слишком большая: её текст заведомо длиннее {max_chars} знаков. {_SPLIT_TABLE}"
+                    )
+                if cells.cells() > _SHEET_AREA:
+                    raise ExtractError(
+                        f"Таблица слишком большая для разбора: в областях данных листов больше {_SHEET_AREA} клеток. "
+                        f"{_SPLIT_TABLE}"
+                    )
+        if sum(part.file_size for part in parts if part.filename.lower().endswith((".xml", ".rels", ".vml"))) > _MARKUP:
+            raise ExtractError(
+                f"Документ слишком большой для разбора: его разметка без сжатия больше {_MARKUP // 2**20} МБ. "
+                "Разделите его на части"
+            )
 
 
 def _open_pdf(data: bytes):
@@ -144,9 +295,10 @@ def _render(data: bytes, number: int) -> bytes:
 
 
 class Extractor:
-    def __init__(self, documents: Documents, ocr: Ocr):
+    def __init__(self, documents: Documents, ocr: Ocr, max_chars: int = 500_000):
         self.documents = documents
         self.ocr = ocr
+        self.max_chars = max_chars          # предел текста элемента (max_text_chars): длиннее служба не очистит
 
     def extract(self, filename: str, data: bytes, progress: Progress = lambda done, total: None) -> Extracted:
         kind = detect_kind(filename, data)
@@ -160,6 +312,8 @@ class Extractor:
             except textfiles.NotText as exc:
                 raise ExtractError(f"Формат файла не поддерживается: {exc}") from None
         else:
+            if kind in _OFFICE:
+                _check_package(data, kind, self.max_chars)
             result = Extracted(self.documents.convert(data, kind), kind)
         if not result.text.strip():
             raise ExtractError("В файле не найден текст")

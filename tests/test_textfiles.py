@@ -1,4 +1,5 @@
 import codecs
+import random
 
 import pytest
 
@@ -30,6 +31,15 @@ def test_single_byte_russian_encodings_are_told_apart(codec):
     assert textfiles.decode(TEXT.encode(codec)) == TEXT
 
 
+SYMBOLS = "Проверка srv-01\r\n───────────────\r\n✓ диск ≥ 20 ГБ, α = 0,05; Ω, β-версия ≠ 2.0 → ok\r\n"
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be"])
+def test_utf16_without_bom_with_symbols_and_greek_is_text(codec):
+    """Обзор плана 2+4, m-4: рамки, галочки, знаки сравнения и греческие буквы — не повод считать файл двоичным."""
+    assert textfiles.decode((SYMBOLS * 10).encode(codec)) == SYMBOLS * 10
+
+
 def test_ascii_line_is_not_mistaken_for_utf16():
     assert textfiles.decode(b"-" * 40 + b"\n") == "-" * 40 + "\n"
 
@@ -37,6 +47,16 @@ def test_ascii_line_is_not_mistaken_for_utf16():
 def test_binary_file_is_not_text():
     with pytest.raises(textfiles.NotText):
         textfiles.decode(bytes(range(256)) * 4)
+
+
+def test_binary_with_zero_bytes_like_utf16_is_not_text():
+    """Обзор плана 2+4, m-4, обратная сторона: нули через байт ещё не делают двоичный файл текстом UTF-16."""
+    rng = random.Random(7)
+    noise = bytes(b for _ in range(2048) for b in (rng.randrange(256), 0 if rng.random() < 0.75 else rng.randrange(256)))
+    numbers = b"".join(n.to_bytes(4, "little") for n in range(0, 40_000, 37))
+    for data in (noise, numbers, noise[::-1]):
+        with pytest.raises(textfiles.NotText, match="двоичный"):
+            textfiles.decode(data)
 
 
 LOG = "2026-10-14 10:00 Пользователь Петров Иван вошёл в систему\n" * 50

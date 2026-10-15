@@ -116,7 +116,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     with _repository(cfg) as repo:
         app = create_app(
             repo, SystemClock(), secure_cookies=bool(cfg.tls_cert), max_text_chars=cfg.max_text_chars,
-            tz=timezone(timedelta(hours=cfg.utc_offset_hours)), engines=Engines(repo, cfg.models_dir),
+            tz=timezone(timedelta(hours=cfg.utc_offset_hours)),
+            engines=Engines(repo, cfg.models_dir, max_text_chars=cfg.max_text_chars),
             max_file_mb=cfg.max_file_mb,
         )
         # Журнал доступа выключен: в строке запроса бывает поиск по названиям чатов (SEC-11).
