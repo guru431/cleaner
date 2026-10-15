@@ -1,3 +1,6 @@
+import random
+import string
+
 import pytest
 
 from cleaner.core.detect import secrets
@@ -512,6 +515,38 @@ def test_token_with_a_random_part_or_a_password_of_words_is_still_found(text, va
     assert finds(text) == {(value, True)}
 
 
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("ключ 1234-abcd-5678-efab-9012", "1234-abcd-5678-efab-9012"),
+        ("API key: 9F3C-A1B2-77DE-C0FF-1A2B", "9F3C-A1B2-77DE-C0FF-1A2B"),
+        ("Recovery key: AB12-CD34-EF56-GH78-JK90-LM12", "AB12-CD34-EF56-GH78-JK90-LM12"),
+        ("license key TY8KN-3XQ7P-WM4RC-9GHVD-B2JFQ", "TY8KN-3XQ7P-WM4RC-9GHVD-B2JFQ"),
+        ("токен доступа 7f3a_0b9c_4d2e_8a1f_c0de", "7f3a_0b9c_4d2e_8a1f_c0de"),
+    ],
+    ids=["hex_lower", "hex_upper", "letters_digits", "product_key", "underscores"],
+)
+def test_key_in_groups_of_one_length_after_its_word_is_found(text, value):
+    """Второе ревью: группы ключа («1234», «abcd», «AB12») похожи на части имени из слов, и ключ после «ключ», «токен»,
+    key оставался открытым — до 12 % случайных ключей из групп по четыре. Три группы и больше одной длины от четырёх
+    знаков — вид ключа, а не имени."""
+    assert finds(text) == {(value, True)}
+
+
+def test_random_keys_in_groups_after_key_are_all_found():
+    rng = random.Random(15)
+    shapes = (
+        (5, 4, "0123456789abcdef"), (5, 4, "0123456789ABCDEF"), (6, 4, string.ascii_uppercase + string.digits),
+        (5, 5, string.ascii_uppercase + string.digits),
+    )
+    for groups, size, alphabet in shapes:
+        for _ in range(300):
+            key = "-".join("".join(rng.choice(alphabet) for _ in range(size)) for _ in range(groups))
+            if not (any(c.isdigit() for c in key) and any(c.isalpha() for c in key)):
+                continue        # без цифры или без буквы правило токена ключ и не ищет (5.3)
+            assert found(f"ключ {key}") == {key}, key
+
+
 BITLOCKER = "135795-258016-380237-502458-624679-013574-720885-008547"   # вымышленный: каждая группа — число до 65 536, × 11
 
 
@@ -540,9 +575,9 @@ def test_numbers_shaped_like_a_bitlocker_key_that_fail_its_check_are_left_alone(
     [
         ("ПИН-код 4821", "4821"), ("PIN: 4821", "4821"), ("пин-код от карты 48213", "48213"),
         ("PIN code 48213579", "48213579"), ("мой пин 4821, не говорите никому", "4821"), ("ПИН-код — 4821", "4821"),
-        ("пинкод: 4821", "4821"),
+        ("пинкод: 4821", "4821"), ("SIM-PIN: 4821", "4821"), ("SIM-PIN 4821", "4821"), ("PIN/PUK: 4821", "4821"),
     ],
-    ids=["pin_code", "colon", "two_words", "english_code", "comma", "dash", "glued"],
+    ids=["pin_code", "colon", "two_words", "english_code", "comma", "dash", "glued", "sim_colon", "sim_space", "puk"],
 )
 def test_pin_code_is_hidden_in_its_place(text, value):
     """Находка «BitLocker recovery keys and PIN codes are not found»: четыре-пять цифр ниже порога кода. ПИН скрывается

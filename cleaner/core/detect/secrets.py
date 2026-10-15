@@ -205,7 +205,8 @@ _PREPOSITIONS = frozenset({"с", "со", "with"})
 # или пробел: «ПИН-код 4821», «PIN: 4821», «пин-код от карты 48213». Скрывается только на своём месте, как код из цифр.
 # «PIN-диод», «пин 3 разъёма», «PIN-1234» на плате — не ПИН-код.
 _PIN = re.compile(
-    r"[пp](?<![\w-][пp])(?:(?<=п)ин|(?<=p)in)(?:[ -]?(?:код(?:а|у|ом|е|ы|ов)?|code))?(?:[ \t]++[\w-]++){0,2}?"
+    r"[пp](?:(?<![\w-][пp])|(?<=sim-p)|(?<=сим-п))(?:(?<=п)ин|(?<=p)in)(?:/(?:puk|пук)2?)?"
+    r"(?:[ -]?(?:код(?:а|у|ом|е|ы|ов)?|code))?(?:[ \t]++[\w-]++){0,2}?"
     r"(?:[ \t]*+[:=—–][ \t]*+|[ \t]++(?:-[ \t]++)?)(?P<bare>\d{4,8}+)(?![\w+/=-])(?!\.\w)",
     re.IGNORECASE,
 )
@@ -216,6 +217,15 @@ _PIN = re.compile(
 _NAME_WORD = r"[A-Z]*+[a-z]*+(?:[A-Z][a-z]++)*+"
 _NAME_PART = rf"(?:{_NAME_WORD}(?:\d{{1,8}}+)?+|\d{{1,8}}+{_NAME_WORD}|[a-z]++\d{{1,8}}+[a-z]++)(?![^_/-])"
 _IDENTIFIER = re.compile(rf"{_NAME_PART}(?:[_/-]{_NAME_PART})++")
+# Три группы и больше одной длины от четырёх знаков — вид ключа, а не имени: «1234-abcd-5678-efab-9012»,
+# «AB12-CD34-EF56-GH78» по частям похожи на слова и числа, и до 12 % случайных ключей из групп по четыре оставались
+# открытыми (второе ревью). Имя из слов одной длины («user-data-test-mode») после «ключ» — цена: оно скрывается.
+_KEY_GROUPS = re.compile(r"[_/-]")
+
+
+def _key_groups(value: str) -> bool:
+    parts = _KEY_GROUPS.split(value)
+    return len(parts) >= 3 and len(parts[0]) >= 4 and all(len(part) == len(parts[0]) for part in parts)
 # Русское слово через дефис («по-прежнему», «кто-то») похоже на пароль только дефисом, а то же слово
 # без дефиса паролем в тексте и так не считается.
 _HYPHENATED_WORD = re.compile(r"[а-яё]+(?:-[а-яё]+)+", re.IGNORECASE)
@@ -677,7 +687,9 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
     for m in _TOKEN_PHRASE.finditer(text):
         value = m.group("bare")
         # Код ошибки — не секрет; имя из слов — не токен, но после «пароль» это пароль из слов.
-        if _status_code(text, m) if value.isdigit() else (m.group("password") is None and _IDENTIFIER.fullmatch(value)):
+        if _status_code(text, m) if value.isdigit() else (
+            m.group("password") is None and _IDENTIFIER.fullmatch(value) and not _key_groups(value)
+        ):
             continue
         spans.append(Span(*m.span("bare"), EntityType.SECRET, name, searchable=_looks_like_password(value)))
     spans += [Span(*m.span("bare"), EntityType.SECRET, name, searchable=False) for m in _PIN.finditer(text)]
