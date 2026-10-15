@@ -133,10 +133,22 @@ def test_zero_padded_address_is_found():
 
 
 def test_zero_padded_address_is_masked_and_restored():
+    """Запись с нулями впереди сводится к обычной: подмена — переставленный адрес, а не метка, и восстанавливается
+    обычная запись адреса."""
     state = ChatState(chat_id="padded", net_key=bytes(32))
     result = sanitize(state, "узел 010.001.002.005", Settings())
-    assert "010.001.002.005" not in result.sanitized
-    assert restore(state, result.sanitized, Settings()).text == "узел 010.001.002.005"
+    assert "010.001.002.005" not in result.sanitized and "<IP_" not in result.sanitized
+    assert restore(state, result.sanitized, Settings()).text == "узел 10.1.2.5"
+
+
+def test_zero_padded_and_plain_spellings_are_one_address():
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: «010.001.002.005» получал метку и был
+    отдельной сущностью от 10.1.2.5."""
+    state = ChatState(chat_id="padded", net_key=bytes(32))
+    result = sanitize(state, "узлы 010.001.002.005 и 10.1.2.5", Settings())
+    padded, plain = (span.surrogate for span in result.spans)
+    assert padded == plain and padded.startswith("10.") and padded.endswith(".5") and padded != "10.1.2.5"
+    assert len(state.entities) == 1
 
 
 def test_lowercase_domain_known_from_an_earlier_text():

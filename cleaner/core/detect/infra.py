@@ -84,18 +84,11 @@ _DN = re.compile(
 )
 
 
-def _unpadded(address: str) -> str:
-    """«010.001.002.005» из таблиц и выгрузок — это 10.1.2.5: ipaddress нулей впереди не принимает.
-    Только если все четыре числа дополнены до трёх цифр: «01.02.03.04» — скорее номер, чем адрес."""
-    octets = address.split(".")
-    return ".".join(str(int(octet)) for octet in octets) if all(len(octet) == 3 for octet in octets) else address
-
-
 def _ipv4(text: str) -> Iterator[Span]:
     for m in _IPV4.finditer(text):
         address, _, prefix = m.group().partition("/")
         try:
-            ip = ipaddress.IPv4Address(_unpadded(address))
+            ip = ipaddress.IPv4Address(netmap.unpadded(address))
         except ValueError:
             continue
         if not netmap.is_maskable(ip) or _VERSION_BEFORE.search(text[max(0, m.start() - 16):m.start()]):
