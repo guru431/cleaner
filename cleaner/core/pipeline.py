@@ -16,7 +16,7 @@ from cleaner.core.detect import dictionary, infra, ner, orgs, rules, secrets
 from cleaner.core.detect.base import DetectContext, Detector
 from cleaner.core.detect.merge import MergedSpan, merge
 from cleaner.core.entities import hostmap, labels
-from cleaner.core.entities.resolve import ResolvedSpan, Resolver
+from cleaner.core.entities.resolve import ResolvedSpan, Resolver, name_parts
 from cleaner.core.leakcheck import Leak
 from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
 
@@ -75,13 +75,11 @@ def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext
 
 def _types(text: str, piece: MergedSpan) -> list[EntityType]:
     """Типы, которые часть записи получит при подмене (resolve._name): часть имени узла — HOST у частей слева от домена и
-    DOMAIN у домена в ней; в части перед заменой и в части без точки домена нет."""
+    DOMAIN у домена в ней."""
     if piece.type is not EntityType.HOST:
         return [piece.type]
-    value = hostmap.dotted(text[piece.start:piece.end])
-    if piece.precedes or "." not in value:
-        return [EntityType.HOST]
-    return [EntityType.HOST] * bool(hostmap.parts(value)[0]) + [EntityType.DOMAIN]
+    left, registrable = name_parts(hostmap.dotted(text[piece.start:piece.end]), piece.precedes)
+    return [EntityType.HOST] * bool(left) + [EntityType.DOMAIN] * bool(registrable)
 
 
 def _split_holds(text: str, pieces: list[MergedSpan], ctx: DetectContext) -> bool:

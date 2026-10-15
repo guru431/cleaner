@@ -73,6 +73,12 @@ def _ip_text(value: str) -> str:
     return f"{ip}/{prefix}"
 
 
+def name_parts(value: str, precedes: bool) -> tuple[list[str], str]:
+    """Части имени через точку слева от домена и домен (5.10): в части имени перед заменой и в части без точки домена нет.
+    По ним выдаёт подмены _name, и по ним же конвейер судит о типах частей адреса (pipeline._types)."""
+    return (value.split("."), "") if precedes or "." not in value else hostmap.parts(value)
+
+
 def _fake_forms(fake: str) -> set[str]:
     """Записи подмены адреса, которые найдёт восстановление: она сама и у сети — её адрес без длины префикса (_ip)."""
     return {fake, fake.split("/")[0]}
@@ -473,7 +479,7 @@ class Resolver:
             return self._manual(value) or self._part(value, origin, leading=True, standalone=True)
         # Часть имени рядом с заменой — не имя целиком (5.10): в частях перед заменой домена нет, одиночная часть после
         # неё — тоже часть. Первой часть после замены не бывает, и отдельным написанием никакая из них не становится.
-        left, registrable = (value.split("."), "") if precedes or "." not in value else hostmap.parts(value)
+        left, registrable = name_parts(value, precedes)
         retyped = self._manual(registrable) if registrable else None
         domain = retyped or (self._dns(registrable, origin) if registrable else None)
         fakes, owners, leading = [], [], not follows
