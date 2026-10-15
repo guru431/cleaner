@@ -18,6 +18,10 @@ gs
 zip
 mov
 cab
+pub
+properties
+email
+target
 name
 id
 is

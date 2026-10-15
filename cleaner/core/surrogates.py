@@ -13,7 +13,11 @@ from cleaner.core.types import ChatState
 
 _LABEL = re.compile(r"<[A-Z]+(?:_[A-Z]+)*_\d+>|\[\[[A-Z]+(?:_[A-Z]+)*_\d+\]\]")
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\w|\.\d)")
-_IPV6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])")
+# Как в слое 3: адрес может стоять сразу за подписью («Source:2001:db8:1::1»), подпись в замену не входит.
+_IPV6 = re.compile(
+    r"(?<![\w:.])(?:(?=\w*[^\W\dA-Fa-f])\w+:|\w{5,}:)?"
+    r"(?P<addr>(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![\w:])"
+)
 _MAC = re.compile(
     r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
     r"|(?<![\w.])[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}(?![\w.])"
@@ -95,7 +99,7 @@ class Finder:
     def _ipv6(self, text: str) -> list[Hit]:
         hits = []
         for m in _IPV6.finditer(text):
-            token = m.group()
+            token = m.group("addr")
             if token.endswith(":") and not token.endswith("::"):
                 token = token[:-1]
             try:
@@ -103,7 +107,7 @@ class Finder:
             except ValueError:
                 continue
             if self._of_kind(key, "ip6"):
-                hits.append(Hit(m.start(), m.start() + len(token), key, text))
+                hits.append(Hit(m.start("addr"), m.start("addr") + len(token), key, text))
         return hits
 
     def _macs(self, text: str) -> list[Hit]:

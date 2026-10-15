@@ -46,6 +46,7 @@ class DetectContext:
     known: tuple[tuple[str, EntityType], ...] = ()     # написания сущностей чата
     manual: tuple[tuple[str, EntityType], ...] = ()    # значения, которые пользователь велел скрывать
     unmask: frozenset[str] = frozenset()               # значения, с которых пользователь снял замену
+    issued_domains: frozenset[str] = frozenset()       # выданные чатом подмены доменов: «domain-1.example»
     builtin: Builtin = field(default_factory=load_builtin)
 
 

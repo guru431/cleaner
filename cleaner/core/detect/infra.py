@@ -12,7 +12,13 @@ from cleaner.core.types import EntityType, Span
 name = "infra"
 
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\w|\.\d)")
-_IPV6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])")
+# Адрес не начинается внутри другой записи через двоеточие, но может стоять сразу за подписью
+# («Source:f54a:…», «IPv6:2a00:…»): за словом, которое не может быть группой адреса, — с буквой
+# не из 0-9a-f или длиннее четырёх знаков. Подпись во фрагмент не входит.
+_IPV6 = re.compile(
+    r"(?<![\w:.])(?:(?=\w*[^\W\dA-Fa-f])\w+:|\w{5,}:)?"
+    r"(?P<addr>(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![\w:])"
+)
 # Слово перед числом, по которому видно, что это номер версии; «ver» внутри «server» не считается.
 _VERSION_BEFORE = re.compile(
     r"(?<![^\W\d_])(?:version|верси[яию]|ver\.?|build|сборка|release|v)\s*[:=]?\s*$", re.IGNORECASE
@@ -30,14 +36,17 @@ _URL_HOST = re.compile(
 # Двоеточие перед «\\» — это «C:\\Users» из журнала JSON, а не сетевой путь; путь из JSON — «\\\\host».
 _UNC_HOST = re.compile(r"(?<![\\\w:])\\\\(?:\\\\)?(?P<host>[\w.-]+)(?=\\)")
 _HOST_PREFIX = re.compile(r"[\w.-]*")     # имя узла без знаков за ним: «», «”», «**», «}», «…»
-_PARAM_HOST = re.compile(r"(?<![\w-])(?:-ComputerName|-Server|-cn|/S)[ \t]+(?P<host>[\w.-]+)", re.IGNORECASE)
+# Буква диска после ключа — не узел: «/S» у dir и xcopy — ключ подкаталогов («dir /s C:\Temp»).
+_PARAM_HOST = re.compile(
+    r"(?<![\w-])(?:-ComputerName|-Server|-cn|/S)[ \t]+(?![a-z]:)(?P<host>[\w.-]+)", re.IGNORECASE
+)
 _MACHINE = re.compile(r"(?<![\w.$-])(?P<host>(?=[A-Za-z-]*\d)[A-Za-z0-9][A-Za-z0-9-]{1,14})\$(?![\w$])")
 _DOTTED = re.compile(r"(?<![\w.$@-])(?:\w(?:[\w-]{0,61}\w)?\.)+[^\W\d_][\w-]{1,62}(?![\w-]|\.\w)")
 
 # Перед доменом может стоять двоеточие ключа команды («/user:CONTOSO\ivanov»); обратная косая
-# бывает удвоена (журналы JSON).
+# бывает удвоена (журналы JSON). Имя входа может быть и кириллицей («CORP\иванов»).
 _DOMAIN_LOGIN = re.compile(
-    r"(?<![\w\\./-])(?P<dom>[A-Za-z][A-Za-z0-9-]{1,14})\\{1,2}(?P<login>[A-Za-z0-9_][\w.$-]{0,63})(?![\w\\])"
+    r"(?<![\w\\./-])(?P<dom>[A-Za-z][A-Za-z0-9-]{1,14})\\{1,2}(?P<login>\w[\w.$-]{0,63})(?![\w\\])"
 )
 _FILE_EXT = re.compile(
     r"\.(?:txt|log|docx?|xlsx?|pptx?|pdf|exe|dll|ps1|psm1|bat|cmd|ini|cfg|conf|xml|json|ya?ml|csv|zip|7z|rar"
@@ -46,15 +55,16 @@ _FILE_EXT = re.compile(
 )
 # Имя профиля из двух-трёх слов с пробелами берётся целиком, если за ним идёт разделитель пути,
 # кавычка, знак препинания перед пробелом или концом текста либо конец строки; иначе — до пробела,
-# а знак препинания в конце отрезается.
+# а знак препинания и кавычка в конце отрезаются. Дефис и апостроф между буквами — внутри слова
+# («Petrov-Vodkin», «O'Brien», «Il'ya»), апостроф перед буквой закрывающей кавычкой не считается.
 _PROFILE = re.compile(
     r"(?:\b[a-z]:\\{1,2}Users\\{1,2}|(?<![\w.\\])\\{1,2}Users\\{1,2}|(?<![\w.])/home/|(?<![\w.])/Users/)"
-    r"(?:(?P<spaced>[^\W\d_]+(?:-[^\W\d_]+)*(?: [^\W\d_]+(?:-[^\W\d_]+)*){1,2})"
-    r"(?=[\\/\"'`]|[.,;:!?)]+(?:\s|$)|[ \t]*(?:\r?\n|$))"
+    r"(?:(?P<spaced>[^\W\d_]+(?:[-'’][^\W\d_]+)*(?: [^\W\d_]+(?:[-'’][^\W\d_]+)*){1,2})"
+    r"(?=[\\/\"`]|['’](?![^\W\d_])|[.,;:!?)]+(?:\s|$)|[ \t]*(?:\r?\n|$))"
     r"|(?P<login>[^\\/\s:*?\"<>|]+))",
     re.IGNORECASE,
 )
-_TRAILING = ".,;:!?)"
+_TRAILING = ".,;:!?)'’"
 _SID = re.compile(r"(?<![\w-])S-1-5-21-\d+-\d+-\d+(?:-\d+)?(?![\w-])")
 # Число компонентов ограничено: без предела цепочка «CN=a,CN=a,…» без DC даёт квадратичный перебор.
 _DN = re.compile(
@@ -64,11 +74,18 @@ _DN = re.compile(
 )
 
 
+def _unpadded(address: str) -> str:
+    """«010.001.002.005» из таблиц и выгрузок — это 10.1.2.5: ipaddress нулей впереди не принимает.
+    Только если все четыре числа дополнены до трёх цифр: «01.02.03.04» — скорее номер, чем адрес."""
+    octets = address.split(".")
+    return ".".join(str(int(octet)) for octet in octets) if all(len(octet) == 3 for octet in octets) else address
+
+
 def _ipv4(text: str) -> Iterator[Span]:
     for m in _IPV4.finditer(text):
         address, _, prefix = m.group().partition("/")
         try:
-            ip = ipaddress.IPv4Address(address)
+            ip = ipaddress.IPv4Address(_unpadded(address))
         except ValueError:
             continue
         if not netmap.is_maskable(ip) or _VERSION_BEFORE.search(text[max(0, m.start() - 16):m.start()]):
@@ -82,7 +99,7 @@ def _ipv4(text: str) -> Iterator[Span]:
 
 def _ipv6(text: str) -> Iterator[Span]:
     for m in _IPV6.finditer(text):
-        candidate = m.group()
+        candidate = m.group("addr")
         if candidate.endswith(":") and not candidate.endswith("::"):
             candidate = candidate[:-1]      # двоеточие после адреса — знак препинания
         try:
@@ -90,7 +107,8 @@ def _ipv6(text: str) -> Iterator[Span]:
         except ValueError:
             continue
         if netmap.is_maskable(ip):
-            yield Span(m.start(), m.start() + len(candidate), EntityType.IP, name, validated=True)
+            start = m.start("addr")
+            yield Span(start, start + len(candidate), EntityType.IP, name, validated=True)
 
 
 def _mac(text: str) -> Iterator[Span]:
@@ -116,6 +134,14 @@ def well_known(value: str, ctx: DetectContext) -> bool:
     return any(".".join(parts[i:]) in listed for i in range(len(parts)))
 
 
+def _under_issued(value: str, ctx: DetectContext) -> bool:
+    """Имя под выданной чатом подменой домена («srv-db02.domain-1.example»): «example» в нём общеизвестно,
+    но части перед подменой вписал человек — это настоящие имена. Выданные части («host-1») и
+    общеизвестные («www») конвейер оставляет как есть (pipeline._outside)."""
+    parts = value.lower().split(".")
+    return len(parts) > 2 and ".".join(parts[-2:]) in ctx.issued_domains
+
+
 def _name_type(value: str) -> EntityType:
     left, registrable = hostmap.split_name(value)
     return EntityType.DOMAIN if registrable and not left else EntityType.HOST
@@ -139,7 +165,9 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
     for pattern in (_URL_HOST, _UNC_HOST, _PARAM_HOST):
         for m in pattern.finditer(text):
             value = _HOST_PREFIX.match(m.group("host")).group().rstrip(".")     # «…contoso.ru», «…ru,»
-            if not re.fullmatch(r"[\w.-]+", value) or _is_address(value) or well_known(value, ctx):
+            if not re.fullmatch(r"[\w.-]+", value) or _is_address(value):
+                continue
+            if well_known(value, ctx) and not _under_issued(value, ctx):
                 continue
             start = m.start("host")
             yield Span(start, start + len(value), _name_type(value), name)
@@ -148,7 +176,7 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
             yield Span(m.start("host"), m.end("host"), EntityType.HOST, name)
     for m in _DOTTED.finditer(text):
         value = m.group()
-        if not well_known(value, ctx) and _plausible(value, text, m.end(), ctx):
+        if _under_issued(value, ctx) or (not well_known(value, ctx) and _plausible(value, text, m.end(), ctx)):
             yield Span(m.start(), m.end(), _name_type(value), name)
 
 
@@ -164,6 +192,8 @@ def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:
             continue
         if not login or _FILE_EXT.search(login) or (login[0] in "ntr" and login[1:2].isupper()):
             continue        # путь к файлу или экранированный перевод строки, а не учётная запись
+        if len(login) == 1:
+            continue        # «DONE\\n», «\d» в шаблоне; написание из одной буквы скрывалось бы во всём чате
         yield Span(m.start("dom"), m.end("dom"), EntityType.DOMAIN, name)
         if login.lower() not in builtin:
             start = m.start("login")

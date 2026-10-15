@@ -3,7 +3,9 @@ import pytest
 from cleaner.core.detect import infra
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities import hostmap
-from cleaner.core.types import DictEntry, Settings
+from cleaner.core.pipeline import sanitize
+from cleaner.core.restore import restore
+from cleaner.core.types import ChatState, DictEntry, Settings
 from cleaner.core.types import EntityType as T
 
 CTX = DetectContext(Settings())
@@ -68,6 +70,58 @@ def test_code_and_file_names_are_not_hosts():
     assert values(text) == set()
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "git config --global user.email", "const el = e.target;", "systemctl isolate multi-user.target",
+        "настройки в application.properties и log4j.properties", "ключ ~/.ssh/id_rsa.pub", "import java.io.*;",
+    ],
+)
+def test_code_names_ending_in_a_top_level_domain_are_not_domains(text):
+    """FINDINGS P3 «Detection: false positives that damage the text, and smaller recall gaps»: домены из кода."""
+    assert values(text) == set()
+
+
+def test_real_names_with_the_same_endings_are_still_found():
+    text = "Узлы srv01.corp.local, mail.contoso.ru, portal.fabrikam.org, api.contoso.io; домен contoso.io"
+    assert values(text) == {"srv01.corp.local", "mail.contoso.ru", "portal.fabrikam.org", "api.contoso.io", "contoso.io"}
+    assert values(r"https://portal.contoso.email/app, \\fs01.contoso.pub\share") == {
+        "portal.contoso.email", "fs01.contoso.pub",
+    }
+
+
+@pytest.mark.parametrize("text", [r"dir /s C:\Temp", r"xcopy /S D:\src", "dir /s c:"])
+def test_drive_letter_after_a_switch_is_not_a_host(text):
+    assert values(text) == set()
+
+
+def test_host_after_a_server_switch_is_still_found():
+    assert values("schtasks /S srv01 /query, systeminfo /s SRV02") == {"srv01", "SRV02"}
+
+
+def test_zero_padded_address_is_found():
+    result = found("узлы 010.001.002.005 и 192.168.001.010")
+    assert {(T.IP, "010.001.002.005"), (T.IP, "192.168.001.010")} <= result
+    assert values("петля 127.000.000.001, версия 001.002.003.004, номер 01.02.03.04") == set()
+
+
+def test_zero_padded_address_is_masked_and_restored():
+    state = ChatState(chat_id="padded", net_key=bytes(32))
+    result = sanitize(state, "узел 010.001.002.005", Settings())
+    assert "010.001.002.005" not in result.sanitized
+    assert restore(state, result.sanitized, Settings()).text == "узел 010.001.002.005"
+
+
+def test_lowercase_domain_known_from_an_earlier_text():
+    ctx = DetectContext(Settings(), known=(("CORP", T.DOMAIN),))
+    assert (T.ACCOUNT, "petrov") in found(r"вход corp\petrov", ctx)
+
+
+def test_cyrillic_login():
+    assert accounts(r"вход CORP\иванов, профиль C:\Users\петров\Desktop") == {"иванов", "петров"}
+    assert values(r"ERROR\nОшибка доступа, папка отчёты\иванов") == set()
+
+
 def test_well_known_and_never_listed_names_stay():
     ctx = DetectContext(Settings(never=frozenset({"partner.org"})))
     text = "Скачайте с download.microsoft.com, зеркало files.partner.org, наш сайт contoso.ru"
@@ -120,6 +174,33 @@ def test_ipv6_address_followed_by_a_colon():
     assert (T.IP, "2a00:1450:4010::65") in found("Адрес 2a00:1450:4010::65: не отвечает")
 
 
+@pytest.mark.parametrize(
+    "text, address",
+    [
+        ("Source:f54a:d0a2:e874:66d7:ad66:a1be:9367:6a02.", "f54a:d0a2:e874:66d7:ad66:a1be:9367:6a02"),
+        ("IPv6:2a00:1450:4010::65", "2a00:1450:4010::65"),
+        ("src:[2a00:1450:4010::65]:443", "2a00:1450:4010::65"),
+        ("Адрес:2a00:1450:4010::65:", "2a00:1450:4010::65"),
+    ],
+)
+def test_ipv6_right_after_a_label_and_a_colon(text, address):
+    """FINDINGS P3 «Detection: valid numbers in spaced notations are missed on the open sets»: полный адрес IPv6
+    сразу после «Source:» не находился — двоеточие перед адресом считалось частью другой записи."""
+    assert found(text) == {(T.IP, address)}
+
+
+def test_colon_chains_after_a_label_are_not_addresses():
+    assert values("Время:12:30:45, MAC:00:1A:2B:3C:4D:5E, ключ:1:2:3:4:5:6:7:8:9, ab:cd:ef:1:2:3:4:5:6") == set()
+
+
+def test_ipv6_after_a_label_is_masked_and_restored():
+    state = ChatState(chat_id="ipv6", net_key=bytes(32))
+    text = "Source:f54a:d0a2:e874:66d7:ad66:a1be:9367:6a02."
+    result = sanitize(state, text, Settings())
+    assert "f54a" not in result.sanitized
+    assert restore(state, result.sanitized, Settings()).text == text
+
+
 def test_profile_name_with_a_space_and_with_trailing_punctuation():
     """Обзор 1А, P1: имя с пробелом целиком, точка после имени — не часть имени."""
     assert accounts(r"Профиль C:\Users\Иван Петров\Desktop") == {"Иван Петров"}
@@ -170,13 +251,72 @@ def test_hyphenated_spaced_profile_name_is_taken_whole():
     assert accounts(r"C:\Users\Ivan Petrov-Vodkin\Documents") == {"Ivan Petrov-Vodkin"}
 
 
+@pytest.mark.parametrize(
+    "text, name",
+    [
+        (r"C:\Users\Dan O'Brien\Desktop", "Dan O'Brien"),
+        (r"C:\Users\Il'ya Petrov\Desktop", "Il'ya Petrov"),
+        ("C:\\Users\\Dan O\u2019Brien\\Desktop", "Dan O\u2019Brien"),
+        (r"'C:\Users\Dan O'Brien'", "Dan O'Brien"),
+        (r"C:\Users\o'brien\Desktop", "o'brien"),
+        ("'/home/ivanov'", "ivanov"),
+        ("\u2018/home/ivan petrov\u2019", "ivan petrov"),
+    ],
+)
+def test_apostrophe_inside_a_profile_name_and_a_quote_after_it(text, name):
+    """FINDINGS P3 «Profile names with apostrophes are split»: апостроф внутри слова — часть имени,
+    кавычка после имени — нет."""
+    assert accounts(text) == {name}
+
+
+def test_profile_name_with_an_apostrophe_followed_by_prose_is_one_word():
+    assert accounts(r"профиль C:\Users\Dan O'Brien лежит на диске") == {"Dan"}
+
+
 @pytest.mark.parametrize("domain", ["SA", "APP", "USER", "GIT"])
 def test_domain_login_is_found_whatever_the_domain_name(domain):
     """Обзор партии P1: общий список стандартных учётных записей прятал «SA\petrov»."""
     assert accounts(f"учётка {domain}\petrov") == {"petrov"}
 
 
+@pytest.mark.parametrize(
+    "text", ['{"msg": "Backup DONE\\\\n"}', r"Backup DONE\n", r"ERROR\t", r"FAILED\\r", r'"ID\d+"', r"CONTOSO\i"],
+)
+def test_one_letter_after_a_backslash_is_not_a_login(text):
+    """FINDINGS P2 «Detection: false SECRET, PHONE, CARD and login hits that damage code and lists»: «DONE\\n»
+    становился учётной записью «n», и потом каждое «n» в тексте заменялось."""
+    assert values(text) == set()
+    ctx = DetectContext(Settings(), known=(("contoso", T.DOMAIN),))
+    assert T.ACCOUNT not in {type_ for type_, _ in found(r"вход contoso\n", ctx)}
+
+
+def test_short_login_after_a_domain_is_still_found():
+    assert accounts(r"вход CONTOSO\ab, CONTOSO\nikolaev, ERROR\tester") == {"ab", "nikolaev", "tester"}
+
+
 @pytest.mark.parametrize("closer", ["»", "”", "**", "}", "…"])
 def test_host_after_a_url_login_is_found_before_any_closer(closer):
     text = f"«ssh://ivanov@srv-db01.corp.contoso.ru{closer} дальше"
     assert (T.HOST, "srv-db01.corp.contoso.ru") in found(text), text
+
+
+def test_name_under_an_issued_surrogate_domain_is_found():
+    """FINDINGS P2 «Detection: a real host name under an issued surrogate domain is not found»."""
+    ctx = DetectContext(Settings(), issued_domains=frozenset({"domain-1.example"}))
+    for text in (
+        "узел srv-db02.domain-1.example.", "https://SRV-DB02.DOMAIN-1.EXAMPLE/app", r"\\srv-db02.domain-1.example\c$",
+    ):
+        assert {type_ for type_, _ in found(text, ctx)} == {T.HOST}, text
+    assert values("узел srv-db02.domain-1.example") == set()        # подмену не выдавали: имя IANA
+    assert values("узел srv-db02.domain-2.example, домен domain-1.example", ctx) == set()
+
+
+def test_real_host_typed_under_an_issued_domain_is_masked_and_restored():
+    state = ChatState(chat_id="issued", net_key=bytes(32))
+    assert sanitize(state, "Домен contoso.ru", Settings()).sanitized == "Домен domain-1.example"
+    result = sanitize(state, "Узел srv-db02.domain-1.example, почта mail.domain-1.example", Settings())
+    assert result.sanitized == "Узел host-1.domain-1.example, почта mail.domain-1.example"
+    assert restore(state, result.sanitized, Settings()).text == "Узел srv-db02.contoso.ru, почта mail.contoso.ru"
+    again = "Узел host-1.domain-1.example"          # выданная часть перед подменой — та же подмена
+    assert sanitize(state, again, Settings()).sanitized == again
+    assert len(state.entities) == 2
