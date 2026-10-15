@@ -422,6 +422,35 @@ def test_selection_inside_a_name_leaves_the_issued_replacement_next_to_it(state,
     assert restore(state, expected, settings).text == text.replace("host-1", "srv01")
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("почта ivanov@host-1.fabrikam.ru", "почта <ACCOUNT_1>@host-1.<TERM_1>"),
+    ("почта postmaster@srv-db02.host-1.fabrikam.ru", "почта postmaster@host-2.host-1.<TERM_1>"),
+    ("почта ivanov@srv02.fabrikam.ru", "почта <TERM_1>"),
+], ids=["part-before", "role-mailbox", "no-replacement"])
+def test_selection_inside_an_email_leaves_the_issued_replacement_next_to_it(state, settings, text, expected):
+    """Обзор пакета, Minor: выделение внутри имени узла уже не поглощало выданную в нём замену, а внутри адреса e-mail —
+    поглощало: <TERM_1> восстанавливался в «ivanov@host-1.fabrikam.ru», с подменой вместо srv01. Адрес делится, как
+    имя: имя входа — ACCOUNT, части имени — как рядом с заменой (5.10), задетые правилом — его тип."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    ops.mask(state, "fabrikam", T.TERM)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert restore(state, expected, settings).text == text.replace("host-1", "srv01")
+
+
+def test_email_with_a_strict_part_next_to_a_replacement_is_split_and_blocked(state):
+    """Та же находка вместе с политикой части: адрес, который поглотила часть со строже политикой, рядом с выданной
+    заменой делится так же, и часть блокирует выдачу своей меткой."""
+    settings = Settings(policies=default_policies() | {T.SECRET: Policy.BLOCK})
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.SECRET)
+    result = sanitize(state, "почта ivanov@srv01.domain-1.example", settings)
+    assert result.sanitized == "почта <ACCOUNT_1>@<SECRET_1>.domain-1.example"
+    assert [state.entities[s.entity_id].type for s in result.blocked] == [T.SECRET]
+    assert restore(state, result.sanitized, settings).text == "почта ivanov@srv01.contoso.ru"
+
+
 def test_email_with_a_retyped_host_part_stays_an_email(state, settings):
     """FINDINGS «Retyping a host name part: what it leaves» (2): правило смены типа части имени поглощало адрес e-mail с
     этой частью — он становился меткой TERM. Правило на целой части имени после «@» адрес не поглощает (5.7, шаг 4)."""
@@ -435,6 +464,23 @@ def test_email_with_a_retyped_host_part_stays_an_email(state, settings):
     assert sanitize(state, "почта ivanov@srv01.contoso.ru", settings).sanitized == "почта <TERM_2>"
 
 
+@pytest.mark.parametrize("policy", [Policy.BLOCK, Policy.HIDE])
+def test_email_keeps_the_stricter_policy_of_a_retyped_host_part(state, policy):
+    """Обзор пакета, Important: после смены типа srv01 на SECRET адрес ivanov@srv01.contoso.ru оставался <EMAIL_1> —
+    выдача не блокировалась, а при «скрывать без восстановления» метка восстанавливалась в адрес вместе с srv01. Часть
+    со строже политикой поглощает адрес, как до пакета; у имени узла политика части и так держит всё имя."""
+    settings = Settings(policies=default_policies() | {T.SECRET: policy})
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.SECRET)
+    result = sanitize(state, "почта ivanov@srv01.contoso.ru", settings)
+    assert result.sanitized == "почта <SECRET_1>"
+    assert [state.entities[s.entity_id].type for s in result.blocked] == ([T.SECRET] if policy is Policy.BLOCK else [])
+    restored = restore(state, result.sanitized, settings)
+    assert restored.text == ("почта ivanov@srv01.contoso.ru" if policy is Policy.BLOCK else "почта <SECRET_1>")
+    host = sanitize(state, "узел srv01.contoso.ru", settings)     # у имени узла — так же
+    assert host.sanitized == "узел <SECRET_2>.domain-1.example" and host.deliverable is (policy is Policy.HIDE)
+
+
 @pytest.mark.parametrize("text, expected", [
     ("почта ivanov@<TERM_1>.northwind.ru", "почта <ACCOUNT_1>@<TERM_1>.domain-3.example"),
     ("почта ivanov@host-1.<ORG_1>", "почта <ACCOUNT_1>@host-1.<ORG_1>"),
@@ -443,7 +489,11 @@ def test_email_with_a_retyped_host_part_stays_an_email(state, settings):
     ("звонил <PERSON_1>, ivanov@<PERSON_1>", "звонил <PERSON_1>, ivanov@<PERSON_1>"),
     ("почта ivanov@srv02.<ORG_1>", "почта <ACCOUNT_1>@host-2.<ORG_1>"),
     ("почта ivanov@srv03.domain-1.example", "почта <ACCOUNT_1>@host-3.domain-1.example"),
-], ids=["label-and-name", "name-and-label", "domain-label", "role-mailbox", "not-a-domain", "part-and-label", "part-and-domain"])
+    ("почта ivanov@contoso.ru.<TERM_1>", "почта <EMAIL_1>.<TERM_1>"),
+], ids=[
+    "label-and-name", "name-and-label", "domain-label", "role-mailbox", "not-a-domain", "part-and-label",
+    "part-and-domain", "label-after",
+])
 def test_email_with_a_label_in_its_domain_is_found(state, settings, text, expected):
     """FINDINGS «Retyping a host name part: what it leaves» (2): правило e-mail не брало метку в домене, и в
     «ivanov@<TERM_1>.fabrikam.ru» оставались открытыми и логин, и домен. Метка, выданная домену в имени (<ORG_1> из
@@ -457,6 +507,21 @@ def test_email_with_a_label_in_its_domain_is_found(state, settings, text, expect
     result = sanitize(state, text, settings)
     assert result.sanitized == expected and result.deliverable
     assert sanitize(state, expected, settings).sanitized == expected
+
+
+def test_chain_of_overlapping_emails_is_hidden_but_not_searched_as_a_whole(state, settings):
+    """Наблюдение раунда имён узлов, P2: в «a@b.c.» * N адреса пересекаются (следующий начинается в домене
+    предыдущего), и второй проход сливал найденные написания в один фрагмент длиной в текст. Он становился искомым
+    написанием, и поиск известных значений разрезал его с каждого слова: 160 КБ — 2,6 с, 500 КБ — 12 с. Искомы сами
+    адреса; цепочка скрыта одной меткой и восстанавливается целиком."""
+    text = "a@b.c." * 50
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "<EMAIL_3>@b.c." and result.deliverable
+    assert sorted(form for e in state.entities.values() for form in e.forms) == ["a@b.c.a", "b.c.a@b.c.a"]
+    assert sanitize(state, text, settings).sanitized == result.sanitized
+    assert restore(state, result.sanitized, settings).text == text
+    sanitize(state, "почта ivanov@contoso.ru", settings)      # адрес с одним «@» — искомое написание, как прежде
+    assert any("ivanov@contoso.ru" in e.forms for e in state.entities.values())
 
 
 def test_email_without_an_at_sign_next_to_a_replacement_does_not_stop_sanitizing(state, settings):

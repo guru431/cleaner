@@ -39,6 +39,10 @@ class Policy(str, Enum):
     OFF = "off"        # не искать
 
 
+# Строгость политики: политика части имени узла или адреса e-mail держит целое, если она строже (5.7, 5.10).
+STRICTNESS = {Policy.BLOCK: 2, Policy.HIDE: 1}         # прочие политики — 0
+
+
 def default_policies() -> dict[EntityType, Policy]:
     policies = {type_: Policy.MASK for type_ in EntityType}
     policies[EntityType.SECRET] = Policy.HIDE

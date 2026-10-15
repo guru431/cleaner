@@ -278,6 +278,13 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         local, _, domain = m.group().rpartition("@")
         if "." not in domain and domain.lower() not in ctx.issued_domains:
             continue        # «ivanov@<PERSON_1>»: метка не домена
+        # Метка в конце имени с точкой — часть адреса, только если выдана домену в имени: «ivanov@contoso.ru.<TERM_1>» —
+        # адрес и метка за ним (точка без пробела), а не имя с меткой части. Без имени с точкой перед ней адрес — как был.
+        parts = domain.split(".")
+        while len(parts) > 2 and _LABEL.fullmatch(parts[-1]) and parts[-1].lower() not in ctx.issued_domains:
+            parts.pop()
+        domain = ".".join(parts)
+        end = m.start() + len(local) + 1 + len(domain)
         url = _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()])
         if url and not _NOT_USERINFO.search(url.group("user") + local):
             continue        # пользователь адреса, а не e-mail: вход — правило _URL_LOGIN ниже
@@ -286,7 +293,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             if local.lower() not in skip:
                 add(m.start(), m.start() + len(local), EntityType.ACCOUNT)
             continue
-        add(m.start(), m.end(), EntityType.EMAIL, True)
+        add(m.start(), end, EntityType.EMAIL, True)
     for m in _URL_LOGIN.finditer(text):
         login = m.group("login")
         if login and login.lower() not in skip:

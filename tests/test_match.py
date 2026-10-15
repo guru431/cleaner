@@ -59,6 +59,17 @@ def test_accents_that_are_part_of_a_letter_still_count():
     assert hits(text, ("Мой", "letters", 2)) == [("Мои\u0306", 2)]
 
 
+def test_long_spelling_is_found_like_a_short_one():
+    """Написание длиннее 64 знаков ищется по началу и сверяется целиком: те же границы, регистр, «ё» и пробелы, что у
+    короткого, и общее начало у разных написаний."""
+    name = "ООО «Научно-производственное объединение Северная звезда» филиал Ёлкино"
+    text = f"{name.upper()},  {name.replace(' ', chr(10))} и {name}ские, {name[:-1]}"
+    assert len(name) > 64
+    found = hits(text, (name, "letters", 1), (name.replace("Ёлкино", "Ёлкино-2"), "letters", 2))
+    assert found == sorted([(name.upper(), 1), (name.replace(" ", "\n"), 1)])
+    assert hits("srv-" + "a" * 70 + "-02 и x" + "srv-" + "a" * 70, ("srv-" + "a" * 70, "strict", 1)) == []
+
+
 def test_yo_and_decomposed_letters_match_their_plain_forms():
     """Обзор 1А, P1: «ё» и «е» — одна буква; «ё» из двух знаков (NFD) — тоже."""
     text = "Семенов, Семёнов и СЕМЁНОВ"

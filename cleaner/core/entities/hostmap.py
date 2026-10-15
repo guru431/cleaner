@@ -4,6 +4,8 @@ from __future__ import annotations
 import tldextract
 
 INTERNAL_SUFFIXES = ("local", "lan", "corp", "internal", "intra", "home", "localdomain", "ad")
+# Предел имени DNS. Имя длиннее целиком не записывается (resolve) и в деревья поиска не берётся (surrogates, restore).
+MAX_NAME = 253
 
 # Только встроенная копия списка публичных суффиксов: в сеть библиотека не ходит.
 _extract = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, extra_suffixes=INTERNAL_SUFFIXES)

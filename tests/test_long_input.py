@@ -12,9 +12,10 @@ from cleaner.core.detect import rules
 from cleaner.core.detect.base import DetectContext, load_builtin
 from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities.resolve import Resolver
+from cleaner.core.match import find_forms
 from cleaner.core.pipeline import DETECTORS, sanitize
 from cleaner.core.restore import StreamRestorer, restore
-from cleaner.core.types import ChatState, Settings
+from cleaner.core.types import ChatState, Settings, Surrogate
 from cleaner.core.types import EntityType as T
 
 
@@ -57,8 +58,8 @@ from cleaner.core.types import EntityType as T
         "<ORG_1>." * 20000, "a.<ORG_1>." * 10000, "<ORG_1>a." * 15000, "<ORG_1" * 20000, "<ORG_1>." + "a.b." * 25000,
         # Цепочка частей через точку, которая кончается не однобуквенной частью: её суффиксы сверяются со списками.
         "abc.def." * 20000,
-        # Адрес e-mail с меткой в домене.
-        "a@<ORG_1>." * 15000, "a@<ORG_1>.<ORG_1" * 10000,
+        # Адрес e-mail с меткой в домене; метки не домена после имени отрезаются.
+        "a@<ORG_1>." * 15000, "a@<ORG_1>.<ORG_1" * 10000, "a@b.c" + ".<ORG_1>" * 10000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -75,7 +76,7 @@ from cleaner.core.types import EntityType as T
         "pem_header_lines", "pem_nested_headers", "pem_long_header_line", "pem_spaced_runs", "pem_spaced_hyphens",
         "putty_headers", "putty_fields", "putty_names", "putty_body", "gitlab_prefixes",
         "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail", "dotted_words", "email_labels",
-        "email_labels_open",
+        "email_labels_open", "email_labels_after",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
@@ -87,13 +88,18 @@ def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
 
 
 @pytest.mark.parametrize(
-    "text", ["abc.def." * 2500, "abc.def." * 2500 + "ru", "srv-01." * 2500 + "contoso.ru", "a." * 10000 + "ru"],
-    ids=["words", "words_suffix", "parts_suffix", "letters_suffix"],
+    "text",
+    [
+        "abc.def." * 2500, "abc.def." * 2500 + "ru", "srv-01." * 2500 + "contoso.ru", "a." * 10000 + "ru",
+        "a@b.c." * 3000,
+    ],
+    ids=["words", "words_suffix", "parts_suffix", "letters_suffix", "email_chain"],
 )
 def test_sanitize_again_and_restore_are_fast_on_a_long_dotted_run(text):
     """FINDINGS P2 «Layer 3 takes quadratic time on a long dotted run»: суффиксы цепочки сверялись со списками
     квадратичное время, а цепочка с настоящим суффиксом становилась одним именем из тысяч частей — и поиск замен в
-    следующем тексте и в ответе перебирал цепочки частей до его длины."""
+    следующем тексте и в ответе перебирал цепочки частей до его длины. Цепочка пересекающихся адресов e-mail
+    становилась искомым написанием длиной в текст (test_pipeline, цепочка адресов)."""
     state = ChatState(chat_id="long", net_key=bytes(32))
     for step in ("sanitize", "again", "restore", "link"):
         started = time.perf_counter()
@@ -267,3 +273,43 @@ def test_restore_is_fast_on_links_written_with_references_in_prose(text):
     started = time.perf_counter()
     restore(state, text + "<EMAIL_1>", Settings())
     assert time.perf_counter() - started < 0.5
+
+
+def test_long_known_value_is_not_sliced_at_every_word():
+    """Найдено в раунде имён узлов: длинное написание («a@bbb…b.ru» — слой 1 длину адреса не ограничивает) поиск
+    известных значений вырезал из текста с каждого вхождения его первого слова — 180 КБ за 0,8 с, квадратично.
+    Длинное написание ищется по началу и сверяется с текстом до первого несовпавшего знака."""
+    form = "a@" + "b" * 60000 + ".ru"
+    started = time.perf_counter()
+    assert len(find_forms(form + " a" * 60000, [(form, "letters", None)])) == 1
+    assert time.perf_counter() - started < 0.3
+
+
+def test_link_host_check_walks_a_tree_of_parts():
+    """Наблюдение раунда имён узлов, P3: проверка хоста ссылки собирала все цепочки частей до числа частей самой длинной
+    записанной подмены — после имени из 125 частей хост из 20 000 частей проверялся 2,2 с. Части проходятся по дереву,
+    как в поиске замен (surrogates.Finder)."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "узел " + "a." * 125 + "ru", Settings())
+    started = time.perf_counter()
+    restore(state, "https://" + "host-1." * 5000 + "x/", Settings())
+    assert time.perf_counter() - started < 0.3
+
+
+def test_names_longer_than_a_dns_name_kept_by_older_chats_are_found_by_parts():
+    """Чаты, сохранённые до 15.10.2026, хранят целиком и имена длиннее 253 знаков: поиск замен и проверка хоста ссылки
+    проходили бы такое имя по дереву на всю его глубину с каждой части. В деревья оно не берётся и находится, и
+    восстанавливается по частям (6.4)."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    name = "a." * 3000 + "ru"
+    whole = sanitize(state, "узел " + name, Settings()).sanitized.removeprefix("узел ")
+    state.surrogates[whole] = Surrogate(state.surrogates["host-1"].entity_id, name, "host")    # как в старом чате
+    assert restore(state, whole, Settings()).text == name
+    assert sanitize(state, whole, Settings()).sanitized == whole
+    for step in ("sanitize", "restore"):
+        started = time.perf_counter()
+        if step == "sanitize":
+            sanitize(state, "host-1." * 3000 + "x", Settings())
+        else:
+            restore(state, "https://" + "host-1." * 3000 + "x/", Settings())
+        assert time.perf_counter() - started < 0.3, step

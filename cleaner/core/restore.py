@@ -13,7 +13,7 @@ from html.entities import html5 as _ENTITIES
 
 from cleaner.core import surrogates
 from cleaner.core.detect.base import load_builtin
-from cleaner.core.entities import labels, macsid, netmap
+from cleaner.core.entities import hostmap, labels, macsid, netmap
 from cleaner.core.entities.names import FIXED_RANK
 from cleaner.core.types import ChatState, EntityType, Policy, Settings, Surrogate
 
@@ -204,6 +204,10 @@ _PROSE_START = re.compile(r"https?://|www\.", re.IGNORECASE)
 # попытка кончается на ближайшем «<».
 _OUTSIDE_TAGS = re.compile(r"<[^<>\"']*>([^<\"']*)")
 _HOST_TYPES = frozenset({EntityType.IP, EntityType.HOST, EntityType.DOMAIN})
+_DOMAIN_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
+# Знаки ASCII в конце хоста, которых нет в доменах верхнего уровня и которые браузер не превращает в букву, цифру или
+# точку: без «-», «.» и «%» («%2e» браузер раскрывает в точку до разбора хоста). «/?#\:@» хост и так кончают.
+_UNRESOLVABLE_TAIL = re.compile(r"(?<=[^\W_])[!\"$&'()*+,;<=>^_`{|}~]+$")
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 _MAC = re.compile(
     r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
@@ -293,19 +297,40 @@ class _Restorer:
         self.issued = set(state.issued.values())      # свои замены сущностей; имени узла целиком среди них нет
         self.fake_nets: set[int] = set()
         self.macs = {}
-        self.own_hosts = {
+        # Имя длиннее 253 знаков чаты, сохранённые до 15.10.2026, хранят целиком; его части выданы и сами, и оно
+        # проверяется по ним (6.4) — иначе дерево ниже было бы глубиной в тысячи частей.
+        own_hosts = {
             text.lower() for text, surrogate in state.surrogates.items()
-            if surrogate.kind in ("host", "ip", "ip6")
+            if surrogate.kind in ("host", "ip", "ip6") and len(surrogate.original or "") <= hostmap.MAX_NAME
         }
         # Метка, выданная адресу или имени узла вместо подмены (совпадение адресов, значение не того вида),
-        # в хосте ссылки ведёт на наш же узел: «http://<IP_1>:8080/». Модель пишет её и без скобок.
+        # в хосте ссылки ведёт на наш же узел: «http://<IP_1>:8080/». Модель пишет её и без скобок. Метка, значение
+        # которой — доменное имя (домен в имени, которому дали другой тип, — <ORG_1> из host-1.<ORG_1>; кусок имени,
+        # который задело выделение, — <TERM_1> из host-1.<TERM_1>), — наш домен, как domain-N.example: после
+        # восстановления это имя из текста пользователя.
+        self.label_domains: set[str] = set()
         for text, surrogate in state.surrogates.items():
-            if surrogate.kind == "label" and state.entities[surrogate.entity_id].type in _HOST_TYPES:
+            if surrogate.kind != "label":
+                continue
+            entity = state.entities[surrogate.entity_id]
+            domain = _DOMAIN_NAME.fullmatch(entity.restore_value) is not None and hostmap.has_known_suffix(
+                entity.restore_value,
+            )
+            if domain or entity.type in _HOST_TYPES:
                 bare = text.strip("<>[]").lower()
-                self.own_hosts |= {bare, f"<{bare}>", f"&lt;{bare}&gt;"}
-        # Больше частей, чем в самой длинной выданной подмене, одна цепочка не займёт: без этого
-        # предела хост «a.a.a…» из тысяч частей проверялся бы квадратичное время.
-        self.depth = max((text.count(".") + 1 for text in self.own_hosts), default=0)
+                variants = {bare, f"<{bare}>", f"&lt;{bare}&gt;"}
+                own_hosts |= variants
+                if domain:
+                    self.label_domains |= variants
+        # Наши хосты — деревом частей, как в поиске замен (surrogates.Finder); None — хост кончается здесь. Цепочка
+        # частей хоста ссылки проходится, пока она — начало нашего: перебор всех цепочек до числа частей самого
+        # длинного занимал на хосте из тысяч частей секунды.
+        self.own_hosts: dict[str | None, dict] = {}
+        for host in own_hosts:
+            node = self.own_hosts
+            for part in host.split("."):
+                node = node.setdefault(part, {})
+            node[None] = {}
         self.domains = {fake.lower() for slot, fake in state.issued.items() if slot.endswith("|dns")}
         self.generic = load_builtin().generic_labels
         for text, surrogate in state.surrogates.items():
@@ -341,23 +366,38 @@ class _Restorer:
     def _host_is_ours(self, host: str) -> bool:
         """Хост целиком — выданная подмена или собран только из её частей (host-1.sub-2.domain-1.example).
 
-        Служебные части впереди («www», «mail» — generic_labels.txt) имени, которое кончается выданным доменом, его
-        чужим не делают: «www.domain-1.example» пишут и пользователь, и модель, а после восстановления это узел того
-        же домена организации. Только впереди и только перед выданным доменом: «domain-1.example.www» и
-        «www.host-1» — уже не имена под нашим доменом, а неизвестная часть («www.evil.domain-1.example») — чужая.
+        Служебные части впереди («www», «mail» — generic_labels.txt) имени, которое кончается выданным доменом или
+        меткой домена (www.host-1.<ORG_1>), его чужим не делают: «www.domain-1.example» пишут и пользователь, и модель,
+        а после восстановления это узел того же домена организации. Только впереди и только перед нашим доменом:
+        «domain-1.example.www» и «www.host-1» — уже не имена под нашим доменом, а неизвестная часть
+        («www.evil.domain-1.example») — чужая.
+
+        Знаки препинания в конце последней части («$» регулярного выражения: remark-gfm делает из
+        «^www\\.host-1\\.domain-1\\.example$» ссылку с хостом «www.host-1.domain-1.example$») к чужому узлу не ведут:
+        в доменах верхнего уровня их не бывает, и такой хост в DNS не найдётся. Наш он, если наше имя перед ними; метка
+        («<IP_1>», «&lt;HOST_1&gt;») сама кончается такими знаками и проверяется как написана.
         """
-        labels_ = host.strip("[]").lower().split(".")
+        host = host.strip("[]")
+        bare = _UNRESOLVABLE_TAIL.sub("", host)
+        return self._reaches_end(host.lower().split(".")) or (
+            bare != host and self._reaches_end(bare.lower().split("."))
+        )
+
+    def _reaches_end(self, labels_: list[str]) -> bool:
         reachable = {0}
-        if ".".join(labels_[-2:]) in self.domains:
-            for position, label in enumerate(labels_[:-2]):
+        domain = 2 if ".".join(labels_[-2:]) in self.domains else 1 if labels_[-1] in self.label_domains else 0
+        if domain:
+            for position, label in enumerate(labels_[:-domain]):
                 if label not in self.generic:
                     break
                 reachable.add(position + 1)
         for first in range(len(labels_)):
             if first not in reachable:
                 continue
-            for last in range(first + 1, min(len(labels_), first + self.depth) + 1):
-                if ".".join(labels_[first:last]) in self.own_hosts:
+            node, last = self.own_hosts, first
+            while last < len(labels_) and (node := node.get(labels_[last])) is not None:
+                last += 1
+                if None in node:
                     reachable.add(last)
         return len(labels_) in reachable
 

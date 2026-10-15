@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities import hostmap, netmap
-from cleaner.core.types import EntityType, Policy, Span
+from cleaner.core.types import STRICTNESS, EntityType, Policy, Span
 
 
 @dataclass(frozen=True)
@@ -17,8 +17,10 @@ class MergedSpan:
     type: EntityType
     sources: tuple[str, ...]
     searchable: bool = True    # Span.searchable
-    # Где во фрагменте лежат правила пользователя, поглотившие имя (5.7): выданную замену в нём они не трогают (5.10).
+    # Где во фрагменте лежат правила пользователя, поглотившие имя или адрес e-mail (5.7): выданную замену в нём они не
+    # трогают (5.10). mail — поглощён адрес: части вне правил — части адреса (имя входа — ACCOUNT).
     ruled: tuple[tuple[int, int], ...] = ()
+    mail: bool = False
     # Фрагмент имени стоит через точку после выданной замены или метки и перед ней (5.10): это часть имени, а не имя.
     follows: bool = False
     precedes: bool = False
@@ -86,15 +88,22 @@ _DOTTED_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
 _NAME_TYPES = (EntityType.HOST, EntityType.DOMAIN)
 
 
-def _name_kept(text: str, group: list[Span], start: int, end: int) -> EntityType | None:
+def _name_kept(
+    text: str, group: list[Span], start: int, end: int, policies: Mapping[EntityType, Policy],
+) -> EntityType | None:
     """Тип имени узла, домена или адреса e-mail, если правила пользователя в нём легли на целые части имени (раздел 6.4:
     каждая часть слева и домен; у адреса — имени после «@»). Такое правило имя не поглощает: часть получит его тип при
-    подмене (resolve._name), адрес — свою метку, в которой скрыта и часть."""
+    подмене (resolve._name), адрес — свою метку, в которой скрыта и часть. Правило типа со строже политикой, чем у
+    адреса, адрес поглощает: метка адреса не блокировала бы выдачу и восстанавливалась бы целиком (у имени узла политику
+    части держит resolve._name)."""
     name = next((
         s for s in group
         if s.source != "manual" and s.type in (*_NAME_TYPES, EntityType.EMAIL) and (s.start, s.end) == (start, end)
     ), None)
     if name is not None and name.type is EntityType.EMAIL:
+        own = STRICTNESS.get(policies.get(EntityType.EMAIL), 0)
+        if any(STRICTNESS.get(policies.get(s.type), 0) > own for s in group if s.source == "manual"):
+            return None
         start = text.rfind("@", start, end) + 1
     if name is None or not _DOTTED_NAME.fullmatch(text, start, end):
         return None
@@ -139,12 +148,19 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
                     opened = netmap.addresses(ctx.settings.never | ctx.unmask)
                 if netmap.canonical_forms(value) & opened:
                     continue
-        kept = senior.source == "manual" and _name_kept(text, group, start, end)
+        kept = senior.source == "manual" and _name_kept(text, group, start, end, policies)
         type_ = kept or senior.type
         # Искомым значение делает любая находка того же типа: слово после «Пароль —», которое нашли и словарём чата.
+        # Цепочка пересекающихся адресов e-mail («a@b.c.a@b.c.a…»: каждый следующий начинается в домене предыдущего) —
+        # не адрес: искомы сами адреса, слой 1 нашёл их по отдельности, а цепочку длиной в текст искали бы с каждого
+        # слова текста (match.find_forms) — квадратичное время.
         searchable = any(s.searchable for s in group if s.type is senior.type)
-        ruled = ()
-        if senior.source == "manual" and not kept and any(s.source != "manual" and s.type in _NAME_TYPES for s in group):
+        if type_ is EntityType.EMAIL and text.count("@", start, end) > 1:
+            searchable = False
+        ruled, mail = (), False
+        records = {s.type for s in group if s.source != "manual"} & {*_NAME_TYPES, EntityType.EMAIL}
+        if senior.source == "manual" and not kept and records:
             ruled = tuple((s.start, s.end) for s in group if s.source == "manual")
-        merged.append(MergedSpan(start, end, type_, sources, searchable, ruled))
+            mail = EntityType.EMAIL in records
+        merged.append(MergedSpan(start, end, type_, sources, searchable, ruled, mail))
     return _join_names(text, merged)

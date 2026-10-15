@@ -8,7 +8,7 @@ from __future__ import annotations
 import ipaddress
 import re
 
-from cleaner.core.entities import macsid
+from cleaner.core.entities import hostmap, macsid
 from cleaner.core.types import ChatState
 
 _LABEL = re.compile(r"<[A-Z]+(?:_[A-Z]+)*_\d+>|\[\[[A-Z]+(?:_[A-Z]+)*_\d+\]\]")
@@ -56,12 +56,14 @@ class Finder:
     def __init__(self, state: ChatState, loose: bool = False):
         self.table = state.surrogates
         self.loose = loose
-        # Имена узлов — деревом частей в нижнем регистре; None — замена, которой кончается цепочка.
+        # Имена узлов — деревом частей в нижнем регистре; None — замена, которой кончается цепочка. Имя длиннее 253
+        # знаков чаты, сохранённые до 15.10.2026, хранят целиком: оно находится по своим частям (6.4), а в дереве
+        # было бы глубиной в тысячи частей, и проход с каждой части текста шёл бы на всю эту глубину.
         self.hosts: dict[str | None, dict | str] = {}
         self.macs: dict[str, str] = {}
         self.macs_by_digits: dict[str, str] = {}
         for key, surrogate in state.surrogates.items():
-            if surrogate.kind == "host":
+            if surrogate.kind == "host" and len(surrogate.original or "") <= hostmap.MAX_NAME:
                 node = self.hosts
                 for part in key.lower().split("."):
                     node = node.setdefault(part, {})

@@ -58,7 +58,7 @@ def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext
     if span.type is EntityType.DN:
         # Имя атрибута без значения («CN=» перед заменой) ничего не выдаёт.
         return MergedSpan(start, end, EntityType.DN, span.sources) if "=" in value else None
-    if span.type is EntityType.EMAIL and "@" not in text[span.start:start]:
+    if (span.type is EntityType.EMAIL or span.mail) and "@" not in text[span.start:start]:
         if value.lower() in ctx.builtin.builtin_accounts | _ROLE_MAILBOXES:
             return None
         return MergedSpan(start, end, EntityType.ACCOUNT, span.sources)    # имя до «@»
@@ -86,7 +86,7 @@ def _outside(
     if span.type not in _SPLIT and not span.ruled:
         return []
     bounds = ranges[first:last]
-    at = text.find("@", span.start, span.end) if span.type is EntityType.EMAIL else -1
+    at = text.find("@", span.start, span.end) if span.type is EntityType.EMAIL or span.mail else -1
     if at >= 0:
         bounds = sorted([*bounds, (at, at + 1)])        # имя входа и имя узла — разные части, и рядом с заменой
     pieces, position = [], span.start
