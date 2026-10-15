@@ -310,6 +310,18 @@ def test_login_in_a_url_is_masked_and_the_host_keeps_its_mapping(state, settings
     assert restore(state, result.sanitized, settings).text == "git clone https://ivanov@git.contoso.ru/team/repo.git"
 
 
+def test_logins_before_an_escaped_at_in_urls_keep_their_own_labels(state, settings):
+    """Найдено в раунде 5 (P2): в строке Perl «https://ivanov\\@git…» вход брался с «\\», ключ входа — часть после
+    последней «\\» — выходил пустым, и все такие входы чата становились одной меткой: petrov восстанавливался как ivanov."""
+    text = r'@urls = ("https://ivanov\@git.contoso.ru/a", "https://petrov\@git.contoso.ru/b");'
+    result = sanitize(state, text, settings)
+    assert result.sanitized == (
+        r'@urls = ("https://<ACCOUNT_1>\@host-1.domain-1.example/a", "https://<ACCOUNT_2>\@host-1.domain-1.example/b");'
+    )
+    # Внутри ссылки с «\» восстановление ничего не подставляет (раздел 7): браузер ведёт её на узел <ACCOUNT_1>.
+    assert restore(state, "входы <ACCOUNT_1> и <ACCOUNT_2>", settings).text == "входы ivanov и petrov"
+
+
 def test_new_values_next_to_an_issued_surrogate_are_masked(state, settings):
     """Обзор пакета исправлений 1А, P1: часть составной записи вне выданной замены скрывается."""
     sanitize(state, r"Сервер srv-dc01.contoso.ru, учётка CONTOSO\ivanov", settings)

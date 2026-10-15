@@ -358,6 +358,8 @@ def test_login_in_a_url_is_an_account_not_an_email():
         ("git clone https://ivanov@git.contoso.ru/team/repo.git", "ivanov"),
         ("ssh://ivanov@srv-db01.contoso.ru:22", "ivanov"),
         ("ftp://petrov@files.contoso.ru", "petrov"),
+        (r'$url = "https://ivanov\@git.contoso.ru/team/repo.git";', "ivanov"),
+        (r'"ssh://petrov\\@srv-db01"', "petrov"),
     ):
         assert found(text) == {(T.ACCOUNT, login)}, text
 

@@ -306,9 +306,11 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             continue
         add(m.start(), end, EntityType.EMAIL, True)
     for m in _URL_LOGIN.finditer(text):
-        login = m.group("login")
+        # «\» перед «@» в строке Perl («https://ivanov\@git…») — не часть входа: иначе ключ входа (часть после последней
+        # «\», resolve.canonical_key) пуст, и все такие входы чата — одна метка.
+        login = m.group("login").rstrip("\\")
         if login and login.lower() not in skip:
-            add(m.start("login"), m.end("login"), EntityType.ACCOUNT)
+            add(m.start("login"), m.start("login") + len(login), EntityType.ACCOUNT)
     for pattern in (_PHONE_RU, _PHONE_INTL):
         for m in pattern.finditer(text):
             if pattern is _PHONE_RU and not _phone_groups(m.group()):
