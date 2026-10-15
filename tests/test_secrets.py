@@ -289,3 +289,35 @@ def test_counters_and_code_under_secret_keys_are_left_alone(text):
 )
 def test_values_next_to_counters_and_code_are_still_found(text, value):
     assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "PWD=/home/ivanov", "OLDPWD=~/src", "msbuild /p:Configuration=Release",
+        "dotnet msbuild /p:Configuration=Release;Platform=x64", "mysqldump --password --verbose crm",
+        "Пароль по-прежнему не подходит", "пароль кто-то сменил",
+    ],
+)
+def test_paths_properties_flags_and_prose_are_left_alone(text):
+    """Находка «false positives that damage the text…»: рабочий каталог оболочки, свойство MSBuild,
+    следующий параметр и русское слово через дефис становились секретом без восстановления."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("Server=db01;UID=sa;PWD=Qwerty123!;", "Qwerty123!"),
+        ("PWD=Qwerty123!", "Qwerty123!"),
+        ("runas /p:Qwerty123", "Qwerty123"),
+        ("tool /p:dGVzdDE=", "dGVzdDE="),
+        ("msbuild /p:CertificatePassword=Secret123", "Secret123"),
+        ("mysqldump --password Qwerty123 crm", "Qwerty123"),
+        ("mysqldump --password=-Qwerty123 crm", "-Qwerty123"),
+        ("Пароль: по-прежнему", "по-прежнему"),
+        ("Временный пароль Пароль-2024 действует сутки", "Пароль-2024"),
+    ],
+)
+def test_passwords_next_to_paths_properties_flags_and_prose_are_found(text, value):
+    assert found(text) == {value}

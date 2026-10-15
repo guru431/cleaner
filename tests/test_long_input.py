@@ -21,11 +21,11 @@ from cleaner.core.types import ChatState, Settings
         # «eyJ» и «sk-» без начала слова (JWT, OpenAI), один токен много раз на строке выгрузки JSON.
         "/home/" * 20000, " token" + " " * 5000 + "!", " secret_key" + " " * 5000 + "!", "eyJ" * 30000,
         "sk-" * 30000, '{"account_sid":"AC' + "0123456789abcdef" * 2 + '","n":1},' * 2000, "token=" * 20000,
-        "password=P;" + "Ab " * 30000, "password=P" + ";Ab Cd" * 15000,
+        "password=P;" + "Ab " * 30000, "password=P" + ";Ab Cd" * 15000, "PWD=/" * 20000, "token=${a}" * 10000,
     ],
     ids=["dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights",
          "slashes", "spaced_key", "spaced_secret_key", "eyj", "sk", "same_token", "token_pairs",
-         "spaced_field", "spaced_fields"],
+         "spaced_field", "spaced_fields", "pwd_paths", "token_templates"],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
     ctx = DetectContext(Settings())

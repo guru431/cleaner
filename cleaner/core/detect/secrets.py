@@ -79,8 +79,12 @@ _XML = re.compile(
 # Длина схемы ограничена: без предела цепочка «a.b.a.b…» без «://» даёт квадратичный перебор.
 # Логина может не быть: «redis://:пароль@хост» — стандартная запись Redis.
 _URL = re.compile(r"\b[a-z][a-z0-9+.-]{0,31}://[^\s:/@]*:(?P<bare>[^\s@/]+)@", re.IGNORECASE)
+# Слово после пробела, начатое с «-», — следующий параметр («--password --verbose»), а «/p:имя=значение» —
+# свойство MSBuild («/p:Configuration=Release»; пароль в нём находит правило ключа). Пароль из base64
+# с «=» на конце («/p:dGVzdDE=») свойством не считается: после «=» у свойства есть значение.
 _CLI = re.compile(
-    r"(?<![\w-])(?:--?(?:password|passwd|pwd|pass|secret|token|api-key)(?:\s+|=)|/p(?:assword)?:)" + _VALUE,
+    r"(?<![\w-])(?:--?(?:password|passwd|pwd|pass|secret|token|api-key)(?:\s+(?!-)|=)"
+    r"|/p(?:assword)?:(?![A-Za-z_][\w-]*=[^\s=]))" + _VALUE,
     re.IGNORECASE,
 )
 _SECURE = re.compile(
@@ -95,7 +99,10 @@ _PHRASE = re.compile(
     r"(?P<sep>[ \t]*[:=][ \t]*|[ \t]*[—–][ \t]*|[ \t]+-[ \t]+)" + _VALUE,
     re.IGNORECASE,
 )
-_PROSE = re.compile(r"(?<!\w)(?:пароль|password)(?:\s+is)?\s+(?P<bare>[^\s,;:=]+)", re.IGNORECASE)
+_PROSE = re.compile(r"(?<!\w)(?:пароль|password)(?:\s+is)?\s+(?P<bare>(?!-)[^\s,;:=]+)", re.IGNORECASE)
+# Русское слово через дефис («по-прежнему», «кто-то») похоже на пароль только дефисом, а то же слово
+# без дефиса паролем в тексте и так не считается.
+_HYPHENATED_WORD = re.compile(r"[а-яё]+(?:-[а-яё]+)+", re.IGNORECASE)
 _LINKING_WORDS = frozenset({"это", "is", "was", "not", "see", "не", "см"})
 _CLAUSE = re.compile(r"[ \t]+\w")
 _AUTH = re.compile(
@@ -208,11 +215,13 @@ def _not_a_value(key: str, value: str) -> bool:
     """Значение под ключом со словом секрета, которое секретом не является: имя той же переменной
     («cancellationToken: cancellationToken», «accessToken: AccessToken;»; но «password: password» —
     слабый пароль), вызов команды и число под ключом токена — счётчик («max_new_tokens: 1024»).
-    Токенов из одних цифр не бывает, а пароль из цифр обычен, поэтому числа — только у «token»."""
+    Токенов из одних цифр не бывает, а пароль из цифр обычен, поэтому числа — только у «token».
+    PWD и OLDPWD с путём — рабочий каталог оболочки, а не поле Pwd строки подключения."""
     return (
         (value.lower() == key.lower() and not _KEY_WORD.fullmatch(key))
         or _CMDLET.fullmatch(value) is not None
         or (value.isdigit() and all(word.lower() == "token" for word in _KEY_WORD.findall(key)))
+        or (key.upper() in ("PWD", "OLDPWD") and value.startswith(("/", "~")))
     )
 
 
@@ -222,20 +231,23 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         for pattern in (_PEM, _JWT, _TOKEN)
         for m in pattern.finditer(text)
     ]
-    hidden_until = 0
+    parsed_until = 0
     for m in _KEY_NAME.finditer(text):
         key = m.group("key")
-        # Пара внутри уже скрытого значения ничего не добавит: её значение кончается там же.
-        # Без этого «token=token=…» разбирал значение до конца строки от каждого ключа.
-        if m.start() < hidden_until:
+        # Пара внутри уже разобранного значения пропускается: её значение кончается там же, а без этого
+        # «token=token=…» или «PWD=/PWD=/…» разбирали значение до конца строки от каждого ключа.
+        # Цена — пара внутри отвергнутого значения («PWD=/x?token=…») не ищется.
+        if m.start() < parsed_until:
             continue
         if not _KEY_WORD.search(key) or (_NOT_SECRET_KEY.fullmatch(key) and not _SECRET_END.search(key)):
             continue
         value = _VALUE_AT.match(text, m.end())
-        bounds = _value(value, minimum=2) if value else None
+        if not value:
+            continue
+        parsed_until = value.end()
+        bounds = _value(value, minimum=2)
         if bounds and not _not_a_value(key, text[bounds[0]:bounds[1]]):
             spans.append(Span(*bounds, EntityType.SECRET, name))
-            hidden_until = bounds[1]
     for pattern in (_XML, _URL, _CLI, _SECURE, _AUTH, _BEARER):
         for m in pattern.finditer(text):
             bounds = _value(m, minimum=2 if pattern is _CLI else 3)
@@ -252,6 +264,6 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PROSE.finditer(text):
         bounds = _value(m)
-        if bounds and _looks_like_password(text[bounds[0]:bounds[1]]):
+        if bounds and _looks_like_password(text[bounds[0]:bounds[1]]) and not _HYPHENATED_WORD.fullmatch(text, *bounds):
             spans.append(Span(*bounds, EntityType.SECRET, name))
     return spans + _library_spans(text, spans)
