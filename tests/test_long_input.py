@@ -237,6 +237,8 @@ def test_restore_is_fast_on_unclosed_css_urls(text):
         "https://a\\x@" * 10000, "https:a\\" * 15000, "file:\\\\C:" * 12000,
         # Имя без схемы, с которого ссылка linkify-it не начинается: путь читается только у ссылки (4,7 с, квадратично).
         "/a.ru" * 20000,
+        # Голые адреса e-mail: у каждого оригинал в имени и чужой домен, «\@» в прочтении CommonMark, домен marked с отступом.
+        "<EMAIL_1>@b.ru " * 2000, "a\\@b.c" * 10000, "a@" + "b.c-" * 25000,
     ],
     ids=[
         "brackets", "arguments", "open_tags", "spaced_label", "bare_links", "file_links", "slashes",
@@ -244,6 +246,7 @@ def test_restore_is_fast_on_unclosed_css_urls(text):
         "file_backslashes", "at_signs", "schemes_with_at_signs", "empty_users",
         "spaced_user", "spaced_schemes_with_at_signs", "spaced_slashes",
         "encoded_backslashes", "schemes_with_backslashes", "drive_letters", "linkify_names",
+        "foreign_emails", "escaped_emails", "marked_email_domains",
     ],
 )
 def test_restore_is_fast_on_many_tags_arguments_and_bare_links(text):

