@@ -97,6 +97,20 @@ def _model_spans(result: SanitizeResult) -> list[dict]:
     ]
 
 
+def _in_request(items: list[Item]) -> list[int]:
+    """«Замен в запросе» (FR-7.5) ответа на месте каждого элемента и ответа после всех: замены во входных текстах
+    после предыдущего ответа, у первого — с начала чата. Отказ без текста и ответ, оборванный ошибкой провайдера
+    (FR-8.9), границей не считаются: вопрос уходит снова, и в запросе следующего ответа — те же тексты."""
+    counts, count = [], 0
+    for item in items:
+        counts.append(count)
+        if item.kind == "input" and item.status == "done":
+            count += len(item.spans)
+        elif item.kind == "answer" and item.original and not item.meta.get("aborted"):
+            count = 0
+    return [*counts, count]
+
+
 def _cached_layers(item: Item, on: dict[str, bool]) -> tuple[Layers, list[str]]:
     """Для повторной очистки после правки: находки слоёв, которые работали и всё ещё включены, — без моделей."""
     ran = [name for name in item.meta.get("layers", []) if on.get(name)]
@@ -425,7 +439,7 @@ class ChatService:
         counters: dict[str, int] = {}
 
         def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
-            counters.update(restore(state, text, settings).counters)
+            counters.update(restore(state, text, settings).counters, in_request=_in_request(items)[-1])
             return [Item(uuid.uuid4().hex, 0, "answer", text, None, source="pasted_answer")], []
 
         [item] = self._apply(chat_id, work)
@@ -436,14 +450,12 @@ class ChatService:
         state, _ = self.repo.load_state(chat_id)
         settings = self.repo.settings()
         views: list[InputView | AnswerView] = []
-        # «Замен в запросе» (FR-7.5): замены во входных текстах после предыдущего ответа, у первого — с начала чата.
-        in_request = 0
-        for item in self.repo.items(chat_id):
+        items = self.repo.items(chat_id)
+        for item, in_request in zip(items, _in_request(items)):
             if item.kind == "input":
                 if item.status != "done":
                     views.append(InputView(item, [], []))
                     continue
-                in_request += len(item.spans)
                 leaks = leakcheck.check(item.sanitized or "", state, settings)
                 blocked = [
                     span for span in item.spans
@@ -459,10 +471,6 @@ class ChatService:
                 result = restore(state, item.original, settings)
                 result.counters["in_request"] = in_request
                 views.append(AnswerView(item, result))
-            if item.kind == "answer" and item.original and not item.meta.get("aborted"):
-                # Отказ без текста и ответ, оборванный ошибкой провайдера (FR-8.9), границей не считаются: вопрос
-                # уходит снова, и в запросе следующего ответа — те же тексты.
-                in_request = 0
         return ChatView(state, settings, views)
 
     # --- облачная модель (FR-8) и локальная вместо облачной (FR-9.4) --------------------------
@@ -534,8 +542,10 @@ class ChatService:
         """FR-8.4: запрос собирается заново и уходит, только если он совпал с показанным на экране подтверждения."""
         provider, model = self._connection(chat_id)
         built: dict[str, OutgoingContext] = {}
+        in_request = 0
 
         def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
+            nonlocal in_request
             if any(i.kind == "answer" and i.source == "api" and i.status in ("queued", "running") for i in items):
                 # Двойное нажатие прошло бы проверку отпечатка: идущий ответ в запрос не входит (оплаченный дубль).
                 raise SendRefused("Предыдущий ответ облака ещё идёт: дождитесь его или остановите")
@@ -545,6 +555,7 @@ class ChatService:
             if not outgoing.sendable:
                 raise SendRefused("В запросе найден оригинал или фрагмент запрещённого типа: отправка заблокирована")
             built["context"] = outgoing.context
+            in_request = _in_request(items)[-1]
             meta = {"provider": provider.name, "model": model}
             return [Item(uuid.uuid4().hex, 0, "answer", "", None, source="api", status="running", meta=meta)], []
 
@@ -555,11 +566,15 @@ class ChatService:
             chars=sum(len(text) for text in context.texts()),
         )
         self.live.start(item.id)
-        self.send_submit(self.run_send, chat_id, item.id, user_id, context, link(provider))
+        self.send_submit(self.run_send, chat_id, item.id, user_id, context, link(provider), in_request)
         return item
 
-    def run_send(self, chat_id: str, item_id: str, user_id: str, context: OutgoingContext, connection: cloud.Connection) -> None:
-        """Задание: поток ответа — в память для страницы, по окончании — в элемент чата. Обрыв сохраняет полученное."""
+    def run_send(
+        self, chat_id: str, item_id: str, user_id: str, context: OutgoingContext, connection: cloud.Connection,
+        in_request: int,
+    ) -> None:
+        """Задание: поток ответа — в память для страницы, по окончании — в элемент чата. Обрыв сохраняет полученное.
+        in_request — «замен в запросе» (FR-7.5) на момент отправки: для журнала, вместе со счётчиками восстановления."""
         live = self.live.start(item_id)
         outcome: dict = {}
         error, aborted = "", False
@@ -604,7 +619,7 @@ class ChatService:
         finally:
             self.live.finish(item_id)
         if text and state is not None:
-            self.repo.audit("restore", user_id, chat_id, **restore(state, text, settings).counters)
+            self.repo.audit("restore", user_id, chat_id, **restore(state, text, settings).counters, in_request=in_request)
 
     def stop(self, chat_id: str, item_id: str) -> None:
         """FR-8.6: генерацию можно остановить; полученная часть сохраняется неполной."""
