@@ -20,6 +20,10 @@ tests:
 .venv/Scripts/python.exe -m cleaner models download   # модели слоя 4 и Docling в models/ (нужен интернет, около 2 ГБ)
 set -a; . data/cleaner.env; set +a          # главный ключ — в окружение, как его передаёт systemd
 .venv/Scripts/python.exe -m cleaner serve    # http://127.0.0.1:5464
+# Открытые наборы (QA-4): скачать один раз (нужен интернет), мерить — с тем же ключом в окружении:
+# eval и с --jsonl открывает базу — из неё берутся словарь, шаблоны и политики.
+.venv/Scripts/python.exe scripts/fetch_open_sets.py data/open-sets
+.venv/Scripts/python.exe -m cleaner eval --jsonl data/open-sets/hivetrace.jsonl --layers 1-3 1-4
 ```
 
 Слой 5, проверка риска и распознавание сканов ходят в шлюз сервера (`http://example:30000/v1`, адрес задаётся на странице «Настройки → Локальная модель»). Ключ — строкой `CLEANER_GATEWAY_KEY=…` в `data/cleaner.env`, которую дописывает владелец (ключ `cleaner-dev`, `sudo ai-ctl gateway-key create cleaner-dev`); в репозиторий и в вывод сессии он не попадает.
