@@ -292,6 +292,60 @@ def test_prose_after_a_copula_a_long_lead_or_a_double_hyphen_is_left_alone():
         assert found(text) == set(), text
 
 
+def finds(text: str) -> set[tuple[str, bool]]:
+    return {(text[span.start:span.end], span.searchable) for span in secrets.detect(text, CTX)}
+
+
+@pytest.mark.parametrize(
+    "text, value, searchable",
+    [
+        ("Пароль: это Zx81kLmN", "Zx81kLmN", True), ("password: is Summer2024", "Summer2024", True),
+        ("Пароль: это: Zx81kLmN", "Zx81kLmN", True), ("пароль = это sunflower", "sunflower", False),
+        ('Пароль: это "временный"', "временный", True), ("password: isAdmin1", "isAdmin1", True),
+    ],
+    ids=["copula", "english", "copula_colon", "equals_word", "quoted", "no_copula"],
+)
+def test_value_after_a_colon_and_a_copula_is_the_next_word(text, value, searchable):
+    """Находка «Review fixes round of 15.10: small leftovers»: после «:» значением бралась связка — «Пароль: это строка»
+    скрывал «это» во всём чате. Слово после связки проверяется, как после тире."""
+    assert finds(text) == {(value, searchable)}
+
+
+def test_prose_after_a_colon_and_a_copula_is_left_alone():
+    for text in (
+        "Пароль: это строка из 8 символов", "Пароль: это", "password: is required", "Пароль: это ваша дата рождения",
+        "Password: was changed yesterday", "пароль = это тот же",
+    ):
+        assert found(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    "text, value, searchable",
+    [
+        ("Пароль для входа в систему: sunflower", "sunflower", False),
+        ("Пароль от учётной записи в новой системе: Zx81kLmN", "Zx81kLmN", True),
+        ("Password for the shared mailbox account: Summer2024!", "Summer2024!", True),
+        ('Пароль для входа в систему: "временный"', "временный", True),
+        ("Пароль для входа в систему: это Qwerty123", "Qwerty123", True),
+    ],
+    ids=["four_words", "six_words", "english", "quoted", "copula"],
+)
+def test_password_after_four_to_six_words_and_a_colon_is_found(text, value, searchable):
+    """Находка «Review fixes round of 15.10: small leftovers»: перед «:» бралось не больше трёх слов. Дальше — до шести,
+    с проверкой прозы, как после тире: обычное слово скрывается только на своём месте."""
+    assert finds(text) == {(value, searchable)}
+
+
+def test_prose_or_a_time_after_four_to_six_words_and_a_colon_is_left_alone():
+    for text in (
+        "Password policy for domain users: minimum 8 characters", "Пароль для входа в систему: тот же, что и раньше",
+        "Password for the shared mailbox: see below", "Password reset for user ivanov at 10:30",
+        "Password change failed for user ivanov at 10:30:15", "Пароль для входа в систему=sunflower",
+        "Пароль от учётной записи пользователя в новой системе: sunflower",
+    ):
+        assert found(text) == set(), text
+
+
 def test_english_state_and_pointer_words_after_a_dash_are_left_alone():
     """Ревью правила тире: частые английские слова состояния и указания — проза, а не пароль."""
     for text in (

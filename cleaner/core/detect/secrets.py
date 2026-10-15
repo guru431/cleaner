@@ -138,16 +138,19 @@ _SECURE = re.compile(
 )
 # После тире или дефиса в прозе часто идёт не пароль («Пароль — это строка…»). Такое значение
 # отбрасывается, только если это слово прозы (_prose_word) и на пароль оно не похоже; продолжение фразы
-# за ним не в счёт: «Пароль от Wi-Fi — sunflower для гостей» — пароль. После «:» и «=» берётся любое.
-# Перед тире — до шести слов («Пароль для входа в систему — …»), перед «:» и «=» — до трёх: значение после двоеточия
-# на прозу не проверяется, и заголовок «Password policy for domain users: minimum…» скрыл бы minimum во всём чате.
+# за ним не в счёт: «Пароль от Wi-Fi — sunflower для гостей» — пароль. После «:» и «=» берётся любое, кроме связки.
+# Перед тире — до шести слов («Пароль для входа в систему — …»), перед «:» и «=» — до трёх: значение там на прозу не
+# проверяется. От четырёх до шести слов перед «:» с пробелом после него (colon; «at 10:30» — время) значение проверяется,
+# как после тире: заголовок «Password policy for domain users: minimum…» не скрывает minimum во всём чате.
 # Слово перед тире начинается не с дефиса: иначе «Пароль - Qwerty - временный» брал значение после второго.
 _PHRASE = re.compile(
     r"(?<!\w)(?:пароль|password)(?:(?:[ \t]+[\w-]+){0,3}(?P<sep>[ \t]*[:=][ \t]*)"
-    r"|(?:[ \t]+\w[\w-]*){0,6}(?P<dash>[ \t]*[—–][ \t]*|[ \t]+--?[ \t]+))" + _VALUE,
+    r"|(?:[ \t]+\w[\w-]*){0,6}(?P<dash>[ \t]*[—–][ \t]*|[ \t]+--?[ \t]+)"
+    r"|(?:[ \t]++\w[\w-]*+){4,6}(?P<colon>[ \t]*+:[ \t]++))" + _VALUE,
     re.IGNORECASE,
 )
-# После связки значение — следующее слово: «Пароль — это Qwerty123», «пароль — это: Zx81kLmN».
+# После связки значение — следующее слово: «Пароль — это Qwerty123», «пароль — это: Zx81kLmN», «Пароль: это Zx81kLmN»;
+# связка без слова за ней («Пароль: это») — не значение.
 _COPULAS = frozenset({"это", "is", "was"})
 _NEXT_VALUE = re.compile(r"[ \t]+" + _VALUE)
 # Знаки в конце — не часть слова прозы: «Password - here!», «Пароль — какой?», «это:».
@@ -464,12 +467,17 @@ def _prose_word(value: str) -> bool:
     )
 
 
+def _copula(m: re.Match[str]) -> bool:
+    return (m.group("bare") or "").rstrip(_TRAILING).lower() in _COPULAS
+
+
 def _after_dash(m: re.Match[str]) -> Span | None:
-    """Значение после «Пароль —» или None — там проза. Знаки в конце в проверку не входят, но скрываются со значением.
+    """Значение после «Пароль —» (а также после связки за «:» и после четырёх слов и «:», см. _PHRASE) или None — там
+    проза. Знаки в конце в проверку не входят, но скрываются со значением.
     Обычное слово, не похожее на пароль, скрывается только на этом месте и искомым написанием чата (5.4) не становится:
     «Пароль — Windows не принимает» иначе скрыло бы Windows во всех текстах чата, без восстановления в ответах.
     Значение в кавычках написано как есть, а не словом фразы, — оно искомое."""
-    if (m.group("bare") or "").rstrip(_TRAILING).lower() in _COPULAS:
+    if _copula(m):
         m = _NEXT_VALUE.match(m.string, m.end())
     bounds = _value(m) if m else None
     if not bounds:
@@ -519,6 +527,10 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         if not value:
             continue
         parsed_until = value.end()
+        if _copula(value):                     # «Пароль: это строка» — значение после связки, как после тире
+            if span := _after_dash(value):
+                spans.append(span)
+            continue
         bounds = _value(value, minimum=2, code=_in_code(text, key, m.start(), value.end()))
         if bounds and not _not_a_value(key, text[bounds[0]:bounds[1]]):
             spans.append(Span(*bounds, EntityType.SECRET, name))
@@ -532,7 +544,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             if bounds and not (pattern in (_AUTH, _BEARER) and _WORDS.fullmatch(text, *bounds)):
                 spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PHRASE.finditer(text):
-        if m.group("dash") is not None:
+        if m.group("sep") is None or _copula(m):
             span = _after_dash(m)
         else:
             # «password = …» без слов перед «=» — тот же ключ присваивания, что видит _KEY_NAME.

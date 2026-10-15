@@ -31,6 +31,8 @@ from cleaner.core.types import ChatState, Settings
         # Слова перед тире после «пароль», «--» и связка «это» перед значением.
         "пароль а б в г д е " * 5000, "пароль " + "a-" * 50000 + " — x", "пароль -- " * 10000, "пароль — это " * 8000,
         "".join("пароль — слово%d " % i for i in range(5000)),
+        # Связка после «:» и до шести слов перед «:».
+        "пароль: это " * 8000, "пароль а б в г: это " * 5000, "password " + "a " * 50000 + ": x",
         # Скобки в конце значения, атрибут и вызов с именами после ключа.
         "password=" + ")" * 100000, "password=" + "a." * 50000 + "1", "password=f(" + "a," * 50000 + "1)",
         "pwd=" + "(a)" * 30000, "password = self." + "aB" * 50000,
@@ -54,7 +56,8 @@ from cleaner.core.types import ChatState, Settings
         "spaced_field", "spaced_fields", "pwd_paths", "token_templates", "net_use", "mysql", "add_key",
         "distinct_tokens", "distinct_short_tokens",
         "password_words", "password_hyphenated_word", "password_double_hyphens", "password_copulas",
-        "password_distinct_words", "closing_brackets", "attribute_chain", "call_names", "bracket_pairs",
+        "password_distinct_words", "password_colon_copulas", "password_long_leads", "password_long_lead_run",
+        "closing_brackets", "attribute_chain", "call_names", "bracket_pairs",
         "camel_attribute", "pem_begins", "dashes", "pem_dashed_headers", "pem_bare_headers", "pem_dashed_body",
         "pem_bare_blocks",
         "pem_header_lines", "pem_nested_headers", "pem_long_header_line", "pem_spaced_runs", "pem_spaced_hyphens",
