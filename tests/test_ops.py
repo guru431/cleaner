@@ -75,6 +75,43 @@ def test_retyping_a_part_after_editing_its_restore_value_takes_the_value_from_th
     assert sanitize(state, text, settings).sanitized == "узел host-1.<TERM_1>.domain-1.example, офис spb"
 
 
+@pytest.mark.parametrize("text, key, probe, expected", [
+    ("узел srv01.corp.contoso.ru", "corp",
+     "узел srv01.corp.contoso.ru, corp wiki, Corporate policy, узел db-corp-02.contoso.ru",
+     "узел host-1.<TERM_1>.domain-1.example, <TERM_1> wiki, Corporate policy, узел host-3.domain-1.example"),
+    ("портал intranet.contoso.ru", "intranet",
+     "Open the intranet, then the intranets page, intranet.contoso.ru",
+     "Open the <TERM_1>, then the intranets page, <TERM_1>.domain-1.example"),
+    ("узел srv-01.msk.contoso.ru", "msk",
+     "Tomsk, msk, srv-01.msk.contoso.ru", "Tomsk, <TERM_1>, host-1.<TERM_1>.domain-1.example"),
+], ids=["middle-part", "leading-part", "short-part"])
+def test_a_rule_from_retyping_a_name_part_is_searched_within_bounds(state, settings, text, key, probe, expected):
+    """Обзор, Minor 6: правило смены типа ищется с границами имени узла (5.4) — часть находится внутри полного
+    имени и отдельно, но не внутри чужого слова и другого имени."""
+    sanitize(state, text, settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == key).id, T.TERM)
+    result = sanitize(state, probe, settings)
+    assert result.sanitized == expected and result.deliverable
+
+
+def test_a_rule_from_retyping_keeps_the_bounds_its_values_were_searched_with(state, settings):
+    """Написания, найденные выделением, и после смены типа ищутся где угодно; найденные как известные значения —
+    с границами своего типа: логин — рядом нет букв (5.4)."""
+    ops.mask(state, "Заря", T.ORG)
+    sanitize(state, "проект Заря, вход CONTOSO\\ivanov", settings)
+    for entity in list(state.entities.values()):
+        if entity.type in (T.ORG, T.ACCOUNT):
+            ops.retype(state, entity.id, T.TERM)
+    result = sanitize(state, "Зарядка, ivanov_backup, ivanova", settings)
+    assert result.sanitized == "<TERM_1>дка, <TERM_2>_backup, ivanova"
+
+
+def test_a_rule_from_a_selection_is_searched_anywhere(state, settings):
+    """Выделенное пользователем скрывается и внутри слова (5.4), в отличие от правила смены типа."""
+    ops.mask(state, "corp", T.TERM)
+    assert sanitize(state, "Corporate policy", settings).sanitized == "<TERM_1>orate policy"
+
+
 def test_retyping_the_domain_of_a_name_keeps_its_host_part(state, settings):
     text = "узел srv01.contoso.ru и srv01, сайт contoso.ru"
     sanitize(state, text, settings)

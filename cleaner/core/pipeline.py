@@ -136,7 +136,7 @@ def _context(state: ChatState, settings: Settings) -> DetectContext:
     return DetectContext(
         settings=settings,
         known=tuple((form, e.type) for e in state.entities.values() for form in e.forms),
-        manual=tuple((r.value, r.type) for r in state.rules if r.action == "mask" and r.type is not None),
+        manual=tuple((r.value, r.type, r.bounds) for r in state.rules if r.action == "mask" and r.type is not None),
         unmask=frozenset(r.value.lower() for r in state.rules if r.action == "unmask"),
         issued_domains=frozenset(fake.lower() for slot, fake in state.issued.items() if slot.endswith("|dns")),
     )

@@ -44,7 +44,7 @@ def load_builtin() -> Builtin:
 class DetectContext:
     settings: Settings
     known: tuple[tuple[str, EntityType], ...] = ()     # написания сущностей чата
-    manual: tuple[tuple[str, EntityType], ...] = ()    # значения, которые пользователь велел скрывать
+    manual: tuple[tuple[str, EntityType, str], ...] = ()    # значения, которые пользователь велел скрывать, и их границы
     unmask: frozenset[str] = frozenset()               # значения, с которых пользователь снял замену
     issued_domains: frozenset[str] = frozenset()       # выданные чатом подмены доменов: «domain-1.example»
     builtin: Builtin = field(default_factory=load_builtin)

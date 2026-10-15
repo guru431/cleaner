@@ -22,8 +22,9 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         for form in (entry.value, *entry.aliases):
             forms.append((form, _mode(entry.type), (entry.type, name)))
     forms += [(form, _mode(type_), (type_, name)) for form, type_ in ctx.known]
-    # Пользователь выделил фрагмент сам — ищем его везде, без оглядки на границы слов.
-    forms += [(form, "none", (type_, "manual")) for form, type_ in ctx.manual]
+    # Пользователь выделил фрагмент сам — ищем его везде, без оглядки на границы слов; правило смены типа —
+    # с границами, с которыми искались написания до неё.
+    forms += [(form, bounds, (type_, "manual")) for form, type_, bounds in ctx.manual]
     spans = [Span(start, end, type_, source) for start, end, (type_, source) in find_forms(text, forms)]
     for pattern in ctx.settings.patterns:
         try:

@@ -19,7 +19,7 @@ def test_dictionary_value_and_alias():
 
 
 def test_known_forms_and_manual_rules():
-    ctx = DetectContext(Settings(), known=(("ivanov", T.ACCOUNT),), manual=(("вано", T.TERM),))
+    ctx = DetectContext(Settings(), known=(("ivanov", T.ACCOUNT),), manual=(("вано", T.TERM, "none"),))
     assert found("ivanov_backup и Иванов", ctx) == {
         (T.ACCOUNT, "ivanov", "dict"),
         (T.TERM, "вано", "manual"),

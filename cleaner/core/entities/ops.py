@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 from cleaner.core.entities.names import FIXED_RANK
-from cleaner.core.types import ChatRule, ChatState, Entity, EntityType
+from cleaner.core.types import STRICT_TYPES, ChatRule, ChatState, Entity, EntityType
 
 
 def _forget(state: ChatState, value: str) -> None:
     state.rules[:] = [rule for rule in state.rules if rule.value.lower() != value.lower()]
 
 
-def mask(state: ChatState, value: str, type_: EntityType) -> None:
-    """Скрывать значение во всех текстах чата."""
+def mask(state: ChatState, value: str, type_: EntityType, bounds: str = "none") -> None:
+    """Скрывать значение во всех текстах чата. Выделенное пользователем ищется где угодно (5.4)."""
     _forget(state, value)
-    state.rules.append(ChatRule("mask", value, type_))
+    state.rules.append(ChatRule("mask", value, type_, bounds))
 
 
 def unmask(state: ChatState, value: str) -> None:
@@ -40,8 +40,13 @@ def retype(state: ChatState, entity_id: str, new_type: EntityType) -> None:
     """Сменить тип: написания переходят в правила с новым типом, старая метка остаётся в таблице.
     У средней части имени узла написаний нет (отдельно она не ищется) — в правило идёт её значение из текста."""
     entity = state.entities[entity_id]
+    # Правило ищет то же, что искали до смены типа: значение правила — как прежде (выделенное — где угодно),
+    # остальное — с границами известных значений прежнего типа. Без границ часть имени «corp» скрывала бы
+    # «Corporate», а «db-corp-02.contoso.ru» поглощала целиком (5.4).
+    kept = {rule.value.lower(): rule.bounds for rule in state.rules if rule.action == "mask"}
+    bounds = "strict" if entity.type in STRICT_TYPES else "letters"
     for form in entity.forms or [_original(state, entity)]:
-        mask(state, form, new_type)
+        mask(state, form, new_type, kept.get(form.lower(), bounds))
     entity.forms = []
 
 

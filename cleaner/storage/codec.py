@@ -28,7 +28,7 @@ def state_to_json(state: ChatState) -> bytes:
         ],
         "surrogates": {text: [s.entity_id, s.original, s.kind] for text, s in state.surrogates.items()},
         "issued": state.issued,
-        "rules": [[r.action, r.value, r.type.value if r.type else None] for r in state.rules],
+        "rules": [[r.action, r.value, r.type.value if r.type else None, r.bounds] for r in state.rules],
         "key_alias": state.key_alias,
         "foreign_labels": sorted(state.foreign_labels),
         "counters": state.counters,
@@ -53,7 +53,11 @@ def state_from_json(raw: bytes) -> ChatState:
         entities=entities,
         surrogates={text: Surrogate(v[0], v[1], v[2]) for text, v in data["surrogates"].items()},
         issued=dict(data["issued"]),
-        rules=[ChatRule(action, value, EntityType(type_) if type_ else None) for action, value, type_ in data["rules"]],
+        # Правило до 15.10.2026 — тройка без границ: оно ищется где угодно, как и искалось.
+        rules=[
+            ChatRule(action, value, EntityType(type_) if type_ else None, *bounds)
+            for action, value, type_, *bounds in data["rules"]
+        ],
         key_alias=dict(data["key_alias"]),
         foreign_labels=set(data["foreign_labels"]),
         counters={key: int(value) for key, value in data["counters"].items()},
