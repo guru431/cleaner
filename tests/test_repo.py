@@ -6,7 +6,7 @@ import pytest
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Policy
 from cleaner.storage import crypto, db
-from cleaner.storage.repo import CheckpointBusy, Item, Repository, StaleState
+from cleaner.storage.repo import CheckpointBusy, Item, Provider, Repository, StaleState
 
 
 def new_chat(repo, title="Чат"):
@@ -224,3 +224,53 @@ def test_gold_examples_are_encrypted_and_deleted(tmp_path, repo):
     repo.conn.execute("PRAGMA wal_checkpoint(FULL)")
     assert b"Ee61" not in raw_database(tmp_path)
     assert repo.delete_gold(gold_id) and repo.gold() == [] and not repo.delete_gold(gold_id)
+
+
+def provider(name="Облако", key="sk-test-0123456789abcd", **changes) -> Provider:
+    base = Provider("", name, "anthropic", "https://llm.example/anthropic", "x-api-key", key, ("m-1", "m-2"), 2048,
+                    {"temperature": 0.2})
+    return replace(base, **changes)
+
+
+def test_provider_key_is_stored_encrypted_and_shown_by_tail(tmp_path, repo):
+    """FR-8.10, AC-3.6 на уровне хранилища: ключ — шифртекст, наружу — последние четыре знака."""
+    provider_id = repo.add_provider(provider())
+    repo.conn.execute("PRAGMA wal_checkpoint(FULL)")
+    raw = b"".join(path.read_bytes() for path in tmp_path.glob("cleaner.db*"))
+    assert b"0123456789abcd" not in raw
+    stored = repo.provider(provider_id)
+    assert (stored.api_key, stored.key_tail, stored.models, stored.extra_body) == (
+        "sk-test-0123456789abcd", "abcd", ("m-1", "m-2"), {"temperature": 0.2},
+    )
+    assert "0123456789abcd" not in repr(stored)
+
+
+def test_update_without_a_key_keeps_the_old_one(repo):
+    provider_id = repo.add_provider(provider())
+    repo.update_provider(provider(id=provider_id, name="Другое", models=("m-3",), enabled=False), None)
+    stored = repo.provider(provider_id)
+    assert (stored.name, stored.models, stored.enabled, stored.api_key) == ("Другое", ("m-3",), False, "sk-test-0123456789abcd")
+    repo.update_provider(stored, "sk-new-key-9999")
+    assert repo.provider(provider_id).key_tail == "9999"
+    with pytest.raises(KeyError):
+        repo.update_provider(provider(id="нет"), None)
+    assert repo.delete_provider(provider_id) and not repo.delete_provider(provider_id) and repo.providers() == []
+
+
+def test_chat_remembers_provider_and_model(repo):
+    user, chat = new_chat(repo)
+    assert repo.chat_provider(chat) == (None, "")
+    repo.set_chat_provider(chat, "p1", "m-1")
+    assert repo.chat_provider(chat) == ("p1", "m-1")
+    with pytest.raises(KeyError):
+        repo.set_chat_provider("нет", "p1", "m-1")
+
+
+def test_finish_answer_writes_text_status_and_meta(repo):
+    user, chat = new_chat(repo)
+    item = repo.add_item(chat, Item(uuid.uuid4().hex, 0, "answer", "", None, source="api", status="running"))
+    repo.finish_answer(chat, item.id, "Ответ <PERSON_1>", "partial", {"model": "m-1", "error": "обрыв"})
+    stored = repo.item(chat, item.id)
+    assert (stored.original, stored.status, stored.meta) == ("Ответ <PERSON_1>", "partial", {"model": "m-1", "error": "обрыв"})
+    with pytest.raises(KeyError):
+        repo.finish_answer(chat, "нет", "x", "done", {})

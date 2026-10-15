@@ -116,6 +116,30 @@ class GoldRow:
     created_at: str
 
 
+@dataclass(frozen=True)
+class Provider:
+    """Подключение к облачной модели (FR-8.1). Ключ хранится под общим ключом и после сохранения не показывается."""
+
+    id: str
+    name: str
+    protocol: str              # openai | anthropic
+    base_url: str
+    auth_style: str            # bearer | x-api-key
+    api_key: str
+    models: tuple[str, ...]
+    max_tokens: int = 4096
+    extra_body: dict = field(default_factory=dict, hash=False)
+    enabled: bool = True
+
+    @property
+    def key_tail(self) -> str:
+        """FR-8.10: видны только последние четыре знака."""
+        return self.api_key[-4:]
+
+    def __repr__(self) -> str:
+        return f"Provider(id={self.id!r}, name={self.name!r}, protocol={self.protocol!r}, base_url={self.base_url!r})"
+
+
 class Repository:
     def __init__(self, conn: sqlite3.Connection, master_key: bytes, clock: Clock):
         self.conn = conn
@@ -416,6 +440,16 @@ class Repository:
         if changed != 1:
             raise KeyError(item_id)
 
+    def finish_answer(self, chat_id: str, item_id: str, text: str, status: str, meta: dict) -> None:
+        """Ответ модели по окончании потока: текст, как получен, состояние и meta — одной записью."""
+        sealed = self._enc(self._dek(chat_id), text, f"items.original:{item_id}")
+        changed = self._run(
+            "UPDATE items SET original_enc = ?, status = ?, meta = ? WHERE id = ? AND chat_id = ?",
+            sealed, status, json.dumps(meta, ensure_ascii=False), item_id, chat_id,
+        )
+        if changed != 1:
+            raise KeyError(item_id)
+
     def fail_interrupted(self, reason: str) -> int:
         """При старте службы: обработка, прерванная остановкой, — отказ с причиной (NFR-6). Число таких элементов."""
         with self.lock, transaction(self.conn):
@@ -481,6 +515,68 @@ class Repository:
 
     def set_layer_defaults(self, values: dict[str, bool]) -> None:
         self.set_setting("layers.default", json.dumps({name: bool(values[name]) for name in DEFAULT_LAYERS}))
+
+    # --- подключения к облачным моделям (FR-8.1, FR-8.3) --------------------------------
+
+    def _provider(self, row: sqlite3.Row) -> Provider:
+        return Provider(
+            row["id"], row["name"], row["protocol"], row["base_url"], row["auth_style"],
+            self._dec(self.global_key, row["api_key_enc"], f"providers.api_key:{row['id']}"),
+            tuple(json.loads(row["models"])), row["max_tokens"], json.loads(row["extra_body"]), bool(row["enabled"]),
+        )
+
+    def add_provider(self, provider: Provider) -> str:
+        provider_id = uuid.uuid4().hex
+        self._run(
+            "INSERT INTO providers(id, name, protocol, base_url, auth_style, api_key_enc, models, max_tokens, "
+            "extra_body, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            provider_id, provider.name, provider.protocol, provider.base_url, provider.auth_style,
+            self._enc(self.global_key, provider.api_key, f"providers.api_key:{provider_id}"),
+            json.dumps(list(provider.models), ensure_ascii=False), provider.max_tokens,
+            json.dumps(provider.extra_body, ensure_ascii=False), int(provider.enabled), self._now(),
+        )
+        return provider_id
+
+    def update_provider(self, provider: Provider, api_key: str | None) -> None:
+        """api_key None — ключ прежний: после сохранения он в форму не возвращается (FR-8.10)."""
+        with self.lock, transaction(self.conn):
+            cursor = self.conn.execute(
+                "UPDATE providers SET name = ?, protocol = ?, base_url = ?, auth_style = ?, models = ?, max_tokens = ?, "
+                "extra_body = ?, enabled = ? WHERE id = ?",
+                (
+                    provider.name, provider.protocol, provider.base_url, provider.auth_style,
+                    json.dumps(list(provider.models), ensure_ascii=False), provider.max_tokens,
+                    json.dumps(provider.extra_body, ensure_ascii=False), int(provider.enabled), provider.id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(provider.id)
+            if api_key is not None:
+                self.conn.execute(
+                    "UPDATE providers SET api_key_enc = ? WHERE id = ?",
+                    (self._enc(self.global_key, api_key, f"providers.api_key:{provider.id}"), provider.id),
+                )
+
+    def providers(self) -> list[Provider]:
+        return [self._provider(row) for row in self._all("SELECT * FROM providers ORDER BY name, id")]
+
+    def provider(self, provider_id: str) -> Provider | None:
+        row = self._one("SELECT * FROM providers WHERE id = ?", provider_id)
+        return None if row is None else self._provider(row)
+
+    def delete_provider(self, provider_id: str) -> bool:
+        return self._run("DELETE FROM providers WHERE id = ?", provider_id) == 1
+
+    def chat_provider(self, chat_id: str) -> tuple[str | None, str]:
+        """Подключение и модель, выбранные в чате; подключение могли удалить — тогда вызывающий получит None."""
+        row = self._one("SELECT provider_id, model FROM chats WHERE id = ?", chat_id)
+        if row is None:
+            raise KeyError(chat_id)
+        return row["provider_id"], row["model"]
+
+    def set_chat_provider(self, chat_id: str, provider_id: str | None, model: str) -> None:
+        if self._run("UPDATE chats SET provider_id = ?, model = ? WHERE id = ?", provider_id, model, chat_id) != 1:
+            raise KeyError(chat_id)
 
     # --- настройки в базе ---------------------------------------------------------
 

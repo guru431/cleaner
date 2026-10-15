@@ -35,7 +35,22 @@ def test_newer_schema_is_refused(tmp_path):
 
 
 def test_schema_version_is_the_last_migration():
-    assert db.SCHEMA_VERSION == max(number for number, _ in db.migrations()) == 2
+    assert db.SCHEMA_VERSION == max(number for number, _ in db.migrations()) == 3
+
+
+def test_version_2_chat_gets_no_provider(tmp_path):
+    """Версия 3 (этап 3): у прежних чатов подключение не выбрано — ручной режим, как был."""
+    conn = db.connect(tmp_path / "cleaner.db")
+    db.migrate(conn)
+    conn.execute(
+        "INSERT INTO users(id, login, password_hash, role, disabled, created_at) VALUES ('u', 'ivan', 'h', 'user', 0, 't')"
+    )
+    conn.execute(
+        "INSERT INTO chats(id, user_id, title_enc, dek_wrapped, state_enc, version, created_at, updated_at) "
+        "VALUES ('c', 'u', x'00', x'00', x'00', 0, 't', 't')"
+    )
+    assert tuple(conn.execute("SELECT provider_id, model FROM chats").fetchone()) == (None, "")
+    assert conn.execute("SELECT COUNT(*) FROM providers").fetchone()[0] == 0
 
 
 def test_version_1_database_upgrades_in_place(tmp_path):
