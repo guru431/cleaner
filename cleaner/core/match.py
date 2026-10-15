@@ -10,6 +10,7 @@ import regex
 
 T = TypeVar("T")
 _TOKEN = re.compile(r"[^\W\d_]+|\d+")
+_PREFIX = 64        # написание длиннее ищется по началу такой длины (find_forms)
 _SPACE_RUN = re.compile(r"\s+")
 # Невидимые знаки: форматирующие (мягкий перенос, пробел нулевой ширины, метки направления) и знак
 # ударения. Ударение выпадает, только если не вошло в букву при сборке NFC: у русских гласных букв
@@ -158,15 +159,20 @@ def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int
     lowered, starts, ends = _normalize(text)
     # первое слово написания -> длина написания -> написание -> [(режим, нагрузка)].
     # Группировка по длине нужна, чтобы тысячи логинов с общим началом («user00001», «i.ivanov»)
-    # проверялись одним обращением к словарю, а не перебором.
+    # проверялись одним обращением к словарю, а не перебором. Написание длиннее _PREFIX — по своему началу:
+    # срез длиной в написание с каждого вхождения первого слова был бы квадратичным («a@bbb…b.ru» и тысячи «a»
+    # в тексте), а сравнение с началом текста кончается на первом несовпавшем знаке.
     index: dict[str, dict[int, dict[str, list[tuple[str, T]]]]] = {}
+    long: dict[str, dict[str, list[tuple[str, str, T]]]] = {}
     loose: list[tuple[str, str, T]] = []
     for form, mode, payload in forms:
         needle = _normalize(form)[0]
         if not needle.strip():
             continue
         head = _TOKEN.match(needle)
-        if head and mode != "none":
+        if head and mode != "none" and len(needle) > _PREFIX:
+            long.setdefault(head.group(), {}).setdefault(needle[:_PREFIX], []).append((needle, mode, payload))
+        elif head and mode != "none":
             by_length = index.setdefault(head.group(), {})
             by_length.setdefault(len(needle), {}).setdefault(needle, []).append((mode, payload))
         else:
@@ -178,6 +184,11 @@ def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int
             for mode, payload in table.get(lowered[start:start + length], ()):
                 if _bounded(lowered, start, start + length, mode):
                     hits.append((starts[start], ends[start + length - 1], payload))
+        prefixes = long.get(token.group())
+        for needle, mode, payload in prefixes.get(lowered[start:start + _PREFIX], ()) if prefixes else ():
+            end = start + len(needle)
+            if lowered.startswith(needle, start) and _bounded(lowered, start, end, mode):
+                hits.append((starts[start], ends[end - 1], payload))
     for needle, mode, payload in loose:
         position = lowered.find(needle)
         while position != -1:

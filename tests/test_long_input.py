@@ -12,6 +12,7 @@ from cleaner.core.detect import rules
 from cleaner.core.detect.base import DetectContext, load_builtin
 from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities.resolve import Resolver
+from cleaner.core.match import find_forms
 from cleaner.core.pipeline import DETECTORS, sanitize
 from cleaner.core.restore import StreamRestorer, restore
 from cleaner.core.types import ChatState, Settings, Surrogate
@@ -272,6 +273,16 @@ def test_restore_is_fast_on_links_written_with_references_in_prose(text):
     started = time.perf_counter()
     restore(state, text + "<EMAIL_1>", Settings())
     assert time.perf_counter() - started < 0.5
+
+
+def test_long_known_value_is_not_sliced_at_every_word():
+    """Найдено в раунде имён узлов: длинное написание («a@bbb…b.ru» — слой 1 длину адреса не ограничивает) поиск
+    известных значений вырезал из текста с каждого вхождения его первого слова — 180 КБ за 0,8 с, квадратично.
+    Длинное написание ищется по началу и сверяется с текстом до первого несовпавшего знака."""
+    form = "a@" + "b" * 60000 + ".ru"
+    started = time.perf_counter()
+    assert len(find_forms(form + " a" * 60000, [(form, "letters", None)])) == 1
+    assert time.perf_counter() - started < 0.3
 
 
 def test_link_host_check_walks_a_tree_of_parts():
