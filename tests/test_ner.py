@@ -161,6 +161,39 @@ def test_common_noun_at_the_start_of_a_sentence_found_only_by_gliner_is_not_a_pe
     ]
 
 
+@pytest.mark.parametrize(
+    "noun", ["Копию", "Счёт", "Договор", "Сервер", "Банк", "Оплату", "Заявку", "Файл", "Доступ"],
+)
+def test_inanimate_noun_at_the_start_of_a_sentence_is_not_a_person(noun):
+    text = f"Готово. {noun} отправил Петров"
+    assert spans(text, word_at(text, noun, "name"), word_at(text, "Петров", "name")) == [("Петров", T.PERSON, "ner")]
+
+
+SURNAME_NOUNS = (
+    "Волк", "Заяц", "Кузнец", "Мельник", "Ткач", "Коваль", "Лебедь", "Король", "Соловей", "Медведь", "Сокол",
+    "Голубь", "Рыбак", "Князь", "Казак", "Поляк", "Немец", "Ворона", "Дрозд", "Карась", "Щука", "Чиж",
+)
+
+
+@pytest.mark.parametrize(
+    "text, names",
+    [
+        ("Заяц подписал договор", ("Заяц",)),
+        ("\n".join(SURNAME_NOUNS), SURNAME_NOUNS),
+        ("- Соловей\n- Орёл\n- Заяц", ("Соловей", "Орёл", "Заяц")),
+        ("Мороз написал отчёт. Кузнец подписал.", ("Мороз", "Кузнец")),
+        ("Мороз: привет\nВолк: ок", ("Мороз", "Волк")),
+        ("Подписали проф. Лебедь, инж. Кузнец и исп. Берёза", ("Лебедь", "Кузнец", "Берёза")),
+    ],
+    ids=["sentence", "lines", "list", "sentences", "chat", "abbreviations"],
+)
+def test_surname_that_is_a_noun_at_the_start_of_a_sentence_stays_a_person(text, names):
+    """Обзор раунда слоёв 2 и 4: фамилия-существительное в начале строки или после сокращения с точкой отбрасывалась.
+    Одушевлённое существительное («Волк», «Кузнец») остаётся человеком; точка после слова до четырёх букв
+    («проф.», «исп.») — сокращение, а не конец предложения («Берёза» — неодушевлённое)."""
+    assert spans(text, *(word_at(text, value, "name") for value in names)) == [(value, T.PERSON, "ner") for value in names]
+
+
 def test_names_and_nouns_elsewhere_or_seen_by_the_russian_model_stay_persons():
     """Имя, фамилия, два слова и существительное не в начале предложения правило не трогает; находка русской модели —
     тоже: правило только для GLiNER."""

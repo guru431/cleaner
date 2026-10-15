@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from cleaner.core.detect.base import DetectContext
-from cleaner.core.entities.names import common_nouns
+from cleaner.core.entities.names import animate, common_nouns
 from cleaner.core.types import EntityType, Span
 
 name = "ner"
@@ -140,29 +140,41 @@ def _not_organisation(text: str, found: Found) -> bool:
 
 
 # Перед началом предложения — конец предыдущего («.», «!», «?», «…») или перевод строки; между ними — пробелы,
-# кавычки, скобки, тире и знаки списка.
+# кавычки, скобки, тире и знаки списка. Точка после слова до четырёх букв — сокращение («проф. Лебедь», «исп. Берёза»).
 _OPENERS = "\"'«„“([—–-•*"
 _SENTENCE_END = ".!?…"
+_ABBREVIATION = 4
 _LETTERS = re.compile(r"[^\W\d_]+")
 _RUSSIAN_PERSON = frozenset({"FIRST_NAME", "LAST_NAME", "MIDDLE_NAME"})
+
+
+def _abbreviation(text: str, dot: int) -> bool:
+    start = dot
+    while start > 0 and dot - start <= _ABBREVIATION and text[start - 1].isalpha():
+        start -= 1
+    return text[dot] == "." and 0 < dot - start <= _ABBREVIATION
 
 
 def _sentence_start(text: str, start: int) -> bool:
     position = start
     while position > 0 and (text[position - 1].isspace() or text[position - 1] in _OPENERS):
         position -= 1
-    return position == 0 or text[position - 1] in _SENTENCE_END or "\n" in text[position:start]
+    return position == 0 or "\n" in text[position:start] or (
+        text[position - 1] in _SENTENCE_END and not _abbreviation(text, position - 1)
+    )
 
 
 def _sentence_noun(text: str, found: Found, russian: bytearray) -> bool:
-    """Человек GLiNER — одно нарицательное существительное словаря в начале предложения («Копию отправил Петров»):
-    заглавная буква там ничего не говорит. Имя, фамилия и отчество по словарю (раздел 5.9) остаются; находку русской
-    модели на том же месте (russian — знаки, занятые её людьми) правило не трогает. Цена — фамилия-существительное
-    («Волк») в начале предложения, которую нашёл только GLiNER, остаётся открытой."""
+    """Человек GLiNER — одно неодушевлённое нарицательное существительное словаря в начале предложения («Копию
+    отправил Петров»): заглавная буква там ничего не говорит. Имя, фамилия и отчество по словарю (раздел 5.9) и
+    существительное, у которого есть одушевлённый разбор, остаются: фамилии «Волк», «Кузнец», «Ворона» — тоже
+    существительные. Находку русской модели на том же месте (russian — знаки, занятые её людьми) правило не трогает.
+    Цена — фамилия из неодушевлённого существительного («Берёза») в начале предложения, которую нашёл только GLiNER,
+    остаётся открытой, а слово о человеке («Клиент», «Директор») там остаётся человеком."""
     value = text[found.start:found.end]
     return (
         found.label == "name" and _LETTERS.fullmatch(value) is not None and _sentence_start(text, found.start)
-        and common_nouns(value) and russian.find(1, found.start, found.end) < 0
+        and common_nouns(value) and not animate(value.lower()) and russian.find(1, found.start, found.end) < 0
     )
 
 

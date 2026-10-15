@@ -90,6 +90,13 @@ def part_of_speech(word: str) -> str | None:
     return morph.parse(word)[0].tag.POS if morph.word_is_known(word) else None
 
 
+@lru_cache(maxsize=8192)
+def animate(word: str) -> bool:
+    """Среди разборов слова как существительного есть одушевлённый: «волк», «кузнец», «ворона» бывают фамилиями,
+    а «копию», «счёт», «сервер» — нет."""
+    return any(p.tag.POS == "NOUN" and "anim" in p.tag for p in _morph().parse(word))
+
+
 def common_nouns(value: str) -> bool:
     """Только нарицательные существительные из словаря и служебные слова между ними: «из бухгалтерии», «отдел кадров».
 
