@@ -383,6 +383,33 @@ def test_name_under_an_issued_surrogate_domain_is_found():
     assert values("узел srv-db02.domain-2.example, домен domain-1.example", ctx) == set()
 
 
+LABELLED = DetectContext(Settings(), issued_domains=frozenset({"domain-1.example", "<org_1>"}))
+
+
+@pytest.mark.parametrize("text, names", [
+    ("узел <TERM_1>.fabrikam.ru.", {"fabrikam.ru"}),
+    ("узел [[TERM_1]].corp.fabrikam.ru", {"corp.fabrikam.ru"}),
+    ("узел srv-db02.<TERM_1>.domain-1.example", {"srv-db02"}),
+    ("узел <TERM_1>.corp.domain-1.example", {"corp.domain-1.example"}),
+    ("узел www.<TERM_1>.domain-1.example", set()),
+    ("узел srv-db02.<ORG_1>", {"srv-db02"}),
+    ("узел srv-db02.host-1.<ORG_1>", {"srv-db02.host-1"}),
+], ids=["domain-after", "square", "part-before", "part-between", "generic-before", "label-domain", "name-before"])
+def test_name_next_to_a_label_part_is_found_around_it(text, names):
+    """Обзор, Minor 8: часть имени бывает меткой (5.7, шаг 4). Рядом с ней находятся части между метками, сама метка
+    во фрагмент не входит; выданную замену в них отрежет конвейер (5.10). <org_1> — метка, выданная домену в имени
+    (host-1.<ORG_1>)."""
+    assert found(text, LABELLED) == {(T.HOST, name) for name in names}
+
+
+@pytest.mark.parametrize("text", [
+    "файл <PERSON_1>.docx", "отчёт.<PERSON_1>.pdf", "сайт <ORG_1>.ru", "<TERM_1>.example.com", "звонил <PERSON_1>.Затем",
+    "узел srv-db02.<TERM_1>.domain-2.example", "узел srv-db02.<ORG_2>", "x.<PERSON_1>.Net", "метка <TERM_1>",
+], ids=["file", "file-parts", "bare-suffix", "well-known", "sentence", "not-issued", "other-label", "code", "bare"])
+def test_label_with_a_dot_next_to_something_else_is_not_a_name(text):
+    assert found(text, LABELLED) == set()
+
+
 def test_real_host_typed_under_an_issued_domain_is_masked_and_restored():
     state = ChatState(chat_id="issued", net_key=bytes(32))
     assert sanitize(state, "Домен contoso.ru", Settings()).sanitized == "Домен domain-1.example"

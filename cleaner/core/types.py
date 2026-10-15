@@ -90,6 +90,7 @@ class ChatRule:
     action: str                    # mask | unmask
     value: str
     type: EntityType | None = None
+    bounds: str = "none"           # none — где угодно (выделение); strict | letters — как написания сущности (смена типа)
 
 
 @dataclass
