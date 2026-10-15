@@ -210,6 +210,29 @@ def test_short_value_under_a_key_is_kept():
         assert found(text) == set(), text
 
 
+def test_short_counter_or_word_under_a_key_is_not_a_secret():
+    """Находка «Small regressions … plan 1В»: после minimum=2 счётчик и «ok» становились секретом."""
+    for text in ("max_token: 2048", '"maxToken": 4096', "pass: ok"):
+        assert found(text) == set(), text
+    assert found("pass: Qwerty1") == {"Qwerty1"}
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("Password=P@ss1;Persist Security Info=False", "P@ss1"),
+        ("Server=db01;Password=P@ss1;User ID=sa", "P@ss1"),
+        ("Password=P@ss1;Initial Catalog=crm;Integrated Security=True", "P@ss1"),
+        ("pwd=Qw;er ty=3", "Qw;er"),
+        ("Password=Pa;Ss Word", "Pa;Ss"),
+    ],
+)
+def test_spaced_field_name_of_capitalised_words_ends_the_value(text, value):
+    """Находка «Small regressions … plan 1В»: в строках ADO.NET имя поля из слов с заглавной буквы
+    («Persist Security Info», «User ID») — следующее поле, а не продолжение пароля."""
+    assert found(text) == {value}
+
+
 def test_long_key_names_still_hold_secrets():
     """Финальный обзор 1В: предел длины имени ключа пропускал длинные ключи Spring и переменных окружения."""
     for text in (
