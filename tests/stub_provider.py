@@ -12,7 +12,8 @@ class StubProvider:
         self.requests: list[dict] = []          # path, headers, body
         self.pieces: list[str] = ["Ответ"]
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        # Опрос раз в 0,05 с, а не в 0,5: остановка заглушки иначе добавляет полсекунды каждому тесту.
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
 
     @property
     def url(self) -> str:
