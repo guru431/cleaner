@@ -275,8 +275,8 @@ def test_profile_name_with_an_apostrophe_followed_by_prose_is_one_word():
 
 @pytest.mark.parametrize("domain", ["SA", "APP", "USER", "GIT"])
 def test_domain_login_is_found_whatever_the_domain_name(domain):
-    """Обзор партии P1: общий список стандартных учётных записей прятал «SA\petrov»."""
-    assert accounts(f"учётка {domain}\petrov") == {"petrov"}
+    r"""Обзор партии P1: общий список стандартных учётных записей прятал «SA\petrov»."""
+    assert accounts(f"учётка {domain}\\petrov") == {"petrov"}
 
 
 @pytest.mark.parametrize(
