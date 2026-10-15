@@ -12,6 +12,11 @@ pip сам считает по машине, где запущен (Windows, Pyt
 
     python deploy/lock_linux.py requirements.in requirements-linux.txt requirements.txt
     python deploy/lock_linux.py requirements-dev.in requirements-dev-linux.txt requirements-dev.txt requirements.txt
+
+Версия, выложенная на PyPI меньше MIN_AGE_DAYS дней назад, не принимается: скомпрометированный релиз
+замечают не в первый день (инцидент с LiteLLM, SEC-14), а pip-compile берёт самый новый. Отказ называет
+пакет — закрепите в .in предыдущую версию (`пакет<версия`) и пересоберите файлы. Отсечь их сразу при
+разрешении нельзя: pip --uploaded-prior-to отказывает целиком, если индекс без времени выкладки (сборки torch).
 """
 from __future__ import annotations
 
@@ -20,6 +25,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from packaging.requirements import Requirement
@@ -35,6 +44,7 @@ SERVER = {
 # pip-compile пишет закреплённый пакет с дополнениями так: docling-slim[format-pdf,…]==2.139.0
 _PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==(\S+)")
 _HASH = re.compile(r"--hash=(sha256:[0-9a-f]{64})")
+MIN_AGE_DAYS = 14
 # pip в отдельном процессе с маркерами сервера: packaging берёт окружение из default_environment() при каждой проверке.
 _PIP_WITH_SERVER_MARKERS = (
     "import json, sys\n"
@@ -109,7 +119,33 @@ def closure(wanted: list[str], metadata: dict[str, list[str]]) -> tuple[list[str
     return sorted(needed), sorted(missing)
 
 
-def main(argv: list[str]) -> int:
+def pypi_published(name: str, version: str) -> datetime | None:
+    """Когда версия появилась на PyPI: самый ранний из её файлов. None — на PyPI её нет."""
+    try:
+        with urllib.request.urlopen(f"https://pypi.org/pypi/{name}/{version}/json", timeout=30) as response:
+            files = json.load(response)["urls"]
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    return min((datetime.fromisoformat(f["upload_time_iso_8601"].replace("Z", "+00:00")) for f in files), default=None)
+
+
+def too_young(
+    pins: dict[str, tuple[str, list[str]]], names: list[str], now: datetime,
+    published: Callable[[str, str], datetime | None] = pypi_published,
+) -> list[str]:
+    """Пакеты, версия которых выложена меньше MIN_AGE_DAYS дней назад. Сборка torch «+cpu» — по версии без «+cpu»."""
+    young = []
+    for name in names:
+        version = pins[name][0].split("+")[0]
+        when = published(name, version)
+        if when is not None and now - when < timedelta(days=MIN_AGE_DAYS):
+            young.append(f"{name}=={version} ({when:%d.%m.%Y})")
+    return young
+
+
+def main(argv: list[str], now: datetime | None = None) -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     source, target, *locks = (Path(arg) for arg in argv)
     pins: dict[str, tuple[str, list[str]]] = {}
@@ -124,6 +160,9 @@ def main(argv: list[str]) -> int:
     missing += [name for name in names if name not in pins]
     if missing:
         print(f"не собрать: {', '.join(sorted(missing))} — нет у pip для этой платформы или в файлах машины разработки")
+        return 1
+    if young := too_young(pins, names, now or datetime.now(timezone.utc)):
+        print(f"моложе {MIN_AGE_DAYS} дней: {', '.join(young)} — закрепите в {source.name} предыдущую версию и пересоберите")
         return 1
     lines = [
         f"# Сервер: Linux x86_64, CPython 3.12. Собран deploy/lock_linux.py из {source.name};",
