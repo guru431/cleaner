@@ -5,8 +5,6 @@ import codecs
 import re
 
 _BOMS = ((codecs.BOM_UTF8, "utf-8-sig"), (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
-# Старшие байты UTF-16 у латиницы, кириллицы, тире и «№»: других в журналах и конфигурациях не бывает.
-_UTF16_HIGH = frozenset({0x00, 0x04, 0x20, 0x21})
 _RUSSIAN = re.compile(r"[А-Яа-яЁё]")
 _SAMPLE = 4096
 
@@ -16,12 +14,14 @@ class NotText(ValueError):
 
 
 def _utf16_without_bom(data: bytes) -> str | None:
-    """В UTF-16 без метки каждый второй байт — один из немногих старших (0x00 у латиницы, 0x04 у кириллицы)."""
+    """В UTF-16 без метки хотя бы половина старших байтов — 0x00 у латиницы или 0x04 у кириллицы; в тексте
+    других кодировок этих байтов нет. Остальные старшие байты не перечисляются: рамки «─», «✓», «≥» и греческие
+    буквы тоже бывают в выгрузках. Двоичный файл отсеивает decode — строгое декодирование и доля печатных знаков."""
     sample = data[:_SAMPLE]
     if len(sample) < 8 or len(sample) % 2:
         return None
     for codec, high in (("utf-16-le", sample[1::2]), ("utf-16-be", sample[0::2])):
-        if set(high) <= _UTF16_HIGH and high.count(0x00) + high.count(0x04) >= len(high) // 2:
+        if high.count(0x00) + high.count(0x04) >= len(high) // 2:
             return codec
     return None
 
