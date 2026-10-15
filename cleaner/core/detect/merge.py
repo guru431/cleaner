@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities import hostmap, netmap
@@ -17,6 +17,9 @@ class MergedSpan:
     type: EntityType
     sources: tuple[str, ...]
     searchable: bool = True    # Span.searchable
+    # Фрагмент слит из нескольких находок, и ни одна не покрывает его целиком («Иван Иван» в «Иван Иван Иван»): искомы
+    # их написания, а не он сам (searchable=False) — иначе цепочка становилась написанием длиной в себя (5.7, шаг 2).
+    forms: tuple[str, ...] = ()
     # Где во фрагменте лежат правила пользователя, поглотившие имя или адрес e-mail (5.7): выданную замену в нём они не
     # трогают (5.10). mail — поглощён адрес: части вне правил — части адреса (имя входа — ACCOUNT).
     ruled: tuple[tuple[int, int], ...] = ()
@@ -41,7 +44,9 @@ def _rank(span: Span) -> int:
     return 3
 
 
-# Шаг 3 (раздел 5.7): части имени рядом — фамилия, имя, отчество, инициалы — один PERSON.
+# Шаг 3 (раздел 5.7): части имени рядом — фамилия, имя, отчество, инициалы — один PERSON. Имя — до четырёх слов
+# («Ильхам Гейдар оглы Алиев», «Иванов И. И.»); ряд длиннее — список людей через пробел, и части остаются как найдены.
+_NAME_WORDS = 4
 _NAME_GAP = re.compile(r"[ \t]+")
 _INITIAL_GAP = re.compile(r"\.[ \t]*")
 _LONE_LETTER = re.compile(r"(?<![^\W\d_])[^\W\d_]$")
@@ -66,20 +71,44 @@ def _with_initials(text: str, span: MergedSpan, floor: int, ceiling: int) -> Mer
     before = _INITIALS_BEFORE.search(text, floor, start)
     if before:
         start = before.start(1)
-    return MergedSpan(start, end, span.type, span.sources)
+    return span if (start, end) == (span.start, span.end) else replace(span, start=start, end=end)
+
+
+def _joined(text: str, pieces: list[MergedSpan]) -> MergedSpan:
+    """Имя из соседних частей. Часть, искомая не целиком (слияние пересекающихся находок), делает таким и имя: оно
+    хранит написания частей."""
+    sources = tuple(dict.fromkeys(source for piece in pieces for source in piece.sources))
+    start, end = pieces[0].start, pieces[-1].end
+    if all(piece.searchable for piece in pieces):
+        return MergedSpan(start, end, EntityType.PERSON, sources)
+    forms = tuple(dict.fromkeys(
+        form for piece in pieces for form in ((text[piece.start:piece.end],) if piece.searchable else piece.forms)
+    ))
+    return MergedSpan(start, end, EntityType.PERSON, sources, searchable=False, forms=forms)
 
 
 def _join_names(text: str, spans: list[MergedSpan]) -> list[MergedSpan]:
     out: list[MergedSpan] = []
+    run: list[MergedSpan] = []      # части ряда соседних имён, которым кончается out
+    words, listed = 0, False        # слов в ряду; ряд длиннее имени — его части в out по отдельности
     for index, span in enumerate(spans):
         if span.type is EntityType.PERSON:
             ceiling = spans[index + 1].start if index + 1 < len(spans) else len(text)
             span = _with_initials(text, span, out[-1].end if out else 0, ceiling)
             previous = out[-1] if out else None
+            count = max(1, len(text[span.start:span.end].split()))
             if previous is not None and previous.type is EntityType.PERSON and _adjacent(text, previous, span):
-                sources = tuple(dict.fromkeys(previous.sources + span.sources))
-                out[-1] = MergedSpan(previous.start, span.end, EntityType.PERSON, sources)
+                run.append(span)
+                words += count
+                if listed:
+                    out.append(span)
+                elif words <= _NAME_WORDS:
+                    out[-1] = _joined(text, run)
+                else:
+                    listed = True
+                    out[-1:] = run
                 continue
+            run, words, listed = [span], count, False
         out.append(span)
     return out
 
@@ -151,16 +180,18 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
         kept = senior.source == "manual" and _name_kept(text, group, start, end, policies)
         type_ = kept or senior.type
         # Искомым значение делает любая находка того же типа: слово после «Пароль —», которое нашли и словарём чата.
-        # Цепочка пересекающихся адресов e-mail («a@b.c.a@b.c.a…»: каждый следующий начинается в домене предыдущего) —
-        # не адрес: искомы сами адреса, слой 1 нашёл их по отдельности, а цепочку длиной в текст искали бы с каждого
-        # слова текста (match.find_forms) — квадратичное время.
+        # Слияние пересекающихся находок, ни одна из которых не покрывает его целиком («Иван Иван» словаря в «Иван Иван
+        # Иван …», правило «la la» в «la la la …», цепочка адресов e-mail «a@b.c.a@b.c.a…»), — не значение: искомы
+        # написания находок, а цепочка длиной в текст раздувала бы чат, и поиск сверял бы её с каждого слова.
         searchable = any(s.searchable for s in group if s.type is senior.type)
-        if type_ is EntityType.EMAIL and text.count("@", start, end) > 1:
+        forms: tuple[str, ...] = ()
+        if searchable and not any((s.start, s.end) == (start, end) for s in group):
+            forms = tuple(dict.fromkeys(text[s.start:s.end] for s in group if s.type is senior.type and s.searchable))
             searchable = False
         ruled, mail = (), False
         records = {s.type for s in group if s.source != "manual"} & {*_NAME_TYPES, EntityType.EMAIL}
         if senior.source == "manual" and not kept and records:
             ruled = tuple((s.start, s.end) for s in group if s.source == "manual")
             mail = EntityType.EMAIL in records
-        merged.append(MergedSpan(start, end, type_, sources, searchable, ruled, mail))
+        merged.append(MergedSpan(start, end, type_, sources, searchable, forms, ruled, mail))
     return _join_names(text, merged)

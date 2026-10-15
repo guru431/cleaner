@@ -1,3 +1,5 @@
+import re
+
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.detect.merge import MergedSpan, merge
 from cleaner.core.types import EntityType as T
@@ -73,7 +75,25 @@ def test_rule_swallowing_a_name_records_where_it_lies():
 
 def test_partial_overlap_covers_the_union():
     spans = [Span(0, 10, T.PHONE, "rules"), Span(5, 16, T.CARD, "rules", validated=True)]
-    assert merge("0123456789abcdef", spans, CTX) == [MergedSpan(0, 16, T.CARD, ("rules",))]
+    assert merge("0123456789abcdef", spans, CTX) == [
+        MergedSpan(0, 16, T.CARD, ("rules",), searchable=False, forms=("56789abcdef",)),
+    ]
+
+
+def test_union_of_findings_none_of_which_covers_it_keeps_their_spellings():
+    """Наблюдение раунда имён узлов, P2: пересекающиеся известные значения («Иван Иван» в «Иван Иван Иван …», правило
+    «la la» в «la la la …») сливались в один фрагмент, и его текст становился искомым написанием длиной в цепочку. Он
+    скрыт одной заменой, а искомы написания находок; находка на весь фрагмент — как прежде."""
+    text = "Иван Иван Иван Иван"
+    spans = [Span(start, start + 9, T.PERSON, "dict") for start in (0, 5, 10)]
+    assert merge(text, spans, CTX) == [MergedSpan(0, 19, T.PERSON, ("dict",), searchable=False, forms=("Иван Иван",))]
+    spans.append(Span(0, 19, T.ORG, "ner"))
+    assert merge(text, spans, CTX) == [MergedSpan(0, 19, T.PERSON, ("ner", "dict"))]
+    # Искомы только находки старшего типа, которые были бы искомыми и сами.
+    spans = [Span(0, 9, T.SECRET, "secrets", searchable=False), Span(5, 14, T.SECRET, "secrets"), Span(8, 19, T.IP, "infra")]
+    assert merge(text, spans, CTX) == [
+        MergedSpan(0, 19, T.SECRET, ("secrets", "infra"), searchable=False, forms=("Иван Иван",)),
+    ]
 
 
 def test_touching_fragments_stay_separate():
@@ -102,6 +122,28 @@ def test_name_parts_side_by_side_become_one_person():
     text = "Иванов Иван Иванович"
     spans = [Span(0, 6, T.PERSON, "ner"), Span(7, 11, T.PERSON, "ner"), Span(12, 20, T.PERSON, "dict")]
     assert merge(text, spans, CTX) == [MergedSpan(0, 20, T.PERSON, ("ner", "dict"))]
+
+
+def test_run_of_names_longer_than_four_words_is_not_joined():
+    """Наблюдение раунда имён узлов, P2: ряд фамилий через пробел («Иванов Петров Сидоров …») сливался в один PERSON
+    длиной в ряд, и его текст становился искомым написанием. Имя — до четырёх слов («Ильхам Гейдар оглы Алиев»,
+    «Иванов И. И.»); ряд длиннее — список людей, и части остаются как найдены."""
+    def joined(text):
+        spans = [Span(m.start(), m.end(), T.PERSON, "ner") for m in re.finditer(r"[^\W\d_]{2,}", text)]
+        return [text[m.start:m.end] for m in merge(text, spans, CTX)]
+
+    assert joined("Ильхам Гейдар оглы Алиев") == ["Ильхам Гейдар оглы Алиев"]
+    assert joined("Иванов Петров Сидоров Козлов Морозов") == ["Иванов", "Петров", "Сидоров", "Козлов", "Морозов"]
+    assert joined("Иванов И. И. Петров П. П.") == ["Иванов И. И.", "Петров П. П."]
+    assert joined("Иванов Петров, Сидоров Козлов Морозов Волков Зайцев.") == [
+        "Иванов Петров", "Сидоров", "Козлов", "Морозов", "Волков", "Зайцев",
+    ]
+    # Ряд, в котором часть — слияние пересекающихся находок: она не искома, и слитое имя хранит её написания.
+    text = "Иван Иван Иван Петров"
+    spans = [Span(0, 9, T.PERSON, "dict"), Span(5, 14, T.PERSON, "dict"), Span(15, 21, T.PERSON, "ner")]
+    assert merge(text, spans, CTX) == [
+        MergedSpan(0, 21, T.PERSON, ("dict", "ner"), searchable=False, forms=("Иван Иван", "Петров")),
+    ]
 
 
 def test_initials_next_to_a_name_join_it():

@@ -121,6 +121,7 @@ class Resolver:
         self._open_addresses: set[str] | None = None
         self._text_names: set[str] | None = None
         self._text_labels: set[str] | None = None
+        self._searched: set[str] | None = None      # написания сущностей чата — при первом слиянии находок (_remember)
 
     @staticmethod
     def _dictionary_key(type_: EntityType, value: str) -> str:
@@ -149,7 +150,7 @@ class Resolver:
         # None — значение не того вида (например, ручное правило): обычная метка. Вид проверяется до
         # первой записи в состояние: исключение посреди подмены оставило бы сущность без замены и номер.
         resolved = special(value, span.type, origin) if special else None
-        entity, surrogate = resolved or self._labelled(span.type, value, origin, span.searchable)
+        entity, surrogate = resolved or self._labelled(span.type, value, origin, span.searchable, span.forms)
         return ResolvedSpan(span.start, span.end, entity.id, surrogate, span.sources)
 
     # --- сущности ---------------------------------------------------------
@@ -159,16 +160,31 @@ class Resolver:
         self.state.counters[type_.value] = number
         return number
 
-    def _entity(self, type_: EntityType, key: str, value: str, origin: str, searchable: bool = True) -> Entity:
+    def _entity(
+        self, type_: EntityType, key: str, value: str, origin: str, searchable: bool = True, forms: tuple[str, ...] = (),
+    ) -> Entity:
         merged_into = self.state.key_alias.get(f"{type_.value}:{key}")
         entity = self.state.entities.get(merged_into) if merged_into else self.index.get((type_, key))
         if entity is None:
             entity = Entity(uuid4().hex, type_, self._next(type_), key, value, origin)
             self.state.entities[entity.id] = entity
             self.index[(type_, key)] = entity
+        self._remember(entity, value, searchable, forms)
+        return entity
+
+    def _remember(self, entity: Entity, value: str, searchable: bool, forms: tuple[str, ...]) -> None:
+        """Искомые написания: значение — или написания находок, слитых в него (MergedSpan.forms). Написание находки, уже
+        искомое в чате (известное значение другой сущности), не повторяется: оно и так найдётся."""
         if searchable and value not in entity.forms:
             entity.forms.append(value)
-        return entity
+        if not forms:
+            return
+        if self._searched is None:
+            self._searched = {form for e in self.state.entities.values() for form in e.forms}
+        for form in forms:
+            if form not in self._searched:
+                self._searched.add(form)
+                entity.forms.append(form)
 
     def _issue(self, entity: Entity, slot: str, make: Callable[[], str]) -> str:
         """Замена сущности для данного вида записи: выдаётся один раз и запоминается."""
@@ -217,12 +233,17 @@ class Resolver:
 
         return self._issue(entity, "label", make)
 
-    def _labelled(self, type_: EntityType, value: str, origin: str, searchable: bool = True) -> tuple[Entity, str]:
+    def _labelled(
+        self, type_: EntityType, value: str, origin: str, searchable: bool = True, forms: tuple[str, ...] = (),
+    ) -> tuple[Entity, str]:
         key = self.alias.get((type_, normalize(value))) or canonical_key(type_, value)
-        entity = self._person(key, value, origin) if type_ is T.PERSON else self._entity(type_, key, value, origin, searchable)
+        if type_ is T.PERSON:
+            entity = self._person(key, value, origin, searchable, forms)
+        else:
+            entity = self._entity(type_, key, value, origin, searchable, forms)
         return entity, self._label(entity)
 
-    def _person(self, key: str, value: str, origin: str) -> Entity:
+    def _person(self, key: str, value: str, origin: str, searchable: bool = True, forms: tuple[str, ...] = ()) -> Entity:
         """Человек: тот же ключ (словарь, объединение, прежнее написание) или единственная совместимая сущность (5.9)."""
         mention = names.parse(value)
         merged_into = self.state.key_alias.get(f"{T.PERSON.value}:{key}")
@@ -244,9 +265,9 @@ class Resolver:
                 entity = fitting[0]
                 self.index[(T.PERSON, key)] = entity
         if entity is None:
-            entity = self._entity(T.PERSON, key, value, origin)
-        elif value not in entity.forms:
-            entity.forms.append(value)
+            entity = self._entity(T.PERSON, key, value, origin, searchable, forms)
+        else:
+            self._remember(entity, value, searchable, forms)
         names.absorb(entity, mention, value)
         return entity
 
