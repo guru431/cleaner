@@ -43,6 +43,9 @@ function reload() {
   }
   const main = document.querySelector("main");
   if (main && main.scrollTop > 0) place.main = main.scrollTop;
+  // Панели «Оригинал» и «Очищенный» на проверке прокручиваются сами (pre.text с id) — их места тоже.
+  const panes = [...document.querySelectorAll("pre.text[id]")].filter((pane) => pane.scrollTop > 0);
+  if (panes.length) place.panes = Object.fromEntries(panes.map((pane) => [pane.id, pane.scrollTop]));
   history.replaceState(place, "");
   window.location.reload();
 }
@@ -128,3 +131,14 @@ document.querySelectorAll("main").forEach((main) => {
   main.scrollTop = saved;
   history.replaceState(rest, "");
 });
+
+// Панели текста — туда же, один раз.
+(() => {
+  const { panes, ...rest } = history.state || {};
+  if (!panes) return;
+  Object.entries(panes).forEach(([id, top]) => {
+    const pane = document.getElementById(id);
+    if (pane) pane.scrollTop = top;
+  });
+  history.replaceState(rest, "");
+})();

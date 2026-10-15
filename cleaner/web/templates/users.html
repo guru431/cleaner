@@ -15,6 +15,8 @@
       <td>
         <form method="post" action="/settings/users/{{ u.id }}/password">
           {% include "_csrf.html" %}
+          {# Чей это пароль — для менеджера паролей браузера: без логина он записал бы его к учётной записи вошедшего. Без name: на сервер не уходит. #}
+          <input hidden autocomplete="username" value="{{ u.login }}">
           <input name="password" type="password" minlength="12" autocomplete="new-password" required aria-label="Новый пароль для {{ u.login }}">
           <button>Сменить</button>
         </form>
@@ -36,7 +38,7 @@
   <div class="panel-body">
     <form method="post" action="/settings/users" class="form">
       {% include "_csrf.html" %}
-      <label class="field"><span>Логин</span><input name="login" required></label>
+      <label class="field"><span>Логин</span><input name="login" autocomplete="username" required></label>
       <label class="field"><span>Пароль</span><span class="control">
         <input name="password" type="password" minlength="12" autocomplete="new-password" required>
         <small class="hint">Не короче 12 знаков</small>

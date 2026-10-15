@@ -119,6 +119,16 @@ def test_users_are_created_given_new_passwords_and_disabled(boss, browser, repo)
     assert {"user_created", "password_changed", "user_disabled"} <= {e.event for e in repo.audit_events()}
 
 
+def test_every_password_form_names_whose_password_it_is(boss):
+    """Форма нового пароля без поля логина: менеджер паролей браузера записал бы новый пароль пользователя к учётной
+    записи вошедшего администратора. Логин строки — скрытым полем без name: на сервер он не уходит."""
+    boss.post("/settings/users", login="petr", password="длинный-пароль-1", role="user")
+    page = boss.get("/settings/users").text
+    for login in ("boss", "petr"):
+        assert f'<input hidden autocomplete="username" value="{login}">' in page
+    assert '<input name="login" autocomplete="username" required>' in page
+
+
 def test_audit_is_filtered_by_event_user_and_day(browser, repo, clock):
     ivan = repo.create_user("ivan", "hash", "user")
     repo.audit("restore", ivan, restored=2)                                   # 14.10
