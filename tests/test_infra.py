@@ -420,6 +420,58 @@ def test_label_with_a_dot_next_to_something_else_is_not_a_name(text):
     assert found(text, LABELLED) == set()
 
 
+@pytest.mark.parametrize("text, expected", [
+    (r"RewriteCond %{HTTP_HOST} ^www\.contoso\.ru$", {(T.HOST, r"www\.contoso\.ru")}),
+    (r"server_name ~^srv01\.contoso\.ru$;", {(T.HOST, r"srv01\.contoso\.ru")}),
+    (r"server_name ~^(.+)\.corp\.contoso\.local$;", {(T.HOST, r"corp\.contoso\.local")}),
+    (r"grep -E '.*\.contoso\.ru' -", {(T.DOMAIN, r"contoso\.ru")}),
+    (r"Select-String '\bportal\.contoso\.ru\b'", {(T.HOST, r"portal\.contoso\.ru")}),
+    (r'if address :regex "from" "@contoso\.ru$"', {(T.DOMAIN, r"contoso\.ru")}),
+    (r"^srv01\.contoso.ru$", {(T.HOST, r"srv01\.contoso.ru")}),
+], ids=["rewrite", "nginx", "nginx-capture", "grep-any", "word-bounds", "sieve", "both-separators"])
+def test_name_written_with_escaped_dots_is_found(text, expected):
+    """Наблюдение раунда 3 имён узлов, P1: имя в регулярном выражении, шаблоне grep, настройке nginx пишут через «\\.», и
+    слой 3 его не находил — настоящий домен уходил в облако. «\\.» — разделитель частей, как точка, с теми же правилами;
+    цепочка начинается и после «\\.» за знаком выражения («.*\\.», «(.+)\\.»), и между «\\b» и «\\b»."""
+    assert found(text) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    (r"C:\Users\ivanov\.ssh\config", {"ivanov"}),
+    (r"C:\Users\ivanov\.android\avd и C:\Users\bob\.local\bin", {"ivanov", "bob"}),
+    (r'"C:\\Users\\ivanov\\.aws\\config"', {"ivanov"}),
+    (r"\\fs01\share\.azure\x", {"fs01"}),
+    (r"System\.Net\.Http, re\.search\(x\), README\.md, 1\.2\.3\.dev, $obj\.host\.ru", set()),
+    (r"^www\.example\.com$ и ^login\.microsoftonline\.com$", set()),
+], ids=["dot-folder", "folders-with-suffixes", "json-path", "share", "code", "well-known"])
+def test_backslash_before_a_dot_elsewhere_is_not_a_name_separator(text, expected):
+    """Та же находка с другой стороны: «\\» перед частью — разделитель пути Windows, и папка на точку в профиле
+    («.android», «.local», «.aws» — суффиксы из списка) именем не становится; код, файлы, общеизвестные и
+    зарезервированные имена через «\\.» остаются, как через точку."""
+    assert values(text) == expected
+
+
+def test_name_with_escaped_dots_under_an_issued_domain_or_next_to_a_label_is_found():
+    ctx = DetectContext(Settings(), issued_domains=frozenset({"domain-1.example"}))
+    assert found(r"^srv-db02\.domain-1\.example$", ctx) == {(T.HOST, r"srv-db02\.domain-1\.example")}
+    assert values(r"^srv-db02\.<TERM_1>\.domain-1\.example$", LABELLED) == {"srv-db02"}
+    assert values(r"^<TERM_1>\.fabrikam\.ru$", LABELLED) == {r"fabrikam\.ru"}
+    assert values(r"<PERSON_1>\.docx и ^www\.<TERM_1>\.domain-1\.example$", LABELLED) == set()
+
+
+def test_mixed_case_name_with_an_issued_replacement_inside_is_a_name():
+    """Наблюдение раунда 3 имён узлов, P3: в «Petrov.host-1.fabrikam.ru» смешанный регистр («Petrov») делал имя похожим
+    на код (System.Net), и fabrikam.ru оставался открытым. Цепочка с выданной заменой внутри — имя, признаки кода к ней не
+    применяются; суффикс из списка нужен по-прежнему. Без выданной замены — как прежде."""
+    ctx = DetectContext(Settings(), issued_domains=frozenset({"domain-1.example"}), issued_names=frozenset({"host-1"}))
+    assert values("узел Petrov.host-1.fabrikam.ru", ctx) == {"Petrov.host-1.fabrikam.ru"}
+    assert values(r"^Petrov\.HOST-1\.Fabrikam\.ru$", ctx) == {r"Petrov\.HOST-1\.Fabrikam\.ru"}
+    assert values("узел Ivanov.domain-1.example.Fabrikam.ru", ctx) == {"Ivanov.domain-1.example.Fabrikam.ru"}
+    assert values("System.Net.Http, re.search(x), Petrov.host-2.fabrikam.ru, Petrov.host-1.Затем", ctx) == set()
+    assert values("узел <ORG_1>.Fabrikam.ru", LABELLED) == {"Fabrikam.ru"}       # после метки доменного имени
+    assert values("x.<PERSON_1>.System.Net", LABELLED) == set()
+
+
 def test_real_host_typed_under_an_issued_domain_is_masked_and_restored():
     state = ChatState(chat_id="issued", net_key=bytes(32))
     assert sanitize(state, "Домен contoso.ru", Settings()).sanitized == "Домен domain-1.example"

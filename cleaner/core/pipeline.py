@@ -104,16 +104,19 @@ def _placed(
 ) -> list[MergedSpan]:
     """Имя, которое стоит через точку после выданной замены или метки или перед ней, — часть имени (5.10): части перед
     заменой — части слева от домена, часть после неё — не первая, и отдельным написанием (5.4) она не становится.
-    Одни служебные части перед заменой («www.mail.<TERM_1>…») не скрываются, как и «www» сам по себе."""
+    Одни служебные части перед заменой («www.mail.<TERM_1>…») не скрываются, как и «www» сам по себе. Точка бывает и
+    «\\.» (имя в регулярном выражении)."""
     if span.type not in (EntityType.HOST, EntityType.DOMAIN):
         return [span]
-    after = bisect.bisect_left(starts, span.end + 1)
-    precedes = text[span.end:span.end + 1] == "." and after < len(starts) and starts[after] == span.end + 1
-    before = bisect.bisect_right(starts, span.start - 2) - 1        # замена, которая кончается перед точкой
-    follows = text[span.start - 1:span.start] == "." and before >= 0 and ranges[before][1] == span.start - 1
+    gap = 2 if text.startswith("\\.", span.end) else 1 if text.startswith(".", span.end) else 0
+    after = bisect.bisect_left(starts, span.end + gap)
+    precedes = gap > 0 and after < len(starts) and starts[after] == span.end + gap
+    lead = 2 if text[max(0, span.start - 2):span.start] == "\\." else 1 if text[span.start - 1:span.start] == "." else 0
+    before = bisect.bisect_right(starts, span.start - lead - 1) - 1     # замена, которая кончается перед точкой
+    follows = lead > 0 and before >= 0 and ranges[before][1] == span.start - lead
     if not (follows or precedes):
         return [span]
-    labels_ = text[span.start:span.end].lower().split(".")
+    labels_ = text[span.start:span.end].lower().replace("\\.", ".").split(".")
     if (precedes or len(labels_) == 1) and all(label in ctx.builtin.generic_labels for label in labels_):
         return []
     return [replace(span, follows=follows, precedes=precedes)]
@@ -168,6 +171,7 @@ def _context(state: ChatState, settings: Settings) -> DetectContext:
         unmask=frozenset(r.value.lower() for r in state.rules if r.action == "unmask"),
         issued_domains=frozenset(fake.lower() for slot, fake in state.issued.items() if slot.endswith("|dns"))
         | {label.lower() for label in labels.domain_labels(state)},
+        issued_names=frozenset(fake.lower() for slot, fake in state.issued.items() if slot.endswith("|name")),
     )
 
 

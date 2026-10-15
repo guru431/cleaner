@@ -46,7 +46,7 @@ def _rank(span: Span) -> int:
 
 # Шаг 3 (раздел 5.7): части имени рядом — фамилия, имя, отчество, инициалы — один PERSON. Имя — до четырёх слов
 # («Ильхам Гейдар оглы Алиев», «Иванов И. И.»); ряд длиннее — список людей через пробел, и части остаются как найдены.
-_NAME_WORDS = 4
+NAME_WORDS = 4
 _NAME_GAP = re.compile(r"[ \t]+")
 _INITIAL_GAP = re.compile(r"\.[ \t]*")
 _LONE_LETTER = re.compile(r"(?<![^\W\d_])[^\W\d_]$")
@@ -102,7 +102,7 @@ def _join_names(text: str, spans: list[MergedSpan]) -> list[MergedSpan]:
                 words += count
                 if listed:
                     out.append(span)
-                elif words <= _NAME_WORDS:
+                elif words <= NAME_WORDS:
                     out[-1] = _joined(text, run)
                 else:
                     listed = True
@@ -114,6 +114,7 @@ def _join_names(text: str, spans: list[MergedSpan]) -> list[MergedSpan]:
 
 
 _DOTTED_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
+_NAME_PART = re.compile(r"[^.\\]+")         # часть имени через «.» или «\.» (регулярное выражение)
 _NAME_TYPES = (EntityType.HOST, EntityType.DOMAIN)
 
 
@@ -134,13 +135,12 @@ def _name_kept(
         if any(STRICTNESS.get(policies.get(s.type), 0) > own for s in group if s.source == "manual"):
             return None
         start = text.rfind("@", start, end) + 1
-    if name is None or not _DOTTED_NAME.fullmatch(text, start, end):
+    dotted = text[start:end].replace("\\.", ".")        # имя через «\.» — как через точку
+    if name is None or not _DOTTED_NAME.fullmatch(dotted):
         return None
-    left, registrable = hostmap.parts(text[start:end])
-    edges, position = {(end - len(registrable), end)}, start
-    for label in left:
-        edges.add((position, position + len(label)))
-        position += len(label) + 1
+    left, registrable = hostmap.parts(dotted)
+    labels = [m.span() for m in _NAME_PART.finditer(text, start, end)]
+    edges = {*labels[:len(left)], (labels[len(left)][0], end)}
     return name.type if all((s.start, s.end) in edges for s in group if s.source == "manual") else None
 
 
@@ -170,6 +170,8 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
         # значение в любой записи: «2a00:1450:4010::65» в тексте и «2a00:1450:4010:0:0:0:0:65» в списке, «10.1.2.5» и
         # «010.001.002.005», «10.1.2.0» и «10.1.2.0/24» (длину /24 и больше слой 3 во фрагмент не берёт).
         if "manual" not in sources:
+            if senior.type in _NAME_TYPES:
+                value = value.replace("\\.", ".")       # имя через «\.» — то же значение
             if value in ctx.settings.never or value in ctx.unmask:
                 continue
             if senior.type is EntityType.IP:

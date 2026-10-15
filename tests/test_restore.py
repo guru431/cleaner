@@ -118,7 +118,7 @@ def test_internal_link_and_derived_names_are_restored(settings):
     [
         (r"RewriteCond %{HTTP_HOST} ^host-1\.sub-2\.domain-1\.example$", r"RewriteCond %{HTTP_HOST} ^srv-web01\.corp\.contoso\.ru$", ["restored"]),
         (r"server_name ~^www\.domain-1\.example$;", r"server_name ~^www\.contoso\.ru$;", ["derived"]),
-        (r"grep 'host-1\.evil\.com' log", r"grep 'srv-web01\.evil\.com' log", ["derived"]),
+        (r"grep 'host-1\.example\.com' log", r"grep 'srv-web01\.example\.com' log", ["derived"]),
         (r"^host-1\.sub-2\.domain-1.example$", r"^srv-web01\.corp\.contoso.ru$", ["derived"] * 3),
     ],
     ids=["rewrite", "nginx", "derived", "both-separators"],
