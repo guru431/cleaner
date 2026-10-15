@@ -478,7 +478,9 @@ class ChatService:
                 self._view_found -= len(self._view_leaks.popitem(last=False)[1])
         return list(found)
 
-    def view(self, chat_id: str) -> ChatView:
+    def view(self, chat_id: str, item_id: str | None = None) -> ChatView:
+        """item_id — вид одного входного текста (экраны проверки и выгрузки): проверка утечек других текстов и
+        восстановление ответов им не нужны, а после нового текста состояние другое, и запомненные итоги не годятся."""
         state, _ = self.repo.load_state(chat_id)
         settings = self.repo.settings()
         # Отпечаток состояния — его запись в базе (полнота записи проверяется тестом кодека), настроек — pickle:
@@ -487,6 +489,8 @@ class ChatService:
         views: list[InputView | AnswerView] = []
         items = self.repo.items(chat_id)
         for item, in_request in zip(items, _in_request(items)):
+            if item_id is not None and item.id != item_id:
+                continue
             if item.kind == "input":
                 if item.status != "done":
                     views.append(InputView(item, [], []))

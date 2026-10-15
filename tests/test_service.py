@@ -210,6 +210,23 @@ def test_view_does_not_repeat_the_leak_check_while_nothing_changed(repo, chat, m
     assert calls == ["почта <EMAIL_1>", "почта <EMAIL_2>"]
 
 
+def test_view_of_one_text_checks_only_that_text_and_restores_no_answers(repo, chat, monkeypatch):
+    """Экраны проверки и выгрузки показывают один текст: проверка утечек других текстов и восстановление ответов им
+    не нужны, а после каждого нового текста состояние чата другое, и запомненные итоги (_view_leak_check) не годятся."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    first = service.add_input(chat_id, user, "почта a@x.example")
+    service.add_input(chat_id, user, "почта b@x.example")
+    service.add_answer(chat_id, user, "Ответ про <EMAIL_1>")
+    calls = []
+    check = leakcheck.check
+    monkeypatch.setattr(leakcheck, "check", lambda *args: calls.append(args[0]) or check(*args))
+    monkeypatch.setattr("cleaner.service.restore", lambda *args: pytest.fail("ответ восстанавливался"))
+    view = service.view(chat_id, first.id)
+    assert [entry.item.id for entry in view.items] == [first.id] and view.items[0].deliverable
+    assert calls == ["почта <EMAIL_1>"]
+
+
 def test_remembered_leak_checks_are_bounded_by_their_findings(repo, chat, monkeypatch):
     """Память ограничена и числом находок: один текст с тысячами находок иначе занял бы её сам. Итог, который не
     помещается, не запоминается — и проверяется заново, с тем же результатом."""

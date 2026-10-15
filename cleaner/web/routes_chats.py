@@ -199,7 +199,7 @@ def set_layer(request: Request, chat_id: str, form: dict[str, str] = Depends(get
 @router.get("/chats/{chat_id}/items/{item_id}/download")
 def download(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depends(get_viewer)) -> Response:
     own_chat(request, chat_id, viewer)
-    entry = input_view(service_of(request).view(chat_id), item_id)
+    entry = input_view(service_of(request).view(chat_id, item_id), item_id)
     if not entry.deliverable:
         raise HTTPException(409, "Выдача заблокирована: текст не обработан, в нём найден оригинал или фрагмент запрещённого типа")
     return Response(

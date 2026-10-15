@@ -88,7 +88,7 @@ def _edit(
 @router.get("/chats/{chat_id}/items/{item_id}")
 def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depends(get_viewer)) -> Response:
     chat = own_chat(request, chat_id, viewer)
-    view = service_of(request).view(chat_id)
+    view = service_of(request).view(chat_id, item_id)
     entry = input_view(view, item_id)
     item, state = entry.item, view.state
     if item.status != "done":
@@ -163,12 +163,12 @@ def refresh(request: Request, chat_id: str, form: dict[str, str] = Depends(get_f
 @router.get("/chats/{chat_id}/entities")
 def entities(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer)) -> Response:
     chat = own_chat(request, chat_id, viewer)
-    view = service_of(request).view(chat_id)
-    names = render.surrogates_by_entity(view.state)
-    counts = Counter(
-        span["entity_id"] for entry in view.items if entry.item.kind == "input" for span in entry.item.spans
-    )
-    ordered = sorted(view.state.entities.values(), key=lambda e: (e.type.value, e.number))
+    # Таблице нужны состояние и замены текстов, а не вид чата: проверка утечек и восстановление ответов ей ни к чему.
+    repo = repo_of(request)
+    state, _ = repo.load_state(chat_id)
+    names = render.surrogates_by_entity(state)
+    counts = Counter(span["entity_id"] for item in repo.items(chat_id) if item.kind == "input" for span in item.spans)
+    ordered = sorted(state.entities.values(), key=lambda e: (e.type.value, e.number))
     rows = [
         {
             "id": e.id, "type": e.type, "type_name": render.TYPE_NAMES[e.type], "surrogates": names.get(e.id, []),
