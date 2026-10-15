@@ -2,7 +2,7 @@
 {% block title %}Таблица замен — {{ chat.title }} — Cleaner{% endblock %}
 {% block main %}
 <div class="bar">
-  <nav class="crumbs"><a href="/chats/{{ chat.id }}">{{ chat.title }}</a><span class="sep">/</span><h1>Таблица замен</h1></nav>
+  <nav class="crumbs"><a href="/chats/{{ chat.id }}" title="{{ chat.title }}">{{ chat.title }}</a><span class="sep">/</span><h1>Таблица замен</h1></nav>
   <span class="spacer"></span>
   <form method="post" action="/chats/{{ chat.id }}/refresh">
     {% include "_csrf.html" %}

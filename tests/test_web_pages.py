@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from cleaner.core.types import EntityType as T
+from cleaner.storage.repo import Provider
 
 WEB = Path(__file__).resolve().parent.parent / "cleaner" / "web"
 TEMPLATES = sorted((WEB / "templates").glob("*.html"))
@@ -63,6 +64,24 @@ def test_chat_pages_open_with_chats_current(ivan, repo):
         response = ivan.get(path)
         assert response.status_code == 200, path
         assert re.findall(r'<a href="([^"]+)" class="on"', response.text) == ["/chats"], path
+
+
+LONG_TITLE = "Согласование договора поставки серверного оборудования для филиала «Север» на четвёртый квартал"
+
+
+def test_a_cut_chat_title_is_whole_in_its_tooltip(ivan, repo):
+    """Длинное название обрезается многоточием в шапке чата, в списке чатов и в «хлебных крошках»; целиком оно —
+    в подсказке, а не только в поле переименования."""
+    chat_id = ivan.chat(LONG_TITLE)
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    item_id = repo.items(chat_id)[0].id
+    provider = repo.add_provider(Provider("", "Облако", "openai", "https://llm.example/v1", "bearer", "sk-test-0123", ("m-1",), 512))
+    ivan.post(f"/chats/{chat_id}/provider", choice=f"{provider}|m-1")
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert f'<h1 title="{LONG_TITLE}">{LONG_TITLE}</h1>' in page
+    assert f'<span class="name" title="{LONG_TITLE}">{LONG_TITLE}</span>' in page
+    for path in (f"/chats/{chat_id}/items/{item_id}", f"/chats/{chat_id}/entities", f"/chats/{chat_id}/send"):
+        assert f'<a href="/chats/{chat_id}" title="{LONG_TITLE}">{LONG_TITLE}</a>' in ivan.get(path).text, path
 
 
 def test_layer_switch_states_its_layer_and_state(ivan):

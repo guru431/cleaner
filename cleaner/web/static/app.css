@@ -267,10 +267,15 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 .work.empty-state { display: flex; align-items: center; justify-content: center; padding: 24px; color: var(--muted); text-align: center; }
 
 .work.chat { display: flex; flex-direction: column; overflow: hidden; }
-.chat-head { flex: none; display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.chat-head { position: relative; flex: none; display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
 .chat-head h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-head > a { white-space: nowrap; }
 .chat-head summary.btn { padding: 0 7px; }
 .chat-head .pop { min-width: 440px; }
+/* Форма переименования — от левого края шапки, а не от карандаша: длинное название уводит карандаш за середину,
+   и форма вылезала бы за рабочую область, которая её обрезает (overflow: hidden). */
+.chat-head details.inline { position: static; }
+.chat-head details.inline > .pop { left: 16px; }
 .layers { display: flex; gap: 6px; margin-left: 8px; }
 .layers form { margin: 0; }
 .feed { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
