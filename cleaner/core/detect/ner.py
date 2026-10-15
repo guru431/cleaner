@@ -107,6 +107,28 @@ def _common_words(text: str, found: Found) -> bool:
     )
 
 
+# Не организации, хотя GLiNER при пороге 0,25 называет их так, заглавными и без названия рядом: номера документов
+# и реестры, страховки, налоги и режимы налогообложения, ЖКХ, а также организационно-правовая форма сама по себе
+# («ИП», «ООО»; форма с названием в кавычках — правило orgs.py, формы — те же, что там). На открытых наборах это
+# самый частый шум ORG. Государственные органы (ФНС, ПФР, МВД, ГИБДД, МФЦ) — организации и сюда не входят: их
+# открывает словарь «никогда не скрывать» (раздел 5.5 ТЗ), а не модель.
+_NOT_ORGANISATIONS = frozenset({
+    "снилс", "инн", "кпп", "огрн", "огрнип", "бик", "окпо", "оквэд", "октмо", "окато", "егрюл", "егрип", "егрн",
+    "птс", "стс", "ву", "эцп", "кэп", "укэп", "фио", "паспорт",
+    "омс", "дмс", "осаго", "каско",
+    "ндс", "ндфл", "усн", "енвд", "псн", "осно", "есхн", "нпд", "енс", "енп", "аусн", "жкх", "жку",
+    "ооо", "оао", "зао", "пао", "нао", "ао", "ип", "фгуп", "фгбу", "фгбоу", "гуп", "муп", "гбу", "мбу", "ано", "нко",
+    "тоо", "тсж", "снт", "общество с ограниченной ответственностью", "акционерное общество",
+    "публичное акционерное общество", "непубличное акционерное общество", "закрытое акционерное общество",
+    "открытое акционерное общество", "llc", "ltd", "inc", "gmbh", "jsc", "plc",
+})
+_EDGE = " \t\r\n.,;:!?\"'«»„“”()"
+
+
+def _not_organisation(text: str, found: Found) -> bool:
+    return _CATEGORY[found.label] == "org" and text[found.start:found.end].strip(_EDGE).lower() in _NOT_ORGANISATIONS
+
+
 def identifier(text: str, span: Span) -> bool:
     """PERSON или ORG, похожий на пароль («sunflower77»); слово берётся целиком — модель может пометить «sunflower»
     внутри «sunflower77»."""
@@ -156,7 +178,7 @@ class NerLayer:
         for tagger in self.taggers:
             found += [f for f in _joined([
                 f for f in tagger.tag(text) if f.label in _CATEGORY and f.score >= THRESHOLD and f.end > f.start
-            ]) if not _common_words(text, f)]
+            ]) if not _common_words(text, f) and not _not_organisation(text, f)]
         spans = [
             Span(f.start, f.end, _TYPES[_CATEGORY[f.label]], name, f.score)
             for f in found if _CATEGORY[f.label] in _TYPES
