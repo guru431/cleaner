@@ -58,12 +58,15 @@ def test_egress_table_allows_internal_nets_and_443_and_rejects_the_rest():
     rules = text[text.index("nft -f - <<EOF"):]
     order = [rules.index(part) for part in (
         "table inet $TABLE\ndelete table inet $TABLE\n", "type filter hook output priority filter; policy accept;",
-        "meta skuid != $uid return", "ip daddr { $nets } return", "ip6 daddr ::1 return",
+        "meta skuid $uid jump cleaner", "chain cleaner {", "ip daddr { $nets } return", "ip6 daddr ::1 return",
         'log prefix "cleaner-out: "', "meta nfproto ipv4 tcp dport 443 return", 'log prefix "cleaner-egress: "',
         "meta l4proto tcp reject with tcp reset", "        reject\n",
     )]
     assert order == sorted(order)
     assert "iptables" not in text.replace("iptables-nft", "").split("set -euo pipefail", 1)[1]
+    # 15.10.2026: «skuid != … return» не срабатывает у пакетов без сокета пользователя (туннель WireGuard
+    # сервера), и они проваливались в отказ. Только положительный отбор по учётной записи.
+    assert "skuid !=" not in rules
     # Второй слой для входящих на порт службы — тот же, что у правила ufw и настроек сервера.
     cfg = config.load(DEPLOY / "cleaner.toml")
     assert f"PORT={cfg.port}" in text.splitlines() and "CLIENTS=example/19" in text.splitlines()

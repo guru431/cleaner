@@ -125,7 +125,7 @@ if bash /usr/local/sbin/cleaner-egress.sh check >"$WORK/egress-table.txt" 2>&1; 
 else
     bad "$(cat "$WORK/egress-table.txt") — выход наружу не ограничен"
 fi
-table=$(nft list chain inet cleaner_egress output 2>/dev/null || true)
+table=$(nft list table inet cleaner_egress 2>/dev/null || true)
 if grep -q "ip6 daddr ::1 return" <<< "$table" && ! grep -q "nfproto ipv6" <<< "$table"; then
     ok "IPv6 наружу отклоняется (пропускается только петля)"
 else

@@ -26,9 +26,9 @@ CLIENTS=example/19
 INTERNAL="127.0.0.0/8 example/24 example/24 example/19 example/24 172.16.0.0/12"
 
 if [[ "${1:-}" == "check" ]]; then
-    rules=$(nft list chain inet "$TABLE" output 2>/dev/null) \
+    rules=$(nft list table inet "$TABLE" 2>/dev/null) \
         || { echo "cleaner-egress: нет таблицы $TABLE — выход наружу не ограничен" >&2; exit 1; }
-    grep -q "skuid" <<< "$rules" && grep -q "reject with tcp reset" <<< "$rules" \
+    grep -q "skuid .* jump cleaner" <<< "$rules" && grep -q "reject with tcp reset" <<< "$rules" \
         || { echo "cleaner-egress: таблица $TABLE без отбора по учётной записи или без отказа" >&2; exit 1; }
     exit 0
 fi
@@ -40,9 +40,14 @@ nft -f - <<EOF
 table inet $TABLE
 delete table inet $TABLE
 table inet $TABLE {
+    # Только пакеты, у которых владелец сокета точно cleaner. У пакетов без сокета пользователя (туннели ядра,
+    # WireGuard, ответы ядра) владельца нет: «skuid != …» на них не срабатывает, и они провалились бы в отказ —
+    # так 15.10.2026 отклонялся UDP-туннель сервера. Положительный отбор их не трогает.
     chain output {
         type filter hook output priority filter; policy accept;
-        meta skuid != $uid return
+        meta skuid $uid jump cleaner
+    }
+    chain cleaner {
         ip daddr { $nets } return
         ip6 daddr ::1 return
         meta nfproto ipv4 tcp dport 443 ct state new limit rate 30/minute log prefix "cleaner-out: " level info
