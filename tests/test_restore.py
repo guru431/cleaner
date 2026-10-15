@@ -2,10 +2,10 @@ import ipaddress
 
 import pytest
 
-from cleaner.core.entities import netmap
+from cleaner.core.entities import netmap, ops
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import RestoreResult, restore
-from cleaner.core.types import ChatRule, ChatState, Entity, Settings, Surrogate
+from cleaner.core.types import ChatRule, ChatState, Entity, Policy, Settings, Surrogate, default_policies
 from cleaner.core.types import EntityType as T
 
 
@@ -369,3 +369,99 @@ def test_ordinary_text_next_to_link_syntax_is_restored(settings, answer, restore
     """Обзор партии P1: «]: <» в строке журнала — не определение ссылки; значение без адреса — не ссылка;
     наш адрес в style восстанавливается."""
     assert restore(link_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize("answer", ["PERSON_1x", "person_1_name", "_PERSON_1", "<PERSON_1x>", "PERSON_10_old"])
+def test_label_inside_an_identifier_is_not_replaced(settings, answer):
+    """FINDINGS P3 «Restore: small defects»: метка без закрывающего ограничителя — отдельное слово,
+    а не часть имени в коде."""
+    result = restore(person_state(), answer, settings)
+    assert (result.text, result.segments) == (answer, [])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("PERSON_1.", "Иван Петров."), ("(person_1)", "(Иван Петров)"), ("PERSON_1-му", "Иван Петров-му"),
+        ("<PERSON_1 >x", "Иван Петровx"),
+    ],
+)
+def test_bare_label_next_to_punctuation_is_restored(settings, answer, restored):
+    """Та же находка с другой стороны: после знака препинания или ограничителя метка восстанавливается."""
+    assert restore(person_state(), answer, settings).text == restored
+
+
+def test_hide_policy_covers_derived_addresses_and_reformatted_macs(settings):
+    """FINDINGS P3 «Restore: small defects»: политика «скрывать без восстановления» действует и на адрес
+    в фиктивной подсети, и на MAC в другой записи."""
+    state = infra_state()
+    fake = next(text for text, surrogate in state.surrogates.items() if surrogate.kind == "ip")
+    answer = f"резервный {fake.rsplit('.', 1)[0]}.99, интерфейс 02-00-00-00-00-01"
+    hidden = Settings(policies={**default_policies(), T.IP: Policy.HIDE, T.MAC: Policy.HIDE})
+    result = restore(state, answer, hidden)
+    assert (result.text, kinds(result), result.counters["kept"]) == (answer, ["kept_by_policy"] * 2, 2)
+    assert kinds(restore(state, answer, settings)) == ["derived", "altered"]
+
+
+def test_value_set_by_the_user_is_restored_for_hosts_addresses_macs_and_sids(settings):
+    """FINDINGS P3 «Restore: small defects»: значение, заданное пользователем (FR-6.4), важнее записанного
+    при выдаче; имя узла целиком собирается из значений своих частей, нетронутые части — как были."""
+    state = ChatState(chat_id="fixed", net_key=bytes(range(32)))
+    text = "srv-web01.corp.contoso.ru, 10.1.2.5, 00:1A:2B:3C:4D:5E, S-1-5-21-1004336348-1177238915-682003330-512"
+    sanitize(state, text, settings)
+    fake = next(text for text, surrogate in state.surrogates.items() if surrogate.kind == "ip")
+    sid = next(text for text, surrogate in state.surrogates.items() if surrogate.kind == "sid")
+    for surrogate, value in (
+        ("host-1", "srv-web02"), ("domain-1.example", "fabrikam.ru"), (fake, "10.1.2.6"),
+        ("02:00:00:00:00:01", "00:1A:2B:3C:4D:5F"), (sid, "S-1-5-21-1-2-3"),
+    ):
+        ops.set_restore_value(state, state.surrogates[surrogate].entity_id, value)
+    answer = f"host-1.sub-2.domain-1.example, HOST-1, newbox.domain-1.example, {fake}, 02-00-00-00-00-01, {sid}-512"
+    assert restore(state, answer, settings).text == (
+        "srv-web02.corp.fabrikam.ru, SRV-WEB02, newbox.fabrikam.ru, 10.1.2.6, 00:1A:2B:3C:4D:5F, S-1-5-21-1-2-3-512"
+    )
+
+
+@pytest.mark.parametrize("answer", ["EMAİL_1", "<EMAİL_1>", "[[EMAİL_1]]", "PERſON_1", "hoſt-1"])
+def test_letters_that_fold_to_ascii_are_not_label_letters(settings, answer):
+    """FINDINGS P3 «Restore: small defects»: «İ» и «ſ» при поиске без учёта регистра совпадали с «I» и «S»,
+    и «EMAİL_1» ронял восстановление. Тип метки — латиница, другой регистр допускается только у неё."""
+    state = link_state()
+    state.entities.update(person_state().entities)
+    state.surrogates["<PERSON_1>"] = Surrogate("p1")
+    result = restore(state, answer, settings)
+    assert (result.text, result.segments) == (answer, [])
+    assert restore(state, "<email_1> и person_1", settings).text == "ivanov@contoso.ru и Иван Петров"
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("file:///C:/Users/<PERSON_1>/a.txt", "file:///C:/Users/Иван Петров/a.txt"),
+        ("x = 1; //TODO:<PERSON_1>", "x = 1; //TODO:Иван Петров"),
+        ("//TODO(<PERSON_1>): проверить", "//TODO(Иван Петров): проверить"),
+    ],
+)
+def test_local_file_link_and_code_comment_are_not_foreign_links(settings, answer, restored):
+    """FINDINGS P3 «Restore: small defects»: «file:///» без хоста и «//TODO:» в коде на чужой узел не ведут."""
+    assert restore(person_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "file://evil.example.org/share/<PERSON_1>",
+        "file:////evil.example.org/share/<PERSON_1>",
+        "//<PERSON_1>.evil.example.org/x",
+        "///evil.example.org/?q=<PERSON_1>",
+        "//1572395042/?q=<PERSON_1>",
+        "//evil%2Eexample%2Eorg/?q=<PERSON_1>",
+        "//evil。example。org/?q=<PERSON_1>",
+        "//TODO:x//evil/?q=<PERSON_1>",
+    ],
+)
+def test_file_and_protocol_relative_links_to_a_host_stay_foreign(settings, answer):
+    """Та же находка с другой стороны: хост у «file://», имя с точкой (и то, что браузер превратит в точку),
+    число вместо IPv4 и второй адрес оставляют ссылку чужой."""
+    result = restore(person_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
