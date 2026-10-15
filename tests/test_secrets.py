@@ -400,6 +400,27 @@ def test_prose_or_a_time_after_four_to_six_words_and_a_colon_is_left_alone():
         assert found(text) == set(), text
 
 
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Оператор указал пароль клиент: пользователь заблокирован", {("пользователь", False)}),
+        ("Пароль от почты: подсолнух", {("подсолнух", False)}),
+        ("Пароль от почты: временный, сменить при входе", set()),
+        ("Пароль от почты: sunflower", {("sunflower", True)}),
+        ("Пароль от почты: Zx81kLmN", {("Zx81kLmN", True)}),
+        ('Пароль от почты: "подсолнух"', {("подсолнух", True)}),
+        ("Пароль: подсолнух", {("подсолнух", True)}),
+    ],
+    ids=["transcript", "noun", "adjective", "english", "password_like", "quoted", "no_words"],
+)
+def test_dictionary_word_after_words_and_a_colon_is_checked_as_after_a_dash(text, expected):
+    """В стенограмме «…указал пароль клиент: пользователь заблокирован» слово после «клиент:» становилось искомым
+    секретом всего чата — так были получены все три находки SECRET в jayguard. Слово словаря после слов между «пароль»
+    и «:» проверяется, как после тире: существительное скрывается на своём месте, слово прозы остаётся. Значение не из
+    словаря, похожее на пароль, в кавычках и сразу после «Пароль:» — искомое, как раньше."""
+    assert finds(text) == expected
+
+
 HEX32 = "3f8e9a1b2c4d5e6f7a8b9c0d1e2f3a4b"                       # вымышленный токен
 API_KEY = "api_3f8e9a1b2c4d5e6f7a8b9c0d1e2f"
 

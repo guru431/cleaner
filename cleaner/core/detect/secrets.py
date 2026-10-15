@@ -552,6 +552,21 @@ def _copula(m: re.Match[str]) -> bool:
     return (m.group("bare") or "").rstrip(_TRAILING).lower() in _COPULAS
 
 
+def _dictionary_word_after_words(m: re.Match[str]) -> bool:
+    """Значение без кавычек после слов между «пароль» и «:» — слово словаря, не похожее на пароль: в стенограмме
+    «…указал пароль клиент: пользователь заблокирован» это речь, и такое слово проверяется, как после тире (_after_dash).
+    Слово не из словаря, похожее на пароль, и значение сразу после «Пароль:» или после «=» остаются искомыми."""
+    bare = m.group("bare")
+    if bare is None or ":" not in m.group("sep") or len(m.string[m.start():m.start("sep")].split()) < 2:
+        return False
+    word = bare.rstrip(_TRAILING)
+    lowered = word.lower().replace("ё", "е")
+    return (
+        not _looks_like_password(word) and _RUSSIAN_WORD.fullmatch(lowered) is not None
+        and part_of_speech(lowered) is not None
+    )
+
+
 def _after_dash(m: re.Match[str]) -> Span | None:
     """Значение после «Пароль —» (а также после связки за «:» и после четырёх слов и «:», см. _PHRASE) или None — там
     проза. Знаки в конце в проверку не входят, но скрываются со значением.
@@ -642,7 +657,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             if bounds and not (pattern in (_AUTH, _BEARER) and _WORDS.fullmatch(text, *bounds)):
                 spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _PHRASE.finditer(text):
-        if m.group("sep") is None or _copula(m):
+        if m.group("sep") is None or _copula(m) or _dictionary_word_after_words(m):
             span = _after_dash(m)
         else:
             # «password = …» без слов перед «=» — тот же ключ присваивания, что видит _KEY_NAME.
