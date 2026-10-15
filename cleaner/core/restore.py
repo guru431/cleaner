@@ -205,6 +205,9 @@ _PROSE_START = re.compile(r"https?://|www\.", re.IGNORECASE)
 _OUTSIDE_TAGS = re.compile(r"<[^<>\"']*>([^<\"']*)")
 _HOST_TYPES = frozenset({EntityType.IP, EntityType.HOST, EntityType.DOMAIN})
 _DOMAIN_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
+# Знаки ASCII в конце хоста, которых нет в доменах верхнего уровня и которые браузер не превращает в букву, цифру или
+# точку: без «-», «.» и «%» («%2e» браузер раскрывает в точку до разбора хоста). «/?#\:@» хост и так кончают.
+_UNRESOLVABLE_TAIL = re.compile(r"(?<=[^\W_])[!\"$&'()*+,;<=>^_`{|}~]+$")
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 _MAC = re.compile(
     r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
@@ -368,8 +371,19 @@ class _Restorer:
         а после восстановления это узел того же домена организации. Только впереди и только перед нашим доменом:
         «domain-1.example.www» и «www.host-1» — уже не имена под нашим доменом, а неизвестная часть
         («www.evil.domain-1.example») — чужая.
+
+        Знаки препинания в конце последней части («$» регулярного выражения: remark-gfm делает из
+        «^www\\.host-1\\.domain-1\\.example$» ссылку с хостом «www.host-1.domain-1.example$») к чужому узлу не ведут:
+        в доменах верхнего уровня их не бывает, и такой хост в DNS не найдётся. Наш он, если наше имя перед ними; метка
+        («<IP_1>», «&lt;HOST_1&gt;») сама кончается такими знаками и проверяется как написана.
         """
-        labels_ = host.strip("[]").lower().split(".")
+        host = host.strip("[]")
+        bare = _UNRESOLVABLE_TAIL.sub("", host)
+        return self._reaches_end(host.lower().split(".")) or (
+            bare != host and self._reaches_end(bare.lower().split("."))
+        )
+
+    def _reaches_end(self, labels_: list[str]) -> bool:
         reachable = {0}
         domain = 2 if ".".join(labels_[-2:]) in self.domains else 1 if labels_[-1] in self.label_domains else 0
         if domain:

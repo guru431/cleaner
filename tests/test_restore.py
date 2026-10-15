@@ -302,6 +302,46 @@ def test_own_encoded_links_and_text_next_to_encoded_links_are_restored(settings,
     assert restore(link_state(), answer, settings).text == restored
 
 
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            r"RewriteCond %{HTTP_HOST} ^www\.host-1\.domain-1\.example$ [NC]",
+            r"RewriteCond %{HTTP_HOST} ^www\.srv-dc01\.domain-1\.example$ [NC]",
+        ),
+        (r"server_name ~^www\.host-1\.domain-1\.example$;", r"server_name ~^www\.srv-dc01\.domain-1\.example$;"),
+        (
+            "```apache\nRewriteCond %{HTTP_HOST} ^www\\.host-1\\.domain-1\\.example$\n```",
+            "```apache\nRewriteCond %{HTTP_HOST} ^www\\.srv-dc01\\.domain-1\\.example$\n```",
+        ),
+    ],
+)
+def test_regular_expression_with_our_host_name_is_restored(settings, answer, restored):
+    """Обзор пакета восстановления, Minor: «^www\\.host-1\\.domain-1\\.example$» remark-gfm раскрывает в ссылку
+    «www.host-1.domain-1.example$», и слово считалось чужой ссылкой — host-1 не восстанавливался (до пакета
+    восстанавливался). Знак в конце последней части, которого не бывает в домене верхнего уровня, к чужому узлу не
+    ведёт: имя перед ним наше — и ссылка наша."""
+    result = restore(link_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        r"^www\.host-1\.domain-1\.example$.evil.example.org/?q=<EMAIL_1>",
+        r"^www\.evil\.example\.org$/?q=<EMAIL_1>",
+        "https://host-1.domain-1.example$evil.example.org/?q=<EMAIL_1>",
+        "https://host-1.domain-1.example%2e%65vil.example.org/?q=<EMAIL_1>",
+        "https&colon;&sol;&sol;evil.example.org$/?q=<EMAIL_1>",
+    ],
+)
+def test_punctuation_after_a_foreign_or_inside_a_name_keeps_the_link_foreign(settings, answer):
+    """Та же находка с другой стороны: знак посреди имени («…example$.evil…»), после чужого имени и «%» (браузер
+    раскрывает «%2e» в точку до разбора хоста) ссылку нашей не делают."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
 def test_host_is_after_the_last_at_sign(settings):
     """Найдено при исправлении обратных косых, P1: браузер берёт хост за последним «@» адреса, а не за первым —
     «https://a@наш:1@evil…» ведёт на evil. Имя пользователя и пароль у нашего адреса ссылку чужой не делают."""
