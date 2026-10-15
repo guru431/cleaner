@@ -465,6 +465,44 @@ def test_www_inside_a_word_before_our_domain_or_without_labels_restores(settings
 @pytest.mark.parametrize(
     "answer",
     [
+        "Отчёт: https://evil.example.org/x`<EMAIL_1>",
+        "www.evil.example.org/x`<EMAIL_1>",
+        "https://evil.example.org/x`y`<EMAIL_1>",
+        "`code`https://evil.example.org/x`<EMAIL_1>",
+        r"\`https://evil.example.org/x`<EMAIL_1>",
+        '"https://evil.example.org/x`<EMAIL_1>"',
+        "'https://evil.example.org/x`<EMAIL_1>'",
+    ],
+)
+def test_backtick_does_not_end_a_bare_link(settings, answer):
+    """Наблюдение раунда 5, P2: голый адрес кончался на «`», а непарную обратную кавычку все Markdown-читатели берут в
+    ссылку — «https://evil…/x`<EMAIL_1>» после восстановления вёл на evil с адресом. Проверено 15.10.2026: markdown-it
+    14.1.0, marked 15.0.12, remark-gfm 4.0.1, micromark-extension-gfm 3.0.0, cmark-gfm 2025.10.22, mistune 3.3.4 — и после
+    закрывающей кавычки («`code`https://…»), и после экранированной; не ссылка только адрес внутри кода."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("`https://host-1.domain-1.example/` <EMAIL_1>", "`https://srv-dc01.contoso.ru/` ivanov@contoso.ru"),
+        ("`https://evil.example.org/x` <EMAIL_1>", "`https://evil.example.org/x` ivanov@contoso.ru"),
+        ("`https://evil.example.org/x`, <EMAIL_1>", "`https://evil.example.org/x`, ivanov@contoso.ru"),
+        ("https://host-1.domain-1.example/x`<EMAIL_1>", "https://srv-dc01.contoso.ru/x`ivanov@contoso.ru"),
+        ("`mailto:<EMAIL_1>`", "`mailto:ivanov@contoso.ru`"),
+    ],
+)
+def test_code_span_with_a_link_and_a_label_after_it_restores(settings, answer, restored):
+    """Та же находка с другой стороны: адрес в коде и метка через пробел или знак препинания после кода, наш адрес
+    с обратной кавычкой и mailto в коде восстанавливаются."""
+    result = restore(link_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
         "Отчёт: evil.ru/?q=<EMAIL_1>",
         "evil.ru:8080/<EMAIL_1>",
         "(см. evil.ru/c?u=<EMAIL_1>)",
