@@ -38,6 +38,9 @@ SECURITY_HEADERS = {
 HSTS = "max-age=31536000"
 _STATUS_TEXT = {404: "Страница не найдена", 405: "Такое действие здесь не поддерживается"}
 SEND_WORKERS = 4
+# Распознавание сканов ждёт шлюз, а не процессор; запросов распознавания одновременно столько же, сколько было
+# при общем пуле, — служба OCR сервера держит ограниченную очередь.
+FILE_WORKERS = 2
 
 
 _UPLOAD_HEADROOM = 1024 * 1024      # поля формы и заголовки частей multipart сверх самого файла
@@ -85,13 +88,16 @@ def _interrupt(repo: Repository) -> None:
 def create_app(
     repo: Repository, clock: Clock, *, secure_cookies: bool, max_text_chars: int = 500_000,
     tz: tzinfo = timezone.utc, engines: Any = None, jobs: Jobs | None = None, max_file_mb: int = 50,
-    sends: Jobs | None = None, cloud_send: Any = None,
+    sends: Jobs | None = None, cloud_send: Any = None, files: Jobs | None = None,
 ) -> FastAPI:
     jobs = jobs or Jobs()
-    # Отправки облаку — свой пул: в общем пуле из двух потоков сканы идут десятки минут (раздел 14).
+    # Отправки облаку и разбор файлов — свои пулы: скан идёт минуту на страницу, и в общем пуле из двух потоков
+    # два скана держали бы десятки минут и ответы облака, и каждый вставленный текст (раздел 14).
     sends = sends or Jobs(ThreadPoolExecutor(max_workers=SEND_WORKERS, thread_name_prefix="cleaner-send"))
+    files = files or Jobs(ThreadPoolExecutor(max_workers=FILE_WORKERS, thread_name_prefix="cleaner-file"))
     service = ChatService(
         repo, max_text_chars, engines, submit=jobs.submit, send_submit=sends.submit, cloud_send=cloud_send or cloud.send,
+        file_submit=files.submit,
     )
 
     @asynccontextmanager
@@ -102,6 +108,7 @@ def create_app(
         service.live.cancel_all()            # идущие ответы облака сохраняются неполными
         jobs.shutdown()
         sends.shutdown()
+        files.shutdown()
         _interrupt(repo)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)

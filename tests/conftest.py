@@ -274,7 +274,9 @@ class Browser:
 def app(repo, clock, monkeypatch, engines, jobs):
     # Быстрый Argon2 только в тестах: хэш хранит свои параметры, проверка пароля от этого не меняется.
     monkeypatch.setattr(auth, "_hasher", PasswordHasher(time_cost=1, memory_cost=1024, parallelism=1))
-    return create_app(repo, clock, secure_cookies=False, engines=engines, jobs=jobs, sends=Jobs(Immediate()))
+    return create_app(
+        repo, clock, secure_cookies=False, engines=engines, jobs=jobs, sends=Jobs(Immediate()), files=Jobs(Immediate()),
+    )
 
 
 @pytest.fixture
