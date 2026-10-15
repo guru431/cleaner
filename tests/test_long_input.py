@@ -67,11 +67,20 @@ def test_restore_is_fast_on_many_reference_brackets():
 
 @pytest.mark.parametrize(
     "text",
-    ['url("' * 20000, "url(" * 25000, "@import '" * 12000, 'url("\\' * 16000, "url(\\" * 20000, "url('\\'" * 12000],
-    ids=["quoted", "unquoted", "import", "quoted_escape", "unquoted_escape", "escaped_quotes"],
+    [
+        'url("' * 20000, "url(" * 25000, "@import '" * 12000, 'url("\\' * 16000, "url(\\" * 20000, "url('\\'" * 12000,
+        "image-set(" * 10000, 'image-set("' * 10000, "src(/*" * 15000, "image-set((((()" * 6000,
+        "src(" + "(" * 20000 + ")" * 20000, "image-set(a)" * 8000, "@import '" + "\\'url(\"" * 15000,
+    ],
+    ids=[
+        "quoted", "unquoted", "import", "quoted_escape", "unquoted_escape", "escaped_quotes",
+        "image_sets", "image_set_strings", "src_comments", "deep_image_sets", "deep_balanced_src", "closed_image_sets",
+        "string_to_the_end",
+    ],
 )
 def test_restore_is_fast_on_unclosed_css_urls(text):
-    """CSS url() и @import без закрывающей кавычки или скобки не дают квадратичного времени."""
+    """CSS url(), @import, image-set() и src() без закрывающей кавычки или скобки, с глубокой вложенностью или
+    во множестве не дают квадратичного времени."""
     state = ChatState(chat_id="long", net_key=bytes(32))
     sanitize(state, "почта ivanov@contoso.ru", Settings())
     started = time.perf_counter()
@@ -84,8 +93,14 @@ def test_restore_is_fast_on_unclosed_css_urls(text):
     [
         "<" * 50000, "<a>, data='x' " * 10000, "<a " * 20000 + "f(a, data='x')",
         "EMAIL_1" + " " * 50000, "//x:<EMAIL_1> " * 5000, "file:///" * 20000, "//" * 50000,
+        "\\" * 100000, "/\\" * 50000, " \\\\x" * 10000, "https:" * 20000, "!http:a:" * 15000, "//a:wss:" * 15000,
+        "file:\\" * 20000, "//" + "a@" * 50000, "https:@" * 20000, "//@:" * 25000,
     ],
-    ids=["brackets", "arguments", "open_tags", "spaced_label", "bare_links", "file_links", "slashes"],
+    ids=[
+        "brackets", "arguments", "open_tags", "spaced_label", "bare_links", "file_links", "slashes",
+        "backslashes", "mixed_slashes", "unc_paths", "schemes", "schemes_without_slashes", "schemes_in_userinfo",
+        "file_backslashes", "at_signs", "schemes_with_at_signs", "empty_users",
+    ],
 )
 def test_restore_is_fast_on_many_tags_arguments_and_bare_links(text):
     """Участки вне тегов считаются один раз на ответ, а не для каждого атрибута; метка без ограничителей,
