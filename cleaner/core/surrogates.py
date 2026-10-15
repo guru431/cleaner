@@ -23,7 +23,9 @@ _MAC = re.compile(
     r"|(?<![\w.])[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}(?![\w.])"
 )
 _SID = re.compile(r"(?<![\w-])(?P<prefix>S-1-5-21-\d+-\d+-\d+)(?:-\d+)?(?![\w-])")
-_NAME = re.compile(r"(?<![\w-])[\w-]+(?:\.[\w-]+)*(?![\w-])")
+# Часть имени бывает меткой: части, которой пользователь дал другой тип, выдана метка (<TERM_1>.domain-1.example).
+_PART = rf"(?:[\w-]+|{_LABEL.pattern})"
+_NAME = re.compile(rf"(?<![\w-]){_PART}(?:\.{_PART})*(?![\w-])")
 
 
 class Hit:

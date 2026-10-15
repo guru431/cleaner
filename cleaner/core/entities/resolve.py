@@ -102,6 +102,11 @@ class Resolver:
                 if other and other[0] is lead[0]:
                     self.alias[(other[0], normalize(other[1]))] = lead[1].lower()
         self.open_values = settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
+        # Правила, которые дают части имени узла свой тип. Правило HOST или DOMAIN часть подменяет как обычно.
+        self.manual = {
+            normalize(r.value): r.type for r in state.rules
+            if r.action == "mask" and r.type is not None and r.type not in (T.HOST, T.DOMAIN)
+        }
         self.real_ips: set[str] = set()
         self._text_addresses: set[str] | None = None
         self._open_addresses: set[str] | None = None
@@ -343,32 +348,17 @@ class Resolver:
         fake = self._issue(entity, "netbios", make)
         return entity, fake if value.isupper() else fake.lower()
 
-    @staticmethod
-    def _split(value: str) -> tuple[list[str], str]:
-        left, registrable = hostmap.split_name(value)
-        if not registrable:                      # неизвестный суффикс: домен — две последние части
-            parts = value.split(".")
-            left, registrable = parts[:-2], ".".join(parts[-2:])
-        return left, registrable
-
     def _lead(self, type_: EntityType, value: str) -> tuple[EntityType, str] | None:
         """Чья замена стоит в подмене имени первой: тип сущности и часть, по которой _name ищет её ключ."""
         if not _NAME.fullmatch(value):
             return None
         if "." not in value:
             return type_, value
-        left, registrable = self._split(value)
+        left, registrable = hostmap.parts(value)
         first = next((label for label in left if label.lower() not in self.generic), None)
         return (T.HOST, first) if first else (T.DOMAIN, registrable)
 
-    def _name(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
-        if not _NAME.fullmatch(value):
-            return None
-        if "." not in value:
-            if type_ is T.DOMAIN:
-                return self._netbios(value, origin)
-            return self._part(value, origin, leading=True, standalone=True)
-        left, registrable = self._split(value)
+    def _dns(self, registrable: str, origin: str) -> tuple[Entity, str]:
         key = self.alias.get((T.DOMAIN, normalize(registrable))) or registrable.lower()
         domain = self._entity(T.DOMAIN, key, registrable, origin)
 
@@ -378,14 +368,32 @@ class Resolver:
             self.state.surrogates[fake] = Surrogate(domain.id, registrable, "host")
             return fake
 
+        return domain, self._issue(domain, "dns", make)
+
+    def _manual(self, part: str) -> tuple[Entity, str] | None:
+        """Часть имени, которой пользователь дал другой тип (смена типа, правило): метка этого типа вместо
+        подмены части, остальные части подменяются как обычно (5.7, шаг 4)."""
+        type_ = self.manual.get(normalize(part))
+        return self._labelled(type_, part, "manual") if type_ else None
+
+    def _name(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
+        if not _NAME.fullmatch(value):
+            return None
+        if "." not in value:
+            if type_ is T.DOMAIN:
+                return self._netbios(value, origin)
+            # Часть имени, отрезанная от выданной замены (pipeline._outside), — тоже часть имени.
+            return self._manual(value) or self._part(value, origin, leading=True, standalone=True)
+        left, registrable = hostmap.parts(value)
+        domain, domain_fake = self._manual(registrable) or self._dns(registrable, origin)
         fakes = []
         primary = domain
-        domain_fake = self._issue(domain, "dns", make)
         for position, label in enumerate(left):
-            if label.lower() in self.generic:
+            manual = self._manual(label)
+            if manual is None and label.lower() in self.generic:
                 fakes.append(label)
                 continue
-            entity, fake = self._part(label, origin, leading=position == 0)
+            entity, fake = manual or self._part(label, origin, leading=position == 0)
             if primary is domain:
                 primary = entity
             fakes.append(fake)

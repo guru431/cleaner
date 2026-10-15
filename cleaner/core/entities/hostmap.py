@@ -19,6 +19,16 @@ def split_name(name: str) -> tuple[list[str], str]:
     return labels[:-tail], ".".join(labels[-tail:])
 
 
+def parts(name: str) -> tuple[list[str], str]:
+    """Части, которые подменяются по отдельности: слева от домена и сам домен. Для неизвестного
+    суффикса домен — две последние части."""
+    left, registrable = split_name(name)
+    if not registrable:
+        labels = name.split(".")
+        left, registrable = labels[:-2], ".".join(labels[-2:])
+    return left, registrable
+
+
 def has_known_suffix(name: str) -> bool:
     return bool(_extract(name.lower()).suffix)
 

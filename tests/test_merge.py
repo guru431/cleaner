@@ -22,6 +22,17 @@ def test_secret_outranks_everything_except_a_manual_rule():
     assert merge("token=abc123def", spans, CTX)[0].type is T.TERM
 
 
+def test_manual_rule_on_a_whole_part_of_a_name_keeps_the_name_type():
+    """Правило на целой части имени узла режет его при подмене (resolve), а не поглощает (5.7, шаг 4)."""
+    text = "srv01.corp.contoso.ru"
+    for manual, expected in (
+        ((0, 5), T.HOST), ((6, 10), T.HOST), ((11, 21), T.HOST),         # первая, средняя часть, домен
+        ((0, 4), T.TERM), ((11, 18), T.TERM), ((0, 10), T.TERM),         # не целая часть — как прежде
+    ):
+        spans = [Span(0, 21, T.HOST, "infra"), Span(*manual, T.TERM, "manual")]
+        assert merge(text, spans, CTX)[0].type is expected, manual
+
+
 def test_partial_overlap_covers_the_union():
     spans = [Span(0, 10, T.PHONE, "rules"), Span(5, 16, T.CARD, "rules", validated=True)]
     assert merge("0123456789abcdef", spans, CTX) == [MergedSpan(0, 16, T.CARD, ("rules",))]

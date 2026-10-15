@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from cleaner.core.detect.base import DetectContext
-from cleaner.core.entities import netmap
+from cleaner.core.entities import hostmap, netmap
 from cleaner.core.types import EntityType, Policy, Span
 
 
@@ -76,6 +76,26 @@ def _join_names(text: str, spans: list[MergedSpan]) -> list[MergedSpan]:
     return out
 
 
+_DOTTED_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
+_NAME_TYPES = (EntityType.HOST, EntityType.DOMAIN)
+
+
+def _name_kept(text: str, group: list[Span], start: int, end: int) -> EntityType | None:
+    """Тип имени узла или домена, если правила пользователя в нём легли на целые части (раздел 6.4: каждая часть
+    слева и домен). Такое правило имя не поглощает: часть получит его тип при подмене (resolve._name)."""
+    name = next((
+        s for s in group if s.source != "manual" and s.type in _NAME_TYPES and (s.start, s.end) == (start, end)
+    ), None)
+    if name is None or not _DOTTED_NAME.fullmatch(text, start, end):
+        return None
+    left, registrable = hostmap.parts(text[start:end])
+    edges, position = {(end - len(registrable), end)}, start
+    for label in left:
+        edges.add((position, position + len(label)))
+        position += len(label) + 1
+    return name.type if all((s.start, s.end) in edges for s in group if s.source == "manual") else None
+
+
 def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSpan]:
     policies = ctx.settings.policies
     active = sorted(
@@ -109,5 +129,6 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
                     opened = netmap.addresses(ctx.settings.never | ctx.unmask)
                 if netmap.canonical_forms(value) & opened:
                     continue
-        merged.append(MergedSpan(start, end, senior.type, sources))
+        type_ = (senior.source == "manual" and _name_kept(text, group, start, end)) or senior.type
+        merged.append(MergedSpan(start, end, type_, sources))
     return _join_names(text, merged)
