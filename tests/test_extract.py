@@ -257,6 +257,38 @@ def test_spreadsheet_within_the_limits_goes_to_docling():
     assert Extractor(Documents(), Ocr()).extract("t.xlsx", book(rows, merge)).kind == "xlsx"
 
 
+def workbook(*states: str) -> bytes:
+    """Книга openpyxl: первый лист видимый, у остальных — заданное состояние."""
+    from openpyxl import Workbook
+
+    result = Workbook()
+    result.active.append(["Сотрудник", "Почта"])
+    for number, state in enumerate(states, 2):
+        sheet = result.create_sheet(f"Лист{number}")
+        sheet.append(["Петров", "petrov@x.example"])
+        sheet.sheet_state = state
+    buffer = io.BytesIO()
+    result.save(buffer)
+    return buffer.getvalue()
+
+
+def test_hidden_sheets_are_counted_for_the_review_notice():
+    """Находка «Small gaps…»: Docling кладёт скрытые листы в невидимый слой, их текста в Markdown нет —
+    число таких листов (не имена: это данные пользователя) идёт в результат для предупреждения."""
+    extract = Extractor(Documents(), Ocr()).extract
+    assert extract("t.xlsx", workbook("hidden", "veryHidden", "visible")).hidden_sheets == 2
+    assert extract("t.xlsx", workbook("visible")).hidden_sheets == 0
+
+
+def test_book_whose_text_is_only_on_hidden_sheets_is_refused_with_the_reason():
+    documents = Documents()
+    documents.convert = lambda data, kind: ""             # видимый лист пуст, данные — на скрытом
+    with pytest.raises(ExtractError, match="не найден текст. Скрытые листы книги не извлекаются"):
+        Extractor(documents, Ocr()).extract("t.xlsx", workbook("hidden"))
+    with pytest.raises(ExtractError, match="не найден текст$"):
+        Extractor(documents, Ocr()).extract("t.xlsx", workbook())
+
+
 def test_huge_page_is_rendered_within_the_recognition_limit():
     """Обзор плана 2+4, m-5: страница огромного размера не рисуется картинкой в гигабайты — не больше, чем примет ocr-ru."""
     from cleaner.ingest.extract import OCR_DPI, _scale

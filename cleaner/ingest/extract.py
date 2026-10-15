@@ -46,6 +46,7 @@ _SHEET_AREA = 1_000_000             # клеток в областях лист�
 _SHEET_MAX = (1_048_576, 16_384)    # строк и столбцов в листе Excel: край для «A:A» и «1:1»
 _COORD = re.compile(r"\$?([A-Za-z]*)\$?([0-9]*)")
 _SPLIT_TABLE = "Загрузите нужную часть таблицы отдельным файлом"
+_HIDDEN_ONLY = ". Скрытые листы книги не извлекаются: покажите нужные листы в Excel и загрузите файл снова"
 
 
 class ExtractError(Exception):
@@ -59,6 +60,7 @@ class Extracted:
     pages: int = 0
     ocr_pages: tuple[int, ...] = ()        # страницы, текст которых получен распознаванием (FR-2.5)
     unread_pages: tuple[int, ...] = ()     # на них распознавание не нашло ни одного знака
+    hidden_sheets: int = 0                 # скрытые листы книги: Docling кладёт их в невидимый слой, их текста нет
 
 
 class Documents(Protocol):
@@ -124,7 +126,8 @@ def detect_kind(filename: str, data: bytes) -> str:
 
 
 class _NotSheet(Exception):
-    """Часть книги — не лист: общие строки, стили, рисунки. Дальше первого элемента она не читается."""
+    """Часть книги — не лист и не каталог листов: общие строки, стили, рисунки. Дальше первого элемента
+    она не читается."""
 
 
 def _point(ref: str, end: bool) -> tuple[int, int]:
@@ -149,6 +152,7 @@ class _Cells:
         self.shown = 0          # клетки, которые попадут в Markdown: со значением и под объединением, во всех листах
         self.area = 0                                       # клетки областей прочитанных листов
         self.box: tuple[int, int, int, int] | None = None   # область текущего листа: верх, лево, низ, право
+        self.hidden = 0         # листы hidden и veryHidden из каталога книги (workbook.xml)
 
     def cells(self) -> int:
         if self.box is None:
@@ -165,7 +169,7 @@ class _Cells:
     def read(self, package: zipfile.ZipFile, part: zipfile.ZipInfo) -> None:
         self.area, self.box = self.cells(), None
         self.depth = self.row_depth = self.cell_depth = self.row = self.column = 0
-        self.has_value = False
+        self.has_value = self.book = False
         parser = expat.ParserCreate()
         parser.StartElementHandler, parser.EndElementHandler = self._start, self._end
         try:
@@ -184,7 +188,14 @@ class _Cells:
         self.depth += 1
         local = name.rpartition(":")[2]
         if self.depth == 1 and local != "worksheet":
-            raise _NotSheet
+            if local != "workbook":
+                raise _NotSheet
+            self.book = True
+        if self.book:
+            # Состояние листа Docling сравнивает только с «visible»: всё прочее уходит в невидимый слой.
+            if local == "sheet" and attrs.get("state", "visible") != "visible":
+                self.hidden += 1
+            return
         if self.row_depth and self.depth == self.row_depth + 1:      # openpyxl считает ячейкой любой элемент строки
             if "r" in attrs:
                 row, self.column = _point(attrs["r"], False)
@@ -213,21 +224,22 @@ class _Cells:
         self.depth -= 1
 
 
-def _check_package(data: bytes, kind: str, max_chars: int) -> None:
+def _check_package(data: bytes, kind: str, max_chars: int) -> int:
     """Отказ до Docling, когда разбор не уместится в память службы (MemoryMax) или его текст всё равно будет
     отклонён: ZIP-бомба, слишком много XML, таблица с заведомо длинным текстом или огромной областью листов.
-    ZIP, который не читается, остаётся Docling: он откажет с причиной «повреждён»."""
+    ZIP, который не читается, остаётся Docling: он откажет с причиной «повреждён». Ответ — число скрытых
+    листов книги (у DOCX и PPTX — 0)."""
+    cells = _Cells(max_chars)
     try:
         package = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
-        return
+        return 0
     with package:
         parts = package.infolist()
         # Размеры — из каталога, без распаковки: больше заявленного zipfile не отдаст ни Docling, ни openpyxl (CRC).
         if sum(part.file_size for part in parts) > _UNPACKED:
             raise ExtractError(f"Документ слишком большой для разбора: без сжатия больше {_UNPACKED // 2**20} МБ")
         if kind == "xlsx":             # таблица — точнее, по ячейкам: причина отказа понятнее пользователю
-            cells = _Cells(max_chars)
             for part in parts:
                 cells.read(package, part)      # каждая часть: лист может лежать под любым именем, путь — в связях книги
                 if cells.text_too_long():
@@ -244,6 +256,7 @@ def _check_package(data: bytes, kind: str, max_chars: int) -> None:
                 f"Документ слишком большой для разбора: его разметка без сжатия больше {_MARKUP // 2**20} МБ. "
                 "Разделите его на части"
             )
+    return cells.hidden
 
 
 def _open_pdf(data: bytes):
@@ -312,11 +325,10 @@ class Extractor:
             except textfiles.NotText as exc:
                 raise ExtractError(f"Формат файла не поддерживается: {exc}") from None
         else:
-            if kind in _OFFICE:
-                _check_package(data, kind, self.max_chars)
-            result = Extracted(self.documents.convert(data, kind), kind)
+            hidden = _check_package(data, kind, self.max_chars) if kind in _OFFICE else 0
+            result = Extracted(self.documents.convert(data, kind), kind, hidden_sheets=hidden)
         if not result.text.strip():
-            raise ExtractError("В файле не найден текст")
+            raise ExtractError("В файле не найден текст" + (_HIDDEN_ONLY if result.hidden_sheets else ""))
         return result
 
     def _page(self, image: bytes, mime: str, number: int) -> tuple[str, tuple[int, ...]]:

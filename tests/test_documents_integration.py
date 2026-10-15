@@ -64,6 +64,22 @@ def test_size_check_lets_ordinary_office_files_through_to_docling(docling, kind,
     assert CANARY in Extractor(docling, lambda image, mime: "").extract(f"file.{kind}", office_files()[kind]).text
 
 
+def test_hidden_sheets_are_left_out_by_docling_and_counted(docling, no_network):
+    """Находка «Small gaps…»: скрытый лист Docling кладёт в невидимый слой — текста нет, предупреждение нужно."""
+    from openpyxl import Workbook
+
+    book = Workbook()
+    book.active.append(["Сотрудник", "Петров Иван"])
+    for state in ("hidden", "veryHidden"):
+        sheet = book.create_sheet(state)
+        sheet.append(["Почта", CANARY])
+        sheet.sheet_state = state
+    data = io.BytesIO()
+    book.save(data)
+    result = Extractor(docling, lambda image, mime: "").extract("book.xlsx", data.getvalue())
+    assert ("Петров Иван" in result.text, CANARY in result.text, result.hidden_sheets) == (True, False, 2)
+
+
 def test_spreadsheet_stays_a_table(docling, no_network):
     markdown = docling.convert(office_files()["xlsx"], "xlsx")
     assert "Петров Иван" in markdown and "|" in markdown          # FR-2.3: таблица остаётся таблицей
