@@ -804,6 +804,32 @@ def test_windows_paths_with_dot_folders_keep_their_meaning(state, settings):
     assert restore(state, result.sanitized, settings).text == text
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("SSL: *.contoso.ru и *.corp.contoso.local", "SSL: *.domain-1.example и *.host-1.domain-2.example"),
+    ("Set-Cookie: sid=1; Domain=.contoso.ru; Path=/", "Set-Cookie: sid=1; Domain=.domain-1.example; Path=/"),
+    ("no_proxy=localhost,.contoso.ru,.corp.local", "no_proxy=localhost,.domain-1.example,.domain-2.example"),
+    ("все адреса @contoso.ru пересылать", "все адреса @domain-1.example пересылать"),
+], ids=["wildcard", "cookie", "no-proxy", "mail-routing"])
+def test_name_after_a_leading_dot_star_or_at_is_masked_and_restored(state, settings, text, expected):
+    """Второе ревью, P1: имя после «*.», «.» и «@» без имени входа уходило в облако. Ведущий знак остаётся, имя — как
+    любое имя с точкой; восстанавливается точно и как имя из запроса, повторная вставка ничего не меняет, известное имя
+    в такой записи видит проверка утечек."""
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert (len(state.entities), len(state.surrogates)) == counts
+    restored = restore(state, expected, settings)
+    assert restored.text == text and restored.counters["derived"] == 0
+    assert leakcheck.check(text, state, settings)
+
+
+def test_dotfiles_and_code_after_a_dot_or_at_keep_their_meaning(state, settings):
+    """Та же находка с другой стороны: файлы на точку, «@» в CSS и Java, многоточие остаются как есть."""
+    text = "cp .env.example .env.local; .gitignore, *.py, .NET; @media print {} @Override; Ну...ru"
+    assert sanitize(state, text, settings).sanitized == text
+
+
 def test_email_written_with_escaped_dots_is_masked_and_restored_with_them(state, settings):
     """Второе ревью, P2: в «^ivanov@contoso\\.ru$» скрывался только домен, а имя входа уходило в облако. Адрес через «\\.»
     — адрес; его значение — как написано, и метка восстанавливается с «\\.»: тот же адрес в прозе — своя метка со своим

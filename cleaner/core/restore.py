@@ -242,6 +242,7 @@ def _tolerant_pattern() -> re.Pattern[str]:
 
 _TOLERANT = _tolerant_pattern()
 _PREFIX_AFTER = re.compile(r"/\d")
+_PART_BEFORE = re.compile(r"[\w>\]-]\\?\.$")     # перед заменой — часть имени или метка и точка (или «\.»)
 
 
 def _one_prefix(original: str, type_: EntityType, text: str, end: int) -> str:
@@ -549,11 +550,13 @@ class _Restorer:
                 original = original.upper()
             if surrogate.kind == "host" and "\\." in text:
                 original = original.replace(".", "\\.")     # имя в регулярном выражении — с тем же разделителем
-            before = m.string[max(0, m.start() - 1):m.start()]
             after = m.string[m.end():m.end() + 3].removeprefix("\\")
-            if before == "." or (after[:1] == "." and after[1:2].isalnum()):
+            if _PART_BEFORE.search(m.string, max(0, m.start() - 3), m.start()) or (
+                after[:1] == "." and after[1:2].isalnum()
+            ):
                 # Часть имени, которого не было в запросе: имя из запроса нашлось бы целиком. Метка тоже бывает
-                # частью имени (части дан другой тип): «<TERM_1>.evil.com» — то же, что «host-1.evil.com».
+                # частью имени (части дан другой тип): «<TERM_1>.evil.com» — то же, что «host-1.evil.com». Ведущая
+                # точка после знака, который не часть имени («*.», «domain=.»), — не стык частей.
                 kind = "derived"
         self.counters[kind] += 1
         return original, kind

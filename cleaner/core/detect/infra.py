@@ -52,7 +52,15 @@ _REMOTE_SWITCH = re.compile(
     re.IGNORECASE,
 )
 _MACHINE = re.compile(r"(?<![\w.$-])(?P<host>(?=[A-Za-z-]*\d)[A-Za-z0-9][A-Za-z0-9-]{1,14})\$(?![\w$])")
-_DOTTED = re.compile(r"(?<![\w.$@-])(?:\w(?:[\w-]{0,61}\w)?\.)+[^\W\d_][\w-]{1,62}(?![\w-]|\.\w)")
+# Начало имени. Имя начинается и после точки за знаком, который не часть имени («*.contoso.ru» сертификата и DNS,
+# «domain=.contoso.ru» cookie, «no_proxy=.contoso.ru,.corp.local», «${env}.contoso.ru»), но не после «/» и «\» с точкой —
+# это файл на точку в пути («~/.env.local», «C:\Users\ivanov\.local»); и после «@» без имени входа перед ним («все
+# адреса @contoso.ru»): адрес e-mail целиком — дело слоя 1. Ведущие «.», «*.», «@» во фрагмент не входят.
+_START = r"(?<![\w$-])(?<![\w\\/-]\.)(?<![\w.+-]@)"
+_DOTTED = re.compile(rf"{_START}(?:\w(?:[\w-]{{0,61}}\w)?\.)+[^\W\d_][\w-]{{1,62}}(?![\w-]|\.\w)")
+# Файл на точку — не имя, хотя его части похожи на имя: «.env.local», «.env.dev», «.zshrc.local», «.tmux.conf.local».
+# Первая часть — имя такого файла (_dotfile), а за ней одна часть или настройки «…local».
+_DOTFILE = re.compile(r"\w*env|\w{3,}rc|\w*config|\w*profile|aliases|tmux", re.IGNORECASE)
 # Имя в регулярном выражении, шаблоне grep, настройке nginx — части через «\.», бывает и вперемешку с точками
 # («^www\.contoso\.ru$»). Цепочка начинается и после «\.» или точки за знаком выражения («.*\.contoso\.ru»,
 # «(.+)\.contoso\.ru»), но не после «\»: в «C:\Users\ivanov\.local» «\» — разделитель пути, а «.local» — папка профиля.
@@ -66,7 +74,8 @@ _BOUNDED = re.compile(rf"(?<=\\b)(?<!\\\\b){_ESCAPED_CHAIN}(?=\\b(?!\w))")
 # host-1.<ORG_1>). Рядом с ней может стоять настоящее имя: «<TERM_1>.fabrikam.ru», «srv-db02.<TERM_1>.domain-1.example»,
 # и через «\.» тоже.
 _PART = rf"(?:[\w-]+|{_LABEL.pattern})"
-_LABELLED = re.compile(rf"(?<![\w.$@-])(?:{_PART}\\?\.)*(?:{_LABEL.pattern})(?:\\?\.{_PART})*")
+_LABELLED = re.compile(rf"{_START}(?:{_PART}\\?\.)*(?:{_LABEL.pattern})(?:\\?\.{_PART})*")
+_LABEL_BEFORE = re.compile(rf"(?:{_LABEL.pattern})\\?\.$")
 _NAME_PART = re.compile(r"[^.\\]+")         # часть имени через «.» или «\.» — и метка
 
 # Перед доменом может стоять двоеточие ключа команды («/user:CONTOSO\ivanov»); обратная косая
@@ -216,6 +225,13 @@ def _plausible(value: str, text: str, end: int, ctx: DetectContext) -> bool:
     return hostmap.has_known_suffix(value)
 
 
+def _dotfile(value: str) -> bool:
+    """Имя, которое стоит после точки, — файл на точку (_DOTFILE): «.env.local», «.env.dev», «.tmux.conf.local». Имя под
+    доменом с публичным суффиксом («.env.contoso.ru») — имя."""
+    labels = value.split(".")
+    return bool(_DOTFILE.fullmatch(labels[0])) and (len(labels) == 2 or labels[-1].lower() == "local")
+
+
 def _plain_runs(value: str, start: int) -> Iterator[tuple[int, int]]:
     """Позиции цепочек обычных частей имени между метками; value — имя, как написано (через «.» или «\\.»), start — его
     позиция в тексте."""
@@ -252,6 +268,10 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
             value = m.group().replace("\\.", ".")       # проверки — как у имени через точку
             if pattern is not _DOTTED and value == m.group():
                 continue
+            if text[m.start() - 1:m.start()] == "." and (
+                _dotfile(value) or _LABEL_BEFORE.search(text, max(0, m.start() - 40), m.start())
+            ):
+                continue        # файл на точку; имя после метки ищет _LABELLED
             if _under_issued(value, ctx) or (not well_known(value, ctx) and (
                 _plausible(value, text, m.end(), ctx) or (_with_issued(value, ctx) and hostmap.has_known_suffix(value))
             )):

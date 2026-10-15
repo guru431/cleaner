@@ -71,6 +71,8 @@ from cleaner.core.types import EntityType as T
         "a\\.b." * 10000, ".*\\.a" * 10000, "\\ba\\." * 10000, "\\b" + "ab\\." * 15000, "x\\.<ORG_1>\\." * 4000,
         # Части в смешанном регистре: имя с выданной заменой внутри проверяется по частям.
         "Ab.Cd." * 10000 + "ru",
+        # Имя после ведущей точки, «*.» и «@» (второе ревью, P1): начало только после точки за знаком не из имени.
+        ".a" * 15000, "*.ab" * 8000, ">.ab.cd" * 5000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -90,7 +92,7 @@ from cleaner.core.types import EntityType as T
         "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail", "dotted_words", "email_labels",
         "email_labels_open", "email_labels_after",
         "escaped_mixed", "escaped_after_expressions", "escaped_word_bounds", "escaped_open_word_bound", "escaped_labels",
-        "mixed_case_parts",
+        "mixed_case_parts", "leading_dots", "wildcards", "after_label_signs",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):

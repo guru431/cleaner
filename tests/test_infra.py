@@ -472,6 +472,38 @@ def test_backslash_before_a_dot_elsewhere_is_not_a_name_separator(text, expected
     assert values(text) == expected
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("SSL: *.contoso.ru, *.corp.contoso.local", {(T.DOMAIN, "contoso.ru"), (T.HOST, "corp.contoso.local")}),
+    ("Set-Cookie: sid=1; Domain=.contoso.ru; Path=/", {(T.DOMAIN, "contoso.ru")}),
+    ("no_proxy=localhost,.contoso.ru,.corp.local", {(T.DOMAIN, "contoso.ru"), (T.DOMAIN, "corp.local")}),
+    ('все адреса @contoso.ru и "@mail.contoso.ru"', {(T.DOMAIN, "contoso.ru"), (T.HOST, "mail.contoso.ru")}),
+    ("[domain_realm]\n .contoso.local = CONTOSO.LOCAL", {(T.DOMAIN, "contoso.local"), (T.DOMAIN, "CONTOSO.LOCAL")}),
+    ("url: https://${env}.contoso.ru/, ^(www|mail).contoso.ru$", {(T.DOMAIN, "contoso.ru")}),
+    ("cookie .env.contoso.ru и *.env.contoso.ru", {(T.HOST, "env.contoso.ru")}),
+], ids=["wildcard", "cookie", "no-proxy", "mail-routing", "kerberos", "template-and-regex", "env-host"])
+def test_name_after_a_leading_dot_star_or_at_is_found(text, expected):
+    """Второе ревью, P1: слой 3 не начинал имя после «.» и «@» — «*.contoso.ru» (сертификат, DNS), «domain=.contoso.ru»
+    (cookie), «no_proxy=.contoso.ru,.corp.local», «@contoso.ru» (маршрутизация почты) уходили в облако. Имя начинается
+    после точки за знаком, который не часть имени, и после «@» без имени входа; ведущие «.», «*.», «@» во фрагмент не
+    входят. Правила — те же, что у любого имени с точкой."""
+    assert found(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    ".gitignore, *.py, .NET, *.tar.gz, *.min.js, *.d.ts",
+    "cp .env.example .env.local && cat .env.development.local .env.dev .env.ci",
+    "файлы .zshrc.local, .gitconfig.local, .tmux.conf.local и ^\\.env\\.local$",
+    "~/.contoso.ru, ./.env.local, C:\\proj\\.zshrc.local, /etc/.corp.local",
+    "Ну...ru, ну и...Всё.ок",
+    "@media screen and (max-width: 600px) {} @Override public void run() @app.get('/') user@ и @import url(a.css)",
+    "obj?.data.id, foo().then.catch",
+], ids=["files", "dotenv", "dotfiles", "paths", "ellipsis", "code-at", "code-chains"])
+def test_leading_dot_or_at_before_a_file_or_code_is_not_a_name(text):
+    """Та же находка с другой стороны: файл на точку («.env.local», «.zshrc.local» — первая часть — имя такого файла, за
+    ней одна часть или «…local»), точка после разделителя пути, многоточие, «@» в CSS и Java, код остаются."""
+    assert values(text) == set()
+
+
 def test_name_with_escaped_dots_under_an_issued_domain_or_next_to_a_label_is_found():
     ctx = DetectContext(Settings(), issued_domains=frozenset({"domain-1.example"}))
     assert found(r"^srv-db02\.domain-1\.example$", ctx) == {(T.HOST, r"srv-db02\.domain-1\.example")}
