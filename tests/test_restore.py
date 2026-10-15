@@ -430,6 +430,37 @@ def test_own_links_and_plain_text_with_backslashes_are_restored(settings, answer
     assert result.text == restored and "foreign_link" not in kinds(result)
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "_www.evil.example.org/?q=<EMAIL_1>",
+        "x.www.evil.example.org/?q=<EMAIL_1>",
+        "xwww.evil.example.org/?q=<EMAIL_1>",
+        "Отчёт: _www&period;evil.example.org/?q=<EMAIL_1>",
+    ],
+)
+def test_www_after_any_character_starts_a_link(settings, answer):
+    """Найдено при проверке голых адресов с «\\», P1: «www.» искался только не после буквы, цифры, «_», «.» и «-». А
+    cmark-gfm (GitHub) и remark-gfm делают ссылкой «_www.evil…» (GFM: и после «*», «~», «(»), remark-gfm в раскрытом
+    тексте — после любого знака препинания, marked — после любого знака («xwww.evil…»)."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("x_www.domain-1.example/<EMAIL_1>", "x_www.contoso.ru/ivanov@contoso.ru"),
+        ('config.www.root = "<EMAIL_1>"', 'config.www.root = "ivanov@contoso.ru"'),
+    ],
+)
+def test_www_inside_a_word_before_our_domain_or_without_labels_restores(settings, answer, restored):
+    """Та же находка с другой стороны: «www.» посреди слова перед нашим доменом — наш узел, а без меток в адресе
+    восстанавливать в нём нечего, и текст рядом восстанавливается."""
+    result = restore(link_state(), answer, settings)
+    assert result.text == restored and "foreign_link" not in kinds(result)
+
+
 def test_host_is_after_the_last_at_sign(settings):
     """Найдено при исправлении обратных косых, P1: браузер берёт хост за последним «@» адреса, а не за первым —
     «https://a@наш:1@evil…» ведёт на evil. Имя пользователя и пароль у нашего адреса ссылку чужой не делают."""
