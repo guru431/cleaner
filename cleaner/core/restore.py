@@ -45,6 +45,7 @@ _URL_HOSTS = re.compile(
     r"(?:(?:[a-z][a-z0-9+.-]{0,31}:)?//(?:[^/?#\\@\s]*@)?|(?<![\w.-])(?=www\.))(\[[^\]]+\]|[^/\\:?#\s]+)",
     re.IGNORECASE,
 )
+_HOST_TYPES = frozenset({EntityType.IP, EntityType.HOST, EntityType.DOMAIN})
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
 _MAC = re.compile(
     r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
@@ -113,6 +114,12 @@ class _Restorer:
             text.lower() for text, surrogate in state.surrogates.items()
             if surrogate.kind in ("host", "ip", "ip6")
         }
+        # Метка, выданная адресу или имени узла вместо подмены (совпадение адресов, значение не того вида),
+        # в хосте ссылки ведёт на наш же узел: «http://<IP_1>:8080/». Модель пишет её и без скобок.
+        for text, surrogate in state.surrogates.items():
+            if surrogate.kind == "label" and state.entities[surrogate.entity_id].type in _HOST_TYPES:
+                bare = text.strip("<>[]").lower()
+                self.own_hosts |= {bare, f"<{bare}>", f"&lt;{bare}&gt;"}
         # Больше частей, чем в самой длинной выданной подмене, одна цепочка не займёт: без этого
         # предела хост «a.a.a…» из тысяч частей проверялся бы квадратичное время.
         self.depth = max((text.count(".") + 1 for text in self.own_hosts), default=0)

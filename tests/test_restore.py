@@ -1,8 +1,11 @@
+import ipaddress
+
 import pytest
 
+from cleaner.core.entities import netmap
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import RestoreResult, restore
-from cleaner.core.types import ChatState, Entity, Settings, Surrogate
+from cleaner.core.types import ChatRule, ChatState, Entity, Settings, Surrogate
 from cleaner.core.types import EntityType as T
 
 
@@ -251,6 +254,44 @@ def test_own_and_nearby_css_urls_are_restored(settings, answer, restored):
     """Та же находка с другой стороны: наш и относительный адрес в url() восстанавливаются, метка
     рядом с чужим url() — тоже."""
     assert restore(link_state(), answer, settings).text == restored
+
+
+def labelled_hosts() -> tuple[ChatState, Settings]:
+    """Адрес, чья подмена совпала с открытым адресом (раздел 6.2), и имя узла не того вида получают метки."""
+    state = ChatState(chat_id="labelled", net_key=bytes(range(32)))
+    real = ipaddress.IPv4Address("192.168.1.5")
+    fake = str(ipaddress.IPv4Address(netmap.map_private(int(real), 16, state.net_key)))
+    settings = Settings(never=frozenset({fake}))
+    state.rules.append(ChatRule("mask", "srv web 02", T.HOST))
+    sanitize(state, f"адрес {real} рядом с {fake}, узел srv web 02, почта ivanov@contoso.ru", settings)
+    assert {"<IP_1>", "<HOST_1>", "<EMAIL_1>"} <= set(state.surrogates)
+    return state, settings
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        ("http://<IP_1>:8080/status?u=<EMAIL_1>", "http://192.168.1.5:8080/status?u=ivanov@contoso.ru"),
+        ("[статус](http://IP_1:8080/status)", "[статус](http://192.168.1.5:8080/status)"),
+        ('<a href="https://&lt;HOST_1&gt;/wiki">', '<a href="https://srv web 02/wiki">'),
+    ],
+)
+def test_link_to_a_labelled_address_or_host_is_restored(answer, restored):
+    """FINDINGS P2 «Resolve and restore: … labelled link hosts not restored»: метка адреса или имени узла,
+    выданная вместо подмены, в хосте ссылки — наш узел."""
+    state, settings = labelled_hosts()
+    assert restore(state, answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["https://<IP_1>.evil.example.org/?q=<IP_1>", "https://<EMAIL_1>/?q=<IP_1>", "https://evil.example.org/<IP_1>"],
+)
+def test_labelled_host_does_not_make_a_foreign_link_ours(answer):
+    """Та же находка с другой стороны: метка под чужим доменом и метки других типов наш узел не задают."""
+    state, settings = labelled_hosts()
+    result = restore(state, answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
 
 def test_own_link_in_an_attribute_is_still_restored(settings):
