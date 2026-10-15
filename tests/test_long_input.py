@@ -59,11 +59,19 @@ def test_restore_is_fast_on_many_reference_brackets():
 
 @pytest.mark.parametrize(
     "text",
-    ['url("' * 20000, "url(" * 25000, "@import '" * 12000, 'url("\\' * 16000, "url(\\" * 20000, "url('\\'" * 12000],
-    ids=["quoted", "unquoted", "import", "quoted_escape", "unquoted_escape", "escaped_quotes"],
+    [
+        'url("' * 20000, "url(" * 25000, "@import '" * 12000, 'url("\\' * 16000, "url(\\" * 20000, "url('\\'" * 12000,
+        "image-set(" * 10000, 'image-set("' * 10000, "src(/*" * 15000, "image-set((((()" * 6000,
+        "src(" + "(" * 20000 + ")" * 20000, "image-set(a)" * 8000,
+    ],
+    ids=[
+        "quoted", "unquoted", "import", "quoted_escape", "unquoted_escape", "escaped_quotes",
+        "image_sets", "image_set_strings", "src_comments", "deep_image_sets", "deep_balanced_src", "closed_image_sets",
+    ],
 )
 def test_restore_is_fast_on_unclosed_css_urls(text):
-    """CSS url() и @import без закрывающей кавычки или скобки не дают квадратичного времени."""
+    """CSS url(), @import, image-set() и src() без закрывающей кавычки или скобки, с глубокой вложенностью или
+    во множестве не дают квадратичного времени."""
     state = ChatState(chat_id="long", net_key=bytes(32))
     sanitize(state, "почта ivanov@contoso.ru", Settings())
     started = time.perf_counter()

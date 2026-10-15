@@ -31,6 +31,25 @@ _AUTHORITY = (
 # такой же кавычкой («"https://…","<EMAIL_1>"»), а без неё идёт и через кавычки («?q='…'»).
 _START = rf"(?:{_AUTHORITY}|(?<![\w.-])www\.)"
 _END = r"[^\s\"'`.,;:!?)\]}]"
+# Строки в image-set() и -webkit-image-set() — в любом варианте, не только в первом, — и в src() браузер
+# тоже загружает сам, как url(). Аргументы такого вызова берутся целиком, по скобкам любого вида: внутри
+# бывают градиенты и var() с блоком, а «)» в строке, в комментарии или после «\» вызов не кончает. Строка
+# и комментарий без конца тянутся до конца ответа, как в CSS; вложенность глубже _CSS_DEPTH и незакрытый
+# вызов — тоже до конца ответа, в сторону ссылки. Каждый шаг атомарен: разбор не возвращается и линеен.
+_CSS_DEPTH = 4
+_CSS_ITEM = (
+    r"\"(?:\\[\s\S]|[^\\\"])*(?:\"|\Z)|'(?:\\[\s\S]|[^\\'])*(?:'|\Z)|/\*[\s\S]*?(?:\*/|\Z)"
+    r"|\\[\s\S]|[^\\()\[\]{}\"']"
+)
+
+
+def _css_args(depth: int) -> str:
+    level = rf"(?>{_CSS_ITEM})*+"
+    for _ in range(depth):
+        level = rf"(?>{_CSS_ITEM}|[(\[{{]{level}[)\]}}])*+"
+    return level
+
+
 # Атрибут тянется и через строки до той же кавычки: браузер выбрасывает из адреса переводы строк.
 # Это линейно — поиск каждого атрибута кончается на следующей такой же кавычке. Определение ссылки
 # Markdown — только в начале строки, как в CommonMark, цель в угловых скобках может стоять на
@@ -45,6 +64,7 @@ _LINK = re.compile(
     r"\s*=\s*(?P<quote>[\"'])(?P<attr>[\s\S]*?)(?P=quote)"
     r"|(?:(?<![\w-])url\(\s*|@import\s*)(?P<cq>[\"'])(?P<css>(?:\\[\s\S]|[^\\])*?)(?P=cq)"
     r"|(?<![\w-])url\((?P<cssu>(?:\\[\s\S]|[^\\()\"'])*)\)"
+    rf"|(?<![\w-])(?:(?:-webkit-)?image-set|src)\((?P<set>{_css_args(_CSS_DEPTH)}(?=[)\]}}])|[\s\S]*)"
     rf"|(?P<mailto>mailto:[^\s\"'`]*{_END})"
     rf"|(?<=\")(?P<dq>{_START}[^\s\"`]*{_END})"
     rf"|(?<=')(?P<sq>{_START}[^\s'`]*{_END})"
@@ -234,7 +254,7 @@ class _Restorer:
             # чужая оставляет метки во всём значении.
             return any(self._foreign(inner) for inner in _LINK.finditer(m.string, m.start("attr"), m.end("attr")))
         target = next((
-            m.group(name) for name in ("md", "ref", "attr", "css", "cssu", "mailto", "dq", "sq", "url")
+            m.group(name) for name in ("md", "ref", "attr", "css", "cssu", "set", "mailto", "dq", "sq", "url")
             if m.group(name)
         ), "")
         if self._is_own(target):
