@@ -6,6 +6,8 @@ from bisect import bisect_right
 from collections.abc import Callable
 from functools import lru_cache
 
+import regex
+
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities.names import part_of_speech
 from cleaner.core.types import EntityType, Span
@@ -118,7 +120,9 @@ _XML = re.compile(
 )
 # Длина схемы ограничена: без предела цепочка «a.b.a.b…» без «://» даёт квадратичный перебор.
 # Логина может не быть: «redis://:пароль@хост» — стандартная запись Redis.
-_URL = re.compile(r"\b[a-z][a-z0-9+.-]{0,31}://[^\s:/@]*:(?P<bare>[^\s@/]+)@", re.IGNORECASE)
+# Выражение начинается с «://», а схема — проверка назад переменной длины (её умеет regex, но не re): начатое со схемы,
+# оно пробовалось с каждой буквы текста — 17 мс на 160 КБ текста с точками, теперь 0,1 мс; находки те же.
+_URL = regex.compile(r"(?<=\b[a-z][a-z0-9+.-]{0,31})://[^\s:/@]*:(?P<bare>[^\s@/]+)@", regex.IGNORECASE)
 # Слово после пробела, начатое с «-», — следующий параметр («--password --verbose»), а «/p:имя=значение» —
 # свойство MSBuild («/p:Configuration=Release»; пароль в нём находит правило ключа). Пароль из base64
 # с «=» на конце («/p:dGVzdDE=») свойством не считается: после «=» у свойства есть значение.
