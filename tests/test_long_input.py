@@ -193,3 +193,21 @@ def test_restore_is_fast_on_character_references(text):
     started = time.perf_counter()
     restore(state, text + "<EMAIL_1>", Settings())
     assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https&colon;&sol;&sol;" * 7000, "www&period;" * 15000, "https\\:\\/\\/a." * 10000, "\\" * 200000,
+        "&amp;" * 30000, "a&amp;b " * 20000, "https&colon;&sol;&sol;a.b/ " * 5000, "&#104;ttps&colon;//a.b " * 5000,
+    ],
+    ids=["starts", "www", "escaped_starts", "backslashes", "references", "words", "links", "letter_references"],
+)
+def test_restore_is_fast_on_links_written_with_references_in_prose(text):
+    """Слово простого текста раскрывается один раз (_prose): тысячи начал адреса в одном слове, десятки тысяч слов со
+    ссылками на знаки и экранированиями."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "почта ivanov@contoso.ru", Settings())
+    started = time.perf_counter()
+    restore(state, text + "<EMAIL_1>", Settings())
+    assert time.perf_counter() - started < 0.5
