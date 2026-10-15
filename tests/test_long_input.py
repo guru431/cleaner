@@ -73,17 +73,19 @@ def test_restore_is_fast_on_many_reference_brackets():
         "src(" + "(" * 20000 + ")" * 20000, "image-set(a)" * 8000, "@import '" + "\\'url(\"" * 15000,
         'u\\72l("' * 12000, "\\75\\72\\6c(" * 10000, "@\\69mport '" * 8000, "image-s\\65t(" * 8000,
         "\\000075 " * 12000, "s\\000072" * 12000, "\\2d webkit\\2d " * 6000,
+        "@import/*" * 15000, "@import /**/" * 8000, "@import " + "/**/ " * 20000, "@import/*'*/'" * 6000,
     ],
     ids=[
         "quoted", "unquoted", "import", "quoted_escape", "unquoted_escape", "escaped_quotes",
         "image_sets", "image_set_strings", "src_comments", "deep_image_sets", "deep_balanced_src", "closed_image_sets",
         "string_to_the_end", "escaped_url_strings", "escaped_urls", "escaped_imports", "escaped_image_sets",
         "spaced_escapes", "six_digit_escapes", "escaped_prefixes",
+        "import_comments", "closed_import_comments", "many_import_comments", "import_comment_quotes",
     ],
 )
 def test_restore_is_fast_on_unclosed_css_urls(text):
     """CSS url(), @import, image-set() и src() без закрывающей кавычки или скобки, с глубокой вложенностью или
-    во множестве, с экранированными именами не дают квадратичного времени."""
+    во множестве, с экранированными именами и @import с незакрытыми комментариями не дают квадратичного времени."""
     state = ChatState(chat_id="long", net_key=bytes(32))
     sanitize(state, "почта ivanov@contoso.ru", Settings())
     started = time.perf_counter()
@@ -98,11 +100,13 @@ def test_restore_is_fast_on_unclosed_css_urls(text):
         "EMAIL_1" + " " * 50000, "//x:<EMAIL_1> " * 5000, "file:///" * 20000, "//" * 50000,
         "\\" * 100000, "/\\" * 50000, " \\\\x" * 10000, "https:" * 20000, "!http:a:" * 15000, "//a:wss:" * 15000,
         "file:\\" * 20000, "//" + "a@" * 50000, "https:@" * 20000, "//@:" * 25000,
+        '<a href="https:' + " a" * 50000 + '">', '<a href="' + "https: @" * 20000 + '">', '<a href="' + "//a b " * 20000 + '">',
     ],
     ids=[
         "brackets", "arguments", "open_tags", "spaced_label", "bare_links", "file_links", "slashes",
         "backslashes", "mixed_slashes", "unc_paths", "schemes", "schemes_without_slashes", "schemes_in_userinfo",
         "file_backslashes", "at_signs", "schemes_with_at_signs", "empty_users",
+        "spaced_user", "spaced_schemes_with_at_signs", "spaced_slashes",
     ],
 )
 def test_restore_is_fast_on_many_tags_arguments_and_bare_links(text):
@@ -126,4 +130,23 @@ def test_stream_restore_is_fast_on_many_unclosed_link_openers(text):
     restorer = StreamRestorer(state, Settings())
     started = time.perf_counter()
     restorer.feed(text + " <EMAIL_1> ")
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '<a href="&#' + "0" * 100000 + '47;">', '<a href="' + "&#47;" * 20000 + '">',
+        '<a style="' + "&abcdefghijklmnopqrstuvwxyzabcde" * 2000 + '">', '<a href="&' + "a" * 100000 + '">',
+        "href=&#47;&#47;a" * 5000, "href=" * 20000, "[1]: &#47;\n" * 5000, '"//a&#46;' * 2000,
+    ],
+    ids=["zeros", "slashes", "unknown_names", "long_name", "unquoted", "empty_unquoted", "definitions", "dots"],
+)
+def test_restore_is_fast_on_character_references(text):
+    """Ссылки на знаки в цели ссылки раскрываются за линейное время: тысячи нулей в числовой ссылке, длинные
+    незнакомые имена, атрибуты без кавычек и определения ссылок без угловых скобок."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "почта ivanov@contoso.ru", Settings())
+    started = time.perf_counter()
+    restore(state, text + "<EMAIL_1>", Settings())
     assert time.perf_counter() - started < 0.5

