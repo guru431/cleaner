@@ -314,6 +314,15 @@ _TRAILING_EDGE = "\""
 # « *»): на длинном ряде пробелов это кубическое время. Ряд сжимается до одного пробела — повторы
 # принимают любое их число, а двух пробелов подряд нет ни в одном значении этих правил.
 _SPACES = re.compile(" {2,}")
+# Выражения тех же правил (и IbmCos) для ключа с именем начинаются с выбора без опорного знака («(?<=\W)|(?<=^)»,
+# необязательные скобка и кавычка), и re пробует их с каждой позиции текста: три четверти цены всех правил библиотеки на
+# тексте. В имени ключа у них обязательна группа из слов key, pwd, pw, password, pass, token (у IbmCos — secret…key), и
+# текст без этих слов они пропускают. Только выражения с такой группой: у Cloudant и Softlayer есть и выражения для
+# адреса («https://имя:ключ@….cloudant.com») — без слов (тест test_worded_library_rules_cannot_match_without_their_words).
+_WORD_GROUPS = (
+    "(?:key|pwd|pw|password|pass|token)(", "(?:key|pwd|password|pass|token)(", "(?:secret[-_]?(?:access)?[-_]?key)(",
+)
+_RULE_WORDS = re.compile(r"key|pw|pass|token", re.IGNORECASE)
 # Сколько разных значений строки ищется по всей строке. Только такой поиск находит повтор значения без контекста
 # его правила («aws_key="…"», а дальше по строке то же значение без ключа), но стоит длину строки на каждое
 # значение: строка выгрузки с тысячами разных токенов шла квадратичное время (8000 SID на строке в 472 КБ — 3,4 с).
@@ -323,14 +332,15 @@ _REPEATS = 50
 
 
 @lru_cache(maxsize=1)
-def _library_rules() -> tuple[re.Pattern[str], ...]:
-    """Выражения правил detect-secrets (denylist) по порядку правил. Не scan_line: тот читает общие для процесса
-    настройки, которые меняет любой параллельный вызов, и слушается пометки «pragma: allowlist secret» во вставленном
-    тексте. И не analyze_string: все включённые правила берут его общим, а он отдаёт значения без позиций."""
+def _library_rules() -> tuple[tuple[re.Pattern[str], bool], ...]:
+    """Выражения правил detect-secrets (denylist) по порядку правил и нужны ли им слова _RULE_WORDS. Не scan_line: тот
+    читает общие для процесса настройки, которые меняет любой параллельный вызов, и слушается пометки «pragma: allowlist
+    secret» во вставленном тексте. И не analyze_string: все включённые правила берут его общим, а он отдаёт значения
+    без позиций."""
     from detect_secrets.core.plugins.util import get_mapping_from_secret_type_to_class
 
     return tuple(
-        regex
+        (regex, any(group in regex.pattern for group in _WORD_GROUPS))
         for cls in get_mapping_from_secret_type_to_class().values()
         if cls.__name__ not in _SKIPPED_PLUGINS
         for regex in cls().denylist
@@ -377,7 +387,8 @@ def _library_spans(text: str, own: list[Span]) -> list[Span]:
     # и 50 000 коротких строк шли 0,66 с, хотя токенов в них нет. Совпадение в строке — совпадение и в тексте на том же
     # месте: «^» и «(?<=^)» у правил стоят рядом с «\s» и «(?<=\W)», а знак конца строки — пробельный и не буквенный.
     squeezed = _SPACES.sub(" ", text)
-    rules = tuple(regex for regex in _library_rules() if regex.search(squeezed))
+    worded = _RULE_WORDS.search(squeezed) is not None
+    rules = tuple(regex for regex, words in _library_rules() if (worded or not words) and regex.search(squeezed))
     if not rules:
         return []
     spans: list[Span] = []

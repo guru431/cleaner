@@ -198,6 +198,29 @@ def test_repeat_on_a_line_with_many_distinct_tokens_is_found_by_the_second_pass(
     assert not any(value in sanitized for value in AWS_SECRETS), sanitized[-80:]
 
 
+def test_worded_library_rules_cannot_match_without_their_words():
+    """Выражения правил IBM, Cloudant, Softlayer и IbmCos для ключа с именем пропускаются на тексте без key, pw, pass и
+    token (_RULE_WORDS): группа из таких слов в них обязательна — за ней сразу следующая группа, а не «?». Новая версия
+    detect-secrets с другими выражениями уронит этот тест, и пропуск придётся проверить заново."""
+    from detect_secrets.core.plugins.util import get_mapping_from_secret_type_to_class
+
+    gated = {
+        cls.__name__ for cls in get_mapping_from_secret_type_to_class().values() if cls.__name__ not in secrets._SKIPPED_PLUGINS
+        for regex in cls().denylist if any(group in regex.pattern for group in secrets._WORD_GROUPS)
+    }
+    assert gated == {"CloudantDetector", "IbmCloudIamDetector", "IbmCosHmacDetector", "SoftlayerDetector"}
+    for group in secrets._WORD_GROUPS:
+        assert all(secrets._RULE_WORDS.search(word) for word in group[3:-2].split("|")), group
+
+
+def test_library_address_rules_need_no_key_word():
+    """Выражение Cloudant для адреса («https://имя:ключ@….cloudant.com») слов key, pw, pass, token не требует и
+    пропуском по ним не задевается; то же значение под ключом со словом находит выражение для ключа."""
+    secret = "0f1e2d3c4b5a6978" * 4
+    assert found(f"https://acme:{secret}@acme.cloudant.com/db") == {secret}
+    assert found(f"cloudant_api_key: {secret}") == {secret}
+
+
 def test_library_rules_still_see_a_key_after_a_run_of_spaces():
     """Ряд пробелов сжимается перед правилами detect-secrets, а значение ищется в настоящей строке."""
     key = "Zx81kLmN02pQ" * 3 + "Ab1-Cd2_"
