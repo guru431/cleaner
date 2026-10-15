@@ -23,6 +23,7 @@ _RTF = b"{\\rtf"
 _ZIP = b"PK\x03\x04"
 _PNG = b"\x89PNG\r\n\x1a\n"
 _JPEG = b"\xff\xd8\xff"
+_TEXT_CONTROLS = b"\t\n\v\f\r\x1b"       # управляющие байты, которые бывают в тексте (ESC — цвета в журналах)
 _OFFICE = frozenset({"docx", "xlsx", "pptx"})
 _LEGACY = frozenset({"doc", "xls", "ppt"})
 _MISMATCH = "Файл повреждён или его расширение не соответствует содержимому"
@@ -55,6 +56,16 @@ Ocr = Callable[[bytes, str], str]          # изображение, MIME -> Mar
 Progress = Callable[[int, int], None]      # сделано, всего
 
 
+def _pdf_signature(data: bytes, ext: str) -> bool:
+    """«%PDF-» в начале файла. Читатели PDF терпят до 1024 байт мусора перед ним (заголовок MacBinary, ответ
+    HTTP, сохранённый вместе с файлом), но журнал или заметка, где «%PDF-» просто упомянут, — текст: без
+    расширения .pdf сдвинутая сигнатура засчитывается, только если перед ней двоичные байты, а не строки."""
+    at = data.find(b"%PDF-", 0, 1024)
+    if at <= 0:
+        return at == 0
+    return ext == "pdf" or any(byte < 0x20 and byte not in _TEXT_CONTROLS for byte in data[:at])
+
+
 def detect_kind(filename: str, data: bytes) -> str:
     """Вид файла по сигнатуре и расширению. Имя файла используется только здесь и нигде не сохраняется."""
     ext = PurePath(filename).suffix.lower().lstrip(".")
@@ -65,7 +76,7 @@ def detect_kind(filename: str, data: bytes) -> str:
     if ext == "rtf" or data.lstrip()[:5] == _RTF:
         # Русские буквы RTF записывает кодами \'cf\'e5…: как текст его не прочитать ни человеку, ни слоям.
         raise ExtractError("Формат файла не поддерживается: RTF сохраните как .docx или .txt")
-    pdf = b"%PDF-" in data[:1024]
+    pdf = _pdf_signature(data, ext)
     image = data.startswith((_PNG, _JPEG))
     if ext in _OFFICE:
         if data.startswith(_OLE):

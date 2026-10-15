@@ -53,6 +53,17 @@ def test_kind_comes_from_the_content_and_the_extension(name, data, kind):
     assert detect_kind(name, data) == kind
 
 
+@pytest.mark.parametrize(("name", "data", "kind"), [
+    ("notes.txt", b"pdf check: the file must start with %PDF-1.7\n", "text"),
+    ("upload.log", "Петров прислал файл без %PDF- в начале\n".encode("utf-8"), "text"),
+    ("macbinary", b"\x00\x0breport.pdf" + b"\x00" * 116 + b"%PDF-1.4\n", "pdf"),
+    ("saved.pdf", b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4\n", "pdf"),
+])
+def test_pdf_signature_counts_at_the_start_or_after_binary_junk(name, data, kind):
+    """Обзор плана 2+4, m-3: текст, где в первом килобайте упомянут «%PDF-», — текст, а не повреждённый PDF."""
+    assert detect_kind(name, data) == kind
+
+
 @pytest.mark.parametrize(("name", "data", "reason"), [
     ("secret.docx", ENCRYPTED, "защищён паролем"),
     ("old.doc", OLE, "Старые форматы Office"),
