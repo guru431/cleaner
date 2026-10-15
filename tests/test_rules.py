@@ -275,6 +275,17 @@ def test_url_login_is_masked_whatever_the_password_and_host(text, login):
     assert (T.ACCOUNT, login) in found(text), text
 
 
+@pytest.mark.parametrize("login", ["user", "root", "git", "Administrator", "ubuntu"])
+def test_service_login_on_an_address_is_left_open(login):
+    """Финальный обзор партии: в «user@10.1.2.5» скрывался «user», хотя в «ssh://user@…» он открыт.
+    Адрес скрывает слой 3."""
+    assert found(f"ssh {login}@10.1.2.5 -p 22") == set()
+
+
+def test_personal_login_on_an_address_is_masked():
+    assert found("ssh ivanov@10.1.2.5 -p 22") == {(T.ACCOUNT, "ivanov")}
+
+
 def test_placeholder_logins_in_a_url_are_not_masked():
     for text in ("https://имя:пароль@host.contoso.ru/", "https://login:password@host.contoso.ru/",
                  "https://username:secret@host.contoso.ru/"):

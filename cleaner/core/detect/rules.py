@@ -231,16 +231,18 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
     def add(start: int, end: int, type_: EntityType, validated: bool = False) -> None:
         spans.append(Span(start, end, type_, name, validated=validated))
 
+    skip = ctx.builtin.builtin_accounts | _URL_SERVICE_LOGINS
     for m in _EMAIL.finditer(text):
         local, _, domain = m.group().rpartition("@")
         url = _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()])
         if url and not _NOT_USERINFO.search(url.group("user") + local):
             continue        # пользователь адреса, а не e-mail: вход — правило _URL_LOGIN ниже
         if _IPV4_DOMAIN.fullmatch(domain):
-            add(m.start(), m.start() + len(local), EntityType.ACCOUNT)     # вход вида ivanov@10.1.2.5
+            # Вход вида ivanov@10.1.2.5; служебный («user@», «root@») человека не выдаёт, как и в адресе.
+            if local.lower() not in skip:
+                add(m.start(), m.start() + len(local), EntityType.ACCOUNT)
             continue
         add(m.start(), m.end(), EntityType.EMAIL, True)
-    skip = ctx.builtin.builtin_accounts | _URL_SERVICE_LOGINS
     for m in _URL_LOGIN.finditer(text):
         login = m.group("login")
         if login and login.lower() not in skip:
