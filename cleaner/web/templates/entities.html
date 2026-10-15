@@ -2,7 +2,7 @@
 {% block title %}Таблица замен — {{ chat.title }} — Cleaner{% endblock %}
 {% block main %}
 <div class="bar">
-  <nav class="crumbs"><a href="/chats/{{ chat.id }}">{{ chat.title }}</a><span class="sep">/</span><h1>Таблица замен</h1></nav>
+  <nav class="crumbs"><a href="/chats/{{ chat.id }}" title="{{ chat.title }}">{{ chat.title }}</a><span class="sep">/</span><h1>Таблица замен</h1></nav>
   <span class="spacer"></span>
   <form method="post" action="/chats/{{ chat.id }}/refresh">
     {% include "_csrf.html" %}
@@ -15,8 +15,8 @@
     <tbody>
     {% for r in rows %}
     <tr>
-      <td class="mono">{{ r.surrogates | join(", ") }}</td>
-      <td>{{ r.type_name }}</td>
+      <td class="mono words">{{ r.surrogates | join(", ") }}</td>
+      <td class="nowrap">{{ r.type_name }}</td>
       <td>{{ r.restore_value }}{% if r.forms | length > 1 %}<div class="sub">{{ r.forms | join(", ") }}</div>{% endif %}</td>
       <td class="num">{{ r.count }}</td>
       <td class="actions">

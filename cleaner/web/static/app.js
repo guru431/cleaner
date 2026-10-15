@@ -27,6 +27,20 @@ document.addEventListener("selectionchange", () => {
   field.value = selection.toString().trim();
 });
 
+// Перезагрузка по опросу или по концу потока. Ленту прокручивает она сама, а не страница, и её место браузер
+// не восстанавливает: если читали не конец, верхний видимый элемент и сдвиг от его верха кладутся в состояние этой
+// записи истории (history.state — не хранилище: живёт в этой вкладке, на этой записи) и возвращаются при загрузке.
+// Элемент, а не scrollTop: выросший выше элемент (повтор старого текста) иначе сдвинул бы место чтения.
+function reload() {
+  const feed = document.querySelector("[data-scroll-end]");
+  if (feed && feed.scrollHeight - feed.scrollTop - feed.clientHeight > 2) {
+    const top = feed.getBoundingClientRect().top;
+    const item = [...feed.children].find((element) => element.getBoundingClientRect().bottom > top);
+    if (item) history.replaceState({ ...history.state, feed: { item: item.id, offset: top - item.getBoundingClientRect().top } }, "");
+  }
+  window.location.reload();
+}
+
 // Ответ облачной модели по мере получения (раздел 14): события сервера несут весь восстановленный к этому
 // моменту текст; по «done» страница перезагружается и показывает полное восстановление с выделением.
 document.querySelectorAll("[data-stream]").forEach((element) => {
@@ -35,7 +49,7 @@ document.querySelectorAll("[data-stream]").forEach((element) => {
     element.classList.remove("muted");
     element.textContent = JSON.parse(event.data).text;
   };
-  source.addEventListener("done", () => { source.close(); window.location.reload(); });
+  source.addEventListener("done", () => { source.close(); reload(); });
 });
 
 // Опрос фоновой обработки (раздел 14): пока задание в очереди или в работе — раз в секунду, потом перезагрузка.
@@ -49,7 +63,7 @@ document.querySelectorAll("[data-poll]").forEach((element) => {
         const progress = element.querySelector("[data-progress]");
         if (progress) progress.textContent = state.progress || "";
         if (state[field] === "queued" || state[field] === "running") setTimeout(check, 1000);
-        else window.location.reload();
+        else reload();
       })
       .catch(() => setTimeout(check, 5000));
   };
@@ -89,5 +103,13 @@ document.querySelectorAll("[data-tabs]").forEach((container) => {
   }
 });
 
-// Лента открывается на последнем элементе.
-document.querySelectorAll("[data-scroll-end]").forEach((element) => { element.scrollTop = element.scrollHeight; });
+// Лента открывается там, где её читали перед перезагрузкой (reload выше; место возвращается один раз), иначе — на
+// элементе из адреса (#item-… после ответа, отправки, вопроса локальной модели: браузер переходит к якорю при
+// открытии, но не при перезагрузке), иначе — на последнем элементе.
+document.querySelectorAll("[data-scroll-end]").forEach((feed) => {
+  const { feed: saved, ...rest } = history.state || {};
+  const item = document.getElementById(saved ? saved.item : window.location.hash.slice(1));
+  if (item && feed.contains(item)) feed.scrollTop += item.getBoundingClientRect().top - feed.getBoundingClientRect().top + (saved ? saved.offset : 0);
+  else feed.scrollTop = feed.scrollHeight;
+  if (saved) history.replaceState(rest, "");
+});

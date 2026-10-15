@@ -12,7 +12,7 @@
   <ul class="chat-list">
     {% for c in chats %}
     <li{% if chat and chat.id == c.id %} class="current"{% endif %}>
-      <a href="/chats/{{ c.id }}"><span class="name">{{ c.title }}</span><small>{{ c.updated_at | local(tz) }}</small></a>
+      <a href="/chats/{{ c.id }}"><span class="name" title="{{ c.title }}">{{ c.title }}</span><small>{{ c.updated_at | local(tz) }}</small></a>
     </li>
     {% else %}
     <li class="empty">Чатов нет</li>

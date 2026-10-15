@@ -2,7 +2,7 @@
 {% block title %}Отправка — {{ chat.title }} — Cleaner{% endblock %}
 {% block main %}
 <div class="bar">
-  <nav class="crumbs"><a href="/chats/{{ chat.id }}">{{ chat.title }}</a><span class="sep">/</span><span class="here">Отправка</span></nav>
+  <nav class="crumbs"><a href="/chats/{{ chat.id }}" title="{{ chat.title }}">{{ chat.title }}</a><span class="sep">/</span><span class="here">Отправка</span></nav>
 </div>
 <h1>{{ provider.name }} — {{ model }}</h1>
 <p class="lead">Ниже ровно то, что уйдёт провайдеру. Оригиналов в нём быть не должно: проверьте замены. Ответ придёт в чат восстановленным.</p>
