@@ -1,23 +1,29 @@
-{% extends "base.html" %}
+{% extends "_settings.html" %}
 {% block title %}Импорт — Cleaner{% endblock %}
-{% block main %}
+{% block content %}
 <p><a href="/settings/dictionary">← Словарь</a></p>
 <h1>Импорт: предпросмотр</h1>
-<form method="post" action="/settings/dictionary/import">
+<p class="lead">Пока ничего не записано: выберите колонку и проверьте значения.</p>
+<form method="post" action="/settings/dictionary/import" class="inline-form">
   {% include "_csrf.html" %}
   <textarea name="csv" hidden>
 {{ csv_text }}</textarea>
   <input type="hidden" name="delimiter" value="{{ delimiter }}">
   <input type="hidden" name="list" value="{{ list_ }}">
   <input type="hidden" name="type" value="{{ type_.value if type_ else '' }}">
-  <label>Колонка <select name="column">{% for h in headers %}<option{% if h == column %} selected{% endif %}>{{ h }}</option>{% endfor %}</select></label>
+  <label for="column">Колонка</label>
+  <select id="column" name="column">{% for h in headers %}<option{% if h == column %} selected{% endif %}>{{ h }}</option>{% endfor %}</select>
   <button name="action" value="preview">Показать</button>
-  {% if column in headers %}<button name="action" value="save">Записать новые ({{ new | length }})</button>{% endif %}
+  {% if column in headers %}<button name="action" value="save" class="primary">Записать новые ({{ new | length }})</button>{% endif %}
 </form>
 {% if column in headers %}
-<p>В колонке значений: {{ total }}, новых для списка: {{ new | length }}{% if new | length > shown | length %}; показаны первые {{ shown | length }}{% endif %}.</p>
-<ul>{% for v in shown %}<li>{{ v }}</li>{% endfor %}</ul>
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Новые значения</h2><span class="state">В колонке значений: {{ total }}, новых для списка: {{ new | length }}{% if new | length > shown | length %}; показаны первые {{ shown | length }}{% endif %}.</span></header>
+  <div class="panel-body">
+    <ul class="values">{% for v in shown %}<li>{{ v }}</li>{% endfor %}</ul>
+  </div>
+</section>
 {% else %}
-<p class="warn">Выберите колонку из первой строки файла.</p>
+<p class="flash warn">Выберите колонку из первой строки файла.</p>
 {% endif %}
 {% endblock %}

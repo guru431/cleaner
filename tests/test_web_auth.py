@@ -88,7 +88,10 @@ def test_form_without_the_session_token_is_refused(browser):
 
 def test_every_response_carries_the_security_headers(browser):
     b = browser()
-    for response in (b.get("/login"), b.get("/static/app.css"), b.get("/static/app.js"), b.get("/missing")):
+    for response in (
+        b.get("/login"), b.get("/static/app.css"), b.get("/static/app.js"), b.get("/static/theme.js"),
+        b.get("/static/icons.svg"), b.get("/missing"),
+    ):
         for name, value in SECURITY_HEADERS.items():
             assert response.headers[name] == value, (response.url, name)
 

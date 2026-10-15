@@ -1,20 +1,26 @@
-{% extends "base.html" %}
+{% extends "_settings.html" %}
 {% block title %}Встроенные списки — Cleaner{% endblock %}
-{% block main %}
-<p><a href="/settings">← Настройки</a></p>
+{% block content %}
 <h1>Встроенные списки</h1>
-<p>Значения этих списков не скрываются. Свои значения добавляются в список «никогда не скрывать» словаря организации.</p>
-<form method="post" action="/settings/dictionary">
-  {% include "_csrf.html" %}
-  <input type="hidden" name="list" value="never">
-  <input type="hidden" name="back" value="builtin">
-  <input name="value" placeholder="Домен, имя узла или учётная запись" required>
-  <input name="comment" placeholder="Комментарий">
-  <button>Добавить</button>
-</form>
-<h2>Добавлено вами</h2>
-<p>{% for r in never %}{{ r.value }}{% if not loop.last %}, {% endif %}{% else %}ничего{% endfor %}</p>
+<p class="lead">Значения этих списков не скрываются. Свои значения добавляются в список «никогда не скрывать» словаря организации.</p>
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Добавить</h2></header>
+  <div class="panel-body">
+    <form method="post" action="/settings/dictionary" class="inline-form">
+      {% include "_csrf.html" %}
+      <input type="hidden" name="list" value="never">
+      <input type="hidden" name="back" value="builtin">
+      <input name="value" placeholder="Домен, имя узла или учётная запись" required aria-label="Значение">
+      <input name="comment" placeholder="Комментарий" aria-label="Комментарий">
+      <button class="primary">Добавить</button>
+    </form>
+    <p class="muted">Добавлено вами: {% for r in never %}<span class="mono">{{ r.value }}</span>{% if not loop.last %}, {% endif %}{% else %}ничего{% endfor %}</p>
+  </div>
+</section>
 {% for title, values in lists %}
-<details><summary>{{ title }} ({{ values | length }})</summary><p>{{ values | join(", ") }}</p></details>
+<details class="panel">
+  <summary class="panel-head"><span class="title">{{ title }}</span><span class="state">{{ values | length }}</span></summary>
+  <div class="panel-body"><ul class="values">{% for value in values %}<li>{{ value }}</li>{% endfor %}</ul></div>
+</details>
 {% endfor %}
 {% endblock %}

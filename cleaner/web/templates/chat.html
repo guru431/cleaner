@@ -1,127 +1,192 @@
 {% extends "base.html" %}
+{% from "_ui.html" import icon %}
 {% block title %}{{ chat.title }} — Cleaner{% endblock %}
+{% block main_class %}split{% endblock %}
 {% block main %}
-<div class="layout">
-  {% include "_sidebar.html" %}
-  <section>
-    <header class="chat-head">
-      <form method="post" action="/chats/{{ chat.id }}/rename">
-        {% include "_csrf.html" %}
-        <input name="title" value="{{ chat.title }}" maxlength="200" required>
-        <button>Переименовать</button>
-      </form>
-      <a href="/chats/{{ chat.id }}/entities">Таблица замен</a>
-    </header>
-    <section class="layers">
+{% include "_sidebar.html" %}
+<section class="work chat">
+  <header class="chat-head">
+    <h1>{{ chat.title }}</h1>
+    <details class="inline">
+      <summary class="btn" title="Переименовать" aria-label="Переименовать">{{ icon("edit") }}</summary>
+      <div class="pop">
+        <form method="post" action="/chats/{{ chat.id }}/rename">
+          {% include "_csrf.html" %}
+          <input name="title" value="{{ chat.title }}" maxlength="200" required aria-label="Название чата">
+          <button class="primary">Переименовать</button>
+        </form>
+      </div>
+    </details>
+    <div class="layers">
       {% for name, label in layer_names.items() %}
       <form method="post" action="/chats/{{ chat.id }}/layers">
         {% include "_csrf.html" %}
         <input type="hidden" name="layer" value="{{ name }}">
         <input type="hidden" name="enabled" value="{{ 'no' if layers[name] else 'yes' }}">
-        <span{% if not layers[name] %} class="warn"{% endif %}>{{ label }}: {% if layers[name] %}включён{% else %}выключен{% endif %}</span>
-        <button>{% if layers[name] %}Выключить для этого чата{% else %}Включить для этого чата{% endif %}</button>
+        <button class="toggle" aria-pressed="{{ 'true' if layers[name] else 'false' }}" title="{{ label }}: {% if layers[name] %}включён{% else %}выключен{% endif %}"><span class="switch"></span>{{ label.split(" — ")[0] }}</button>
       </form>
       {% endfor %}
-    </section>
+    </div>
+    <span class="spacer"></span>
+    <a href="/chats/{{ chat.id }}/entities">Таблица замен</a>
+    <details class="menu">
+      <summary class="btn" title="Ещё" aria-label="Ещё">{{ icon("more") }}</summary>
+      <div class="pop">
+        <form method="post" action="/chats/{{ chat.id }}/delete">
+          {% include "_csrf.html" %}
+          <label class="check"><input type="checkbox" name="confirm" value="yes" required> Удалить чат безвозвратно, вместе с таблицей замен и ключом</label>
+          <button class="danger">Удалить</button>
+        </form>
+      </div>
+    </details>
+  </header>
 
+  <div class="feed" data-scroll-end>
     {% for e in entries %}
-    <article class="item" id="item-{{ e.id }}">
+    <article class="panel item" id="item-{{ e.id }}">
       {% if e.kind == "input" %}
-      <h3>{% if e.source == "file" %}Файл{% elif e.source == "instruction" %}Инструкция для модели{% else %}Текст{% endif %} {{ e.seq }}{% if e.status == "done" %} · <a href="/chats/{{ chat.id }}/items/{{ e.id }}">проверка</a>{% endif %}</h3>
-      {% if e.status in ("queued", "running") %}
-      <p class="muted" data-poll="/chats/{{ chat.id }}/items/{{ e.id }}/status">{% if e.status == "queued" %}В очереди{% else %}Обрабатывается{% endif %}… <span data-progress>{{ e.progress }}</span></p>
-      {% elif e.status == "failed" %}
-      <p class="error">Не обработан: {{ e.error }}</p>
-      {% if e.retry %}
-      <form method="post" action="/chats/{{ chat.id }}/items/{{ e.id }}/retry">{% include "_csrf.html" %}<button>Повторить</button></form>
-      {% endif %}
-      {% else %}
-      {% if e.exposed %}
-      <p class="warn">Прежний вариант этого текста содержал открытым значение, которое теперь скрывается: {{ e.exposed | join("; ") }}. Если текст уже был передан, значение ушло открытым.</p>
-      {% endif %}
-      {% if not e.deliverable %}
-      <p class="error">Выдача заблокирована:{% if e.leaks %} найдено оригиналов — {{ e.leaks }};{% endif %}{% if e.blocked %} фрагментов запрещённого типа — {{ e.blocked }};{% endif %} откройте проверку.</p>
-      {% endif %}
-      <pre id="text-{{ e.id }}">
+      {% set polling = e.status in ("queued", "running") %}
+      <header class="panel-head"{% if polling %} data-poll="/chats/{{ chat.id }}/items/{{ e.id }}/status"{% endif %}>
+        <span class="title">{% if e.source == "file" %}Файл{% elif e.source == "instruction" %}Инструкция для модели{% else %}Текст{% endif %} {{ e.seq }}</span>
+        {% if polling %}
+        <span class="state">{% if e.status == "queued" %}В очереди{% else %}Обрабатывается{% endif %}… <span data-progress>{{ e.progress }}</span></span>
+        {% elif e.status == "done" and not e.deliverable %}
+        <span class="badge bad">{{ icon("warning") }}заблокирован</span>
+        {% endif %}
+        {% if e.status == "done" %}
+        <span class="actions">
+          <a class="btn" href="/chats/{{ chat.id }}/items/{{ e.id }}">Проверка</a>
+          {% if e.deliverable %}
+          <button type="button" data-copy="text-{{ e.id }}">{{ icon("copy") }}<span>Скопировать</span></button>
+          <a class="btn" href="/chats/{{ chat.id }}/items/{{ e.id }}/download">{{ icon("download") }}Скачать .txt</a>
+          {% endif %}
+        </span>
+        {% endif %}
+      </header>
+      {% if e.status == "failed" %}
+      <div class="panel-body">
+        <p class="flash bad">Не обработан: {{ e.error }}</p>
+        {% if e.retry %}
+        <form method="post" action="/chats/{{ chat.id }}/items/{{ e.id }}/retry">{% include "_csrf.html" %}<button>Повторить</button></form>
+        {% endif %}
+      </div>
+      {% elif e.status == "done" %}
+      <div class="panel-body">
+        {% if e.exposed %}
+        <p class="flash warn">Прежний вариант этого текста содержал открытым значение, которое теперь скрывается: {{ e.exposed | join("; ") }}. Если текст уже был передан, значение ушло открытым.</p>
+        {% endif %}
+        {% if not e.deliverable %}
+        <p class="flash bad">Выдача заблокирована:{% if e.leaks %} найдено оригиналов — {{ e.leaks }};{% endif %}{% if e.blocked %} фрагментов запрещённого типа — {{ e.blocked }};{% endif %} откройте проверку.</p>
+        {% endif %}
+        <pre class="text" id="text-{{ e.id }}">
 {{ e.html }}</pre>
-      {% if e.deliverable %}
-      <button type="button" data-copy="text-{{ e.id }}">Скопировать</button>
-      <a href="/chats/{{ chat.id }}/items/{{ e.id }}/download">Скачать .txt</a>
-      {% endif %}
+      </div>
       {% endif %}
       {% else %}
-      <h3>{% if e.source == "api" %}Ответ {{ e.provider }} — {{ e.model }}{% elif e.source == "local" %}Ответ локальной модели{% else %}Ответ модели{% endif %} {{ e.seq }}</h3>
-      {% if e.status in ("queued", "running") and e.source == "api" %}
-      <pre id="text-{{ e.id }}" data-stream="/chats/{{ chat.id }}/items/{{ e.id }}/stream" class="muted">Ждём ответ…</pre>
-      <form method="post" action="/chats/{{ chat.id }}/items/{{ e.id }}/stop">{% include "_csrf.html" %}<button>Остановить</button></form>
-      {% elif e.status in ("queued", "running") %}
-      <p class="muted" data-poll="/chats/{{ chat.id }}/items/{{ e.id }}/status">{% if e.status == "queued" %}В очереди{% else %}Модель отвечает{% endif %}… <span data-progress></span></p>
+      {% set streaming = e.status in ("queued", "running") and e.source == "api" %}
+      {% set polling = e.status in ("queued", "running") and e.source != "api" %}
+      <header class="panel-head"{% if polling %} data-poll="/chats/{{ chat.id }}/items/{{ e.id }}/status"{% endif %}>
+        <span class="title">{% if e.source == "api" %}Ответ {{ e.provider }} — {{ e.model }}{% elif e.source == "local" %}Ответ локальной модели{% else %}Ответ модели{% endif %} {{ e.seq }}</span>
+        {% if polling %}
+        <span class="state">{% if e.status == "queued" %}В очереди{% else %}Модель отвечает{% endif %}… <span data-progress></span></span>
+        {% elif streaming %}
+        <span class="state">Модель отвечает…</span>
+        {% endif %}
+        <span class="actions">
+          {% if streaming %}
+          <form method="post" action="/chats/{{ chat.id }}/items/{{ e.id }}/stop">{% include "_csrf.html" %}<button>{{ icon("x") }}Остановить</button></form>
+          {% elif not polling and e.status != "failed" %}
+          <button type="button" data-copy="text-{{ e.id }}">{{ icon("copy") }}<span>Скопировать</span></button>
+          {% endif %}
+        </span>
+      </header>
+      {% if streaming %}
+      <div class="panel-body">
+        <pre class="text muted" id="text-{{ e.id }}" data-stream="/chats/{{ chat.id }}/items/{{ e.id }}/stream">Ждём ответ…</pre>
+      </div>
       {% elif e.status == "failed" %}
-      <p class="error">Ответ не получен: {{ e.error }}</p>
-      {% else %}
-      {% if e.status == "partial" %}<p class="warn">Ответ неполный: {{ e.error }}</p>{% endif %}
-      {% if e.source == "local" %}
-      <p class="counters">Локальная модель видела оригиналы: ответ показан как получен, восстанавливать в нём нечего.</p>
-      {% else %}
-      <p class="counters">Замен в текстах после прошлого ответа: {{ e.counters.in_request }}, восстановлено: {{ e.counters.restored }}, из искажённой записи: {{ e.counters.altered }}, выведено: {{ e.counters.derived }}, неизвестных меток: {{ e.counters.unknown }}, оставлено по политике: {{ e.counters.kept }}, посторонних ссылок: {{ e.counters.foreign_links }}.</p>
-      {% endif %}
-      <pre id="text-{{ e.id }}">
+      <div class="panel-body"><p class="flash bad">Ответ не получен: {{ e.error }}</p></div>
+      {% elif not polling %}
+      <div class="panel-body">
+        {% if e.status == "partial" %}<p class="flash warn">Ответ неполный: {{ e.error }}</p>{% endif %}
+        <pre class="text" id="text-{{ e.id }}">
 {{ e.html }}</pre>
-      <button type="button" data-copy="text-{{ e.id }}">Скопировать</button>
-      {% if e.source != "local" %}
-      <details><summary>Как получено</summary><pre>
+        {% if e.source == "local" %}
+        <p class="counters">Локальная модель видела оригиналы: ответ показан как получен, восстанавливать в нём нечего.</p>
+        {% else %}
+        <p class="counters">Замен в текстах после прошлого ответа: {{ e.counters.in_request }}, восстановлено: {{ e.counters.restored }}, из искажённой записи: {{ e.counters.altered }}, выведено: {{ e.counters.derived }}, неизвестных меток: {{ e.counters.unknown }}, оставлено по политике: {{ e.counters.kept }}, посторонних ссылок: {{ e.counters.foreign_links }}.</p>
+        <details class="raw"><summary>Как получено</summary><pre class="text">
 {{ e.raw }}</pre></details>
-      {% endif %}
+        {% endif %}
+      </div>
       {% endif %}
       {% endif %}
     </article>
     {% endfor %}
+  </div>
 
-    <form method="post" action="/chats/{{ chat.id }}/input">
-      {% include "_csrf.html" %}
-      <label>Текст для очистки <textarea name="text" rows="8" required></textarea></label>
-      <button>Очистить</button>
-    </form>
-    <form method="post" action="/chats/{{ chat.id }}/upload" enctype="multipart/form-data">
-      {% include "_csrf.html" %}
-      <label>Файл до {{ max_file_mb }} МБ: DOCX, XLSX, PPTX, PDF (и скан), EML, MSG, HTML, CSV, текст, PNG, JPEG <input type="file" name="file" required></label>
-      <button>Загрузить и очистить</button>
-    </form>
-    <form method="post" action="/chats/{{ chat.id }}/input">
-      {% include "_csrf.html" %}
-      <input type="hidden" name="source" value="instruction">
-      <label>Инструкция для модели — очищается так же и уходит в системную часть запроса <textarea name="text" rows="2" required></textarea></label>
-      <button>Добавить инструкцию</button>
-    </form>
-    <section class="send">
-      <h2>Отправка</h2>
+  <footer class="composer">
+    <div class="send-row">
       {% if choices %}
       <form method="post" action="/chats/{{ chat.id }}/provider">
         {% include "_csrf.html" %}
-        <label>Облачная модель <select name="choice">
+        <label for="choice">Облачная модель</label>
+        <select id="choice" name="choice">
           <option value="">— ручной режим —</option>
           {% for value, label in choices %}<option value="{{ value }}"{% if value == chosen %} selected{% endif %}>{{ label }}</option>{% endfor %}
-        </select></label>
+        </select>
         <button>Выбрать</button>
       </form>
-      {% if chosen %}<p><a href="/chats/{{ chat.id }}/send">Отправить очищенный чат…</a> — сначала экран подтверждения с тем, что уйдёт.</p>{% endif %}
+      {% if chosen %}<a class="btn primary" href="/chats/{{ chat.id }}/send" title="Сначала экран подтверждения с тем, что уйдёт">Отправить очищенный чат…</a>{% endif %}
       {% else %}
-      <p class="muted">Подключений к облачным моделям нет: очищенный текст копируется вручную, ответ вставляется ниже.</p>
+      <span class="muted">Подключений к облачным моделям нет: очищенный текст копируется вручную, ответ вставляется ниже.</span>
       {% endif %}
       {% if local %}
-      <form method="post" action="/chats/{{ chat.id }}/ask-local">{% include "_csrf.html" %}<button>Спросить локальную модель</button> <span class="muted">— без очистки: текст не покидает сервер</span></form>
+      <form method="post" action="/chats/{{ chat.id }}/ask-local" class="ask-local">
+        {% include "_csrf.html" %}
+        <button title="Без очистки: текст не покидает сервер">Спросить локальную модель</button>
+      </form>
       {% endif %}
-    </section>
-    <form method="post" action="/chats/{{ chat.id }}/answer">
-      {% include "_csrf.html" %}
-      <label>Ответ модели, полученный вручную <textarea name="answer" rows="6" required></textarea></label>
-      <button>Восстановить</button>
-    </form>
-    <form method="post" action="/chats/{{ chat.id }}/delete" class="danger">
-      {% include "_csrf.html" %}
-      <label><input type="checkbox" name="confirm" value="yes" required> Удалить чат безвозвратно, вместе с таблицей замен и ключом</label>
-      <button>Удалить</button>
-    </form>
-  </section>
-</div>
+    </div>
+    <div class="tabs" data-tabs>
+      <div class="tab-list" role="tablist">
+        <button type="button" role="tab" data-tab="text" aria-selected="true">Текст</button>
+        <button type="button" role="tab" data-tab="file" aria-selected="false">Файл</button>
+        <button type="button" role="tab" data-tab="instruction" aria-selected="false">Инструкция</button>
+        <button type="button" role="tab" data-tab="answer" aria-selected="false">Ответ вручную</button>
+      </div>
+      <div class="tab-panel on" role="tabpanel" data-tab-panel="text">
+        <form method="post" action="/chats/{{ chat.id }}/input" class="compose">
+          {% include "_csrf.html" %}
+          <textarea name="text" rows="4" required placeholder="Текст для очистки" aria-label="Текст для очистки"></textarea>
+          <button class="primary">Очистить</button>
+        </form>
+      </div>
+      <div class="tab-panel" role="tabpanel" data-tab-panel="file">
+        <form method="post" action="/chats/{{ chat.id }}/upload" enctype="multipart/form-data" class="compose">
+          {% include "_csrf.html" %}
+          <input type="file" name="file" required aria-label="Файл">
+          <button class="primary">Загрузить и очистить</button>
+          <small class="hint">Файл до {{ max_file_mb }} МБ: DOCX, XLSX, PPTX, PDF (и скан), EML, MSG, HTML, CSV, текст, PNG, JPEG</small>
+        </form>
+      </div>
+      <div class="tab-panel" role="tabpanel" data-tab-panel="instruction">
+        <form method="post" action="/chats/{{ chat.id }}/input" class="compose">
+          {% include "_csrf.html" %}
+          <input type="hidden" name="source" value="instruction">
+          <textarea name="text" rows="2" required placeholder="Инструкция для модели" aria-label="Инструкция для модели"></textarea>
+          <button class="primary">Добавить инструкцию</button>
+          <small class="hint">Очищается так же и уходит в системную часть запроса</small>
+        </form>
+      </div>
+      <div class="tab-panel" role="tabpanel" data-tab-panel="answer">
+        <form method="post" action="/chats/{{ chat.id }}/answer" class="compose">
+          {% include "_csrf.html" %}
+          <textarea name="answer" rows="4" required placeholder="Ответ модели, полученный вручную" aria-label="Ответ модели, полученный вручную"></textarea>
+          <button class="primary">Восстановить</button>
+        </form>
+      </div>
+    </div>
+  </footer>
+</section>
 {% endblock %}

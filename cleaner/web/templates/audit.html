@@ -1,25 +1,31 @@
-{% extends "base.html" %}
+{% extends "_settings.html" %}
 {% block title %}Журнал — Cleaner{% endblock %}
-{% block main %}
-<p><a href="/settings">← Настройки</a></p>
+{% block content %}
 <h1>Журнал</h1>
-<form method="get" action="/settings/audit">
-  <select name="event"><option value="">все события</option>{% for e in events %}<option{% if e == event %} selected{% endif %}>{{ e }}</option>{% endfor %}</select>
-  <select name="user"><option value="">все пользователи</option>{% for u in users %}<option value="{{ u.id }}"{% if u.id == user %} selected{% endif %}>{{ u.login }}</option>{% endfor %}</select>
+<p class="lead">События службы с отбором по событию, пользователю и дням.</p>
+<form method="get" action="/settings/audit" class="inline-form">
+  <select name="event" aria-label="Событие"><option value="">все события</option>{% for e in events %}<option{% if e == event %} selected{% endif %}>{{ e }}</option>{% endfor %}</select>
+  <select name="user" aria-label="Пользователь"><option value="">все пользователи</option>{% for u in users %}<option value="{{ u.id }}"{% if u.id == user %} selected{% endif %}>{{ u.login }}</option>{% endfor %}</select>
   <label>с <input type="date" name="since" value="{{ since }}"></label>
   <label>по <input type="date" name="until" value="{{ until }}"></label>
   <button>Показать</button>
 </form>
-<table>
-  <tr><th>Время</th><th>Пользователь</th><th>Чат</th><th>Событие</th><th>Подробности</th></tr>
-  {% for r in rows %}
-  <tr>
-    <td>{{ r.ts | local(tz) }}</td>
-    <td>{{ logins.get(r.user_id, "") }}</td>
-    <td>{{ (r.chat_id or "")[:8] }}</td>
-    <td class="event">{{ r.event }}</td>
-    <td>{% for key, value in r.details.items() %}{{ key }}: {{ value }}{% if not loop.last %}; {% endif %}{% endfor %}</td>
-  </tr>
-  {% endfor %}
-</table>
+<section class="panel">
+  <table class="grid">
+    <thead><tr><th>Время</th><th>Пользователь</th><th>Чат</th><th>Событие</th><th>Подробности</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr>
+      <td class="mono nowrap">{{ r.ts | local(tz) }}</td>
+      <td>{{ logins.get(r.user_id, "") }}</td>
+      <td class="mono nowrap">{{ (r.chat_id or "")[:8] }}</td>
+      <td class="event">{{ r.event }}</td>
+      <td>{% for key, value in r.details.items() %}{{ key }}: {{ value }}{% if not loop.last %}; {% endif %}{% endfor %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="empty">Событий нет</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
 {% endblock %}

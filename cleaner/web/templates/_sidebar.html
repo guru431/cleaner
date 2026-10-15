@@ -1,20 +1,21 @@
-<aside class="sidebar">
-  <form method="post" action="/chats">
+{% from "_ui.html" import icon %}
+<aside class="side">
+  <form method="post" action="/chats" class="side-new">
     {% include "_csrf.html" %}
-    <input name="title" placeholder="Название (необязательно)" maxlength="200">
-    <button>Новый чат</button>
+    <input name="title" placeholder="Название (необязательно)" maxlength="200" aria-label="Название нового чата">
+    <button class="primary">{{ icon("plus") }}Новый</button>
   </form>
-  <form method="get" action="/chats">
-    <input name="q" value="{{ q }}" placeholder="Поиск по названию">
+  <form method="get" action="/chats" class="search">
+    {{ icon("search") }}
+    <input name="q" value="{{ q }}" placeholder="Поиск по названию" aria-label="Поиск по названию">
   </form>
-  <ul>
+  <ul class="chat-list">
     {% for c in chats %}
     <li{% if chat and chat.id == c.id %} class="current"{% endif %}>
-      <a href="/chats/{{ c.id }}">{{ c.title }}</a>
-      <small>{{ c.updated_at | local(tz) }}</small>
+      <a href="/chats/{{ c.id }}"><span class="name">{{ c.title }}</span><small>{{ c.updated_at | local(tz) }}</small></a>
     </li>
     {% else %}
-    <li>Чатов нет</li>
+    <li class="empty">Чатов нет</li>
     {% endfor %}
   </ul>
 </aside>

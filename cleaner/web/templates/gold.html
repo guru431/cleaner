@@ -1,16 +1,21 @@
-{% extends "base.html" %}
+{% extends "_settings.html" %}
 {% block title %}Эталонный набор — Cleaner{% endblock %}
-{% block main %}
-<p><a href="/settings">← Настройки</a></p>
+{% block content %}
 <h1>Эталонный набор</h1>
-<p>Примеров: {{ rows | length }} из {{ target }}, нужных к концу этапа 2. Примеры сохраняются кнопкой «Сохранить как эталон» на экране проверки; тексты здесь не показываются. Измерение — команда <code>python -m cleaner eval</code>.</p>
-<table>
-  <tr><th>Сохранён</th><th>Кем</th><th>Знаков</th><th>Разметка</th><th></th></tr>
-  {% for row in rows %}
-  <tr>
-    <td>{{ row.created_at | local(tz) }}</td><td>{{ row.login }}</td><td>{{ row.length }}</td><td>{{ row.types }}</td>
-    <td><form method="post" action="/settings/gold/{{ row.id }}/delete">{% include "_csrf.html" %}<button>Удалить</button></form></td>
-  </tr>
-  {% endfor %}
-</table>
+<p class="lead">Примеров: {{ rows | length }} из {{ target }}, нужных к концу этапа 2. Примеры сохраняются кнопкой «Сохранить как эталон» на экране проверки; тексты здесь не показываются. Измерение — команда <code>python -m cleaner eval</code>.</p>
+<section class="panel">
+  <table class="grid">
+    <thead><tr><th>Сохранён</th><th>Кем</th><th class="num">Знаков</th><th>Разметка</th><th></th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+    <tr>
+      <td class="mono nowrap">{{ row.created_at | local(tz) }}</td><td>{{ row.login }}</td><td class="num">{{ row.length }}</td><td>{{ row.types }}</td>
+      <td class="actions"><form method="post" action="/settings/gold/{{ row.id }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="empty">Примеров пока нет</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
 {% endblock %}

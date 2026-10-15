@@ -1,35 +1,63 @@
-{% extends "base.html" %}
+{% extends "_settings.html" %}
 {% block title %}Локальная модель — Cleaner{% endblock %}
-{% block main %}
-<p><a href="/settings">← Настройки</a></p>
+{% block content %}
 <h1>Локальная модель</h1>
-<p>Через шлюз сервера идут слой 5, проверка остаточного риска и распознавание сканов. Адрес — только петлевой, частной сети или из списка доверенных.</p>
-<p>Ключ шлюза ({{ key_env }}): {% if status.key %}задан в окружении службы{% else %}<span class="error">не задан</span>{% endif %}.</p>
-<form method="post" action="/settings/local-llm">
-  {% include "_csrf.html" %}
-  <label>Адрес, OpenAI-совместимый, до /v1 <input name="url" value="{{ current.url }}" required></label>
-  <label>Модель <input name="model" value="{{ current.model }}" required></label>
-  <label>Доверенные узлы вне частных сетей — по одному в строке <textarea name="trusted" rows="3">{{ current.trusted | sort | join("\n") }}</textarea></label>
-  <label>Схема ответа <select name="schema">
-    <option value="response_format"{% if current.schema %} selected{% endif %}>параметром response_format</option>
-    <option value="prompt"{% if not current.schema %} selected{% endif %}>только в тексте запроса</option>
-  </select></label>
-  <button>Сохранить</button>
-</form>
-<form method="post" action="/settings/local-llm/check">{% include "_csrf.html" %}<button>Проверить сохранённую настройку</button></form>
-{% if result %}<p class="{{ 'error' if failed else 'muted' }}">{{ result }}</p>{% endif %}
-<h2>Слои 4 и 5 по умолчанию</h2>
-<p>Действует в чатах, где пользователь не включал и не выключал слой сам.</p>
-<form method="post" action="/settings/layers">
-  {% include "_csrf.html" %}
-  <label><input type="checkbox" name="ner" value="yes"{% if defaults.ner %} checked{% endif %}> Слой 4 — модели распознавания имён</label>
-  <label><input type="checkbox" name="llm" value="yes"{% if defaults.llm %} checked{% endif %}> Слой 5 — локальная модель</label>
-  <button>Сохранить умолчания</button>
-</form>
-<h2>Модели на диске</h2>
-<ul>
-  {% for name, present in status.models.items() %}
-  <li>{{ name }}: {% if present %}загружена{% else %}<span class="error">нет — выполните models download</span>{% endif %}</li>
-  {% endfor %}
-</ul>
+<p class="lead">Через шлюз сервера идут слой 5, проверка остаточного риска и распознавание сканов. Адрес — только петлевой, частной сети или из списка доверенных.</p>
+{% if result %}<p class="flash {{ 'bad' if failed else 'good' }}">{{ result }}</p>{% endif %}
+<section class="panel">
+  <header class="panel-head">
+    <h2 class="title">Шлюз</h2>
+    <span class="state">Ключ шлюза ({{ key_env }}):</span>
+    {% if status.key %}<span class="badge good">задан в окружении службы</span>{% else %}<span class="badge bad">не задан</span>{% endif %}
+  </header>
+  <div class="panel-body">
+    <form method="post" action="/settings/local-llm" class="form">
+      {% include "_csrf.html" %}
+      <label class="field"><span>Адрес</span><span class="control">
+        <input name="url" value="{{ current.url }}" required>
+        <small class="hint">OpenAI-совместимый, до /v1</small>
+      </span></label>
+      <label class="field"><span>Модель</span><input name="model" value="{{ current.model }}" required></label>
+      <label class="field"><span>Доверенные узлы</span><span class="control">
+        <textarea name="trusted" rows="3">{{ current.trusted | sort | join("\n") }}</textarea>
+        <small class="hint">Вне частных сетей — по одному в строке</small>
+      </span></label>
+      <label class="field"><span>Схема ответа</span><select name="schema">
+        <option value="response_format"{% if current.schema %} selected{% endif %}>параметром response_format</option>
+        <option value="prompt"{% if not current.schema %} selected{% endif %}>только в тексте запроса</option>
+      </select></label>
+      <div class="buttons">
+        <button class="primary">Сохранить</button>
+        <button form="local-check">Проверить сохранённую настройку</button>
+      </div>
+    </form>
+    <form method="post" action="/settings/local-llm/check" id="local-check" hidden>{% include "_csrf.html" %}</form>
+  </div>
+</section>
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Слои 4 и 5 по умолчанию</h2><span class="state">в чатах, где пользователь не включал и не выключал слой сам</span></header>
+  <div class="panel-body">
+    <form method="post" action="/settings/layers" class="form">
+      {% include "_csrf.html" %}
+      <label class="check"><input type="checkbox" name="ner" value="yes"{% if defaults.ner %} checked{% endif %}> Слой 4 — модели распознавания имён</label>
+      <label class="check"><input type="checkbox" name="llm" value="yes"{% if defaults.llm %} checked{% endif %}> Слой 5 — локальная модель</label>
+      <div><button class="primary">Сохранить умолчания</button></div>
+    </form>
+  </div>
+</section>
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Модели на диске</h2></header>
+  <table class="grid">
+    <tbody>
+    {% for name, present in status.models.items() %}
+    <tr>
+      <td class="mono">{{ name }}</td>
+      <td>{% if present %}<span class="badge good">загружена</span>{% else %}<span class="badge bad">нет — выполните models download</span>{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td class="empty">Сведений о моделях нет</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
 {% endblock %}
