@@ -144,6 +144,13 @@ _NOT_SECRET = frozenset({
 _TEMPLATE = re.compile(
     r"^(?:[*xX•·.]+|\$\{.*\}|\$\(.*|\$env:\w+|%\w+%|\{\{.*\}\}|<[^>]*>|\[\[[^\]]*\]\]|\$[A-Za-z_]+|\(.*)$"
 )
+# Вызов или индекс в коде после ключа — тоже не значение: «password = input()», «token = os.environ["TOKEN"]»,
+# «api_key=config.get("key")» давали секреты «input(», «os.environ[», и обрывок кода скрывался во всём чате.
+# Имя через точку перед скобкой — код всегда («getpass.getpass()», «$cred.GetNetworkCredential().Password»).
+# Имя без точки — только когда скобка кончает значение и за ней сразу «)», «]» или кавычка (вызов без
+# аргументов, аргумент или индекс строкой): «password=Ab(1» и «Summer2024(» в конце строки — пароли.
+# Значение в кавычках не проверяется: «"Qwerty1("» — строка, а не выражение.
+_CALL = re.compile(r"\$?[A-Za-z_]\w*(?P<dotted>(?:\.[A-Za-z_]\w*)+)?[(\[]")
 
 # Правила по энтропии и по ключевым словам шумят на обычном тексте; контекст у нас свой.
 # Правила npm, JWT и OpenAI без начала слова перебирают строку от каждого «//», «eyJ», «sk-» —
@@ -212,11 +219,21 @@ def _value(m: re.Match[str], minimum: int = 3) -> tuple[int, int] | None:
         if group == "bare":
             while end > start and m.string[end - 1] in ".,)]}":
                 end -= 1
+            if _code(m.string, start, end):
+                return None
         value = m.string[start:end]
         if len(value) < minimum or value.lower() in _NOT_SECRET or _TEMPLATE.match(value):
             return None
         return start, end
     return None
+
+
+def _code(string: str, start: int, end: int) -> bool:
+    """Значение без кавычек string[start:end] — вызов или индекс в коде (см. _CALL)."""
+    call = _CALL.match(string, start, end)
+    return call is not None and (
+        call.group("dotted") is not None or (call.end() == end < len(string) and string[end] in ")]\"'")
+    )
 
 
 def _looks_like_password(value: str) -> bool:

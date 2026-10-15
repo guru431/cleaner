@@ -294,6 +294,32 @@ def test_values_next_to_counters_and_code_are_still_found(text, value):
 @pytest.mark.parametrize(
     "text",
     [
+        "password = input()", 'token = os.environ["TOKEN"]', "secret = getpass.getpass()", 'api_key=config.get("key")',
+        "password = getpass('Пароль: ')", "self.token = kwargs['token']", "token = os.environ.get(TOKEN_NAME)",
+        "$password = $cred.GetNetworkCredential().Password", 'password: request.form["password"]',
+    ],
+)
+def test_call_or_subscript_under_a_secret_key_is_code(text):
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: вызов и индекс после ключа становились секретом
+    («input(», «os.environ[»), и этот обрывок кода потом скрывался во всём чате."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ('password = "Qwerty1("', "Qwerty1("), ("password = 'getpass()'", "getpass()"), ("password=Ab(1", "Ab(1"),
+        ("password=Summer2024(", "Summer2024("), ("password=Qw!7(", "Qw!7("), ("Пароль: Ab(1", "Ab(1"),
+    ],
+)
+def test_passwords_with_brackets_are_still_found(text, value):
+    """Значение в кавычках — строка, а не код; скобка внутри пароля или в его конце без закрытого вызова — пароль."""
+    assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "PWD=/home/ivanov", "OLDPWD=~/src", "msbuild /p:Configuration=Release",
         "dotnet msbuild /p:Configuration=Release;Platform=x64", "mysqldump --password --verbose crm",
         "Пароль по-прежнему не подходит", "пароль кто-то сменил",
