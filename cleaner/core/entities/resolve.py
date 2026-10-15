@@ -249,13 +249,23 @@ class Resolver:
         return entity, self._issue(entity, "ip", make)
 
     def _address_in_text(self, address: str) -> bool:
+        """Стоит ли подмена в тексте как адрес, в любой записи: «2001:0db8:0001::0001» — это 2001:db8:1::1,
+        «203.000.113.001» — 203.0.113.1, «203.0.113.1/24» — и сеть, и сам адрес. Ответ таких записей не различит.
+        Подмены netmap выдаёт в каноническом виде."""
         if self._text_addresses is None:      # собирается один раз на текст: проверок — тысячи
-            tokens = (m.group("v6") or m.group() for m in _ADDRESS_TOKEN.finditer(self.text))
-            # Двоеточие после адреса IPv6 — знак препинания («2001:db8:1::1: занят»).
-            self._text_addresses = {
-                (token[:-1] if token.endswith(":") and not token.endswith("::") else token).lower() for token in tokens
-            }
-        return address.lower() in self._text_addresses
+            self._text_addresses = set()
+            for m in _ADDRESS_TOKEN.finditer(self.text):
+                token = m.group("v6") or m.group()
+                if token.endswith(":") and not token.endswith("::"):
+                    token = token[:-1]          # двоеточие после адреса IPv6 — знак препинания («2001:db8:1::1: занят»)
+                try:
+                    ip, prefix = netmap.parse(token)
+                except ValueError:
+                    continue                    # не адрес — с подменой не совпадёт
+                self._text_addresses.add(str(ip))
+                if prefix is not None:
+                    self._text_addresses.add(f"{ip}/{prefix}")
+        return address in self._text_addresses
 
     def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
         key = macsid.mac_key(value)
