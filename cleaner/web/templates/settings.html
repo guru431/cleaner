@@ -1,15 +1,15 @@
-{% extends "base.html" %}
+{% extends "_settings.html" %}
+{% from "_settings_nav.html" import sections %}
 {% block title %}Настройки — Cleaner{% endblock %}
-{% block main %}
+{% block content %}
 <h1>Настройки</h1>
-<ul>
-  <li><a href="/settings/providers">Подключения к облачным моделям</a></li>
-  <li><a href="/settings/policies">Политики типов</a></li>
-  <li><a href="/settings/dictionary">Словарь организации и импорт</a></li>
-  <li><a href="/settings/patterns">Пользовательские шаблоны</a></li>
-  <li><a href="/settings/builtin">Встроенные списки</a></li>
-  <li><a href="/settings/local-llm">Локальная модель</a></li>
-  <li><a href="/settings/gold">Эталонный набор</a></li>
-  <li><a href="/settings/users">Пользователи</a></li>
-  <li><a href="/settings/audit">Журнал</a></li>
-</ul>{% endblock %}
+<p class="lead">Общие для всех чатов: подключения к моделям, правила распознавания, пользователи и журнал.</p>
+{% for group, links in sections %}
+<h2>{{ group }}</h2>
+<div class="cards">
+  {% for href, label, description in links %}
+  <a class="card" href="{{ href }}"><strong>{{ label }}</strong><span>{{ description }}</span></a>
+  {% endfor %}
+</div>
+{% endfor %}
+{% endblock %}

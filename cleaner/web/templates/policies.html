@@ -1,21 +1,25 @@
-{% extends "base.html" %}
+{% extends "_settings.html" %}
 {% block title %}Политики — Cleaner{% endblock %}
-{% block main %}
-<p><a href="/settings">← Настройки</a></p>
+{% block content %}
 <h1>Политики типов</h1>
+<p class="lead">Что делать с найденным фрагментом каждого типа во всех чатах.</p>
 <form method="post" action="/settings/policies">
   {% include "_csrf.html" %}
-  <table>
-    <tr><th>Тип</th><th>Политика</th></tr>
-    {% for code, name in types.items() %}
-    <tr>
-      <td>{{ name }}</td>
-      <td><select name="policy-{{ code.value }}">
-        {% for policy, label in names.items() %}<option value="{{ policy.value }}"{% if current[code] == policy %} selected{% endif %}>{{ label }}</option>{% endfor %}
-      </select></td>
-    </tr>
-    {% endfor %}
-  </table>
-  <button>Сохранить</button>
+  <section class="panel">
+    <table class="grid">
+      <thead><tr><th>Тип</th><th>Политика</th></tr></thead>
+      <tbody>
+      {% for code, name in types.items() %}
+      <tr>
+        <td>{{ name }}</td>
+        <td><select name="policy-{{ code.value }}" aria-label="{{ name }}">
+          {% for policy, label in names.items() %}<option value="{{ policy.value }}"{% if current[code] == policy %} selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  <button class="primary">Сохранить</button>
 </form>
 {% endblock %}

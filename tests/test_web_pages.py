@@ -82,3 +82,26 @@ def test_review_of_a_blocked_text_offers_no_copy(ivan, repo):
     repo.add_dictionary("always", "Ромашка", T.ORG)
     page = ivan.get(f"/chats/{chat_id}/items/{repo.items(chat_id)[0].id}").text
     assert "data-copy" not in page and "/download" not in page and "Выдача заблокирована" in page
+
+
+SETTINGS = [
+    "/settings/providers", "/settings/local-llm", "/settings/policies", "/settings/dictionary", "/settings/patterns",
+    "/settings/builtin", "/settings/gold", "/settings/users", "/settings/audit",
+]
+
+
+def current(page: str) -> list[str]:
+    return re.findall(r'<a href="([^"]+)" class="current"', page)
+
+
+def test_every_settings_page_opens_with_its_menu_item_current(boss):
+    index = boss.get("/settings")
+    assert index.status_code == 200 and current(index.text) == []
+    assert all(f'href="{path}"' in index.text for path in SETTINGS)          # карточки девяти разделов
+    for path in SETTINGS:
+        response = boss.get(path)
+        assert response.status_code == 200, path
+        assert current(response.text) == [path], path
+        assert re.findall(r'<a href="([^"]+)" class="on"', response.text) == ["/settings"], path
+    preview = boss.post("/settings/dictionary/import", csv="a\r\nb\r\n", column="a", delimiter="comma", list="never", action="preview")
+    assert preview.status_code == 200 and current(preview.text) == ["/settings/dictionary"]

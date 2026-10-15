@@ -44,6 +44,7 @@
 /* --- основа ------------------------------------------------------------------ */
 
 *, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }          /* иначе display у textarea и кнопок ниже его перебивает */
 html, body { height: 100%; }
 body {
   margin: 0; display: flex; flex-direction: column;
@@ -319,6 +320,11 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 .field input:not([type="checkbox"]), .field select, .field textarea { width: 100%; }
 .buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 0; padding-left: 172px; }
 .pop .field { grid-template-columns: 160px minmax(0, 1fr); }
+details.panel > summary { list-style: none; cursor: pointer; }
+details.panel > summary::-webkit-details-marker { display: none; }
+details.panel > summary::after { content: "▸"; margin-left: auto; color: var(--muted); }
+details.panel[open] > summary::after { content: "▾"; }
+details.panel:not([open]) > summary { border-bottom: 0; border-radius: var(--radius); }
 .values { columns: 3 220px; margin: 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 12.5px; }
 .values li { overflow-wrap: anywhere; }
 
