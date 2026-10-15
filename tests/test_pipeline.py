@@ -723,6 +723,19 @@ def test_name_with_escaped_dots_next_to_a_replacement_keeps_its_place(state, set
     )
 
 
+def test_mixed_case_name_around_an_issued_replacement_is_masked(state, settings):
+    """Наблюдение раунда 3 имён узлов, P3: «Petrov.host-1.fabrikam.ru» слой 3 принимал за код (смешанный регистр, 5.4),
+    и fabrikam.ru уходил открытым. Имя с выданной заменой внутри — имя; код без неё остаётся как есть."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    text = "Проверь Petrov.host-1.fabrikam.ru и System.Net, re.search(x)"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "Проверь host-2.host-1.domain-2.example и System.Net, re.search(x)" and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, result.sanitized, settings).text == text.replace("host-1", "srv01")
+
+
 def test_windows_paths_with_dot_folders_keep_their_meaning(state, settings):
     """Та же находка с другой стороны: «\\» перед частью — разделитель пути, а не точки; папка на точку с суффиксом из
     списка («.android», «.azure») именем не становится."""

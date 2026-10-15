@@ -186,6 +186,15 @@ def _under_issued(value: str, ctx: DetectContext) -> bool:
     )
 
 
+def _with_issued(value: str, ctx: DetectContext) -> bool:
+    """В имени стоит выданная замена — подмена части («Petrov.host-1.fabrikam.ru»), домена или метка доменного имени: это
+    имя, которое пользователь вписал рядом с ней, а не код, и признаки кода (_plausible) к нему не применяются."""
+    parts = value.lower().split(".")
+    return any(part in ctx.issued_names or part in ctx.issued_domains for part in parts) or any(
+        f"{part}.{after}" in ctx.issued_domains for part, after in zip(parts, parts[1:])
+    )
+
+
 def _name_type(value: str) -> EntityType:
     left, registrable = hostmap.split_name(value)
     return EntityType.DOMAIN if registrable and not left else EntityType.HOST
@@ -241,7 +250,9 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
             value = m.group().replace("\\.", ".")       # проверки — как у имени через точку
             if pattern is not _DOTTED and value == m.group():
                 continue
-            if _under_issued(value, ctx) or (not well_known(value, ctx) and _plausible(value, text, m.end(), ctx)):
+            if _under_issued(value, ctx) or (not well_known(value, ctx) and (
+                _plausible(value, text, m.end(), ctx) or (_with_issued(value, ctx) and hostmap.has_known_suffix(value))
+            )):
                 yield Span(m.start(), m.end(), _name_type(value), name)
     # Имя с меткой — если оно под выданной подменой домена (или меткой домена) либо после последней метки стоит имя
     # с точкой, как у _DOTTED; «<PERSON_1>.docx» и «<ORG_1>.ru» — не имена. Фрагменты — цепочки частей между метками:
@@ -254,9 +265,9 @@ def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
         parts = value.split(".")
         last = max(i for i, part in enumerate(parts) if _LABEL.fullmatch(part))
         tail = ".".join(parts[last + 1:])
-        if not _under_issued(value, ctx) and not (
-            "." in tail and not well_known(tail, ctx) and _plausible(tail, text, m.end(), ctx)
-        ):
+        if not _under_issued(value, ctx) and not ("." in tail and not well_known(tail, ctx) and (
+            _plausible(tail, text, m.end(), ctx) or (_with_issued(value, ctx) and hostmap.has_known_suffix(tail))
+        )):
             continue
         for start, end in _plain_runs(m.group(), m.start()):
             run = text[start:end].replace("\\.", ".")

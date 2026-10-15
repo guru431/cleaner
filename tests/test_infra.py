@@ -459,6 +459,19 @@ def test_name_with_escaped_dots_under_an_issued_domain_or_next_to_a_label_is_fou
     assert values(r"<PERSON_1>\.docx и ^www\.<TERM_1>\.domain-1\.example$", LABELLED) == set()
 
 
+def test_mixed_case_name_with_an_issued_replacement_inside_is_a_name():
+    """Наблюдение раунда 3 имён узлов, P3: в «Petrov.host-1.fabrikam.ru» смешанный регистр («Petrov») делал имя похожим
+    на код (System.Net), и fabrikam.ru оставался открытым. Цепочка с выданной заменой внутри — имя, признаки кода к ней не
+    применяются; суффикс из списка нужен по-прежнему. Без выданной замены — как прежде."""
+    ctx = DetectContext(Settings(), issued_domains=frozenset({"domain-1.example"}), issued_names=frozenset({"host-1"}))
+    assert values("узел Petrov.host-1.fabrikam.ru", ctx) == {"Petrov.host-1.fabrikam.ru"}
+    assert values(r"^Petrov\.HOST-1\.Fabrikam\.ru$", ctx) == {r"Petrov\.HOST-1\.Fabrikam\.ru"}
+    assert values("узел Ivanov.domain-1.example.Fabrikam.ru", ctx) == {"Ivanov.domain-1.example.Fabrikam.ru"}
+    assert values("System.Net.Http, re.search(x), Petrov.host-2.fabrikam.ru, Petrov.host-1.Затем", ctx) == set()
+    assert values("узел <ORG_1>.Fabrikam.ru", LABELLED) == {"Fabrikam.ru"}       # после метки доменного имени
+    assert values("x.<PERSON_1>.System.Net", LABELLED) == set()
+
+
 def test_real_host_typed_under_an_issued_domain_is_masked_and_restored():
     state = ChatState(chat_id="issued", net_key=bytes(32))
     assert sanitize(state, "Домен contoso.ru", Settings()).sanitized == "Домен domain-1.example"

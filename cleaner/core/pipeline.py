@@ -171,6 +171,7 @@ def _context(state: ChatState, settings: Settings) -> DetectContext:
         unmask=frozenset(r.value.lower() for r in state.rules if r.action == "unmask"),
         issued_domains=frozenset(fake.lower() for slot, fake in state.issued.items() if slot.endswith("|dns"))
         | {label.lower() for label in labels.domain_labels(state)},
+        issued_names=frozenset(fake.lower() for slot, fake in state.issued.items() if slot.endswith("|name")),
     )
 
 

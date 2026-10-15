@@ -47,6 +47,7 @@ class DetectContext:
     manual: tuple[tuple[str, EntityType, str], ...] = ()    # значения, которые пользователь велел скрывать, и их границы
     unmask: frozenset[str] = frozenset()               # значения, с которых пользователь снял замену
     issued_domains: frozenset[str] = frozenset()       # подмены доменов и метки доменных имён: «domain-1.example», «<org_1>»
+    issued_names: frozenset[str] = frozenset()         # подмены частей имён: «host-1», «sub-2»
     builtin: Builtin = field(default_factory=load_builtin)
 
 
