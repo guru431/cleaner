@@ -161,6 +161,27 @@ def test_zero_padded_and_plain_spellings_are_one_address():
     assert len(state.entities) == 1
 
 
+@pytest.mark.parametrize("text, expected", [
+    (r"if ($remote_addr ~ ^10\.1\.2\.35$) { return 403; }", {(T.IP, r"10\.1\.2\.35")}),
+    (r"grep -E '192\.168\.10\.5|8\.8\.4\.4' access.log", {(T.IP, r"192\.168\.10\.5"), (T.IP, r"8\.8\.4\.4")}),
+    (r"Deny from 10\.1\.0\.0/16 и узел 010\.001\.002\.005", {(T.IP, r"10\.1\.0\.0/16"), (T.IP, r"010\.001\.002\.005")}),
+], ids=["nginx", "grep", "network-and-padded"])
+def test_ipv4_written_with_escaped_dots_is_found(text, expected):
+    """Второе ревью, P2: адрес в регулярном выражении, правиле nginx, шаблоне grep пишут через «\\.», и слой 3 его не
+    находил — адрес уходил в облако. Разделители — все три «\\.»; правила — те же, что у адреса через точку."""
+    assert found(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    r"version 1\.2\.3\.4, build 10\.0\.190\.45",r"^\d+\.\d+\.\d+\.\d+$ и [0-9]{1,3}\.[0-9]{1,3}", r"^127\.0\.0\.1$",
+    r"10\\\\.1\\\\.2\\\\.35 и 10\.1\.2\.35\.4", r"C:\Logs\10\.1\.2",
+], ids=["versions", "patterns", "loopback", "escaped-backslash-and-longer", "short"])
+def test_backslash_and_dot_elsewhere_make_no_address(text):
+    """Та же находка с другой стороны: номера версий, шаблоны чисел, петля, «\\\\\\\\.» (в JSON — обратная косая и любой
+    знак выражения), цепочка длиннее адреса и три числа остаются, как через точку."""
+    assert values(text) == set()
+
+
 def test_lowercase_domain_known_from_an_earlier_text():
     ctx = DetectContext(Settings(), known=(("CORP", T.DOMAIN),))
     assert (T.ACCOUNT, "petrov") in found(r"вход corp\petrov", ctx)
@@ -448,6 +469,64 @@ def test_backslash_before_a_dot_elsewhere_is_not_a_name_separator(text, expected
     """Та же находка с другой стороны: «\\» перед частью — разделитель пути Windows, и папка на точку в профиле
     («.android», «.local», «.aws» — суффиксы из списка) именем не становится; код, файлы, общеизвестные и
     зарезервированные имена через «\\.» остаются, как через точку."""
+    assert values(text) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("SSL: *.contoso.ru, *.corp.contoso.local", {(T.DOMAIN, "contoso.ru"), (T.HOST, "corp.contoso.local")}),
+    ("Set-Cookie: sid=1; Domain=.contoso.ru; Path=/", {(T.DOMAIN, "contoso.ru")}),
+    ("no_proxy=localhost,.contoso.ru,.corp.local", {(T.DOMAIN, "contoso.ru"), (T.DOMAIN, "corp.local")}),
+    ('все адреса @contoso.ru и "@mail.contoso.ru"', {(T.DOMAIN, "contoso.ru"), (T.HOST, "mail.contoso.ru")}),
+    ("[domain_realm]\n .contoso.local = CONTOSO.LOCAL", {(T.DOMAIN, "contoso.local"), (T.DOMAIN, "CONTOSO.LOCAL")}),
+    ("url: https://${env}.contoso.ru/, ^(www|mail).contoso.ru$", {(T.DOMAIN, "contoso.ru")}),
+    ("cookie .env.contoso.ru и *.env.contoso.ru", {(T.HOST, "env.contoso.ru")}),
+], ids=["wildcard", "cookie", "no-proxy", "mail-routing", "kerberos", "template-and-regex", "env-host"])
+def test_name_after_a_leading_dot_star_or_at_is_found(text, expected):
+    """Второе ревью, P1: слой 3 не начинал имя после «.» и «@» — «*.contoso.ru» (сертификат, DNS), «domain=.contoso.ru»
+    (cookie), «no_proxy=.contoso.ru,.corp.local», «@contoso.ru» (маршрутизация почты) уходили в облако. Имя начинается
+    после точки за знаком, который не часть имени, и после «@» без имени входа; ведущие «.», «*.», «@» во фрагмент не
+    входят. Правила — те же, что у любого имени с точкой."""
+    assert found(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    ".gitignore, *.py, .NET, *.tar.gz, *.min.js, *.d.ts",
+    "cp .env.example .env.local && cat .env.development.local .env.dev .env.ci",
+    "файлы .zshrc.local, .gitconfig.local, .tmux.conf.local и ^\\.env\\.local$",
+    "~/.contoso.ru, ./.env.local, C:\\proj\\.zshrc.local, /etc/.corp.local",
+    "Ну...ru, ну и...Всё.ок",
+    "@media screen and (max-width: 600px) {} @Override public void run() @app.get('/') user@ и @import url(a.css)",
+    "obj?.data.id, foo().then.catch",
+], ids=["files", "dotenv", "dotfiles", "paths", "ellipsis", "code-at", "code-chains"])
+def test_leading_dot_or_at_before_a_file_or_code_is_not_a_name(text):
+    """Та же находка с другой стороны: файл на точку («.env.local», «.zshrc.local» — первая часть — имя такого файла, за
+    ней одна часть или «…local»), точка после разделителя пути, многоточие, «@» в CSS и Java, код остаются."""
+    assert values(text) == set()
+
+
+@pytest.mark.parametrize("text, expected", [
+    (r'{"host_regex": "^www\\.contoso\\.ru$"}', {(T.HOST, r"www\\.contoso\\.ru")}),
+    (r'Pattern.compile("\\bportal\\.contoso\\.ru\\b")', {(T.HOST, r"portal\\.contoso\\.ru")}),
+    (r'{"pattern": ".*\\.corp\\.contoso\\.local", "label": "<TERM_1>\\.fabrikam\\.ru"}',
+     {(T.HOST, r"corp\\.contoso\\.local"), (T.HOST, r"fabrikam\\.ru")}),
+    (r'{"allow": "^10\\.1\\.2\\.35$"}', {(T.IP, r"10\\.1\\.2\\.35")}),
+], ids=["json", "java-word-bounds", "after-expression-and-label", "address"])
+def test_name_and_address_in_a_regex_inside_a_string_literal_are_found(text, expected):
+    """Второе ревью, P3: регулярное выражение внутри строки JSON, Java, C#, Python пишут через «\\\\.» — после раскрытия
+    строки это «\\.». Такое имя и адрес уходили в облако, известные — тоже. «\\\\.» — разделитель, как «\\.», с теми же
+    правилами; цепочка не начинается после «\\», поэтому путь Windows в JSON остаётся путём."""
+    ctx = DetectContext(Settings(), issued_domains=frozenset({"<term_1>"}))
+    assert found(text, ctx) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    (r'{"path": "C:\\Users\\ivanov\\.android\\avd", "share": "\\\\fs01\\data\\.azure"}', {"ivanov", "fs01"}),
+    (r'{"cfg": "C:\\Users\\Public\\.aws\\credentials", "bin": "node_modules\\.bin", "dir": "C:\\host\\.local"}', set()),
+    (r'"contoso\\\\.ru", "10\\\\.1\\\\.2\\\\.35", "System\\.Net\\.Http"', set()),
+], ids=["windows-paths", "dot-folders", "escaped-backslashes-and-code"])
+def test_backslashes_in_json_paths_are_not_name_separators(text, expected):
+    """Та же находка с другой стороны: путь Windows в JSON («C:\\\\Users\\\\ivanov\\\\.android») — путь, папки на точку —
+    не имена; «\\\\\\\\.» (в выражении — обратная косая и любой знак) — не разделитель; код остаётся кодом."""
     assert values(text) == expected
 
 

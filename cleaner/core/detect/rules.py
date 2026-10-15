@@ -8,6 +8,7 @@ from datetime import date
 
 from cleaner.core import validators
 from cleaner.core.detect.base import DetectContext
+from cleaner.core.entities import hostmap
 from cleaner.core.entities.labels import SHAPE as _LABEL
 from cleaner.core.types import EntityType, Span
 
@@ -18,8 +19,15 @@ _AFTER = 15
 
 # Часть домена бывает меткой: части, которой пользователь дал другой тип, выдана метка (ivanov@<TERM_1>.domain-1.example,
 # ivanov@host-1.<ORG_1>). Метка без точки — домен, только если это метка доменного имени (detect, labels.domain_labels).
+# Адрес в регулярном выражении или правиле почты пишут через «\.» («^i\.ivanov@contoso\.ru$»), внутри строки JSON, Java,
+# C# — через «\\.» (hostmap.dotted): это точка и в имени входа, и в домене. После «\» имя входа начинается только с
+# буквы или цифры («CORP\ivanov@…»): иначе каждое «\.» и «\\.» цепочки «a\.a\.…» без «@» было бы началом попытки до
+# конца цепочки.
 _DOMAIN_PART = rf"(?:[\w-]+|{_LABEL.pattern})"
-_EMAIL = re.compile(rf"(?<![\w.+-])[\w.+-]+@(?:{_DOMAIN_PART}(?:\.{_DOMAIN_PART})+|{_LABEL.pattern})")
+_EMAIL = re.compile(
+    rf"(?<![\w.+-])(?:(?<!\\)|(?=[\w+-]))(?:[\w.+-]|\\{{1,2}}\.)+@"
+    rf"(?:{_DOMAIN_PART}(?:\\{{0,2}}\.{_DOMAIN_PART})+|{_LABEL.pattern})"
+)
 # «схема://» прямо перед «…@хост»: то, что до «@», — пользователь адреса, а не e-mail. Знаки «?#=»
 # в нём значат, что это уже параметры адреса («?mail=ivanov@contoso.ru»), — тогда это e-mail.
 _USERINFO_BEFORE = re.compile(r"[a-z][a-z0-9+.-]{0,31}://(?P<user>[^\s/@]*)$", re.IGNORECASE)
@@ -283,12 +291,12 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         parts = domain.split(".")
         while len(parts) > 2 and _LABEL.fullmatch(parts[-1]) and parts[-1].lower() not in ctx.issued_domains:
             parts.pop()
-        domain = ".".join(parts)
+        domain = ".".join(parts).rstrip("\\")      # «\» перед отрезанной меткой — от «\.»
         end = m.start() + len(local) + 1 + len(domain)
         url = _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()])
         if url and not _NOT_USERINFO.search(url.group("user") + local):
             continue        # пользователь адреса, а не e-mail: вход — правило _URL_LOGIN ниже
-        if _IPV4_DOMAIN.fullmatch(domain):
+        if _IPV4_DOMAIN.fullmatch(hostmap.dotted(domain)):
             # Вход вида ivanov@10.1.2.5; служебный («user@», «root@») человека не выдаёт, как и в адресе.
             if local.lower() not in skip:
                 add(m.start(), m.start() + len(local), EntityType.ACCOUNT)

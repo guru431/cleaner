@@ -71,6 +71,10 @@ from cleaner.core.types import EntityType as T
         "a\\.b." * 10000, ".*\\.a" * 10000, "\\ba\\." * 10000, "\\b" + "ab\\." * 15000, "x\\.<ORG_1>\\." * 4000,
         # Части в смешанном регистре: имя с выданной заменой внутри проверяется по частям.
         "Ab.Cd." * 10000 + "ru",
+        # Имя после ведущей точки, «*.» и «@» (второе ревью, P1): начало только после точки за знаком не из имени.
+        ".a" * 15000, "*.ab" * 8000, ">.ab.cd" * 5000,
+        # «\\.» — выражение в строке JSON (второе ревью, P3): имя входа e-mail не начинается со второй «\».
+        "a\\\\.b." * 4000, "1\\\\.2\\\\.3\\\\.4\\\\." * 2000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -90,7 +94,7 @@ from cleaner.core.types import EntityType as T
         "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail", "dotted_words", "email_labels",
         "email_labels_open", "email_labels_after",
         "escaped_mixed", "escaped_after_expressions", "escaped_word_bounds", "escaped_open_word_bound", "escaped_labels",
-        "mixed_case_parts",
+        "mixed_case_parts", "leading_dots", "wildcards", "after_label_signs", "json_mixed", "json_addresses",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
@@ -149,10 +153,12 @@ def test_run_of_eights_gives_no_phones():
         "010.001.002.005 " * 12000, "10.1.2.5/24 " * 15000, "2a00:1450:4010:0:0:0:0:65 " * 7000,
         "".join("10.%d.%d.%d " % (i >> 16, i >> 8 & 255, i & 255) for i in range(15000)), "a:" * 100000,
         "Source" * 30000 + ":1:2", "1.2.3.4." * 25000, "2a00::" * 30000,
+        # Адреса через «\.» (второе ревью, P2): цепочка чисел и записи с нулями впереди.
+        "1\\.2\\.3\\.4\\." * 4000, "010\\.001\\.002\\.005 " * 3000,
     ],
     ids=[
         "padded", "written_with_prefix", "full_ipv6", "distinct_addresses", "colons", "label", "dotted_numbers",
-        "ipv6_runs",
+        "ipv6_runs", "escaped_dotted_numbers", "escaped_padded",
     ],
 )
 def test_leak_check_is_fast_on_many_addresses(text):
@@ -302,6 +308,18 @@ def test_long_known_value_is_not_sliced_at_every_word():
     assert time.perf_counter() - started < 0.3
 
 
+def test_many_long_spellings_with_a_shared_beginning_are_found_in_linear_time():
+    """Второе ревью, Important: каждое вхождение начала из 64 знаков сверялось со всеми длинными написаниями с этим
+    началом — 6000 токенов вида JWT с общим началом из 74 знаков (486 КБ) искались 2,65 с. Один текст создаёт их сам:
+    первый проход делает их написаниями, второй ищет. Длинные написания лежат деревом по 64 знака."""
+    prefix = "eyjhbgcioijiuzi1niisinr5cci6ikpxvcj9.eyjzdwiioiixmjm0nty3odkwiiwibmftzsi6"
+    forms = [prefix + "%06x" % i for i in range(3000)]
+    started = time.perf_counter()
+    found = find_forms(" ".join(forms), [(form, "strict", i) for i, form in enumerate(forms)])
+    assert time.perf_counter() - started < 0.15
+    assert sorted(payload for _, _, payload in found) == list(range(3000))
+
+
 def test_link_host_check_walks_a_tree_of_parts():
     """Наблюдение раунда имён узлов, P3: проверка хоста ссылки собирала все цепочки частей до числа частей самой длинной
     записанной подмены — после имени из 125 частей хост из 20 000 частей проверялся 2,2 с. Части проходятся по дереву,
@@ -366,11 +384,14 @@ def test_overlapping_known_values_and_runs_of_names_are_fast_and_not_one_spellin
         "C:\\Users\\a\\.local\\" * 1000, "contoso\\.ru " * 1500, "a\\\\." * 6000,
         # Имя в смешанном регистре с выданной заменой внутри (раунд 3, P3).
         "Petrov\\.host-1\\." * 2000 + "ru", "Petrov.host-1." * 2000 + "Ru",
+        # «\\.» — выражение в строке JSON (второе ревью, P3): после знаков выражения, между «\\b», части замены.
+        ".*\\\\.ab" * 2000, "\\\\bab\\\\.cd\\\\b" * 600, "host-1\\\\." * 1500 + "x",
     ],
     ids=[
         "parts", "letters", "separators", "labels",
         "mixed", "after_expressions", "word_bounds", "open_word_bound", "label_parts", "dot_folders", "known",
         "escaped_backslashes", "issued_inside_escaped", "issued_inside",
+        "json_after_expressions", "json_word_bounds", "json_parts",
     ],
 )
 def test_names_written_with_escaped_dots_are_found_in_linear_time(text):

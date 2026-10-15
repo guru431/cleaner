@@ -62,7 +62,7 @@ def test_rule_on_a_part_of_an_email_with_a_stricter_policy_swallows_the_email():
 def test_rule_swallowing_a_name_records_where_it_lies():
     """Конвейер оставит выданную замену в имени и отдаст правилу только задетые им части (5.10)."""
     [merged] = merge("host-1.fabrikam.ru", [Span(0, 18, T.HOST, "infra"), Span(7, 15, T.TERM, "manual")], CTX)
-    assert (merged.type, merged.ruled) == (T.TERM, ((7, 15),))
+    assert (merged.type, merged.ruled) == (T.TERM, ((7, 15, T.TERM),))
     [kept] = merge("srv01.contoso.ru", [Span(0, 16, T.HOST, "infra"), Span(0, 5, T.TERM, "manual")], CTX)
     assert (kept.type, kept.ruled) == (T.HOST, ())
     [alone] = merge("Проект Заря", [Span(7, 11, T.TERM, "manual")], CTX)
@@ -70,7 +70,26 @@ def test_rule_swallowing_a_name_records_where_it_lies():
     # Адрес e-mail — так же; конвейер поделит его по «@» на имя входа и части имени.
     email = [Span(0, 25, T.EMAIL, "rules", validated=True), Span(14, 22, T.TERM, "manual")]
     [mail] = merge("ivanov@host-1.fabrikam.ru", email, CTX)
-    assert (mail.type, mail.ruled, mail.mail, merged.mail) == (T.TERM, ((14, 22),), True, False)
+    assert (mail.type, mail.ruled, mail.mail, merged.mail) == (T.TERM, ((14, 22, T.TERM),), True, False)
+
+
+def test_rule_off_whole_parts_keeps_the_stricter_policy_of_the_record_it_swallows():
+    """Второе ревью, Minor: правило не на целых частях поглощало адрес или имя и давало ему свой тип — «contoso» (TERM) в
+    ivanov@srv.contoso.ru при EMAIL=BLOCK давал <TERM_1>, и выдача не блокировалась, а при EMAIL=HIDE метка
+    восстанавливалась целиком. Фрагмент берёт тип того из двух — записи или правила, — чья политика строже; при равных —
+    правила, как прежде. Где лежат правила и их типы, фрагмент помнит: части рядом с выданной заменой получат тип правила."""
+    for text, record, rule_at in (("ivanov@srv.contoso.ru", T.EMAIL, (11, 18)), ("srv.contoso.ru", T.HOST, (4, 11))):
+        for changed, expected in (
+            ({}, T.TERM), ({record: Policy.BLOCK}, record), ({record: Policy.HIDE}, record),
+            ({record: Policy.HIDE, T.TERM: Policy.BLOCK}, T.TERM), ({record: Policy.HIDE, T.TERM: Policy.HIDE}, T.TERM),
+        ):
+            spans = [Span(0, len(text), record, "rules", validated=True), Span(*rule_at, T.TERM, "manual")]
+            [merged] = merge(text, spans, DetectContext(Settings(policies=default_policies() | changed)))
+            assert (merged.type, merged.ruled, merged.mail) == (expected, ((*rule_at, T.TERM),), record is T.EMAIL), changed
+    # Цена: смена типа всей записи при строже политике записи ничего не меняет.
+    spans = [Span(0, 14, T.HOST, "infra"), Span(0, 14, T.TERM, "manual")]
+    blocked = DetectContext(Settings(policies=default_policies() | {T.HOST: Policy.BLOCK}))
+    assert merge("srv.contoso.ru", spans, blocked)[0].type is T.HOST
 
 
 def test_partial_overlap_covers_the_union():

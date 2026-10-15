@@ -70,14 +70,30 @@ def test_long_spelling_is_found_like_a_short_one():
     assert hits("srv-" + "a" * 70 + "-02 и x" + "srv-" + "a" * 70, ("srv-" + "a" * 70, "strict", 1)) == []
 
 
+def test_long_spellings_sharing_whole_chunks_are_told_apart():
+    """Длинные написания лежат деревом кусков по 64 знака: написания длиной ровно в кусок, на знак длиннее, в несколько
+    кусков и одно — начало другого находятся каждое на своём месте."""
+    base = "token-" + "a1" * 61       # 128 знаков — два куска
+    forms = [base, base + "b", base + "b" * 70, base[:100], base[:65]]
+    text = " ".join(form.upper() for form in forms) + " " + base[:-1] + " " + base + "c"
+    assert hits(text, *((form, "strict", i) for i, form in enumerate(forms))) == sorted(
+        (form.upper(), i) for i, form in enumerate(forms)
+    )
+
+
 def test_escaped_dot_is_a_dot_and_an_escaped_backslash_is_not():
     """Наблюдение раунда 3 имён узлов, P1: имя в регулярном выражении пишут через «\\.» («^srv01\\.contoso\\.ru$»), и
-    известное «contoso.ru» в нём не находилось. «\\.» — точка, и написание с ним находит то же; «\\\\.» — обратная косая
-    и точка, путь Windows («C:\\Users\\ivanov\\.ssh») читается, как прежде."""
-    text = r"^srv01\.contoso\.ru$, CONTOSO\.RU, contoso\\.ru, C:\Users\ivanov\.ssh"
+    известное «contoso.ru» в нём не находилось. «\\.» — точка, и написание с ним находит то же. Второе ревью, P3: в строке
+    JSON, Java, C# то же выражение пишут через «\\\\.» («"^www\\\\.contoso\\\\.ru$"») — это тоже точка; три и четыре
+    обратные косые перед точкой («\\\\\\\\.» в JSON — «\\\\.» выражения) — нет. Путь Windows («C:\\Users\\ivanov\\.ssh») и
+    он же в JSON читаются, как прежде."""
+    text = r'^srv01\.contoso\.ru$, CONTOSO\.RU, "contoso\\.ru", C:\Users\ivanov\.ssh, "C:\\Users\\ivanov\\.ssh"'
     found = hits(text, ("contoso.ru", "strict", 1), ("ivanov", "letters", 2), ("srv01\\.contoso", "strict", 3))
-    assert found == sorted([(r"contoso\.ru", 1), (r"CONTOSO\.RU", 1), ("ivanov", 2), (r"srv01\.contoso", 3)])
+    assert found == sorted([
+        (r"contoso\.ru", 1), (r"CONTOSO\.RU", 1), (r"contoso\\.ru", 1), ("ivanov", 2), ("ivanov", 2), (r"srv01\.contoso", 3),
+    ])
     assert hits("srv01.contoso.ru", ("srv01\\.contoso.ru", "strict", 1)) == [("srv01.contoso.ru", 1)]
+    assert hits(r"contoso\\\.ru contoso\\\\.ru", ("contoso.ru", "strict", 1)) == []
 
 
 def test_yo_and_decomposed_letters_match_their_plain_forms():

@@ -12,7 +12,9 @@ from cleaner.core.entities import hostmap, macsid
 from cleaner.core.types import ChatState
 
 _LABEL = re.compile(r"<[A-Z]+(?:_[A-Z]+)*_\d+>|\[\[[A-Z]+(?:_[A-Z]+)*_\d+\]\]")
-_IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?!\w|\.\d)")
+# Адрес через «\.» или «\\.» (регулярное выражение, в том числе в строке JSON) — та же подмена: восстановление пишет
+# оригинал с тем же разделителем.
+_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(\\{0,2}\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?:/\d{1,2})?(?!\w|\\{0,2}\.\d)")
 # Как в слое 3: адрес может стоять сразу за подписью («Source:2001:db8:1::1»), подпись в замену не входит.
 _IPV6 = re.compile(
     r"(?<![\w:.])(?:(?=\w*[^\W\dA-Fa-f])\w+:|\w{5,}:)?"
@@ -31,6 +33,9 @@ _NAME = re.compile(rf"(?<![\w-]){_PART}(?:\.{_PART})*(?![\w-])")
 _ESCAPED_NAME = re.compile(rf"(?<![\w-]){_PART}(?:\\\.{_PART})+(?![\w-])")
 # Перед ней бывает граница слова выражения («\bhost-1\.domain-1\.example\b»): «b» — не часть имени (слой 3, _BOUNDED).
 _BOUNDED_NAME = re.compile(rf"(?<=\\b)(?<!\\\\b){_PART}(?:\\\.{_PART})+(?![\w-])")
+# То же выражение внутри строки JSON, Java, C#: «\\.» и «\\b» («"^host-1\\.domain-1\\.example$"», hostmap.dotted).
+_DOUBLE_NAME = re.compile(rf"(?<![\w-]){_PART}(?:\\\\\.{_PART})+(?![\w-])")
+_DOUBLE_BOUNDED_NAME = re.compile(rf"(?<=\\\\b)(?<!\\\\\\b){_PART}(?:\\\\\.{_PART})+(?![\w-])")
 
 
 class Hit:
@@ -101,11 +106,12 @@ class Finder:
     def _ipv4(self, text: str) -> list[Hit]:
         hits = []
         for m in _IPV4.finditer(text):
-            token, address = m.group(), m.group().split("/")[0]
+            written = m.group().split("/")[0]
+            token, address = hostmap.dotted(m.group()), hostmap.dotted(written)
             if self._of_kind(token, "ip"):
                 hits.append(Hit(m.start(), m.end(), token, text))
             elif self._of_kind(address, "ip"):
-                hits.append(Hit(m.start(), m.start() + len(address), address, text))
+                hits.append(Hit(m.start(), m.start() + len(written), address, text))
         return hits
 
     def _ipv6(self, text: str) -> list[Hit]:
@@ -148,7 +154,9 @@ class Finder:
         if not self.hosts:
             return []
         hits = []
-        patterns = [(_NAME, "."), (_ESCAPED_NAME, "\\.")] + ([(_BOUNDED_NAME, "\\.")] if "\\b" in text else [])
+        patterns = [(_NAME, "."), (_ESCAPED_NAME, "\\."), (_DOUBLE_NAME, "\\\\.")]
+        if "\\b" in text:
+            patterns += [(_BOUNDED_NAME, "\\."), (_DOUBLE_BOUNDED_NAME, "\\\\.")]
         for pattern, separator in patterns:
             for m in pattern.finditer(text):
                 parts = m.group().split(separator)

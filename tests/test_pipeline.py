@@ -492,6 +492,38 @@ def test_email_keeps_the_stricter_policy_of_a_retyped_host_part(state, policy):
     assert host.sanitized == "узел <SECRET_2>.domain-1.example" and host.deliverable is (policy is Policy.HIDE)
 
 
+@pytest.mark.parametrize("text, record", [
+    ("почта ivanov@srv.contoso.ru", T.EMAIL), ("узел srv.contoso.ru", T.HOST), ("домен contoso.ru", T.DOMAIN),
+], ids=["email", "host", "domain"])
+@pytest.mark.parametrize("policy", [Policy.BLOCK, Policy.HIDE])
+def test_rule_off_whole_parts_keeps_the_stricter_policy_of_the_record(state, text, record, policy):
+    """Второе ревью, Minor: выделение «contoso» не на целой части поглощало адрес или имя меткой своего типа — при
+    EMAIL=BLOCK выдача не блокировалась, при «скрывать без восстановления» метка восстанавливалась целиком. Фрагмент
+    берёт тип записи, если её политика строже (5.7, шаг 4)."""
+    settings = Settings(policies=default_policies() | {record: policy})
+    ops.mask(state, "contoso", T.TERM)
+    result = sanitize(state, text, settings)
+    entity = state.entities[result.spans[0].entity_id]
+    assert entity.type is record and "contoso" not in result.sanitized
+    assert [state.entities[s.entity_id].type for s in result.blocked] == ([record] if policy is Policy.BLOCK else [])
+    assert (restore(state, result.sanitized, settings).text == text) is (policy is Policy.BLOCK)
+    lenient = Settings(policies=default_policies() | {T.TERM: policy})      # правило строже — его метка, как прежде
+    assert sanitize(state, text, lenient).sanitized == text.rsplit(" ", 1)[0] + " <TERM_1>"
+
+
+def test_rule_parts_of_a_split_record_keep_their_own_types(state):
+    """Рядом с выданной заменой поглощённая запись делится (5.10), и каждая часть, задетая правилом, получает тип своего
+    правила, а не самого длинного: «ivanov» (PERSON) и «fabrikam» (TERM) в ivanov@host-1.fabrikam.ru. Запись строже
+    правила делится так же: политику частей держат их правила."""
+    settings = Settings(policies=default_policies() | {T.EMAIL: Policy.BLOCK, T.TERM: Policy.HIDE})
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    ops.mask(state, "fabrikam", T.TERM)
+    ops.mask(state, "ivanov", T.PERSON)
+    result = sanitize(state, "почта ivanov@host-1.fabrikam.ru", settings)
+    assert result.sanitized == "почта <PERSON_1>@host-1.<TERM_1>"
+    assert restore(state, result.sanitized, settings).text == "почта ivanov@srv01.<TERM_1>"
+
+
 @pytest.mark.parametrize("text, expected", [
     ("почта ivanov@<TERM_1>.northwind.ru", "почта <ACCOUNT_1>@<TERM_1>.domain-3.example"),
     ("почта ivanov@host-1.<ORG_1>", "почта <ACCOUNT_1>@host-1.<ORG_1>"),
@@ -769,6 +801,128 @@ def test_windows_paths_with_dot_folders_keep_their_meaning(state, settings):
     text = r"C:\Users\ivanov\.ssh\config, C:\Users\ivanov\.android\avd и \\fs01\share\.azure"
     result = sanitize(state, text, settings)
     assert result.sanitized == r"C:\Users\<ACCOUNT_1>\.ssh\config, C:\Users\<ACCOUNT_1>\.android\avd и \\host-1\share\.azure"
+    assert restore(state, result.sanitized, settings).text == text
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("SSL: *.contoso.ru и *.corp.contoso.local", "SSL: *.domain-1.example и *.host-1.domain-2.example"),
+    ("Set-Cookie: sid=1; Domain=.contoso.ru; Path=/", "Set-Cookie: sid=1; Domain=.domain-1.example; Path=/"),
+    ("no_proxy=localhost,.contoso.ru,.corp.local", "no_proxy=localhost,.domain-1.example,.domain-2.example"),
+    ("все адреса @contoso.ru пересылать", "все адреса @domain-1.example пересылать"),
+], ids=["wildcard", "cookie", "no-proxy", "mail-routing"])
+def test_name_after_a_leading_dot_star_or_at_is_masked_and_restored(state, settings, text, expected):
+    """Второе ревью, P1: имя после «*.», «.» и «@» без имени входа уходило в облако. Ведущий знак остаётся, имя — как
+    любое имя с точкой; восстанавливается точно и как имя из запроса, повторная вставка ничего не меняет, известное имя
+    в такой записи видит проверка утечек."""
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert (len(state.entities), len(state.surrogates)) == counts
+    restored = restore(state, expected, settings)
+    assert restored.text == text and restored.counters["derived"] == 0
+    assert leakcheck.check(text, state, settings)
+
+
+def test_dotfiles_and_code_after_a_dot_or_at_keep_their_meaning(state, settings):
+    """Та же находка с другой стороны: файлы на точку, «@» в CSS и Java, многоточие остаются как есть."""
+    text = "cp .env.example .env.local; .gitignore, *.py, .NET; @media print {} @Override; Ну...ru"
+    assert sanitize(state, text, settings).sanitized == text
+
+
+def test_regex_inside_a_string_literal_is_masked_and_restored_with_its_escapes(state, settings):
+    """Второе ревью, P3: выражение внутри строки JSON, Java, C# пишут через «\\\\.» («\\.» после раскрытия строки), и имя,
+    адрес e-mail и IP в нём уходили в облако. Подмены пишутся тем же разделителем, восстановление возвращает его,
+    повторная вставка ничего не меняет, известное имя в такой записи видит проверка утечек; путь Windows в JSON — путь."""
+    text = (
+        r'{"host": "^www\\.contoso\\.ru$", "node": "^srv01\\.contoso\\.ru$", "from": "^ivanov@contoso\\.ru$", '
+        r'"allow": "^10\\.1\\.2\\.35$", "path": "C:\\Users\\petrov\\.android"}'
+    )
+    result = sanitize(state, text, settings)
+    fake_ip = result.spans[-2].surrogate
+    assert result.sanitized == (
+        r'{"host": "^www\\.domain-1\\.example$", "node": "^host-1\\.domain-1\\.example$", "from": "^<EMAIL_1>$", '
+        rf'"allow": "^{fake_ip}$", "path": "C:\\Users\\<ACCOUNT_1>\\.android"}}'
+    )
+    assert fake_ip.count("\\\\.") == 3 and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, result.sanitized, settings).text == text
+    planted = r'"^Mail\\.Contoso\\.ru$"'
+    assert [planted[leak.start:leak.end] for leak in leakcheck.check(planted, state, settings)] == [r"Contoso\\.ru"]
+    # После знака выражения и между «\\b»: «\\» там восстановление читает началом адреса без схемы (раздел 7, шаг 1).
+    bounded = sanitize(state, r'"\\bsrv01\\.contoso\\.ru\\b", ".*\\.msk\\.contoso\\.ru"', settings).sanitized
+    assert bounded == r'"\\bhost-1\\.domain-1\\.example\\b", ".*\\.host-2\\.domain-1\\.example"'
+
+
+def test_email_written_with_escaped_dots_is_masked_and_restored_with_them(state, settings):
+    """Второе ревью, P2: в «^ivanov@contoso\\.ru$» скрывался только домен, а имя входа уходило в облако. Адрес через «\\.»
+    — адрес; его значение — как написано, и метка восстанавливается с «\\.»: тот же адрес в прозе — своя метка со своим
+    написанием. Повторная вставка ничего не меняет, известный адрес через «\\.» проверка утечек видит."""
+    text = r'if address :regex "from" "^i\.ivanov@contoso\.ru$" и почта i.ivanov@contoso.ru'
+    result = sanitize(state, text, settings)
+    assert result.sanitized == r'if address :regex "from" "^<EMAIL_1>$" и почта <EMAIL_2>' and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, result.sanitized, settings).text == text
+    planted = r"^I\.Ivanov@Contoso\.ru$"
+    assert {planted[leak.start:leak.end] for leak in leakcheck.check(planted, state, settings)} == {planted[1:-1]}
+
+
+@pytest.mark.parametrize("text, expected", [
+    (r"^ivanov@domain-1\.example$", r"^<ACCOUNT_1>@domain-1\.example$"),
+    (r"^ivanov@srv02\.domain-1\.example$", r"^<ACCOUNT_1>@host-2\.domain-1\.example$"),
+], ids=["issued-domain", "part-before-issued"])
+def test_email_with_escaped_dots_next_to_a_replacement_keeps_them(state, settings, text, expected):
+    """Адрес через «\\.» рядом с выданной заменой делится, как через точку (5.10): имя входа — ACCOUNT, часть перед
+    заменой — часть имени, и разделитель остаётся тем же."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert restore(state, expected, settings).text == text.replace("domain-1", "contoso").replace("example", "ru")
+
+
+def test_ipv4_written_with_escaped_dots_is_one_address_with_the_same_separators(state, settings):
+    """Второе ревью, P2: «^10\\.1\\.2\\.35$» не находился, а известный адрес в такой записи получал отдельную метку <IP_N>.
+    Это тот же адрес — та же сущность и та же подмена, записанная через «\\.»; восстановление пишет оригинал с тем же
+    разделителем, и производный адрес той же сети /24 — тоже. Повторная вставка ничего не меняет."""
+    text = r"узел 10.1.2.35, правило ^10\.1\.2\.35$ и сеть 10\.1\.0\.0/16"
+    result = sanitize(state, text, settings)
+    plain, escaped, network = (span.surrogate for span in result.spans)
+    assert escaped == plain.replace(".", "\\.") and network.endswith(r"\.0\.0/16") and "<IP_" not in result.sanitized
+    assert len(state.entities) == 2 and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, result.sanitized, settings).text == text
+    derived = escaped.rsplit("\\.", 1)[0] + r"\.36"
+    assert restore(state, f"^{derived}$", settings).text == r"^10\.1\.2\.36$"
+
+
+def test_known_ipv4_written_with_escaped_dots_is_caught_by_the_leak_check(state, settings):
+    """Та же находка: известный адрес через «\\.» проверка утечек видит и по написанию, и в записи с нулями впереди."""
+    sanitize(state, "узел 10.1.2.35", settings)
+    planted = r"^10\.1\.2\.35$ и 010\.001\.002\.035"
+    found = [planted[leak.start:leak.end] for leak in leakcheck.check(planted, state, settings)]
+    assert found == [r"10\.1\.2\.35", r"010\.001\.002\.035"]
+
+
+def test_opened_address_stays_open_written_with_escaped_dots(state):
+    """Список «никогда не скрывать» открывает адрес в любой записи (5.7, шаг 5) — и через «\\.»."""
+    text = r"allow ^10\.1\.2\.35$; deny 10\.1\.2\.36"
+    result = sanitize(state, text, Settings(never=frozenset({"10.1.2.35"})))
+    assert result.sanitized.startswith(r"allow ^10\.1\.2\.35$; deny 10\.") and result.sanitized != text
+
+
+def test_documentation_address_written_with_escaped_dots_is_not_given_as_a_surrogate(state, settings):
+    """Подмена не совпадает с адресом текста и в записи через «\\.»: иначе восстановление сделало бы из примера
+    203\\.0\\.113\\.1 публичный адрес (6.2)."""
+    text = r"пример ^203\.0\.113\.1$, узел 8.8.4.4"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == r"пример ^203\.0\.113\.1$, узел 203.0.113.2"
     assert restore(state, result.sanitized, settings).text == text
 
 
