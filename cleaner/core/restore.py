@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from html.entities import html5 as _ENTITIES
 
 from cleaner.core import surrogates
+from cleaner.core.detect.base import load_builtin
 from cleaner.core.entities import labels, macsid, netmap
 from cleaner.core.entities.names import FIXED_RANK
 from cleaner.core.types import ChatState, EntityType, Policy, Settings, Surrogate
@@ -267,6 +268,8 @@ class _Restorer:
         # Больше частей, чем в самой длинной выданной подмене, одна цепочка не займёт: без этого
         # предела хост «a.a.a…» из тысяч частей проверялся бы квадратичное время.
         self.depth = max((text.count(".") + 1 for text in self.own_hosts), default=0)
+        self.domains = {fake.lower() for slot, fake in state.issued.items() if slot.endswith("|dns")}
+        self.generic = load_builtin().generic_labels
         for text, surrogate in state.surrogates.items():
             if surrogate.kind == "ip":
                 self.fake_nets.add(int(ipaddress.IPv4Address(text.split("/")[0])) >> 8)
@@ -297,9 +300,20 @@ class _Restorer:
         return self.settings.policies.get(type_) is Policy.HIDE
 
     def _host_is_ours(self, host: str) -> bool:
-        """Хост целиком — выданная подмена или собран только из её частей (host-1.sub-2.domain-1.example)."""
+        """Хост целиком — выданная подмена или собран только из её частей (host-1.sub-2.domain-1.example).
+
+        Служебные части впереди («www», «mail» — generic_labels.txt) имени, которое кончается выданным доменом, его
+        чужим не делают: «www.domain-1.example» пишут и пользователь, и модель, а после восстановления это узел того
+        же домена организации. Только впереди и только перед выданным доменом: «domain-1.example.www» и
+        «www.host-1» — уже не имена под нашим доменом, а неизвестная часть («www.evil.domain-1.example») — чужая.
+        """
         labels_ = host.strip("[]").lower().split(".")
         reachable = {0}
+        if ".".join(labels_[-2:]) in self.domains:
+            for position, label in enumerate(labels_[:-2]):
+                if label not in self.generic:
+                    break
+                reachable.add(position + 1)
         for first in range(len(labels_)):
             if first not in reachable:
                 continue

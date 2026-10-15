@@ -124,6 +124,11 @@ def normalize(text: str) -> str:
     return _normalize(text)[0].strip()
 
 
+def has_invisible(text: str) -> bool:
+    """Есть ли в тексте невидимые знаки или ударение, которые нормализация выбрасывает (с 15.10.2026)."""
+    return _FORMAT_OR_STRESS.search(text) is not None
+
+
 def _bounded(text: str, start: int, end: int, mode: str) -> bool:
     if mode == "none":
         return True

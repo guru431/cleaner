@@ -2,8 +2,10 @@ import pytest
 
 from cleaner.core.detect.base import load_builtin
 from cleaner.core.detect.merge import MergedSpan
+from cleaner.core.entities import ops
 from cleaner.core.entities.resolve import Resolver, canonical_key
-from cleaner.core.types import ChatState, DictEntry, Settings
+from cleaner.core.pipeline import sanitize
+from cleaner.core.types import ChatState, DictEntry, Entity, Settings, Surrogate
 from cleaner.core.types import EntityType as T
 
 GENERIC = frozenset({"www", "mail"})
@@ -143,6 +145,35 @@ def test_address_colliding_with_an_open_value_gets_a_label(state):
     assert resolve(other, "10.1.2.5", ("10.1.2.5", T.IP), settings=settings) == ["<IP_1>"]
 
 
+def _padded(address: str) -> str:
+    return ".".join(f"{int(octet):03d}" for octet in address.split("."))
+
+
+@pytest.mark.parametrize(
+    "real, listed",
+    [
+        ("10.1.2.5", None),                                     # частная подмена, записанная с нулями
+        ("8.8.8.8", "203.000.113.001"),
+        ("2a00:1450:4010::65", "2001:0db8:0001:0000:0000:0000:0000:0001"),
+        ("2a00:1450:4010::65", "2001:db8:1:0::1/64"),
+    ],
+)
+def test_address_colliding_with_an_open_value_written_otherwise_gets_a_label(state, real, listed):
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: открытое значение сравнивалось с подменой как текст,
+    и адрес списка «никогда не скрывать» в другой записи не останавливал совпавшую с ним подмену."""
+    if listed is None:
+        listed = _padded(resolve(state, real, (real, T.IP))[0])
+        state = ChatState(chat_id="other", net_key=state.net_key)
+    assert resolve(state, real, (real, T.IP), settings=Settings(never=frozenset({listed}))) == ["<IP_1>"]
+
+
+@pytest.mark.parametrize("listed", ["2001:0db8:0001::0002", "203.000.113.002", "srv-dc01.contoso.ru"])
+def test_open_value_of_another_address_or_not_an_address_leaves_the_surrogate(state, listed):
+    surrogates = resolve(state, "8.8.8.8 и 2a00:1450:4010::65", ("8.8.8.8", T.IP), ("2a00:1450:4010::65", T.IP),
+                         settings=Settings(never=frozenset({listed})))
+    assert surrogates == ["203.0.113.1", "2001:db8:1::1"]
+
+
 @pytest.mark.parametrize(
     "text, real, fake",
     [
@@ -196,6 +227,46 @@ def test_merged_key_points_to_the_kept_entity(state):
     state.key_alias["PERSON:иванов и."] = kept.id
     assert resolve(state, "Иванов И.", ("Иванов И.", T.PERSON)) == first
     assert kept.forms == ["Иванов", "Иванов И."]
+
+
+def old_style_state() -> ChatState:
+    """Состояние, записанное до 15.10: ключи посчитаны нормализацией, которая оставляла невидимые знаки. У ORG мягкий
+    перенос остался в ключе, у ADDRESS стал пробелом (знаки препинания ключа адреса — пробелы)."""
+    state = ChatState(chat_id="old", net_key=bytes(range(32)))
+    for type_, key, form in (
+        (T.ORG, "ро\u00adмашка", "ООО «Ро\u00adмашка»"),
+        (T.ADDRESS, "ул лени на д 5", "ул. Лени\u00adна, д. 5"),
+        (T.PERSON, "ива\u200bнов", "Ива\u200bнов"),
+    ):
+        entity = Entity(type_.value.lower(), type_, 1, key, form, "detector", [form])
+        state.entities[entity.id] = entity
+        label = f"<{type_.value}_1>"
+        state.surrogates[label] = Surrogate(entity.id)
+        state.issued[f"{entity.id}|label"] = label
+        state.counters[type_.value] = 1
+    return state
+
+
+def test_entity_stored_with_invisible_characters_in_its_key_keeps_its_label():
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: после того как нормализация стала выбрасывать
+    невидимые знаки, сущность из такого значения получала при следующей очистке новый ключ и новую метку."""
+    state = old_style_state()
+    text = "Договор с ООО «Ро\u00adмашка», ул. Лени\u00adна, д. 5; снова ООО «Ромашка», Ива\u200bнов и Иванов"
+    result = sanitize(state, text, Settings())
+    assert result.sanitized == "Договор с <ORG_1>, <ADDRESS_1>; снова <ORG_1>, <PERSON_1> и <PERSON_1>"
+    assert len(state.entities) == 3 and state.counters == {"ORG": 1, "ADDRESS": 1, "PERSON": 1}
+
+
+def test_old_style_key_merged_into_another_entity_leads_to_it():
+    """Та же находка: значение, влитое объединением до 15.10, ведёт к оставленной сущности, а не к влитой."""
+    state = old_style_state()
+    keep = Entity("keep", T.ORG, 2, "ромашка-холдинг", "Ромашка-Холдинг", "detector", ["Ромашка-Холдинг"])
+    state.entities[keep.id] = keep
+    state.surrogates["<ORG_2>"] = Surrogate(keep.id)
+    state.issued["keep|label"] = "<ORG_2>"
+    state.counters["ORG"] = 2
+    ops.merge_entities(state, keep.id, "org")
+    assert sanitize(state, "Счёт от ООО «Ромашка»", Settings()).sanitized == "Счёт от <ORG_2>"
 
 
 def test_value_of_the_wrong_shape_falls_back_to_a_label(state):

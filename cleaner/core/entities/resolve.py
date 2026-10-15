@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities import hostmap, labels, macsid, names, netmap
-from cleaner.core.match import normalize
+from cleaner.core.match import has_invisible, normalize
 from cleaner.core.types import ChatState, Entity, EntityType, Settings, Surrogate
 
 T = EntityType
@@ -79,6 +79,15 @@ class Resolver:
         self.text_lower = text.lower()
         self.generic = generic_labels
         self.index = {(e.type, e.key): e for e in state.entities.values()}
+        # До 15.10.2026 нормализация оставляла невидимые знаки (мягкий перенос, пробел нулевой ширины, ударение), и
+        # ключ сущности из такого значения хранится с ними, а у адреса — с пробелом на их месте. Сегодняшний ключ того
+        # же значения другой, и сущность получила бы новую метку. Поэтому её написание с невидимыми знаками ведёт к
+        # ней и по сегодняшнему ключу: так находится и сущность, в которую значение влито объединением, — написания
+        # влитой переходят к ней. Ключ, уже занятый другой сущностью, остаётся за той.
+        for entity in state.entities.values():
+            for form in entity.forms:
+                if has_invisible(form):
+                    self.index.setdefault((entity.type, canonical_key(entity.type, form)), entity)
         self.alias: dict[tuple[EntityType, str], str] = {}
         for entry in settings.always:
             key = self._dictionary_key(entry.type, entry.value)
@@ -95,6 +104,7 @@ class Resolver:
         self.open_values = settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
         self.real_ips: set[str] = set()
         self._text_addresses: set[str] | None = None
+        self._open_addresses: set[str] | None = None
 
     @staticmethod
     def _dictionary_key(type_: EntityType, value: str) -> str:
@@ -232,7 +242,7 @@ class Resolver:
             while fake is not None and self._address_in_text(fake) and netmap.private_bits(ip) is None:
                 fake = netmap.fake_ip(canonical, self.state)
             collides = (
-                fake in self.real_ips or (T.IP, fake) in self.index or fake in self.open_values
+                fake in self.real_ips or (T.IP, fake) in self.index or self._address_open(fake)
                 or (fake is not None and self._address_in_text(fake))
             )
             if fake is None or collides:
@@ -258,14 +268,16 @@ class Resolver:
                 token = m.group("v6") or m.group()
                 if token.endswith(":") and not token.endswith("::"):
                     token = token[:-1]          # двоеточие после адреса IPv6 — знак препинания («2001:db8:1::1: занят»)
-                try:
-                    ip, prefix = netmap.parse(token)
-                except ValueError:
-                    continue                    # не адрес — с подменой не совпадёт
-                self._text_addresses.add(str(ip))
-                if prefix is not None:
-                    self._text_addresses.add(f"{ip}/{prefix}")
+                self._text_addresses |= netmap.canonical_forms(token)    # не адрес — с подменой не совпадёт
         return address in self._text_addresses
+
+    def _address_open(self, address: str | None) -> bool:
+        """Совпадает ли подмена с открытым адресом (список «никогда не скрывать», правило «открыть») в любой его записи:
+        «2001:0db8:0001::0001» в списке — это подмена 2001:db8:1::1. Открытый адрес показывается в текстах чата как есть,
+        и восстановление превратило бы его в оригинал другой сущности. Список разбирается при первой подмене адреса."""
+        if self._open_addresses is None:
+            self._open_addresses = netmap.addresses(self.open_values)
+        return address in self._open_addresses
 
     def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
         key = macsid.mac_key(value)

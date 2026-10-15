@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+from collections.abc import Iterable
 
 from cleaner.core.types import ChatState
 
@@ -41,6 +42,22 @@ def parse(token: str) -> tuple[Address, int | None]:
     а восстанавливается обычная запись адреса."""
     address, _, prefix = token.partition("/")
     return ipaddress.ip_address(unpadded(address.split("%")[0])), (int(prefix) if prefix else None)
+
+
+def canonical_forms(token: str) -> set[str]:
+    """Записи адреса в каноническом виде, как их выдаёт подмена: сам адрес и, с длиной префикса, ещё и сеть —
+    «2001:0db8:0001::0001» — это 2001:db8:1::1, «203.0.113.1/24» — и 203.0.113.1/24, и 203.0.113.1. Сравнение по ним
+    не зависит от записи. Не адрес — пустое множество."""
+    try:
+        ip, prefix = parse(token)
+    except ValueError:
+        return set()
+    return {str(ip)} if prefix is None else {str(ip), f"{ip}/{prefix}"}
+
+
+def addresses(values: Iterable[str]) -> set[str]:
+    """Канонические записи всех адресов среди values (список «никогда не скрывать», правила «открыть»)."""
+    return {form for value in values for form in canonical_forms(value)}
 
 
 def is_maskable(ip: Address) -> bool:

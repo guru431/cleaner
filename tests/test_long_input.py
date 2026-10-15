@@ -47,12 +47,14 @@ def test_run_of_eights_gives_no_phones():
     assert rules.detect("8 " * 50000, DetectContext(Settings())) == []
 
 
-def test_restore_is_fast_on_a_host_name_of_many_parts():
-    """Обзор пакета исправлений 1А, P2: проверка хоста ссылки шла квадратичное время."""
+@pytest.mark.parametrize("host", ["a." * 20000 + "x", "www." * 20000 + "domain-1.example"], ids=["parts", "generic"])
+def test_restore_is_fast_on_a_host_name_of_many_parts(host):
+    """Обзор пакета исправлений 1А, P2: проверка хоста ссылки шла квадратичное время. Служебные части перед выданным
+    доменом делают начало цепочки возможным с каждой из них."""
     state = ChatState(chat_id="long", net_key=bytes(32))
     sanitize(state, "узел srv-dc01.corp.contoso.ru", Settings())
     started = time.perf_counter()
-    restore(state, "https://" + "a." * 20000 + "x", Settings())
+    restore(state, "https://" + host, Settings())
     assert time.perf_counter() - started < 0.5
 
 
