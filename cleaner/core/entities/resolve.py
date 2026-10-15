@@ -21,6 +21,7 @@ _ADDRESS_TOKEN = re.compile(
 _LEGAL_FORMS = frozenset(
     {"ооо", "зао", "оао", "пао", "ао", "ип", "нко", "гуп", "муп", "фгуп", "llc", "inc", "ltd", "gmbh", "corp", "co"}
 )
+_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)*")
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,11 @@ def canonical_key(type_: EntityType, value: str) -> str:
 
 def _ip_text(value: str) -> str:
     ip, prefix = netmap.parse(value)
-    return str(ip) if prefix is None else f"{ip}/{prefix}"
+    if prefix is None:
+        return str(ip)
+    if not 0 <= prefix <= ip.max_prefixlen:
+        raise ValueError(value)         # «10.0.0.0/40» — не сеть: перестановка споткнулась бы о длину
+    return f"{ip}/{prefix}"
 
 
 class Resolver:
@@ -77,6 +82,14 @@ class Resolver:
             key = self._dictionary_key(entry.type, entry.value)
             for form in (entry.value, *entry.aliases):
                 self.alias[(entry.type, normalize(form))] = key
+            lead = self._lead(entry.type, entry.value) if entry.aliases and entry.type in (T.HOST, T.DOMAIN) else None
+            for form in entry.aliases if lead else ():
+                # Варианты одной записи — одна замена (5.4): у имени с точками её задаёт первая часть,
+                # поэтому первая часть каждого варианта ведёт к ключу первой части значения. Домен
+                # варианта остаётся своим: «dc01.contoso.local» не делает contoso.local тем же, что contoso.ru.
+                other = self._lead(entry.type, form)
+                if other and other[0] is lead[0]:
+                    self.alias[(other[0], normalize(other[1]))] = lead[1].lower()
         self.open_values = settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
         self.real_ips: set[str] = set()
         self._text_addresses: set[str] | None = None
@@ -106,12 +119,9 @@ class Resolver:
         special = {
             T.IP: self._ip, T.MAC: self._mac, T.SID: self._sid, T.HOST: self._name, T.DOMAIN: self._name,
         }.get(span.type)
-        resolved = None
-        if special:
-            try:
-                resolved = special(value, span.type, origin)
-            except ValueError:
-                pass        # значение не того вида (например, ручное правило) — обычная метка
+        # None — значение не того вида (например, ручное правило): обычная метка. Вид проверяется до
+        # первой записи в состояние: исключение посреди подмены оставило бы сущность без замены и номер.
+        resolved = special(value, span.type, origin) if special else None
         entity, surrogate = resolved or self._labelled(span.type, value, origin)
         return ResolvedSpan(span.start, span.end, entity.id, surrogate, span.sources)
 
@@ -206,8 +216,11 @@ class Resolver:
 
     # --- подмены ----------------------------------------------------------
 
-    def _ip(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str]:
-        canonical = _ip_text(value)
+    def _ip(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
+        try:
+            canonical = _ip_text(value)
+        except ValueError:
+            return None
         entity = self._entity(T.IP, canonical, canonical, origin)
 
         def make() -> str:
@@ -238,10 +251,10 @@ class Resolver:
             self._text_addresses = {m.group().lower() for m in _ADDRESS_TOKEN.finditer(self.text)}
         return address.lower() in self._text_addresses
 
-    def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str]:
+    def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
         key = macsid.mac_key(value)
         if len(key) != 12:
-            raise ValueError(value)
+            return None
         entity = self._entity(T.MAC, key, value, origin)
         style = macsid.style_of(value)
 
@@ -252,10 +265,10 @@ class Resolver:
 
         return entity, self._issue(entity, f"mac{style}", make)
 
-    def _sid(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str]:
+    def _sid(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
         m = macsid.SID.fullmatch(value)
         if not m:
-            raise ValueError(value)
+            return None
         domain_id, rid = m.group(1), m.group(2)
         original = f"S-1-5-21-{domain_id}"
         entity = self._entity(T.SID, domain_id, original, origin)
@@ -296,17 +309,32 @@ class Resolver:
         fake = self._issue(entity, "netbios", make)
         return entity, fake if value.isupper() else fake.lower()
 
-    def _name(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str]:
-        if not re.fullmatch(r"[\w-]+(?:\.[\w-]+)*", value):
-            raise ValueError(value)
-        if "." not in value:
-            if type_ is T.DOMAIN:
-                return self._netbios(value, origin)
-            return self._part(value, origin, leading=True, standalone=True)
+    @staticmethod
+    def _split(value: str) -> tuple[list[str], str]:
         left, registrable = hostmap.split_name(value)
         if not registrable:                      # неизвестный суффикс: домен — две последние части
             parts = value.split(".")
             left, registrable = parts[:-2], ".".join(parts[-2:])
+        return left, registrable
+
+    def _lead(self, type_: EntityType, value: str) -> tuple[EntityType, str] | None:
+        """Чья замена стоит в подмене имени первой: тип сущности и часть, по которой _name ищет её ключ."""
+        if not _NAME.fullmatch(value):
+            return None
+        if "." not in value:
+            return type_, value
+        left, registrable = self._split(value)
+        first = next((label for label in left if label.lower() not in self.generic), None)
+        return (T.HOST, first) if first else (T.DOMAIN, registrable)
+
+    def _name(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
+        if not _NAME.fullmatch(value):
+            return None
+        if "." not in value:
+            if type_ is T.DOMAIN:
+                return self._netbios(value, origin)
+            return self._part(value, origin, leading=True, standalone=True)
+        left, registrable = self._split(value)
         key = self.alias.get((T.DOMAIN, normalize(registrable))) or registrable.lower()
         domain = self._entity(T.DOMAIN, key, registrable, origin)
 

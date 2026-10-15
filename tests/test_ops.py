@@ -52,6 +52,36 @@ def test_chained_merges_end_in_one_label(state, settings):
     assert result.sanitized == "<PERSON_3>, <PERSON_3>, <PERSON_3>"
 
 
+def test_merging_into_an_already_merged_entity_joins_all_three(state, settings):
+    """Находка «Merge chains»: объединение со влитой сущностью идёт в ту, куда её уже влили."""
+    text = "a@x.example b@x.example c@x.example"
+    sanitize(state, text, settings)
+    a, b, c = sorted(state.entities.values(), key=lambda entity: entity.number)
+    ops.merge_entities(state, a.id, b.id)
+    ops.merge_entities(state, b.id, c.id)
+    assert sanitize(state, text, settings).sanitized == "<EMAIL_1> <EMAIL_1> <EMAIL_1>"
+
+
+def test_dropping_an_already_merged_entity_moves_its_whole_group(state, settings):
+    text = "a@x.example b@x.example c@x.example"
+    sanitize(state, text, settings)
+    a, b, c = sorted(state.entities.values(), key=lambda entity: entity.number)
+    ops.merge_entities(state, a.id, b.id)
+    ops.merge_entities(state, c.id, b.id)
+    assert sanitize(state, text, settings).sanitized == "<EMAIL_3> <EMAIL_3> <EMAIL_3>"
+
+
+def test_merging_two_parts_of_one_group_changes_nothing(state, settings):
+    """Сущность не вливается сама в себя: её написания не теряются."""
+    text = "a@x.example b@x.example"
+    sanitize(state, text, settings)
+    a, b = sorted(state.entities.values(), key=lambda entity: entity.number)
+    ops.merge_entities(state, a.id, b.id)
+    ops.merge_entities(state, b.id, a.id)
+    assert a.forms == ["a@x.example", "b@x.example"]
+    assert sanitize(state, text, settings).sanitized == "<EMAIL_1> <EMAIL_1>"
+
+
 def test_merging_different_types_is_refused(state, settings):
     ops.mask(state, "Заря", T.TERM)
     ops.mask(state, "Иванов", T.PERSON)

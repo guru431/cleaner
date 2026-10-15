@@ -1,4 +1,4 @@
-from cleaner.core.match import find_forms
+from cleaner.core.match import find_forms, normalize
 
 
 def hits(text: str, *forms) -> list[tuple[str, object]]:
@@ -32,6 +32,31 @@ def test_any_run_of_whitespace_matches_a_single_space():
     text = "Иванов  Иван Иванович; Иванов\r\nИван Иванович"
     found = hits(text, ("Иванов Иван Иванович", "letters", 1))
     assert found == sorted([("Иванов  Иван Иванович", 1), ("Иванов\r\nИван Иванович", 1)])
+
+
+def test_stress_marks_and_invisible_characters_do_not_stop_a_match():
+    """Находка «Merge chains and invisible characters»: знак ударения, мягкий перенос, пробел нулевой ширины."""
+    text = "Пишут Ива\u0301нов, Ива\u00adнов и Ива\u200bнов; Петрова\u0301 и Иван \u200b Петров"
+    found = hits(text, ("Иванов", "letters", 1), ("Петрова", "letters", 2), ("Иван Петров", "letters", 3))
+    # Найденный фрагмент накрывает и невидимые знаки, и ударение на последней букве.
+    assert found == sorted([
+        ("Ива\u0301нов", 1), ("Ива\u00adнов", 1), ("Ива\u200bнов", 1), ("Петрова\u0301", 2), ("Иван \u200b Петров", 3),
+    ])
+    assert hits("Пишет Иванов.", ("Ива\u0301\u00adнов", "letters", 1)) == [("Иванов", 1)]
+    assert normalize("Ива\u0301\u200bнов") == normalize("Иванов")
+
+
+def test_invisible_characters_in_a_decomposed_text_drop_out_too():
+    text = "Семе\N{COMBINING DIAERESIS}нов и Ива\N{COMBINING ACUTE ACCENT}\N{ZERO WIDTH SPACE}нов"
+    found = hits(text, ("Иванов", "letters", 1), ("Семёнов", "letters", 2))
+    assert found == sorted([("Семе\N{COMBINING DIAERESIS}нов", 2), ("Ива\N{COMBINING ACUTE ACCENT}\N{ZERO WIDTH SPACE}нов", 1)])
+
+
+def test_accents_that_are_part_of_a_letter_still_count():
+    """Отбрасывается только ударение, не вошедшее в букву: «é» и «й» в любой записи — свои буквы."""
+    text = "Jose\u0301, José и Jose; Мои\u0306 и Мои"
+    assert hits(text, ("José", "letters", 1)) == sorted([("Jose\u0301", 1), ("José", 1)])
+    assert hits(text, ("Мой", "letters", 2)) == [("Мои\u0306", 2)]
 
 
 def test_yo_and_decomposed_letters_match_their_plain_forms():
