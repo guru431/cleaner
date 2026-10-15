@@ -35,7 +35,7 @@ from cleaner.core.types import ChatState, Settings
         "пароль: это " * 8000, "пароль а б в г: это " * 5000, "password " + "a " * 50000 + ": x",
         # Скобки в конце значения, атрибут и вызов с именами после ключа.
         "password=" + ")" * 100000, "password=" + "a." * 50000 + "1", "password=f(" + "a," * 50000 + "1)",
-        "pwd=" + "(a)" * 30000, "password = self." + "aB" * 50000,
+        "pwd=" + "(a)" * 30000, "password = self." + "aB" * 50000, "password=" + "(" * 50000 + "a" + ")" * 50000,
         # Заголовок ключа с рядами дефисов или тире, без них и тело ключа.
         "BEGIN " * 20000, "-" * 100000, "—–BEGIN PRIVATE KEY—–\n" * 5000, "BEGIN PRIVATE KEY\n" * 10000,
         "BEGIN PRIVATE KEY\nMIIEowIBAAKCAQEA\n" + "-" * 100000, "BEGIN PRIVATE KEY\nMIIEowIBAAKCAQEA\nEND PRIVATE KEY\n" * 5000,
@@ -58,7 +58,7 @@ from cleaner.core.types import ChatState, Settings
         "password_words", "password_hyphenated_word", "password_double_hyphens", "password_copulas",
         "password_distinct_words", "password_colon_copulas", "password_long_leads", "password_long_lead_run",
         "closing_brackets", "attribute_chain", "call_names", "bracket_pairs",
-        "camel_attribute", "pem_begins", "dashes", "pem_dashed_headers", "pem_bare_headers", "pem_dashed_body",
+        "camel_attribute", "nested_brackets", "pem_begins", "dashes", "pem_dashed_headers", "pem_bare_headers", "pem_dashed_body",
         "pem_bare_blocks",
         "pem_header_lines", "pem_nested_headers", "pem_long_header_line", "pem_spaced_runs", "pem_spaced_hyphens",
         "putty_headers", "putty_fields", "putty_names", "putty_body", "gitlab_prefixes",

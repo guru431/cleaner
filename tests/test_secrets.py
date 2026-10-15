@@ -625,6 +625,22 @@ def test_closing_bracket_stays_with_the_value_when_its_pair_is_inside(text, valu
     assert found(text) == {value}
 
 
+@pytest.mark.parametrize("text", ["password = (input())", "pwd = (get_secret(name))", "token = (os.environ[KEY])"])
+def test_code_in_brackets_under_a_secret_key_is_code(text):
+    """Находка «Layers 2 and 4 leftovers round: what it leaves»: вызов или индекс в скобках («(input())») был секретом
+    и скрывался во всём чате."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [("password=((Qw1))", "((Qw1))"), ("password=(Ab(1))", "(Ab(1))"), ("password=(a)(b)", "(a)(b)"),
+     ("password=(Ab()", "(Ab()"), ("Пароль: (input())", "(input())")],
+)
+def test_password_in_brackets_is_still_found(text, value):
+    assert found(text) == {value}
+
+
 def test_word_or_number_in_brackets_is_still_prose():
     for text in (
         "password: (optional)", "Пароль (временный) действует сутки", "password: (empty)", "token: (N/A)",

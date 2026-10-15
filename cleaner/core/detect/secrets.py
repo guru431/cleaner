@@ -381,7 +381,14 @@ def _trimmed_end(string: str, start: int, end: int) -> int:
 
 
 def _code(string: str, start: int, end: int) -> bool:
-    """Значение без кавычек string[start:end] — вызов, индекс или атрибут в коде (см. _CALL)."""
+    """Значение без кавычек string[start:end] — вызов, индекс или атрибут в коде (см. _CALL), и в скобках тоже:
+    «(input())». Скобки снимаются только парой по краям; «(Qw1)», «(Ab(1))» внутри — не код, «(a)(b)» — тоже. Снятое
+    берётся копией: знак за ним (_CALL, «f(password=abc)») — своя скобка, а не текст после значения."""
+    inner = start
+    while end - inner > 2 and string[inner] == "(" and string[end - 1] == ")":
+        inner, end = inner + 1, end - 1
+    if inner > start:
+        string, start, end = string[inner:end], 0, end - inner
     call = _CALL.match(string, start, end)
     if call is None:
         attribute = _ATTRIBUTE.fullmatch(string, start, end)
