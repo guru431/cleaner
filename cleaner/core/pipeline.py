@@ -11,7 +11,7 @@ from types import ModuleType
 from typing import Protocol
 
 from cleaner.core import leakcheck, surrogates
-from cleaner.core.detect import dictionary, infra, orgs, rules, secrets
+from cleaner.core.detect import dictionary, infra, ner, orgs, rules, secrets
 from cleaner.core.detect.base import DetectContext, Detector
 from cleaner.core.detect.merge import MergedSpan, merge
 from cleaner.core.entities import labels
@@ -191,6 +191,11 @@ def sanitize(
         extra = list(layers.cached)
     else:
         extra = layers.ner.detect(text, _context(state, settings)) if layers.ner is not None else []
+        if layers.llm is not None:
+            # Пароль, который слой 4 принял за имя («sunflower77» → <PERSON_1>), остаётся слою 5: он видит текст,
+            # уже очищенный слоями 1–4, и иначе не может дать ему тип SECRET. Без слоя 5 находка остаётся: отбросить её —
+            # открыть сам пароль (на pii_benchmark так открылись бы почта и номер полиса, записанные с пробелами и словами).
+            extra = [span for span in extra if not ner.identifier(text, span)]
     resolved = _passes(state, text, settings, protected, starts, extra, detectors)
     if layers.cached is None and layers.llm is not None:
         # Слой 5 — один раз, по тексту, который уже очистили слои 1–4; затем проходы повторяются с его находками.

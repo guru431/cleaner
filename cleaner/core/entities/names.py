@@ -16,6 +16,9 @@ FIXED_RANK = 1_000_000          # значение для восстановле
 _ROLES = (("Surn", "last"), ("Name", "first"), ("Patr", "middle"))
 _TOKEN = re.compile(r"[^\W\d_]\.|[^\W\d_]+(?:-[^\W\d_]+)*")
 _CYRILLIC = re.compile(r"[а-яё]", re.IGNORECASE)
+_LETTERS = re.compile(r"[^\W\d_]+")
+_PROPER = ("Name", "Surn", "Patr", "Geox", "Orgn", "Trad")   # имя, фамилия, отчество, топоним, организация, марка
+_FUNCTION = ("PREP", "CONJ", "PRCL")
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,27 @@ def _word(token: str) -> Word:
 
 def parse(mention: str) -> tuple[Word, ...]:
     return tuple(_word(token) for token in _TOKEN.findall(mention))
+
+
+@lru_cache(maxsize=8192)
+def _kind(word: str) -> str:
+    """noun — нарицательное существительное из словаря, function — предлог, союз или частица, other — прочее."""
+    morph = _morph()
+    parses = morph.parse(word)
+    if parses[0].tag.POS in _FUNCTION:
+        return "function"           # раньше имён: у «из» есть разбор «(нет) Ий»
+    if not morph.word_is_known(word) or any(grammeme in p.tag for p in parses for grammeme in _PROPER):
+        return "other"
+    return "noun" if parses[0].tag.POS == "NOUN" else "other"
+
+
+def common_nouns(value: str) -> bool:
+    """Только нарицательные существительные из словаря и служебные слова между ними: «из бухгалтерии», «отдел кадров».
+
+    Прилагательное не в счёт: «чапаевская аллея», «васильевского острова» — часть адреса.
+    """
+    kinds = [_kind(word.lower()) for word in _LETTERS.findall(value)]
+    return "noun" in kinds and "other" not in kinds
 
 
 def _outcome(word: Word, entity: Entity) -> str:

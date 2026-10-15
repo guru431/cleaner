@@ -1,6 +1,7 @@
-from cleaner.core.detect.ner import THRESHOLD, Found, NerLayer, windows
+from cleaner.core.detect.ner import THRESHOLD, Found, NerLayer, identifier, windows
 from cleaner.core.pipeline import Layers, sanitize
 from cleaner.core.types import EntityType as T
+from cleaner.core.types import Span
 
 
 class Tagger:
@@ -54,6 +55,48 @@ def test_windows_cover_the_text_with_overlap():
     assert text[parts[0][0]:parts[0][1]].split()[-1] == "w199"
     assert text[parts[1][0]:parts[1][1]].split()[0] == "w160"
     assert parts[-1][1] == len(text) and windows("   ") == []
+
+
+def found_at(text, value, label):
+    start = text.index(value)
+    return Found(start, start + len(value), label, 0.5)
+
+
+def test_lowercase_organisation_of_common_nouns_is_dropped():
+    text = "Счёт из бухгалтерии, сверку прислал банк, отдел кадров молчит; Ромашка, автосити, алексей и чапаевская аллея — нет."
+    kept = ("Ромашка", "автосити", "алексей", "чапаевская аллея")     # заглавная, не из словаря, имя, прилагательное
+    found = [found_at(text, value, "organization") for value in ("из бухгалтерии", "банк", "отдел кадров", *kept)]
+    assert spans(text, *found) == [(value, T.ORG, "ner") for value in kept]
+
+
+def test_password_is_told_by_the_whole_word():
+    text = "sunflower77, Qwerty2024; АА1234567, ivanov_test, Вектор-77, Сидоров, ул. Мира5"
+
+    def looks(value, type_):
+        start = text.index(value)
+        return identifier(text, Span(start, start + len(value), type_, "ner"))
+
+    # «sunflower» — обрывок «sunflower77»: модель может пометить часть слова
+    assert looks("sunflower", T.PERSON) and looks("Qwerty2024", T.ORG)
+    assert not any(looks(value, type_) for value, type_ in (
+        ("АА1234567", T.PERSON), ("ivanov_test", T.PERSON), ("Вектор-77", T.ORG), ("Сидоров", T.PERSON), ("Мира5", T.ADDRESS),
+    ))
+
+
+def test_password_taken_for_a_name_is_left_to_layer_5(state, settings, engines):
+    """GLiNER называет «sunflower77» именем; слой 5 видит очищенный текст и без отсева получил бы <PERSON_1>."""
+    text = "Для общего ящика на стикере записано: sunflower77, отвечает Сидоров"
+    layer = NerLayer([Tagger(found_at(text, "sunflower77", "name"), found_at(text, "Сидоров", "name"))])
+    engines.second.marks = {"sunflower77": T.SECRET}
+    result = sanitize(state, text, settings, Layers(ner=layer, llm=engines.second))
+    assert result.sanitized == "Для общего ящика на стикере записано: <SECRET_1>, отвечает <PERSON_1>"
+    assert engines.second.seen == ["Для общего ящика на стикере записано: sunflower77, отвечает <PERSON_1>"]
+
+
+def test_password_taken_for_a_name_stays_hidden_without_layer_5(state, settings):
+    text = "Для общего ящика на стикере записано: sunflower77"
+    layer = NerLayer([Tagger(found_at(text, "sunflower77", "name"))])
+    assert sanitize(state, text, settings, Layers(ner=layer)).sanitized == "Для общего ящика на стикере записано: <PERSON_1>"
 
 
 def test_findings_of_both_models_add_up():
