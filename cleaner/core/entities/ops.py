@@ -27,11 +27,20 @@ def set_restore_value(state: ChatState, entity_id: str, value: str) -> None:
     entity.restore_rank = FIXED_RANK        # разбор имён больше не меняет значение, заданное пользователем
 
 
+def _original(state: ChatState, entity: Entity) -> str:
+    """Значение из текста, которому выдана подмена сущности. Значение для восстановления мог задать пользователь."""
+    for slot, fake in state.issued.items():
+        surrogate = state.surrogates.get(fake)
+        if slot.startswith(f"{entity.id}|") and surrogate is not None and surrogate.original:
+            return surrogate.original
+    return entity.restore_value
+
+
 def retype(state: ChatState, entity_id: str, new_type: EntityType) -> None:
     """Сменить тип: написания переходят в правила с новым типом, старая метка остаётся в таблице.
-    У средней части имени узла написаний нет (отдельно она не ищется) — в правило идёт её значение."""
+    У средней части имени узла написаний нет (отдельно она не ищется) — в правило идёт её значение из текста."""
     entity = state.entities[entity_id]
-    for form in entity.forms or [entity.restore_value]:
+    for form in entity.forms or [_original(state, entity)]:
         mask(state, form, new_type)
     entity.forms = []
 

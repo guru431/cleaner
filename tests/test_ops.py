@@ -64,6 +64,17 @@ def test_retyping_a_middle_part_of_a_name_takes_effect(state, settings):
     assert restore(state, "host-1.<TERM_1>.domain-1.example", settings).text == "srv-01.spb.contoso.ru"
 
 
+def test_retyping_a_part_after_editing_its_restore_value_takes_the_value_from_the_text(state, settings):
+    """Обзор, Minor 5: значение для восстановления мог задать пользователь. Правило на него оставило бы часть
+    своей подменой, а заданное значение скрывалось бы во всём чате."""
+    text = "узел srv-01.msk.contoso.ru, офис spb"
+    sanitize(state, text, settings)
+    part = next(e for e in state.entities.values() if e.key == "msk")
+    ops.set_restore_value(state, part.id, "spb")
+    ops.retype(state, part.id, T.TERM)
+    assert sanitize(state, text, settings).sanitized == "узел host-1.<TERM_1>.domain-1.example, офис spb"
+
+
 def test_retyping_the_domain_of_a_name_keeps_its_host_part(state, settings):
     text = "узел srv01.contoso.ru и srv01, сайт contoso.ru"
     sanitize(state, text, settings)
