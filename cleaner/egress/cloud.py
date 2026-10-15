@@ -20,7 +20,7 @@ from cleaner.core import leakcheck
 from cleaner.core.pipeline import OutgoingContext
 from cleaner.core.types import ChatState, Settings
 from cleaner.egress import ProviderError, StreamEnd
-from cleaner.egress.protocols import anthropic, error_text, openai
+from cleaner.egress.protocols import anthropic, openai, provider_error
 
 PROTOCOLS = {"openai": openai, "anthropic": anthropic}
 AUTH_STYLES = ("bearer", "x-api-key")
@@ -85,12 +85,16 @@ def _headers(connection: Connection) -> dict[str, str]:
     return {"Authorization": f"Bearer {connection.api_key}"}
 
 
-def _scrub(message: str, key: str) -> str:
-    return message.replace(key, "***") if key else message
+def _scrub(error: ProviderError, key: str) -> ProviderError:
+    """Ключ из сообщения провайдера — прочь: некоторые повторяют его в тексте ошибки."""
+    if key and key in error.detail:
+        error.detail = error.detail.replace(key, "***")
+    return error
 
 
 def _error(response: httpx.Response, key: str) -> ProviderError:
-    """Код ответа и сообщение провайдера — без ключа: некоторые провайдеры повторяют его в тексте ошибки."""
+    if 300 <= response.status_code < 400:
+        return ProviderError("провайдер ответил переадресацией — она не выполняется", status=response.status_code)
     raw = b""
     for chunk in response.iter_bytes():
         raw += chunk
@@ -98,10 +102,11 @@ def _error(response: httpx.Response, key: str) -> ProviderError:
             break
     try:
         body = json.loads(raw[:_ERROR_BYTES])
-        message = error_text(body.get("error") or body) if isinstance(body, dict) else ""
     except ValueError:
-        message = raw[:300].decode("utf-8", "replace").strip()
-    return ProviderError(_scrub(f"провайдер ответил {response.status_code}: {message[:300]}".rstrip(": "), key))
+        body = raw[:300].decode("utf-8", "replace").strip()
+    if isinstance(body, dict):
+        body = body.get("error") or body
+    return _scrub(provider_error(body, response.status_code), key)
 
 
 def _events(lines: Iterator[str]) -> Iterator[dict]:
@@ -152,7 +157,7 @@ def send(
                     except StreamEnd:
                         return
                     except ProviderError as exc:
-                        raise ProviderError(_scrub(str(exc), key)) from None
+                        raise _scrub(exc, key) from None
                     if piece:
                         yield piece
         except httpx.TimeoutException:

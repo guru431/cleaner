@@ -3,8 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cleaner.egress import ProviderError
-from cleaner.egress.protocols import error_text
+from cleaner.egress.protocols import provider_error
 
 if TYPE_CHECKING:
     from cleaner.core.pipeline import OutgoingContext
@@ -24,7 +23,7 @@ def request(ctx: OutgoingContext, connection: Connection) -> tuple[str, dict[str
 def text(event: dict) -> str | None:
     """Фрагмент ответа. Рассуждения модели (reasoning_content у DeepSeek) не показываются."""
     if "error" in event:
-        raise ProviderError(error_text(event["error"]))
+        raise provider_error(event["error"])
     choices = event.get("choices") or []
     if not choices or not isinstance(choices[0], dict):
         return None

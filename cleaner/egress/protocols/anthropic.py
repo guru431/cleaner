@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cleaner.egress import ProviderError, StreamEnd
-from cleaner.egress.protocols import error_text
+from cleaner.egress import StreamEnd
+from cleaner.egress.protocols import provider_error
 
 if TYPE_CHECKING:
     from cleaner.core.pipeline import OutgoingContext
@@ -27,7 +27,7 @@ def text(event: dict) -> str | None:
     """Фрагмент ответа. Блоки рассуждений (thinking_delta) не показываются."""
     kind = event.get("type")
     if kind == "error":
-        raise ProviderError(error_text(event.get("error")))
+        raise provider_error(event.get("error"))
     if kind == "message_stop":
         raise StreamEnd()
     if kind == "content_block_delta":

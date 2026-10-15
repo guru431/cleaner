@@ -133,21 +133,32 @@ def test_redirect_is_not_followed():
 
 
 def test_key_is_scrubbed_from_provider_errors():
-    body = json.dumps({"error": {"message": f"Incorrect API key provided: {KEY}"}}).encode()
+    body = json.dumps({"error": {"type": "invalid_api_key", "message": f"Incorrect API key provided: {KEY}"}}).encode()
     with pytest.raises(ProviderError) as error:
         run(probe_context("p", "m"), connection(), Recorder(body, status=401))
-    assert KEY not in str(error.value) and "401" in str(error.value) and "***" in str(error.value)
+    assert str(error.value) == "провайдер отклонил ключ подключения (код 401, invalid_api_key)"
+    assert error.value.detail == "Incorrect API key provided: ***"
+
+
+def test_provider_message_stays_out_of_the_stored_reason():
+    """Сообщение провайдера может повторять текст запроса: в постоянное объяснение (meta, журнал) оно не входит."""
+    body = json.dumps({"error": {"type": "invalid_request_error", "message": "в запросе «<PERSON_1> из бухгалтерии»"}}).encode()
+    with pytest.raises(ProviderError) as error:
+        run(probe_context("p", "m"), connection(), Recorder(body, status=400))
+    assert "PERSON" not in str(error.value) and "PERSON" in error.value.detail
+    with pytest.raises(ProviderError, match="сбой на стороне провайдера \\(код 502\\)"):
+        run(probe_context("p", "m"), connection(), Recorder(b"<html>Bad gateway</html>", status=502))
 
 
 def test_error_event_inside_the_stream():
     body = sse({"choices": [{"delta": {"content": "нач"}}]}, {"error": {"message": "overloaded"}})
     pieces = []
-    with pytest.raises(ProviderError, match="overloaded"):
+    with pytest.raises(ProviderError, match="прервал ответ ошибкой") as error:
         for piece in send(probe_context("p", "m"), connection(), None, None, transport=httpx.MockTransport(Recorder(body))):
             pieces.append(piece)
-    assert pieces == ["нач"]
+    assert pieces == ["нач"] and error.value.detail == "overloaded"
     anthropic = sse({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}, done=False)
-    with pytest.raises(ProviderError, match="Overloaded"):
+    with pytest.raises(ProviderError, match="overloaded_error"):
         run(probe_context("p", "m"), connection("anthropic"), Recorder(anthropic))
 
 
