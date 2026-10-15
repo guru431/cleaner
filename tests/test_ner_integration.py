@@ -45,6 +45,12 @@ def test_common_words_are_not_organisations(layer, no_network):
     assert [text[s.start:s.end] for s in layer.detect(text) if s.type is T.ORG] == []
 
 
+def test_organisation_with_a_digit_is_not_an_address(layer, no_network):
+    """GLiNER называет «1С» в этой фразе адресом («location address», около 0,49): без номера дома это не адрес."""
+    text = "Копию отправили в Сбербанк и в 1С."
+    assert [text[s.start:s.end] for s in layer.detect(text) if s.type is T.ADDRESS] == []
+
+
 def test_password_taken_for_a_name_is_typed_by_layer_5(layer, no_network, state, settings, engines):
     """AC-4.1 на example: GLiNER называет «sunflower77» именем; со слоем 5 — SECRET, без него — скрыт как PERSON."""
     text = "Для общего ящика на стикере записано: sunflower77, отвечает Сидоров"

@@ -24,7 +24,8 @@ _CATEGORY = {
     # Номера документов без своего типа в ТЗ и без правила в слоях 1–3.
     "DRIVER_LICENSE": "document", "MILITARY_ID": "document", "BIRTH_CERTIFICATE": "document",
 }
-_TYPES = {"person": EntityType.PERSON, "org": EntityType.ORG, "address": EntityType.ADDRESS, "document": EntityType.PASSPORT}
+# Адреса GLiNER («location address») здесь нет: это часть адреса наравне с частями русской модели (_addresses).
+_TYPES = {"person": EntityType.PERSON, "org": EntityType.ORG, "document": EntityType.PASSPORT}
 # Между частями одного почтового адреса — запятые, точки, пробелы и служебные слова.
 ADDRESS_GAP = re.compile(
     r"(?:[\s,.:№-]|\b(?:г|гор|город|ул|улица|пр|просп|проспект|пер|переулок|ш|шоссе|наб|набережная|б-р|бульвар|"
@@ -32,6 +33,17 @@ ADDRESS_GAP = re.compile(
     re.IGNORECASE,
 )
 _ADDRESS_GAP_MAX = 40
+# Адрес GLiNER — адрес и без улицы: открытые наборы размечают адресом и место («в Москве», «на Мойке»), и правило
+# русской модели «город сам не скрывается» снизило бы полноту «Организаций и почтовых адресов» на hivetrace с 0,886
+# до 0,858. Кроме находки с числом, которое не похоже на дом: «location address» GLiNER называет и «1С». Дом — число
+# отдельным словом («Ленина 5», «10 Downing St»), от двух цифр («12к1»; номер документа тоже остаётся скрытым — слои 1–3
+# без контекста его не находят) или слово улицы рядом с номером («ул. Мира 5А»).
+_HOUSE = re.compile(
+    r"\d{2}|(?<![^\W\d_])\d(?![^\W\d_])"
+    r"|\b(?:ул|улиц\w*|пр|просп|пр-т|проспект\w*|пер|переул\w*|ш|шоссе|наб|набережн\w*|б-р|бульвар\w*|пл|площад\w*"
+    r"|проезд\w*|тупик\w*|алле[яиюе]|мкр|микрорайон\w*|street|st|avenue|ave|road|rd|lane|ln|boulevard|blvd|drive|dr)\b",
+    re.IGNORECASE,
+)
 _WORD = re.compile(r"\S+")
 # Строчные буквы вплотную к цифрам — пароль: «sunflower77», «Qwerty2024». Не серия документа «АА1234567» и не логин
 # или имя через подчёркивание («ivanov_test», «ИВАНОВА_МАРИЯ»): слой 5 их пропускает, а без находки слоя 4 они
@@ -106,8 +118,18 @@ def identifier(text: str, span: Span) -> bool:
     return span.type in (EntityType.PERSON, EntityType.ORG) and _IDENTIFIER.search(text, start, end) is not None
 
 
+def _street(text: str, part: Found) -> bool:
+    """Часть, с которой соседние части становятся адресом: улица или дом русской модели, адрес GLiNER (см. _HOUSE)."""
+    if _CATEGORY[part.label] != "address":
+        return _CATEGORY[part.label] == "street"
+    value = text[part.start:part.end]
+    return not any(c.isdigit() for c in value) or _HOUSE.search(value) is not None
+
+
 def _addresses(text: str, parts: list[Found]) -> list[tuple[int, int, float]]:
-    """Части адреса подряд — один ADDRESS, если среди них есть улица или дом: город или страна сами не скрываются."""
+    """Части адреса подряд — один ADDRESS, если среди них есть улица или дом: город или страна сами не скрываются.
+    Адрес GLiNER рядом с частями русской модели входит в тот же ADDRESS: двумя находками запятая между ними
+    оставалась открытой."""
     groups: list[list[Found]] = []
     for part in sorted(parts, key=lambda f: f.start):
         gap = text[groups[-1][-1].end:part.start] if groups else ""
@@ -117,7 +139,7 @@ def _addresses(text: str, parts: list[Found]) -> list[tuple[int, int, float]]:
             groups.append([part])
     return [
         (group[0].start, max(p.end for p in group), max(p.score for p in group))
-        for group in groups if any(_CATEGORY[p.label] == "street" for p in group)
+        for group in groups if any(_street(text, p) for p in group)
     ]
 
 
@@ -139,6 +161,6 @@ class NerLayer:
             Span(f.start, f.end, _TYPES[_CATEGORY[f.label]], name, f.score)
             for f in found if _CATEGORY[f.label] in _TYPES
         ]
-        places = [f for f in found if _CATEGORY[f.label] in ("street", "place")]
+        places = [f for f in found if _CATEGORY[f.label] in ("street", "place", "address")]
         spans += [Span(start, end, EntityType.ADDRESS, name, score) for start, end, score in _addresses(text, places)]
         return spans
