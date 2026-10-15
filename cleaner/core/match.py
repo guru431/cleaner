@@ -23,8 +23,9 @@ _STRESS = "\N{COMBINING ACUTE ACCENT}"
 _FORMAT = regex.compile(r"\p{Cf}+")
 _FORMAT_OR_STRESS = regex.compile(r"[\p{Cf}" + _STRESS + "]+")
 # «\.» — точка: имя в регулярном выражении, шаблоне grep, настройке nginx («^srv01\.contoso\.ru$») — то же имя, и «\\.» —
-# то же выражение внутри строки JSON, Java, C# (hostmap.dotted). Три обратные косые и больше точку не экранируют.
-_ESCAPED_DOT = re.compile(r"(?<!\\)\\{1,2}(?=\.)")
+# то же выражение внутри строки JSON, Java, C# (hostmap.dotted). Три обратные косые и больше точку не экранируют. «\@» —
+# «@» адреса в строке Perl и PHP и в выражении Perl («ivanov\@contoso.ru», слой 1); «\\@» — обратная косая и массив Perl.
+_ESCAPED = re.compile(r"(?<!\\)(?:\\{1,2}(?=\.)|\\(?=@))")
 
 
 def _lower(text: str) -> str:
@@ -138,18 +139,18 @@ def has_invisible(text: str) -> bool:
 
 
 def _unescaped(lowered: str, starts: list[int], ends: list[int]) -> tuple[str, list[int], list[int]]:
-    """Нормализованный текст, в котором «\\.» и «\\\\.» — точка (_ESCAPED_DOT): обратные косые выпадают, точка накрывает
-    и их."""
+    """Нормализованный текст, в котором «\\.» и «\\\\.» — точка, а «\\@» — «@» (_ESCAPED): обратные косые выпадают, знак
+    накрывает и их."""
     pieces: list[str] = []
     kept_starts: list[int] = []
     kept_ends: list[int] = []
     position = 0
-    for m in _ESCAPED_DOT.finditer(lowered):
-        slash, dot = m.start(), m.end()
-        pieces += [lowered[position:slash], "."]
+    for m in _ESCAPED.finditer(lowered):
+        slash, sign = m.start(), m.end()
+        pieces += [lowered[position:slash], lowered[sign]]
         kept_starts += [*starts[position:slash], starts[slash]]
-        kept_ends += [*ends[position:slash], ends[dot]]
-        position = dot + 1
+        kept_ends += [*ends[position:slash], ends[sign]]
+        position = sign + 1
     pieces.append(lowered[position:])
     return "".join(pieces), kept_starts + starts[position:], kept_ends + ends[position:]
 
@@ -174,14 +175,15 @@ def _bounded(text: str, start: int, end: int, mode: str) -> bool:
 
 
 def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int, int, T]]:
-    """Все вхождения написаний без учёта регистра, «ё/е», вида пробелов и формы записи букв; «\\.» и «\\\\.» — точка.
+    """Все вхождения написаний без учёта регистра, «ё/е», вида пробелов и формы записи букв; «\\.» и «\\\\.» — точка,
+    «\\@» — «@».
 
     forms — тройки (написание, режим границ, полезная нагрузка). Режимы:
     strict — рядом нет букв, цифр, «_» и «-»; letters — рядом нет букв; none — где угодно.
     Позиции возвращаются в исходном тексте.
     """
     lowered, starts, ends = _normalize(text)
-    if "\\." in lowered:
+    if "\\." in lowered or "\\@" in lowered:
         lowered, starts, ends = _unescaped(lowered, starts, ends)
     # первое слово написания -> длина написания -> написание -> [(режим, нагрузка)].
     # Группировка по длине нужна, чтобы тысячи логинов с общим началом («user00001», «i.ivanov»)
@@ -192,7 +194,7 @@ def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int
     long: dict[str, dict[str, _Node[T]]] = {}
     loose: list[tuple[str, str, T]] = []
     for form, mode, payload in forms:
-        needle = _ESCAPED_DOT.sub("", _normalize(form)[0])
+        needle = _ESCAPED.sub("", _normalize(form)[0])
         if not needle.strip():
             continue
         head = _TOKEN.match(needle)

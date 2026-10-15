@@ -96,6 +96,17 @@ def test_escaped_dot_is_a_dot_and_an_escaped_backslash_is_not():
     assert hits(r"contoso\\\.ru contoso\\\\.ru", ("contoso.ru", "strict", 1)) == []
 
 
+def test_escaped_at_is_an_at_and_a_doubled_backslash_is_not():
+    """Ревью раунда 5, P3: в строке Perl и PHP и в выражении Perl «@» пишут через «\\» («ivanov\\@contoso.ru»): одна
+    обратная косая перед «@» — то же «@», и известный адрес в такой записи находится; написание с ней — тоже. Две — нет:
+    «\\\\@» в строке Perl — обратная косая и массив."""
+    text = r'"ivanov\@contoso.ru", /^IVANOV\@contoso\.ru$/, "ivanov\\@contoso.ru", ivanov@contoso.ru'
+    assert hits(text, ("ivanov@contoso.ru", "letters", 1)) == sorted([
+        (r"ivanov\@contoso.ru", 1), (r"IVANOV\@contoso\.ru", 1), ("ivanov@contoso.ru", 1),
+    ])
+    assert hits("ivanov@contoso.ru", (r"ivanov\@contoso.ru", "letters", 1)) == [("ivanov@contoso.ru", 1)]
+
+
 def test_yo_and_decomposed_letters_match_their_plain_forms():
     """Обзор 1А, P1: «ё» и «е» — одна буква; «ё» из двух знаков (NFD) — тоже."""
     text = "Семенов, Семёнов и СЕМЁНОВ"
