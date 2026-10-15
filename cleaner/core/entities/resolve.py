@@ -233,7 +233,14 @@ class Resolver:
             canonical = _ip_text(value)
         except ValueError:
             return None
-        entity = self._entity(T.IP, canonical, canonical, origin)
+        ip = netmap.parse(canonical)[0]
+        # IPv6 восстанавливается в записи из текста, где адрес встретился впервые, как и остальные сущности;
+        # IPv4 — в простой записи (5.4). Ключ — канонический: одна сущность на адрес в любой записи. Каноническая
+        # запись остаётся и среди искомых: по ней известные значения и проверка утечек находили адрес и раньше.
+        written = value if ip.version == 6 else canonical
+        entity = self._entity(T.IP, canonical, written, origin)
+        if canonical not in entity.forms:
+            entity.forms.append(canonical)
 
         def make() -> str:
             fake = netmap.fake_ip(canonical, self.state)
@@ -248,14 +255,13 @@ class Resolver:
             if fake is None or collides:
                 return self._label(entity)
             kind = "ip6" if ":" in fake else "ip"
-            self.state.surrogates[fake] = Surrogate(entity.id, canonical, kind)
+            self.state.surrogates[fake] = Surrogate(entity.id, written, kind)
             if "/" in fake:
                 # Модель может написать адрес сети без длины префикса.
-                bare = Surrogate(entity.id, canonical.split("/")[0], kind)
+                bare = Surrogate(entity.id, written.split("/")[0], kind)
                 self.state.surrogates.setdefault(fake.split("/")[0], bare)
             return fake
 
-        ip = netmap.parse(canonical)[0]
         return entity, self._issue(entity, "ip", make)
 
     def _address_in_text(self, address: str) -> bool:
