@@ -289,6 +289,85 @@ def test_book_whose_text_is_only_on_hidden_sheets_is_refused_with_the_reason():
         Extractor(documents, Ocr()).extract("t.xlsx", workbook())
 
 
+DOCX = ('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body>{}</w:body></w:document>')
+
+
+def para(text: str) -> str:
+    return f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
+
+
+def docx(body: str, **parts: str) -> bytes:
+    """Документ; картинка — часть, которую проверка должна пропустить."""
+    return package({"word/media/image1.png": PNG, "word/document.xml": DOCX.format(body), **parts})
+
+
+def shape(text: str, hidden: str = "", ph: str = "") -> str:
+    """Фигура с текстом в обычном фрагменте и в поле (номер слайда, дата)."""
+    return (f'<p:sp><p:nvSpPr><p:cNvPr id="2" name="x"{hidden}/><p:cNvSpPr/><p:nvPr>{ph}</p:nvPr></p:nvSpPr><p:spPr/>'
+            f"<p:txBody><a:bodyPr/><a:p><a:r><a:t>{text}</a:t></a:r><a:fld><a:t>{text}</a:t></a:fld></a:p></p:txBody></p:sp>")
+
+
+def slide(shapes: str, attrs: str = "", root: str = "sld") -> str:
+    return (f'<p:{root} xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+            f'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"{attrs}>'
+            f"<p:cSld><p:spTree>{shapes}</p:spTree></p:cSld></p:{root}>")
+
+
+def pptx(*slides: str) -> bytes:
+    return package({"ppt/media/image1.png": PNG} | {f"ppt/slides/slide{n}.xml": s for n, s in enumerate(slides, 1)})
+
+
+def counted_docx(chars: int) -> bytes:
+    """Текст, который Docling выводит всегда: абзацы, ячейки таблиц, ссылки, элементы управления содержимым."""
+    return docx(
+        para("x" * 100) + f"<w:tbl><w:tr><w:tc>{para('я' * 100)}</w:tc></w:tr></w:tbl>"
+        + f'<w:p><w:hyperlink><w:r><w:t xml:space="preserve">{"y" * 50}  </w:t></w:r></w:hyperlink></w:p>'
+        + f"<w:sdt><w:sdtContent>{para('z' * (chars - 250))}</w:sdtContent></w:sdt>"
+    )
+
+
+def counted_pptx(chars: int) -> bytes:
+    return pptx(slide(shape("x" * 50)), slide(f"<p:grpSp>{shape('y' * (chars // 2 - 50))}</p:grpSp>"))
+
+
+@pytest.mark.parametrize(("name", "make"), [("t.docx", counted_docx), ("t.pptx", counted_pptx)])
+def test_document_whose_text_must_exceed_the_limit_is_refused_before_docling(name, make):
+    """Находка «Small gaps…»: DOCX на 1,2 МБ (20 МБ XML) держал Docling 194 с и всё равно не прошёл предел
+    длины. Знаки текстовых элементов без пробелов — оценка снизу: длиннее предела — отказ сразу."""
+    documents = Documents()
+    assert Extractor(documents, Ocr(), max_chars=300).extract(name, make(300)).kind == name[2:]
+    with pytest.raises(ExtractError, match="Документ слишком большой: его текст заведомо длиннее 300 знаков"):
+        Extractor(documents, Ocr(), max_chars=300).extract(name, make(302))
+    assert documents.calls == [name[2:]]
+
+
+X = "x" * 400
+TEXT_BOX = f"<w:p><w:r><w:drawing><wps:txbx xmlns:wps='s'><w:txbxContent>{para(X)}</w:txbxContent></wps:txbx></w:drawing></w:r></w:p>"
+
+
+@pytest.mark.parametrize(("name", "data"), [
+    ("spaces.docx", docx(f'<w:p><w:r><w:t xml:space="preserve">{" " * 400}x</w:t></w:r></w:p>')),
+    # Word пишет надпись дважды — в mc:Choice и в mc:Fallback; Docling читает одну ветвь.
+    ("box.docx", docx(f"<mc:AlternateContent><mc:Choice Requires='wps'>{TEXT_BOX}</mc:Choice>"
+                      f"<mc:Fallback>{TEXT_BOX}</mc:Fallback></mc:AlternateContent>")),
+    ("moved.docx", docx(f"<w:p><w:moveFrom><w:r><w:t>{X}</w:t></w:r></w:moveFrom></w:p>")),
+    ("header.docx", docx(para("x"), **{"word/header1.xml": f'<w:hdr xmlns:w="w">{para(X)}</w:hdr>'})),
+    ("hidden-slide.pptx", pptx(slide(shape(X), ' show="0"'))),
+    ("hidden-shape.pptx", pptx(
+        slide(shape(X, hidden=' hidden="true"')),
+        slide(f'<p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="g" hidden="1"/></p:nvGrpSpPr>{shape(X)}</p:grpSp>'),
+    )),
+    ("footer.pptx", pptx(slide(shape(X, ph='<p:ph type="ftr"/>')))),
+    ("layout.pptx", pptx(slide(shape(X), root="sldLayout"), slide(shape(X), root="notes"))),
+], ids=lambda value: value if isinstance(value, str) else "")
+def test_text_docling_leaves_out_is_not_counted(name, data):
+    """Обратная сторона: текст, которого в Markdown Docling нет (пробелы, копия надписи, перенесённое, колонтитул,
+    скрытый слайд или фигура, нижний колонтитул слайда, макет), к пределу не идёт."""
+    documents = Documents()
+    assert Extractor(documents, Ocr(), max_chars=300).extract(name, data).kind == name.rpartition(".")[2]
+
+
 def test_huge_page_is_rendered_within_the_recognition_limit():
     """Обзор плана 2+4, m-5: страница огромного размера не рисуется картинкой в гигабайты — не больше, чем примет ocr-ru."""
     from cleaner.ingest.extract import OCR_DPI, _scale
