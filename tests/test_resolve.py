@@ -101,3 +101,16 @@ def test_merged_key_points_to_the_kept_entity(state):
 
 def test_value_of_the_wrong_shape_falls_back_to_a_label(state):
     assert resolve(state, "не адрес", ("не адрес", T.IP)) == ["<IP_1>"]
+
+
+def test_network_of_an_impossible_length_gets_a_label_and_leaves_nothing_behind(state):
+    """Находка «Core: unvalidated inputs»: подмена, сорвавшаяся на середине, оставляла сущность и номер."""
+    assert resolve(state, "сеть 10.0.0.0/040", ("10.0.0.0/040", T.IP)) == ["<IP_1>"]
+    assert resolve(state, "сеть 10.1.2.5/33", ("10.1.2.5/33", T.IP)) == ["<IP_2>"]
+    assert len(state.entities) == 2 and state.counters == {"IP": 2}
+
+
+def test_network_of_a_possible_length_keeps_its_replacement(state):
+    network, host = resolve(state, "10.1.0.0/16 и 10.1.2.5/32", ("10.1.0.0/16", T.IP), ("10.1.2.5/32", T.IP))
+    assert network.startswith("10.") and network.endswith(".0.0/16") and network != "10.1.0.0/16"
+    assert host.startswith("10.") and host.endswith(".5/32")

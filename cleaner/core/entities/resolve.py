@@ -59,7 +59,11 @@ def canonical_key(type_: EntityType, value: str) -> str:
 
 def _ip_text(value: str) -> str:
     ip, prefix = netmap.parse(value)
-    return str(ip) if prefix is None else f"{ip}/{prefix}"
+    if prefix is None:
+        return str(ip)
+    if not 0 <= prefix <= ip.max_prefixlen:
+        raise ValueError(value)         # «10.0.0.0/40» — не сеть: перестановка споткнулась бы о длину
+    return f"{ip}/{prefix}"
 
 
 class Resolver:
@@ -106,12 +110,9 @@ class Resolver:
         special = {
             T.IP: self._ip, T.MAC: self._mac, T.SID: self._sid, T.HOST: self._name, T.DOMAIN: self._name,
         }.get(span.type)
-        resolved = None
-        if special:
-            try:
-                resolved = special(value, span.type, origin)
-            except ValueError:
-                pass        # значение не того вида (например, ручное правило) — обычная метка
+        # None — значение не того вида (например, ручное правило): обычная метка. Вид проверяется до
+        # первой записи в состояние: исключение посреди подмены оставило бы сущность без замены и номер.
+        resolved = special(value, span.type, origin) if special else None
         entity, surrogate = resolved or self._labelled(span.type, value, origin)
         return ResolvedSpan(span.start, span.end, entity.id, surrogate, span.sources)
 
@@ -206,8 +207,11 @@ class Resolver:
 
     # --- подмены ----------------------------------------------------------
 
-    def _ip(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str]:
-        canonical = _ip_text(value)
+    def _ip(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
+        try:
+            canonical = _ip_text(value)
+        except ValueError:
+            return None
         entity = self._entity(T.IP, canonical, canonical, origin)
 
         def make() -> str:
@@ -238,10 +242,10 @@ class Resolver:
             self._text_addresses = {m.group().lower() for m in _ADDRESS_TOKEN.finditer(self.text)}
         return address.lower() in self._text_addresses
 
-    def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str]:
+    def _mac(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
         key = macsid.mac_key(value)
         if len(key) != 12:
-            raise ValueError(value)
+            return None
         entity = self._entity(T.MAC, key, value, origin)
         style = macsid.style_of(value)
 
@@ -252,10 +256,10 @@ class Resolver:
 
         return entity, self._issue(entity, f"mac{style}", make)
 
-    def _sid(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str]:
+    def _sid(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
         m = macsid.SID.fullmatch(value)
         if not m:
-            raise ValueError(value)
+            return None
         domain_id, rid = m.group(1), m.group(2)
         original = f"S-1-5-21-{domain_id}"
         entity = self._entity(T.SID, domain_id, original, origin)
@@ -296,9 +300,9 @@ class Resolver:
         fake = self._issue(entity, "netbios", make)
         return entity, fake if value.isupper() else fake.lower()
 
-    def _name(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str]:
+    def _name(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
         if not re.fullmatch(r"[\w-]+(?:\.[\w-]+)*", value):
-            raise ValueError(value)
+            return None
         if "." not in value:
             if type_ is T.DOMAIN:
                 return self._netbios(value, origin)
