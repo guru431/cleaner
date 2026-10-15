@@ -47,23 +47,26 @@ def _internal(path: Path) -> set[str]:
     return set(_INTERNAL.search(path.read_text(encoding="utf-8")).group(1).split())
 
 
-def test_egress_chain_allows_internal_nets_and_443_and_rejects_the_rest():
-    """Раздел 15 спецификации, SEC-15: внутренние сети, затем 443 с записью, остальное — запись и отказ."""
+def test_egress_table_allows_internal_nets_and_443_and_rejects_the_rest():
+    """Раздел 15 спецификации, SEC-15: своя таблица nftables (ufw её не чистит), заменяется одной транзакцией;
+    внутренние сети, затем 443 по IPv4 с записью, остальное — запись и отказ."""
     text = EGRESS.read_text(encoding="utf-8")
     assert text.startswith("#!/usr/bin/env bash\n") and "\r" not in text
     assert _internal(EGRESS) == {
         "127.0.0.0/8", "example/24", "example/24", "example/19", "example/24", "172.16.0.0/12",
     }
-    order = [text.index(part) for part in (
-        '-d "$net" -j RETURN', '--log-prefix "cleaner-out: "', '--dport 443 -j RETURN',
-        '--log-prefix "cleaner-egress: "', "-j REJECT --reject-with tcp-reset",
+    rules = text[text.index("nft -f - <<EOF"):]
+    order = [rules.index(part) for part in (
+        "table inet $TABLE\ndelete table inet $TABLE\n", "type filter hook output priority filter; policy accept;",
+        "meta skuid != $uid return", "ip daddr { $nets } return", "ip6 daddr ::1 return",
+        'log prefix "cleaner-out: "', "meta nfproto ipv4 tcp dport 443 return", 'log prefix "cleaner-egress: "',
+        "meta l4proto tcp reject with tcp reset", "        reject\n",
     )]
     assert order == sorted(order)
-    assert '-I OUTPUT 1 -m owner --uid-owner "$USER_NAME" -j "$CHAIN"' in text
-    assert 'ip6tables -A "$CHAIN" -d ::1/128 -j RETURN' in text
+    assert "iptables" not in text.replace("iptables-nft", "").split("set -euo pipefail", 1)[1]
     unit = (DEPLOY / "cleaner-egress.service").read_text(encoding="utf-8").splitlines()
     for line in ("Type=oneshot", "RemainAfterExit=yes", "ExecStart=/usr/local/sbin/cleaner-egress.sh",
-                 "After=ufw.service network-online.target", "Before=cleaner.service", "WantedBy=multi-user.target"):
+                 "After=network-online.target", "Before=cleaner.service", "WantedBy=multi-user.target"):
         assert line in unit, line
 
 

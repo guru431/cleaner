@@ -106,7 +106,7 @@ fi
 
 echo "5. Исходящие службы (этап 3: наружу только TCP 443)"
 procs="/sys/fs/cgroup/system.slice/${UNIT}/cgroup.procs"
-# Проба — от учётной записи cleaner внутри контрольной группы службы: цепочка CLEANER-EGRESS выбирает
+# Проба — от учётной записи cleaner внутри контрольной группы службы: таблица cleaner_egress выбирает
 # пакеты по учётной записи, и проба от root прошла бы мимо неё. setpriv, а не runuser: без PAM процесс
 # остаётся в группе службы.
 probe() {  # $1 — адрес, $2 — порт. Код: 0 — соединение есть, 97 — не вошли в группу, иное — отказ
@@ -118,20 +118,16 @@ if [[ "$(systemctl is-active cleaner-egress.service)" == "active" ]]; then
 else
     bad "cleaner-egress.service не активен"
 fi
-output=$(iptables -S OUTPUT 2>/dev/null || true)
-jump=$(grep -n -- "-m owner --uid-owner $(id -u cleaner) -j CLEANER-EGRESS" <<< "$output" | head -1 | cut -d: -f1)
-first_ufw=$(grep -n -- "-j ufw" <<< "$output" | head -1 | cut -d: -f1)
-if [[ -z "$jump" ]]; then
-    bad "в OUTPUT нет входа в CLEANER-EGRESS — выход наружу не ограничен (ufw reload без try-restart cleaner-egress?)"
-elif [[ -n "$first_ufw" && "$jump" -gt "$first_ufw" ]]; then
-    bad "вход в CLEANER-EGRESS стоит после цепочек ufw — новые соединения его минуют"
+if bash /usr/local/sbin/cleaner-egress.sh check >"$WORK/egress-table.txt" 2>&1; then
+    ok "таблица nftables inet cleaner_egress на месте: отбор по учётной записи и отказ"
 else
-    ok "вход в CLEANER-EGRESS стоит раньше цепочек ufw"
+    bad "$(cat "$WORK/egress-table.txt") — выход наружу не ограничен"
 fi
-if ip6tables -S OUTPUT 2>/dev/null | grep -q -- "-j CLEANER-EGRESS" && ip6tables -S CLEANER-EGRESS 2>/dev/null | grep -q -- "-j REJECT"; then
-    ok "IPv6 наружу отклоняется"
+table=$(nft list chain inet cleaner_egress output 2>/dev/null || true)
+if grep -q "ip6 daddr ::1 return" <<< "$table" && ! grep -q "nfproto ipv6" <<< "$table"; then
+    ok "IPv6 наружу отклоняется (пропускается только петля)"
 else
-    bad "нет цепочки CLEANER-EGRESS для IPv6"
+    bad "в таблице cleaner_egress нет правила IPv6 только для петли"
 fi
 nets() { sed -n "s/^${2}=\"\(\${[A-Z_]*:-\)\{0,1\}\([^}\"]*\)}\{0,1\}\"$/\2/p" "$1" | tr ' ' '\n' | sort | tr '\n' ' '; }
 ours=$(nets /usr/local/sbin/cleaner-egress.sh INTERNAL)

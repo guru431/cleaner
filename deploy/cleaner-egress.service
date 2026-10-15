@@ -1,7 +1,7 @@
 [Unit]
 Description=Cleaner: границы выхода наружу (порт 443, журнал отказов)
-# После ufw: он перестраивает OUTPUT и убирает оттуда чужие переходы.
-After=ufw.service network-online.target
+# Своя таблица nftables: ufw её не трогает, порядок относительно него не важен.
+After=network-online.target
 Wants=network-online.target
 Before=cleaner.service
 

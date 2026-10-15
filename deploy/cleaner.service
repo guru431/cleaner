@@ -2,7 +2,7 @@
 Description=Cleaner: очистка данных перед облачными LLM
 # Адрес example должен уже быть на интерфейсе: служба слушает только его.
 # Границы выхода наружу (этап 3) ставит cleaner-egress.service; Requires= не годится: перезапуск
-# цепочки после ufw reload перезапускал бы и службу.
+# таблицы (обновление списка сетей) перезапускал бы и службу. Без таблицы служба не стартует (ExecStartPre).
 After=network-online.target cleaner-egress.service
 Wants=network-online.target cleaner-egress.service
 
@@ -18,8 +18,8 @@ Environment="TRANSFORMERS_OFFLINE=1"
 Environment="HF_HUB_DISABLE_TELEMETRY=1"
 Environment="DO_NOT_TRACK=1"
 Environment="TOKENIZERS_PARALLELISM=false"
-# Без входа в цепочку CLEANER-EGRESS выход наружу не ограничен — тогда служба не стартует.
-# «+» — проверка от root: правила iptables учётной записи cleaner не видны.
+# Без таблицы nftables cleaner_egress выход наружу не ограничен — тогда служба не стартует.
+# «+» — проверка от root: правила nftables учётной записи cleaner не видны.
 ExecStartPre=+/usr/local/sbin/cleaner-egress.sh check
 ExecStart=/opt/cleaner/.venv/bin/python -m cleaner serve
 MemoryMax=8G
@@ -33,7 +33,7 @@ RestrictSUIDSGID=yes
 ReadWritePaths=/var/lib/cleaner
 Restart=always
 RestartSec=20
-# Выход наружу (этап 3, SEC-15): только TCP 443 — цепочка CLEANER-EGRESS (cleaner-egress.sh) по учётной
+# Выход наружу (этап 3, SEC-15): только TCP 443 — таблица nftables cleaner_egress (cleaner-egress.sh) по учётной
 # записи cleaner; IPAddressDeny=, как у остальных служб сервера, закрыл бы и его.
 
 [Install]
