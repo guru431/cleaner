@@ -28,7 +28,7 @@ GATEWAY_KEY_ENV = "CLEANER_GATEWAY_KEY"
 @dataclass(frozen=True)
 class LocalSettings:
     url: str = "http://127.0.0.1:30000/v1"     # шлюз LiteLLM сервера по петле (раздел 11)
-    model: str = "qwen-27b"
+    model: str = "qwen-27b-fast"               # qwen-27b рассуждает и упирается в 2048 токенов ответа слоя 5
     trusted: frozenset[str] = frozenset()      # узлы вне частных сетей, которым администратор доверяет явно
     schema: bool = True                        # схема JSON параметром response_format; False — только в тексте запроса
 

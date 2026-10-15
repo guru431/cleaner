@@ -26,9 +26,10 @@ def test_client_needs_the_key_from_the_environment(repo, tmp_path):
         Engines(repo, tmp_path, environ={}).client()
     engines = Engines(repo, tmp_path, environ={"CLEANER_GATEWAY_KEY": "k-test"})
     first = engines.client()
-    assert first.config.model == "qwen-27b" and engines.client() is first
-    repo.set_setting("local_llm.model", "qwen-27b-fast")
-    assert engines.client().config.model == "qwen-27b-fast"
+    # По умолчанию — модель без рассуждений: qwen-27b не укладывает ответ слоя 5 в 2048 токенов (проверка E этапа 4).
+    assert first.config.model == "qwen-27b-fast" and engines.client() is first
+    repo.set_setting("local_llm.model", "qwen-27b")
+    assert engines.client().config.model == "qwen-27b"
 
 
 def test_client_refuses_an_address_that_became_public(repo, tmp_path):
