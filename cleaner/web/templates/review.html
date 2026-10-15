@@ -78,7 +78,12 @@
 <div class="tabs" data-tabs data-tabs-remember>
   <div class="tab-list" role="tablist">
     <button type="button" role="tab" data-tab="fragments" aria-selected="true">Замены в этом тексте ({{ fragments | length }})</button>
-    <button type="button" role="tab" data-tab="risk" aria-selected="false">Остаточный риск</button>
+    {# Состояние проверки — и на ярлыке: выбрана может быть другая вкладка, а без sessionStorage выбор не переживает перенаправление. #}
+    <button type="button" role="tab" data-tab="risk" aria-selected="false">Остаточный риск
+      {%- if item.risk_status in ("queued", "running") %} <span class="badge">идёт проверка</span>
+      {%- elif item.risk_status == "failed" %} <span class="badge bad">ошибка проверки</span>
+      {%- elif item.risk_status == "interrupted" %} <span class="badge bad">проверка прервана</span>
+      {%- endif %}</button>
     {% if viewer.is_admin %}<button type="button" role="tab" data-tab="dictionary" aria-selected="false">В словарь</button>{% endif %}
     <button type="button" role="tab" data-tab="gold" aria-selected="false">Эталон</button>
   </div>

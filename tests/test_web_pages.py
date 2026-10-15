@@ -121,6 +121,33 @@ def test_risk_poll_stays_in_the_page_while_its_tab_is_not_selected(ivan, repo):
     assert f'data-poll="/chats/{chat_id}/items/{item_id}/status" data-poll-field="risk"' in page
 
 
+def risk_tab(page: str) -> str:
+    return re.search(r'data-tab="risk" aria-selected="false">(.*?)</button>', page).group(1)
+
+
+def test_risk_check_state_is_on_its_tab_label(ivan, repo):
+    """Идущая, не выполненная и прерванная проверка видна на ярлыке вкладки — и когда выбрана другая вкладка, и когда
+    браузер не даёт sessionStorage (выбор не переживает перенаправление). Готовая и не запускавшаяся — без отметки."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    item_id = repo.items(chat_id)[0].id
+    path = f"/chats/{chat_id}/items/{item_id}"
+    assert risk_tab(ivan.get(path).text) == "Остаточный риск"
+    labels = {}
+    for status, current in (("queued", ""), ("running", "queued"), ("failed", "running"), ("interrupted", "failed")):
+        repo.set_item_risk_status(chat_id, item_id, status, (current,))
+        labels[status] = risk_tab(ivan.get(path).text)
+    assert labels == {
+        "queued": 'Остаточный риск <span class="badge">идёт проверка</span>',
+        "running": 'Остаточный риск <span class="badge">идёт проверка</span>',
+        "failed": 'Остаточный риск <span class="badge bad">ошибка проверки</span>',
+        "interrupted": 'Остаточный риск <span class="badge bad">проверка прервана</span>',
+    }
+    repo.set_item_risk_status(chat_id, item_id, "running", ("interrupted",))
+    repo.set_item_risk(chat_id, item_id, {"guesses": []})
+    assert risk_tab(ivan.get(path).text) == "Остаточный риск"
+
+
 def test_review_of_a_blocked_text_offers_no_copy(ivan, repo):
     chat_id = ivan.chat()
     ivan.post(f"/chats/{chat_id}/input", text="клиент Ромашка")
