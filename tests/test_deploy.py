@@ -66,7 +66,7 @@ def test_egress_table_allows_internal_nets_and_443_and_rejects_the_rest():
     assert "iptables" not in text.replace("iptables-nft", "").split("set -euo pipefail", 1)[1]
     # 15.10.2026: «skuid != … return» не срабатывает у пакетов без сокета пользователя (туннель WireGuard
     # сервера), и они проваливались в отказ. Только положительный отбор по учётной записи.
-    assert "skuid !=" not in rules
+    assert not [line for line in rules.splitlines() if "skuid !=" in line and not line.strip().startswith("#")]
     # Второй слой для входящих на порт службы — тот же, что у правила ufw и настроек сервера.
     cfg = config.load(DEPLOY / "cleaner.toml")
     assert f"PORT={cfg.port}" in text.splitlines() and "CLIENTS=example/19" in text.splitlines()
