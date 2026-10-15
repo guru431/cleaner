@@ -1,10 +1,12 @@
 """Действия пользователя над чатами: ядро очистки плюс хранилище."""
 from __future__ import annotations
 
+import hashlib
 import logging
+import pickle
 import threading
 import uuid
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -21,6 +23,7 @@ from cleaner.core.pipeline import (
 from cleaner.core.restore import RestoreResult, restore
 from cleaner.core.types import ChatState, EntityType, Policy, Settings, Span
 from cleaner.egress import ProviderError, cloud
+from cleaner.storage.codec import state_to_json
 from cleaner.storage.repo import Item, Provider, Repository, StaleState
 
 log = logging.getLogger("cleaner.service")
@@ -36,6 +39,9 @@ LOCAL_ANSWER_TOKENS = 4096
 _SEND_INTERNAL = "Внутренняя ошибка отправки"
 _STOPPED = "Остановлено"
 _SERVICE_STOPPED = "Служба остановлена во время ответа: сохранена полученная часть"
+# Итоги проверки утечек для вида чата в памяти процесса: не больше стольких итогов и находок в них всех вместе
+# (находка — около 200 байт, 50 000 — около 10 МБ; один итог с тысячами находок иначе раздувал бы память).
+_VIEW_RESULTS, _VIEW_FOUND = 1024, 50_000
 
 Work = Callable[[ChatState, list[Item], Settings], tuple[list[Item], list[Item]]]
 Submit = Callable[..., None]
@@ -230,6 +236,9 @@ class ChatService:
         self.file_submit = file_submit  # свой пул: вставленный текст не ждёт за распознаванием сканов (раздел 14)
         self.cloud_send = cloud_send
         self.live = LiveAnswers()
+        self._view_leaks: OrderedDict[bytes, tuple[Leak, ...]] = OrderedDict()
+        self._view_found = 0                    # находок во всех запомненных итогах
+        self._view_leaks_lock = threading.Lock()
 
     def _check_length(self, text: str) -> None:
         if len(text) > self.max_text_chars:
@@ -446,9 +455,35 @@ class ChatService:
         self.repo.audit("restore", user_id, chat_id, **counters)
         return item
 
+    def _view_leak_check(self, text: str, state: ChatState, settings: Settings, inputs: bytes) -> list[Leak]:
+        """Проверка утечек для вида чата. Вид строится при каждой загрузке страниц чата, проверки и таблицы замен, а
+        проверка линейна по тексту: пять текстов по 100 000 знаков — 0,45 с на загрузку, почти вся её цена. Итог
+        зависит только от текста, состояния чата и настроек и запоминается по отпечатку всех троих (inputs — двух
+        последних, от view); любое их изменение — другой ключ, и проверка идёт заново. В памяти процесса, давние
+        вытесняются (_VIEW_RESULTS, _VIEW_FOUND); в итогах места и id сущностей, текстов нет."""
+        key = inputs + hashlib.sha256(text.encode("utf-8")).digest()
+        with self._view_leaks_lock:
+            found = self._view_leaks.get(key)
+            if found is not None:
+                self._view_leaks.move_to_end(key)
+                return list(found)
+        found = tuple(leakcheck.check(text, state, settings))
+        if len(found) > _VIEW_FOUND:
+            return list(found)                  # не запоминается: вытеснил бы все остальные итоги
+        with self._view_leaks_lock:
+            # Тот же ключ мог успеть записать параллельный запрос: его находки не считаются дважды.
+            self._view_found += len(found) - len(self._view_leaks.pop(key, ()))
+            self._view_leaks[key] = found
+            while len(self._view_leaks) > _VIEW_RESULTS or self._view_found > _VIEW_FOUND:
+                self._view_found -= len(self._view_leaks.popitem(last=False)[1])
+        return list(found)
+
     def view(self, chat_id: str) -> ChatView:
         state, _ = self.repo.load_state(chat_id)
         settings = self.repo.settings()
+        # Отпечаток состояния — его запись в базе (полнота записи проверяется тестом кодека), настроек — pickle:
+        # точная запись любых полей, и новых тоже (repr, например, обрезает длинное выражение re.Pattern).
+        inputs = hashlib.sha256(state_to_json(state)).digest() + hashlib.sha256(pickle.dumps(settings)).digest()
         views: list[InputView | AnswerView] = []
         items = self.repo.items(chat_id)
         for item, in_request in zip(items, _in_request(items)):
@@ -456,7 +491,7 @@ class ChatService:
                 if item.status != "done":
                     views.append(InputView(item, [], []))
                     continue
-                leaks = leakcheck.check(item.sanitized or "", state, settings)
+                leaks = self._view_leak_check(item.sanitized or "", state, settings, inputs)
                 blocked = [
                     span for span in item.spans
                     if span["entity_id"] in state.entities

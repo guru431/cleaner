@@ -5,6 +5,7 @@ from cleaner.core.detect import infra
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.leakcheck import Leak
 from cleaner.core.types import EntityType as T
+from cleaner.core.types import Policy
 from cleaner.service import AnswerView, ChatService, EditRefused, InputView, TextTooLong
 from cleaner.storage.codec import state_to_json
 from cleaner.storage.repo import Item, StaleState
@@ -192,6 +193,65 @@ def test_refresh_applies_a_new_dictionary_value(repo, chat):
     service.refresh(chat_id, user)
     assert repo.items(chat_id)[0].sanitized == "клиент <ORG_1>"
     assert service.view(chat_id).items[0].deliverable
+
+
+def test_view_does_not_repeat_the_leak_check_while_nothing_changed(repo, chat, monkeypatch):
+    """Вид чата строится при каждой загрузке страниц чата, проверки и таблицы замен, а проверка утечек линейна по
+    тексту: пять текстов по 100 000 знаков — 0,45 с на каждую загрузку. Повторный вид без изменений её не повторяет."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    service.add_input(chat_id, user, "почта a@x.example")
+    service.add_input(chat_id, user, "почта b@x.example")
+    calls = []
+    check = leakcheck.check
+    monkeypatch.setattr(leakcheck, "check", lambda *args: calls.append(args[0]) or check(*args))
+    service.view(chat_id)
+    service.view(chat_id)
+    assert calls == ["почта <EMAIL_1>", "почта <EMAIL_2>"]
+
+
+def test_remembered_leak_checks_are_bounded_by_their_findings(repo, chat, monkeypatch):
+    """Память ограничена и числом находок: один текст с тысячами находок иначе занял бы её сам. Итог, который не
+    помещается, не запоминается — и проверяется заново, с тем же результатом."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    service.add_input(chat_id, user, "Ромашка и снова Ромашка")
+    service.add_input(chat_id, user, "почта b@x.example")
+    repo.add_dictionary("always", "Ромашка", T.ORG)
+    monkeypatch.setattr("cleaner.service._VIEW_FOUND", 1)
+    calls = []
+    check = leakcheck.check
+    monkeypatch.setattr(leakcheck, "check", lambda *args: calls.append(args[0]) or check(*args))
+    assert [len(entry.leaks) for entry in service.view(chat_id).items] == [2, 0]
+    assert [len(entry.leaks) for entry in service.view(chat_id).items] == [2, 0]
+    assert calls == ["Ромашка и снова Ромашка", "почта <EMAIL_1>", "Ромашка и снова Ромашка"]
+
+
+def test_view_checks_again_after_any_change_the_check_depends_on(repo, chat):
+    """Проверку утечек пропустить нельзя: она зависит от очищенного текста, состояния чата и общих настроек, и каждое
+    их изменение видно в следующем виде, хотя прежний результат уже запомнен."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    service.add_input(chat_id, user, "клиент Ромашка, почта a@x.example")
+    service.add_input(chat_id, user, "почта b@x.example")
+
+    def leaks() -> list[int]:
+        return [len(entry.leaks) for entry in service.view(chat_id).items]
+
+    assert leaks() == [0, 0]
+    repo.add_dictionary("always", "Ромашка", T.ORG)                  # словарь; второй текст — свой результат
+    assert leaks() == [1, 0]
+    repo.set_policy(T.ORG, Policy.OFF)                               # политика типа
+    assert leaks() == [0, 0]
+    repo.set_policy(T.ORG, Policy.MASK)
+    assert leaks() == [1, 0]
+    never = repo.add_dictionary("never", "ромашка")                  # список «никогда не скрывать»
+    assert leaks() == [0, 0]
+    repo.delete_dictionary(never)
+    assert leaks() == [1, 0]
+    sanitized = repo.items(chat_id)[0].sanitized
+    service.unmask(chat_id, user, ["Ромашка"])                       # состояние чата: правило «открыть»
+    assert repo.items(chat_id)[0].sanitized == sanitized and leaks() == [0, 0]
 
 
 @pytest.fixture
