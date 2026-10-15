@@ -301,7 +301,7 @@ class _Restorer:
         # проверяется по ним (6.4) — иначе дерево ниже было бы глубиной в тысячи частей.
         own_hosts = {
             text.lower() for text, surrogate in state.surrogates.items()
-            if surrogate.kind in ("host", "ip", "ip6") and len(surrogate.original or "") <= 253
+            if surrogate.kind in ("host", "ip", "ip6") and len(surrogate.original or "") <= hostmap.MAX_NAME
         }
         # Метка, выданная адресу или имени узла вместо подмены (совпадение адресов, значение не того вида),
         # в хосте ссылки ведёт на наш же узел: «http://<IP_1>:8080/». Модель пишет её и без скобок. Метка, значение

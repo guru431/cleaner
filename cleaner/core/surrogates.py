@@ -8,7 +8,7 @@ from __future__ import annotations
 import ipaddress
 import re
 
-from cleaner.core.entities import macsid
+from cleaner.core.entities import hostmap, macsid
 from cleaner.core.types import ChatState
 
 _LABEL = re.compile(r"<[A-Z]+(?:_[A-Z]+)*_\d+>|\[\[[A-Z]+(?:_[A-Z]+)*_\d+\]\]")
@@ -63,7 +63,7 @@ class Finder:
         self.macs: dict[str, str] = {}
         self.macs_by_digits: dict[str, str] = {}
         for key, surrogate in state.surrogates.items():
-            if surrogate.kind == "host" and len(surrogate.original or "") <= 253:
+            if surrogate.kind == "host" and len(surrogate.original or "") <= hostmap.MAX_NAME:
                 node = self.hosts
                 for part in key.lower().split("."):
                     node = node.setdefault(part, {})

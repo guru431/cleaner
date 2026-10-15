@@ -429,6 +429,6 @@ class Resolver:
         # проверка ссылок перебирают цепочки частей до длины самой длинной записанной, и имя из тысяч частей делало бы
         # их кубическими. Его части выданы, и восстанавливается оно по частям. Часть имени рядом с заменой — не имя
         # из запроса и тоже не записывается.
-        if left and whole and len(value) <= 253:
+        if left and whole and len(value) <= hostmap.MAX_NAME:
             self.state.surrogates.setdefault(surrogate, Surrogate(primary.id, value, "host"))
         return primary, surrogate
