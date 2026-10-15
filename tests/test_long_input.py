@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from cleaner.core.detect import rules
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.pipeline import DETECTORS, sanitize
 from cleaner.core.restore import restore
@@ -17,11 +18,12 @@ from cleaner.core.types import ChatState, Settings
     [
         "a.b." * 5000, "CN=a," * 5000, "x" * 20000, "1," * 10000, "a:" * 10000, "token" * 20000 + "=Zx81kLmN02pQ",
         "token" * 4000, "pwd" * 7000, "a_pass" * 3500, "8 " * 50000, "/home/" + "a'" * 10000,
-        "CORP\\" + "и\\" * 10000, "Source" * 5000 + ":1:2",
+        "CORP\\" + "и\\" * 10000, "Source" * 5000 + ":1:2", "1 - " * 25000, "123.456/" * 12500,
+        "д.р. 11.11.11 " * 7000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
-        "cyrillic_logins", "label_colons",
+        "cyrillic_logins", "label_colons", "spaced_dashes", "dots_slashes", "short_dates",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
@@ -30,6 +32,11 @@ def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
         started = time.perf_counter()
         detector.detect(text, ctx)
         assert time.perf_counter() - started < 0.5, detector.name
+
+
+def test_run_of_eights_gives_no_phones():
+    """FINDINGS P2 «false … PHONE, CARD …»: «8 8 8 …» давал тысячи ложных телефонов, очистка шла две секунды."""
+    assert rules.detect("8 " * 50000, DetectContext(Settings())) == []
 
 
 def test_restore_is_fast_on_a_host_name_of_many_parts():

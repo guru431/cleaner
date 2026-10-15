@@ -33,21 +33,31 @@ _URL_SERVICE_LOGINS = frozenset({
     "пользователь",
 })
 _IPV4_DOMAIN = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
-# +7 или 8 и ровно десять цифр с любыми разделителями: «8 (4852) 12-34-56», «+7 916 1234567».
-_PHONE_RU = re.compile(r"(?<![\w+])(?:\+7|8)(?:[\s()-]{0,3}\d){10}(?!\d)")
+# +7 или 8 и ровно десять цифр с любыми разделителями в одной строке: «8 (4852) 12-34-56», «+7 916 1234567».
+# Перевод строки телефон не переходит: «8» в конце строки и число на следующей — разные значения.
+_PHONE_RU = re.compile(r"(?<![\w+])(?:\+7|8)(?:(?:[^\S\r\n]|[()-]){0,3}\d){10}(?!\d)")
 # «8 2024-10-14 12:00» — дата в журнале, а не телефон.
 _DATE_INSIDE = re.compile(r"(?:19|20)\d\d-[01]\d-[0-3]\d")
 _PHONE_INTL = re.compile(
-    r"(?<![\w+])\+\d{1,3}[\s(-]{0,2}\d{2,4}[\s)-]{0,2}\d{2,4}(?:[\s-]?\d{2,4}){1,3}(?!\d)"
+    r"(?<![\w+])\+\d{1,3}(?:[^\S\r\n]|[(-]){0,2}\d{2,4}(?:[^\S\r\n]|[)-]){0,2}\d{2,4}"
+    r"(?:(?:[^\S\r\n]|-)?\d{2,4}){1,3}(?!\d)"
 )
-_PHONE_LOCAL = re.compile(r"(?<![\w+])\(?\d{3}\)?[\s-]{0,2}\d{3}[\s-]?\d{2}[\s-]?\d{2}(?!\d)")
-# Группы цифр через одиночный пробел или дефис; номер карты ищется окнами внутри такой цепочки,
-# потому что рядом бывают срок действия, CVV или чужая группа («от 2024 4111 1111 1111 1111»).
-_DIGIT_RUN = re.compile(r"(?<![\w-])\d+(?:[ -]\d+)*(?![\w-])")
+_PHONE_LOCAL = re.compile(
+    r"(?<![\w+])\(?\d{3}\)?(?:[^\S\r\n]|-){0,2}\d{3}(?:[^\S\r\n]|-)?\d{2}(?:[^\S\r\n]|-)?\d{2}(?!\d)"
+)
+# Группы цифр через одиночный пробел, дефис, « - », точку или косую черту («6271 - 8855 - 1122 - 3344»,
+# «77/11/222/333/44»); номер карты ищется окнами внутри такой цепочки, потому что рядом бывают срок
+# действия, CVV или чужая группа («от 2024 4111 1111 1111 1111»).
+_DIGIT_RUN = re.compile(r"(?<![\w-])\d+(?:(?: - |[ ./\u2011-])\d+)*(?![\w-])")
 _DIGIT_GROUP = re.compile(r"\d+")
+# Окно номера карты среди других четырёхзначных групп — список (порты, коды), а не карта: в нём каждое
+# десятое окно проходит проверку Луна. Такое окно принимается только при словах о карте рядом.
+_CARD_WORDS = re.compile(r"карт|кредитк|card|visa|master|maestro|amex|cvv|cvc|\bмир\b", re.IGNORECASE)
+_YEAR = re.compile(r"(?:19|20)\d\d")
 # Запятая рядом с номером — разделитель CSV, а не десятичная дробь: отсеивают контрольные разряды.
 _NUMBER = re.compile(r"(?<![\w.])\d{9,20}(?!\w|\.\d)")
-_SNILS = re.compile(r"(?<![\w-])\d{3}-\d{3}-\d{3}[ -]\d{2}(?!\d)")
+# «112-233-445 95», «178 - 481 - 192 10», «123.456.789.01»: разделитель первых трёх групп один и тот же.
+_SNILS = re.compile(r"(?<![\w.-])\d{3}(-| - |\.)\d{3}\1\d{3}(?:[ -]| - |\.)\d{2}(?!\d|\.\d)")
 _BIK = re.compile(r"(?<!\d)04\d{7}(?!\d)")
 _IBAN = re.compile(
     r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?(?![A-Za-z0-9])"
@@ -56,8 +66,10 @@ _PASSPORT = re.compile(r"(?<![\w-])\d{2} ?\d{2} ?(?:№ ?)?\d{6}(?![\w-])")
 _PASSPORT_WORDS = re.compile(
     r"сери[яи]\s*(\d{2}\s?\d{2})\s*,?\s*(?:номер|№|n)\s*(\d{6})(?!\d)", re.IGNORECASE
 )
+# Год из двух цифр («д.р. 01.02.90») — только при двузначных дне и месяце: «1.2.10» — скорее версия.
 _DATE = re.compile(
-    r"(?<![\w.])(?:(\d{1,2})[./-](\d{1,2})[./-](\d{4})|(\d{4})-(\d{2})-(\d{2}))(?!\w|\.\d)"
+    r"(?<![\w.])(?:(\d{1,2})[./-](\d{1,2})[./-](\d{4})|(\d{4})-(\d{2})-(\d{2})|(\d{2})[./-](\d{2})[./-](\d{2}))"
+    r"(?!\w|\.\d)"
 )
 
 _PHONE_WORDS = ("тел", "моб", "phone", "tel.", "tel:", "звон", "номер")
@@ -80,13 +92,37 @@ def _digits(value: str) -> str:
 def _valid_date(m: re.Match[str]) -> bool:
     if m.group(1):
         day, month, year = m.group(1), m.group(2), m.group(3)
-    else:
+    elif m.group(4):
         day, month, year = m.group(6), m.group(5), m.group(4)
+    else:                   # век неважен: високосные годы 19xx и 20xx совпадают, кроме 1900 — а 29.02.00 бывает
+        day, month, year = m.group(7), m.group(8), "20" + m.group(9)
     try:
         date(int(year), int(month), int(day))
     except ValueError:
         return False
     return True
+
+
+def _ipv4(value: str) -> bool:
+    """«192.168.100.65» — адрес IPv4: его скрывает слой 3, даже если цифры проходят проверку СНИЛС или ИНН."""
+    return bool(_IPV4_DOMAIN.fullmatch(value)) and all(int(part) <= 255 for part in value.split("."))
+
+
+def _phone_groups(value: str) -> bool:
+    """После +7/8 код от трёх цифр и группы от двух: «8 10 12 9 11 7 15» — счёт, а не телефон.
+
+    Группа из одной цифры бывает в местном номере после пятизначного кода в скобках: «8 (34396) 5-12-34».
+    """
+    groups = _DIGIT_GROUP.findall(value[2:] if value.startswith("+") else value[1:])
+    return len(groups[0]) >= 3 and ("(" in value or min(len(group) for group in groups) >= 2)
+
+
+def _listed(groups: list[tuple[int, int, str]], first: int, last: int) -> bool:
+    """Стоит ли окно из нескольких групп среди других четырёхзначных групп цепочки, кроме года («от 2024 …»)."""
+    if first == last:
+        return False                                    # 13–19 цифр слитно — номер сам по себе
+    neighbours = [groups[i][2] for i in (first - 1, last + 1) if 0 <= i < len(groups)]
+    return any(len(group) == 4 and not _YEAR.fullmatch(group) for group in neighbours)
 
 
 def _card_shape(parts: list[str]) -> bool:
@@ -117,10 +153,37 @@ def _cards(text: str, m: re.Match[str], add: Add) -> None:
             if len(digits) > 19:
                 break
             parts = [group[2] for group in groups[first:last + 1]]
-            if len(digits) >= 13 and _card_shape(parts) and validators.luhn(digits):
+            if (
+                len(digits) >= 13 and _card_shape(parts) and validators.luhn(digits)
+                and (not _listed(groups, first, last) or _CARD_WORDS.search(
+                    text[max(0, m.start() - _BEFORE):m.start()] + " " + text[m.end():m.end() + _AFTER]
+                ))
+            ):
                 add(groups[first][0], groups[last][1], EntityType.CARD, True)
             if not _extendable(parts):
                 break
+
+
+def _grouped(text: str, m: re.Match[str], add: Add) -> None:
+    """ИНН и СНИЛС группами («77 07 08 38 93», «50 - 0100732259») — только рядом со своим словом.
+
+    Без слова сгруппированных десяти цифр с верной суммой ИНН слишком много: каждый десятый номер
+    телефона без кода, версия «1.234.567.890». В реквизитах и журналах рядом с ИНН стоят и паспорт
+    (группы 4-6 и 2-2-6), и адрес, и дата со временем — их цифры тоже проходят проверку.
+    Слитную запись проверяет _number.
+    """
+    value = m.group()
+    digits = _digits(value)
+    if len(digits) == len(value) or _ipv4(value) or any(_valid_date(date_) for date_ in _DATE.finditer(value)):
+        return
+    passport = [len(group) for group in _DIGIT_GROUP.findall(value)] in ([4, 6], [2, 2, 6])
+    if (
+        len(digits) in (10, 12) and not passport and validators.inn(digits)
+        and _near(text, m.start(), m.end(), ("инн",))
+    ):
+        add(m.start(), m.end(), EntityType.INN, True)
+    elif len(digits) == 11 and validators.snils(digits) and _near(text, m.start(), m.end(), ("снилс",)):
+        add(m.start(), m.end(), EntityType.SNILS, True)
 
 
 def _number(text: str, m: re.Match[str], add: Add) -> None:
@@ -165,6 +228,8 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             add(m.start("login"), m.end("login"), EntityType.ACCOUNT)
     for pattern in (_PHONE_RU, _PHONE_INTL):
         for m in pattern.finditer(text):
+            if pattern is _PHONE_RU and not _phone_groups(m.group()):
+                continue
             if 8 <= len(_digits(m.group())) <= 15 and not _DATE_INSIDE.search(m.group()):
                 add(m.start(), m.end(), EntityType.PHONE)
     for m in _PHONE_LOCAL.finditer(text):
@@ -172,8 +237,9 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             add(m.start(), m.end(), EntityType.PHONE)
     for m in _DIGIT_RUN.finditer(text):
         _cards(text, m, add)
+        _grouped(text, m, add)
     for m in _SNILS.finditer(text):
-        if validators.snils(_digits(m.group())):
+        if not _ipv4(m.group()) and validators.snils(_digits(m.group())):
             add(m.start(), m.end(), EntityType.SNILS, True)
     for m in _NUMBER.finditer(text):
         _number(text, m, add)
