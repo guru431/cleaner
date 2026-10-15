@@ -1,7 +1,10 @@
 """SEC-1: сетевые библиотеки доступны только модулям выхода в сеть."""
 import ast
+import socket
 from collections.abc import Iterator
 from pathlib import Path
+
+import pytest
 
 PACKAGE = Path(__file__).resolve().parents[1] / "cleaner"
 FORBIDDEN = ("httpx", "requests", "aiohttp", "socket", "urllib.request", "http.client")
@@ -27,6 +30,17 @@ def test_network_libraries_are_imported_only_by_egress_modules():
             if any(name == bad or name.startswith(bad + ".") for bad in FORBIDDEN):
                 offenders.append(f"{path.relative_to(PACKAGE)}: {name}")
     assert offenders == []
+
+
+def test_fast_suite_refuses_connections_beyond_loopback():
+    """Сторож из conftest.py: внешний адрес и имя для DNS — отказ, петля — работает."""
+    with pytest.raises(OSError, match="запрещено"):
+        socket.create_connection(("192.0.2.10", 443), timeout=0.2)
+    with pytest.raises(OSError, match="запрещено"):
+        socket.getaddrinfo("huggingface.co", 443)
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        with socket.create_connection(server.getsockname(), timeout=1):
+            pass
 
 
 def test_source_parses_as_python_3_12():

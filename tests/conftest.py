@@ -1,4 +1,6 @@
+import ipaddress
 import re
+import socket
 from concurrent.futures import Executor, Future
 from datetime import datetime, timedelta, timezone
 
@@ -20,6 +22,45 @@ from cleaner.web.jobs import Jobs
 
 _CSRF = re.compile(r'name="csrf" value="([^"]+)"')
 TEST_PASSWORD = "пароль-для-тестов"
+
+
+def _loopback(host) -> bool:
+    if host is None or host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(str(host).split("%")[0]).is_loopback
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _loopback_only(request, monkeypatch):
+    """NFR-8: быстрый набор работает без сети — проверяется фактом на каждом тесте, а не импортами.
+    У библиотек моделей и документов свои загрузчики (huggingface_hub, docling): тест импортов их
+    не видит, а новый путь к сети в быстром наборе упадёт здесь. Петля разрешена (тестовые серверы)."""
+    if request.node.get_closest_marker("integration") or request.node.get_closest_marker("manual"):
+        return
+    connect, connect_ex, getaddrinfo = socket.socket.connect, socket.socket.connect_ex, socket.getaddrinfo
+
+    def check(address) -> None:
+        if isinstance(address, tuple) and not _loopback(address[0]):
+            raise OSError(f"быстрый набор: соединение с {address[0]} запрещено")
+
+    def guarded_connect(self, address):
+        check(address)
+        return connect(self, address)
+
+    def guarded_connect_ex(self, address):
+        check(address)
+        return connect_ex(self, address)
+
+    def guarded_getaddrinfo(host, *args, **kwargs):
+        check((host,))         # запрос к DNS — уже выход в сеть
+        return getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
 
 
 @pytest.fixture
