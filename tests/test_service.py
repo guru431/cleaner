@@ -301,3 +301,69 @@ def test_key_error_from_a_layer_fails_the_text_instead_of_leaving_it_running(rep
     engines.completer.error = KeyError("guesses")
     service.check_risk(chat_id, user, done.id)
     assert repo.item(chat_id, done.id).risk_status == "failed"
+
+
+GUESS = '{"guesses": [{"kind": "org", "guess": "Ромашка", "clue": ""}]}'
+
+
+def test_risk_guesses_are_cleared_when_the_cleaned_text_changes(repo, chat, engines, with_ner):
+    """Обзор плана 2+4, m-2: догадки относятся к прежнему очищенному тексту — правка и «Очистить заново»
+    их стирают; правка, не изменившая текст, — нет."""
+    user, chat_id = chat
+    service = ChatService(repo, engines=engines)
+    item = service.add_input(chat_id, user, "Проект Заря, отдел Восток")
+    engines.completer.answers = [GUESS, GUESS]
+    service.check_risk(chat_id, user, item.id)
+    service.refresh(chat_id, user)
+    assert repo.item_risk(chat_id, item.id)["guesses"][0]["guess"] == "Ромашка"
+    service.mask_value(chat_id, user, item.id, "Заря", T.TERM)
+    stored = repo.item(chat_id, item.id)
+    assert (stored.sanitized, stored.risk_status, repo.item_risk(chat_id, item.id)) == ("Проект <TERM_1>, отдел Восток", "", None)
+    service.check_risk(chat_id, user, item.id)
+    engines.ner_layer.marks = {"Восток": T.ORG}
+    service.retry(chat_id, user, item.id)
+    stored = repo.item(chat_id, item.id)
+    assert (stored.sanitized, stored.risk_status, repo.item_risk(chat_id, item.id)) == ("Проект <TERM_1>, отдел <ORG_1>", "", None)
+
+
+def test_guesses_of_a_check_overtaken_by_an_edit_are_not_stored(repo, chat, engines):
+    """Обзор плана 2+4, m-2: пока модель думала, текст изменили — её догадки о прежнем тексте не записываются."""
+    user, chat_id = chat
+    service = ChatService(repo, engines=engines)
+    item = service.add_input(chat_id, user, "Проект Заря запущен")
+
+    def edited_meanwhile(sanitized):
+        service.mask_value(chat_id, user, item.id, "Заря", T.TERM)
+        return []
+
+    engines.risk = lambda: edited_meanwhile
+    service.check_risk(chat_id, user, item.id)
+    stored = repo.item(chat_id, item.id)
+    assert (stored.sanitized, stored.risk_status, repo.item_risk(chat_id, item.id)) == ("Проект <TERM_1> запущен", "", None)
+    assert repo.audit_events("risk_check") == []
+
+
+def test_double_click_queues_the_text_and_the_check_once(repo, chat, engines, monkeypatch):
+    """Обзор плана 2+4, m-10: два запроса прочли «готово» раньше, чем любой из них поставил задание в очередь."""
+    user, chat_id = chat
+    queue = []
+    service = ChatService(repo, engines=engines, submit=lambda fn, *args: queue.append(fn))
+    item = repo.add_item(chat_id, Item("a" * 32, 0, "input", "Проект Заря", "Проект Заря"))
+    monkeypatch.setattr(repo, "item", lambda chat_id_, item_id: item)
+    service.check_risk(chat_id, user, item.id)
+    with pytest.raises(EditRefused):
+        service.check_risk(chat_id, user, item.id)
+    service.retry(chat_id, user, item.id)
+    with pytest.raises(EditRefused):
+        service.retry(chat_id, user, item.id)
+    assert queue == [service.run_risk, service.process]
+
+
+def test_edit_keeps_items_cleaned_before_layers_4_and_5_unmarked(repo, chat):
+    """Обзор плана 2+4, m-12: у текста этапа 1 нет отметки о слоях — правка не приписывает ему «слои выключены»."""
+    user, chat_id = chat
+    state, version = repo.load_state(chat_id)
+    repo.commit_chat(chat_id, state, version, [Item("b" * 32, 0, "input", "Проект Заря", "Проект Заря")])
+    ChatService(repo).mask_value(chat_id, user, "b" * 32, "Заря", T.TERM)
+    stored = repo.item(chat_id, "b" * 32)
+    assert (stored.sanitized, stored.meta) == ("Проект <TERM_1>", {})

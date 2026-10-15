@@ -54,7 +54,9 @@ def _warnings(item: Item) -> list[str]:
             f"На страницах {_pages(item.meta['unread_pages'])} распознавание не нашло текста: "
             "их содержимое в очищенный текст не попало."
         )
-    ran = item.meta.get("layers", [])
+    ran = item.meta.get("layers")
+    if ran is None:             # текст очищен до появления слоёв 4 и 5 (этап 1): выключенными они не были (m-12)
+        return warnings
     for layer, label in LAYER_NAMES.items():
         if layer not in ran:
             warnings.append(

@@ -1,7 +1,10 @@
 import json
 import re
+import uuid
 
 from cleaner.core.types import EntityType as T
+from cleaner.storage.repo import Item
+from cleaner.web.app import create_app
 
 
 def first_item(repo, chat_id: str) -> str:
@@ -131,6 +134,33 @@ def test_residual_risk_guesses_are_shown_and_stored_encrypted(ivan, repo, engine
     repo.conn.execute("PRAGMA wal_checkpoint(FULL)")
     raw = b"".join(path.read_bytes() for path in tmp_path.glob("cleaner.db*"))
     assert "Rk17".encode("utf-8") not in raw
+
+
+def test_check_interrupted_by_a_restart_says_so_and_can_be_run_again(ivan, repo, clock, engines, jobs):
+    """Обзор плана 2+4, m-2: прерванная перезапуском проверка — не «локальная модель недоступна»."""
+    engines.completer.answers = [json.dumps({"guesses": []})]
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    item_id = first_item(repo, chat_id)
+    repo.set_item_risk_status(chat_id, item_id, "running", ("",))
+    create_app(repo, clock, secure_cookies=False, engines=engines, jobs=jobs)          # перезапуск службы
+    page = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    assert "Проверка прервана перезапуском службы" in page and "недоступна" not in page
+    assert f"/items/{item_id}/risk" in page
+    ivan.post(f"/chats/{chat_id}/items/{item_id}/risk")
+    assert repo.item(chat_id, item_id).risk_status == "done"
+
+
+def test_text_cleaned_before_layers_4_and_5_is_not_reported_as_cleaned_without_them(ivan, repo):
+    """Обзор плана 2+4, m-12: у текста этапа 1 слоёв 4 и 5 не было — «слой выключен» о нём неправда."""
+    chat_id = ivan.chat()
+    state, version = repo.load_state(chat_id)
+    old = Item(uuid.uuid4().hex, 0, "input", "Проект Заря запущен", "Проект Заря запущен")     # meta {} — как после миграции
+    repo.commit_chat(chat_id, state, version, [old])
+    assert "не выполнялся" not in ivan.get(f"/chats/{chat_id}/items/{old.id}").text
+    ivan.post(f"/chats/{chat_id}/mask", item_id=old.id, value="Заря", type="TERM")
+    page = ivan.get(f"/chats/{chat_id}/items/{old.id}").text
+    assert "&lt;TERM_1&gt;" in page and "не выполнялся" not in page
 
 
 def test_failed_residual_risk_check_says_so(ivan, repo, engines):

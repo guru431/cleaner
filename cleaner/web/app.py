@@ -72,6 +72,13 @@ class BodyLimit:
         await self.app(scope, limited, send)
 
 
+def _interrupt(repo: Repository) -> None:
+    """Всё, что осталось в очереди или в работе, — отказ «прервано» с кнопкой повтора (NFR-6)."""
+    interrupted = repo.fail_interrupted(INTERRUPTED)
+    if interrupted:
+        repo.audit("jobs_interrupted", count=interrupted)
+
+
 def create_app(
     repo: Repository, clock: Clock, *, secure_cookies: bool, max_text_chars: int = 500_000,
     tz: tzinfo = timezone.utc, engines: Any = None, jobs: Jobs | None = None, max_file_mb: int = 50,
@@ -81,7 +88,10 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
+        # Остановка: соединение с базой закрывается после этого (__main__). Недождавшиеся задания помечаются
+        # здесь, пока оно открыто, — а не случайной ошибкой записи в закрытую базу и пометкой при следующем старте.
         jobs.shutdown()
+        _interrupt(repo)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.repo = repo
@@ -93,9 +103,7 @@ def create_app(
     app.state.throttle = auth.Throttle(clock)
     app.state.secure_cookies = secure_cookies
     app.state.tz = tz
-    interrupted = repo.fail_interrupted(INTERRUPTED)  # служба одна, очередь в памяти: всё «в работе» прервано
-    if interrupted:
-        repo.audit("jobs_interrupted", count=interrupted)
+    _interrupt(repo)            # служба одна, очередь в памяти: всё «в работе» прервано (остановка без lifespan, сбой)
     app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static")), name="static")
     app.include_router(routes_auth.router)
     app.include_router(routes_chats.router)

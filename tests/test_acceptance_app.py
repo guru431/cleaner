@@ -79,32 +79,41 @@ def test_ac_1_11_only_the_login_page_is_open_without_a_session(app, browser):
             assert (response.status_code, response.headers.get("location")) == (303, "/login"), (method, path)
 
 
-def test_ac_1_11_one_user_cannot_reach_another_users_chat(browser, repo):
+def test_ac_1_11_one_user_cannot_reach_another_users_chat(app, browser, repo):
+    """Каждый маршрут с чатом в адресе — из списка маршрутов приложения, так что новый проверяется сам
+    (обзор плана 2+4, m-11). Чужой — администратор: маршруты только для администраторов тоже доходят до
+    проверки владельца. Поля запросов верные: без проверки владельца каждый из них изменил бы чат Анны."""
     anna, boris = browser(), browser()
     anna.user("anna")
     anna.login("anna")
-    boris.user("boris")
+    boris.user("boris", "admin")
     boris.login("boris")
     chat_id = anna.chat()
     anna.post(f"/chats/{chat_id}/input", text="почта a@x.example")
     item_id = repo.items(chat_id)[0].id
     [entity] = repo.load_state(chat_id)[0].entities.values()
-    for path in (
-        f"/chats/{chat_id}", f"/chats/{chat_id}/items/{item_id}",
-        f"/chats/{chat_id}/entities", f"/chats/{chat_id}/items/{item_id}/download",
-    ):
-        assert boris.get(path).status_code == 404, path
-    for path, fields in (
-        (f"/chats/{chat_id}/input", {"text": "x"}),
-        (f"/chats/{chat_id}/answer", {"answer": "x"}),
-        (f"/chats/{chat_id}/rename", {"title": "x"}),
-        (f"/chats/{chat_id}/mask", {"item_id": item_id, "value": "почта", "type": "TERM"}),
-        (f"/chats/{chat_id}/unmask", {"item_id": item_id, "value": "a@x.example"}),
-        (f"/chats/{chat_id}/entities/{entity.id}/unmask", {}),
-        (f"/chats/{chat_id}/entities/{entity.id}/retype", {"type": "TERM"}),
-        (f"/chats/{chat_id}/refresh", {}),
-        (f"/chats/{chat_id}/delete", {"confirm": "yes"}),
-    ):
-        assert boris.post(path, **fields).status_code == 404, path
+    ids = {"chat_id": chat_id, "item_id": item_id, "entity_id": entity.id}
+    fields = {
+        "text": "x", "answer": "x", "title": "x", "item_id": item_id, "value": "a@x.example", "type": "TERM",
+        "list": "never", "layer": "ner", "enabled": "no", "keep": entity.id, "drop": entity.id, "confirm": "yes",
+    }
+    checked = set()
+    for route in iter_route_contexts(app.routes):
+        if "{chat_id}" not in (route.path or ""):
+            continue
+        path = re.sub(r"\{([^}]+)\}", lambda m: ids[m.group(1)], route.path)      # KeyError — новый вид id: дополните ids
+        for method in sorted((route.methods or set()) - {"HEAD"}):
+            if method == "GET":
+                response = boris.get(path)
+            elif path.endswith("/upload"):
+                response = boris.upload(path, "письмо.txt", "почта b@x.example".encode("utf-8"))
+            else:
+                response = boris.client.request(method, path, data={"csrf": boris.csrf, **fields})
+            assert response.status_code == 404, (method, route.path)
+            checked.add(route.path)
+    item_routes = {f"/chats/{{chat_id}}/items/{{item_id}}/{name}" for name in ("status", "retry", "risk", "gold")}
+    assert item_routes | {"/chats/{chat_id}/layers", "/chats/{chat_id}/upload", "/chats/{chat_id}/delete"} <= checked
     assert "Консультация" not in boris.get("/chats").text
-    assert [i.sanitized for i in repo.items(chat_id)] == ["почта <EMAIL_1>"]
+    [item] = repo.items(chat_id)
+    assert (item.sanitized, item.status, item.risk_status) == ("почта <EMAIL_1>", "done", "")
+    assert (repo.chat(chat_id).title, repo.chat_layers(chat_id), repo.gold(), repo.dictionary()) == ("Консультация", {}, [], [])

@@ -99,6 +99,8 @@
 <p class="muted" data-poll="/chats/{{ chat.id }}/items/{{ item.id }}/status" data-poll-field="risk">Локальная модель проверяет текст…</p>
 {% elif item.risk_status == "failed" %}
 <p class="error">Проверка не выполнена: локальная модель недоступна или ответила не по правилам.</p>
+{% elif item.risk_status == "interrupted" %}
+<p class="error">Проверка прервана перезапуском службы: запустите её ещё раз.</p>
 {% elif risk is not none %}
 <ul>
   {% for guess in risk.guesses %}

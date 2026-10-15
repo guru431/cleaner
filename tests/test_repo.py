@@ -158,6 +158,9 @@ def test_failure_reason_is_kept_and_cleared(repo):
     assert repo.item(chat, item.id).meta == {"error": "Файл защищён паролем"}
     repo.set_item_status(chat, item.id, "queued")
     assert repo.item(chat, item.id).meta == {}
+    repo.set_item_status(chat, item.id, "failed", "Файл защищён паролем")
+    assert repo.queue_item(chat, item.id) and not repo.queue_item(chat, item.id)
+    assert (repo.item(chat, item.id).status, repo.item(chat, item.id).meta) == ("queued", {})
 
 
 def test_interrupted_processing_fails_at_start(repo):
@@ -165,10 +168,10 @@ def test_interrupted_processing_fails_at_start(repo):
     repo.add_item(chat, Item("a" * 32, 0, "input", "x", None, status="running"))
     repo.add_item(chat, Item("b" * 32, 0, "input", "y", None, status="queued"))
     repo.add_item(chat, Item("c" * 32, 0, "input", "z", "z"))
-    repo.set_item_risk_status(chat, "c" * 32, "running")
+    assert repo.set_item_risk_status(chat, "c" * 32, "running", ("",))
     assert repo.fail_interrupted("прервано") == 2
     assert [(i.status, i.meta.get("error"), i.risk_status) for i in repo.items(chat)] == [
-        ("failed", "прервано", ""), ("failed", "прервано", ""), ("done", None, "failed"),
+        ("failed", "прервано", ""), ("failed", "прервано", ""), ("done", None, "interrupted"),
     ]
 
 
@@ -176,7 +179,8 @@ def test_extracted_text_and_risk_are_stored_encrypted(tmp_path, repo):
     user, chat = new_chat(repo)
     item = repo.add_item(chat, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="running"))
     repo.set_item_original(chat, item.id, "извлечено Kk41", {"kind": "docx"})
-    repo.set_item_risk(chat, item.id, {"guesses": [{"kind": "org", "guess": "Ромашка Gg52", "clue": ""}]})
+    assert repo.set_item_risk_status(chat, item.id, "running", ("",))
+    assert repo.set_item_risk(chat, item.id, {"guesses": [{"kind": "org", "guess": "Ромашка Gg52", "clue": ""}]})
     stored = repo.item(chat, item.id)
     assert (stored.original, stored.meta, stored.risk_status) == ("извлечено Kk41", {"kind": "docx"}, "done")
     assert repo.item_risk(chat, item.id)["guesses"][0]["guess"] == "Ромашка Gg52"

@@ -24,6 +24,8 @@ _ATTEMPTS = 3
 LAYERS = ("ner", "llm")          # слой 4 и слой 5; совпадают с источником их фрагментов
 _INTERNAL = "Внутренняя ошибка очистки: текст не обработан и никуда не передан"
 _BUSY = "Чат меняли одновременно, текст не обработан — запустите его ещё раз"
+_IN_PROGRESS = "текст ещё обрабатывается"
+_RISK_IDLE = ("", "done", "failed", "interrupted")     # состояния проверки риска, из которых её можно запустить
 
 Work = Callable[[ChatState, list[Item], Settings], tuple[list[Item], list[Item]]]
 Submit = Callable[..., None]
@@ -257,10 +259,11 @@ class ChatService:
         if item is None or item.kind != "input":
             raise KeyError(item_id)
         if item.status in ("queued", "running"):
-            raise EditRefused("текст ещё обрабатывается")
+            raise EditRefused(_IN_PROGRESS)
         if not item.original:
             raise EditRefused("текст файла не был извлечён, а сам файл не хранится: загрузите его ещё раз")
-        self.repo.set_item_status(chat_id, item_id, "queued")
+        if not self.repo.queue_item(chat_id, item_id):        # второе нажатие успело прочесть «готово» (m-10)
+            raise EditRefused(_IN_PROGRESS)
         self.submit(self.process, chat_id, item_id, user_id)
 
     # --- проверка остаточного риска (FR-9.3) ------------------------------------------
@@ -271,33 +274,34 @@ class ChatService:
             raise KeyError(item_id)
         if item.status != "done":
             raise EditRefused("текст ещё не очищен")
-        if item.risk_status in ("queued", "running"):
-            raise EditRefused("проверка уже идёт")
         if self.engines is None:
             raise EditRefused("локальная модель не подключена")
-        self.repo.set_item_risk_status(chat_id, item_id, "queued")
+        if not self.repo.set_item_risk_status(chat_id, item_id, "queued", _RISK_IDLE):     # одним UPDATE (m-10)
+            raise EditRefused("проверка уже идёт")
         self.submit(self.run_risk, chat_id, item_id, user_id)
 
     def run_risk(self, chat_id: str, item_id: str, user_id: str) -> None:
-        """Задание: только очищенный текст и только локальной модели (FR-9.5)."""
+        """Задание: только очищенный текст и только локальной модели (FR-9.5).
+
+        Сначала проверка переходит в работу, потом читается текст: если его изменят после этого, догадки
+        не запишутся (set_item_risk), а не окажутся у нового текста."""
         try:
+            if not self.repo.set_item_risk_status(chat_id, item_id, "running", ("queued",)):
+                return                                    # проверку отменила смена текста или чат удалён
             item = self.repo.item(chat_id, item_id)
             if item is None:
                 return
-            self.repo.set_item_risk_status(chat_id, item_id, "running")
             guesses = self.engines.risk()(item.sanitized or "")
-            self.repo.set_item_risk(chat_id, item_id, risk.to_dict(guesses))
+            stored = self.repo.set_item_risk(chat_id, item_id, risk.to_dict(guesses))
         except Exception as exc:
             if isinstance(exc, KeyError) and self.repo.chat(chat_id) is None:
                 return                                    # чат удалили, пока шла проверка
             log.error("проверка риска: %s", type(exc).__name__)
-            try:
-                self.repo.set_item_risk_status(chat_id, item_id, "failed")
-            except KeyError:
-                return
+            self.repo.set_item_risk_status(chat_id, item_id, "failed", ("running",))
             self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="risk")
             return
-        self.repo.audit("risk_check", user_id, chat_id, guesses=len(guesses))
+        if stored:
+            self.repo.audit("risk_check", user_id, chat_id, guesses=len(guesses))
 
     # --- ответы модели и вид чата ----------------------------------------------------
 
@@ -350,10 +354,11 @@ class ChatService:
                 layers, ran = _cached_layers(item, on)
                 result = sanitize(state, item.original, settings, layers)
                 leaks["count"] += len(result.leaks)
-                if result.sanitized != item.sanitized or ran != item.meta.get("layers"):
+                # Текст, очищенный до слоёв 4 и 5 (этап 1), отметки о них не получает: выключенными они не были (m-12).
+                meta = (item.meta | {"layers": ran}) if "layers" in item.meta else item.meta
+                if result.sanitized != item.sanitized or meta != item.meta:
                     fresh = replace(
-                        item, sanitized=result.sanitized, spans=_spans(result), notices=_notices(result),
-                        meta=item.meta | {"layers": ran},
+                        item, sanitized=result.sanitized, spans=_spans(result), notices=_notices(result), meta=meta,
                     )
                     pairs.append((item, fresh))
             for old, fresh in pairs:
