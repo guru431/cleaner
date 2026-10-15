@@ -14,7 +14,8 @@ _PEM = re.compile(
     r"(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
     re.DOTALL,
 )
-_JWT = re.compile(r"(?<![\w-])eyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]{8,}(?![\w-])")
+# Подпись может быть пустой («alg: none»): такой токен раньше находило правило JWT из detect-secrets.
+_JWT = re.compile(r"(?<![\w-])eyJ[\w-]{8,}\.eyJ[\w-]{8,}\.[\w-]*")
 _TOKEN = re.compile(
     r"""(?<![\w-])(?:
         AKIA[0-9A-Z]{16}
@@ -113,7 +114,17 @@ _TEMPLATE = re.compile(
 )
 
 # Правила по энтропии и по ключевым словам шумят на обычном тексте; контекст у нас свой.
-_SKIPPED_PLUGINS = frozenset({"Base64HighEntropyString", "HexHighEntropyString", "KeywordDetector"})
+# Правила npm, JWT и OpenAI без начала слова перебирают строку от каждого «//», «eyJ», «sk-» —
+# квадратичное время под общей блокировкой интерпретатора, то есть остановка службы для всех.
+# Их токены находят свои правила: _TOKEN (npm_, sk-), _JWT и ключ «_authToken=» в .npmrc.
+_SKIPPED_PLUGINS = frozenset({
+    "Base64HighEntropyString", "HexHighEntropyString", "KeywordDetector",
+    "NpmDetector", "JwtTokenDetector", "OpenAIDetector",
+})
+# Правила IBM, Cloudant и Softlayer разбирают пробелы вокруг «=» тремя повторами подряд (« *», « +»,
+# « *»): на длинном ряде пробелов это кубическое время. Ряд сжимается до одного пробела — повторы
+# принимают любое их число, а двух пробелов подряд нет ни в одном значении этих правил.
+_SPACES = re.compile(" {2,}")
 
 
 @lru_cache(maxsize=1)
@@ -133,18 +144,25 @@ def _library_plugins() -> tuple:
 def _library_spans(text: str, own: list[Span]) -> list[Span]:
     """Токены известных сервисов по правилам detect-secrets — там, где свои правила ничего не нашли."""
     spans: list[Span] = []
+    # Занятые знаки — картой, а не перебором найденного: токен, повторённый на строке выгрузки сотни
+    # раз, давал кубическое время (каждое повторение сверялось с каждым найденным, и столько же раз).
+    taken = bytearray(len(text))
+    for span in own:
+        taken[span.start:span.end] = b"\x01" * (span.end - span.start)
     offset = 0
     for line in text.splitlines(keepends=True):
-        for plugin in _library_plugins():
-            for value in plugin.analyze_string(line):
-                if len(value) < 8:
-                    continue
-                position = line.find(value)
-                while position >= 0:
-                    start, end = offset + position, offset + position + len(value)
-                    if not any(span.start < end and start < span.end for span in own + spans):
-                        spans.append(Span(start, end, EntityType.SECRET, name, validated=True))
-                    position = line.find(value, position + 1)
+        squeezed = _SPACES.sub(" ", line)
+        values = dict.fromkeys(value for plugin in _library_plugins() for value in plugin.analyze_string(squeezed))
+        for value in values:
+            if len(value) < 8:
+                continue
+            position = line.find(value)    # значение ищется в настоящей строке, не в сжатой
+            while position >= 0:
+                start, end = offset + position, offset + position + len(value)
+                if taken.find(1, start, end) < 0:
+                    spans.append(Span(start, end, EntityType.SECRET, name, validated=True))
+                    taken[start:end] = b"\x01" * len(value)
+                position = line.find(value, position + 1)
         offset += len(line)
     return spans
 
@@ -184,14 +202,20 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         for pattern in (_PEM, _JWT, _TOKEN)
         for m in pattern.finditer(text)
     ]
+    hidden_until = 0
     for m in _KEY_NAME.finditer(text):
         key = m.group("key")
+        # Пара внутри уже скрытого значения ничего не добавит: её значение кончается там же.
+        # Без этого «token=token=…» разбирал значение до конца строки от каждого ключа.
+        if m.start() < hidden_until:
+            continue
         if not _KEY_WORD.search(key) or (_NOT_SECRET_KEY.fullmatch(key) and not _SECRET_END.search(key)):
             continue
         value = _VALUE_AT.match(text, m.end())
         bounds = _value(value, minimum=2) if value else None
         if bounds:
             spans.append(Span(*bounds, EntityType.SECRET, name))
+            hidden_until = bounds[1]
     for pattern in (_XML, _URL, _CLI, _SECURE, _AUTH, _BEARER):
         for m in pattern.finditer(text):
             bounds = _value(m, minimum=2 if pattern is _CLI else 3)

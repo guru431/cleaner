@@ -112,6 +112,34 @@ def test_allowlist_pragma_does_not_switch_the_library_rules_off():
     assert found(f"sendgrid: {SENDGRID}  # pragma: allowlist secret") == {SENDGRID}
 
 
+UNSIGNED_JWT = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ('//registry.npmjs.org/:_au' 'thToken=0f1e2d3c-4b5a-6978' '-8796-a5b4c3d2e1f0',
+         '0f1e2d3c-4b5a-6978' '-8796-a5b4c3d2e1f0'),
+        ("//registry.npmjs.org/:_authToken=npm_" + "a1B2c3D4e5F6" * 3, "npm_" + "a1B2c3D4e5F6" * 3),
+        ("ключ REDACTED_OPENAI_KEY в логе",
+         "REDACTED_OPENAI_KEY"),
+        (f"заголовок {UNSIGNED_JWT} в логе", UNSIGNED_JWT),
+    ],
+)
+def test_tokens_of_the_slow_library_rules_are_found_by_own_rules(text, value):
+    """Находка «NpmDetector is quadratic…»: правила npm, OpenAI и JWT из detect-secrets квадратичны
+    на длинной строке и выключены; их токены находят свои правила."""
+    assert found(text) == {value}
+
+
+def test_library_rules_still_see_a_key_after_a_run_of_spaces():
+    """Ряд пробелов сжимается перед правилами detect-secrets, а значение ищется в настоящей строке."""
+    key = "Zx81kLmN02pQ" * 3 + "Ab1-Cd2_"
+    assert len(key) == 44
+    text = "ibm_cloud_iam_key" + " " * 40 + key
+    assert found(text) == {key}
+
+
 @pytest.mark.parametrize(
     "text, value",
     [
