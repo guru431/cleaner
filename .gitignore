@@ -15,3 +15,6 @@ __pycache__/
 
 # models downloaded by `cleaner models download` for development
 /models/
+
+# brainstorming and plan-execution scratch (ledgers, briefs, mockups)
+.superpowers/
