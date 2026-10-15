@@ -187,6 +187,16 @@ def test_nothing_is_restored_inside_a_foreign_link(settings, answer):
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
 
 
+def test_host_is_after_the_last_at_sign(settings):
+    """Найдено при исправлении обратных косых, P1: браузер берёт хост за последним «@» адреса, а не за первым —
+    «https://a@наш:1@evil…» ведёт на evil. Имя пользователя и пароль у нашего адреса ссылку чужой не делают."""
+    answer = "https://a@host-1.domain-1.example:1@evil.example.org/?q=<EMAIL_1>"
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+    own = restore(link_state(), "https://a:b@host-1.domain-1.example:8080/?q=<EMAIL_1>", settings)
+    assert own.text == "https://a:b@srv-dc01.contoso.ru:8080/?q=ivanov@contoso.ru"
+
+
 def test_own_links_and_labels_next_to_foreign_links_are_restored(settings):
     state = link_state()
     own = restore(state, "https://host-1.domain-1.example/?q=<EMAIL_1>", settings)
