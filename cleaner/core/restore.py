@@ -32,8 +32,9 @@ _AUTHORITY = (
 # Всё, что может стать ссылкой. Цель ссылки Markdown берётся вместе со скобками внутри («x_(1).png»),
 # атрибут HTML с адресом — целиком, с кавычками внутри. Голый адрес (со схемой или на «www.») тянется
 # до пробела и не кончается знаком препинания или кавычкой; адрес сразу после кавычки кончается
-# такой же кавычкой («"https://…","<EMAIL_1>"»), а без неё идёт и через кавычки («?q='…'»).
-_START = rf"(?:{_AUTHORITY}|(?<![\w.-])www\.)"
+# такой же кавычкой («"https://…","<EMAIL_1>"»), а без неё идёт и через кавычки («?q='…'»). «www.» начинает
+# адрес после любого знака: cmark-gfm и remark-gfm делают ссылкой «_www.evil…», marked — и «xwww.evil…».
+_START = rf"(?:{_AUTHORITY}|www\.)"
 _END = r"[^\s\"'`.,;:!?)\]}]"
 # Строки в image-set() и -webkit-image-set() — в любом варианте, не только в первом, — и в src() браузер
 # тоже загружает сам, как url(). Аргументы такого вызова берутся целиком, по скобкам любого вида: внутри
@@ -118,12 +119,13 @@ _LINK = re.compile(
 # пользователя с паролем не содержит «/?#\» и кончается на последнем «@» («a@наш:1@evil…» ведёт на evil),
 # хост кончается на «/», «\», «:», «?» или «#». Пробелы имя пользователя не кончают: браузер кодирует их как
 # «%20», и «https://наш x@evil…» в атрибуте ведёт на evil. У «file:///путь» хоста нет — это локальный файл (а
-# «file:////узел/…» — путь UNC, его хост находится как обычно). Имя пользователя не тянется через начало
-# адреса с особой схемой («//a:https:@…»): у того адреса свой хост, и поиск остаётся линейным на «https:https:…»;
-# любое другое начало адреса содержит «/» или «\», на которых имя пользователя тоже кончается.
+# «file:////узел/…» — путь UNC, его хост находится как обычно); у «file://C:/…» и «file:\\C:\…» тоже: буква диска
+# с «:» или «|» перед косой — начало пути, а не хост (WHATWG URL, file host state). Имя пользователя не тянется через
+# начало адреса с особой схемой («//a:https:@…»): у того адреса свой хост, и поиск остаётся линейным на
+# «https:https:…»; любое другое начало адреса содержит «/» или «\», на которых имя пользователя тоже кончается.
 _URL_HOSTS = re.compile(
-    r"file:[/\\]{3}(?![/\\])"
-    rf"|(?:(?:{_AUTHORITY})[/\\]*+(?:(?:(?!{_SPECIAL})[^/?#\\])*@)?|(?<![\w.-])(?=www\.))"
+    r"file:[/\\]{2}(?:[/\\](?![/\\])|[a-z][:|](?![^/\\?#]))"
+    rf"|(?:(?:{_AUTHORITY})[/\\]*+(?:(?:(?!{_SPECIAL})[^/?#\\])*@)?|(?=www\.))"
     r"(\[[^\]]+\]|[^/\\:?#\s]+)",
     re.IGNORECASE,
 )
@@ -169,6 +171,10 @@ def _named_charref(ref: str, reader: str) -> str:
 
 # Экранирование CommonMark: «\» перед знаком препинания ASCII — сам этот знак, и в тексте, и в цели ссылки.
 _MD_DECODED = re.compile(rf"\\[!-/:-@\[-`{{-~]|{_CHARREF.pattern}")
+# «\», которая осталась в адресе, Markdown-читатели (cmark-gfm, remark-gfm, marked, markdown-it, mistune) кодируют в
+# «%5C»: она уже не кончает ни имя пользователя, ни хост, и «https://наш\@evil…» ведёт на evil. В таком прочтении
+# вместо «\» стоит этот знак: хост с ним (как с «%5C» и с NUL) браузер отвергает, и адрес никуда не ведёт.
+_ENCODED_BACKSLASH = "\0"
 
 
 def _md(text: str) -> str:
@@ -183,14 +189,20 @@ def _readings(text: str, markdown: bool = False) -> tuple[str, ...]:
     адреса: «&#47;&#47;evil…» в атрибуте — это «//evil…», «наш&commat;evil…» — «наш@evil…». Где окажется ответ,
     неизвестно, поэтому ссылка наша, только если наша при каждом прочтении. Одного html.unescape мало: в атрибуте
     «&#47;&#47;наш&nbspevil…» — один хост с «&nbsp» внутри, а html.unescape раскрыл бы «&nbsp» в пробел, и хост
-    оборвался бы на нашем имени. markdown — цель ссылки Markdown или адрес простого текста для remark-gfm: в них
-    CommonMark раскрывает и экранирования «\\» (_md). В остальных местах «\\» остаётся собой: «file:\\\\\\C:\\…» в коде —
-    три косые и локальный файл, а не узел «C». Одинаковые прочтения проверяются один раз."""
+    оборвался бы на нашем имени. markdown — цель ссылки Markdown, голый адрес или адрес простого текста для
+    remark-gfm: в них CommonMark раскрывает и экранирования «\\» (_md), а «\\», которая осталась, Markdown-читатели
+    кодируют в «%5C» (_ENCODED_BACKSLASH) — и в раскрытом тексте, и в голом адресе, который они берут из записи как
+    есть; remark-gfm берёт его раскрытым, если хост в записи не подошёл (srv_01\\.evil…). В атрибуте и в CSS «\\»
+    остаётся собой — браузер читает её как «/». Одинаковые прочтения проверяются один раз."""
     if "&" not in text and not (markdown and "\\" in text):
         return (text,)
     readings = [_CHARREF.sub(lambda m: _charref(m.group(), reader), text) for reader in ("html", "attr")]
-    md = _md(text) if markdown else _CHARREF.sub(lambda m: _charref(m.group(), "md"), text)
-    return tuple(dict.fromkeys((text, *readings, md)))
+    if markdown:
+        md = _md(text)
+        readings += (md, md.replace("\\", _ENCODED_BACKSLASH), text.replace("\\", _ENCODED_BACKSLASH))
+    else:
+        readings.append(_CHARREF.sub(lambda m: _charref(m.group(), "md"), text))
+    return tuple(dict.fromkeys((text, *readings)))
 
 
 # Слово простого текста и начало адреса, которое в нём ищет remark-gfm (react-markdown — во многих чатах): он
@@ -414,7 +426,7 @@ class _Restorer:
         hosts = [m.group(1) for m in _URL_HOSTS.finditer(target) if m.group(1) is not None]
         if not hosts and self.base:
             return False        # с <base href> адрес без узла уходит на узел из base — его не проверить
-        return all(self._host_is_ours(host) for host in hosts)
+        return all(self._host_is_ours(host) for host in hosts if _ENCODED_BACKSLASH not in host)
 
     def _outside_tags(self, text: str, position: int) -> bool:
         if self.tags is None or self.tags[0] is not text:
@@ -455,7 +467,8 @@ class _Restorer:
             # Вложенный документ iframe: браузер раскрывает ссылки на знаки дважды (атрибут, затем сама страница),
             # и «&amp;#47;&amp;#47;evil» внутри — это «//evil». Нашим он не бывает.
             return self._inner(m.group()) != m.group()
-        markdown = any(m.group(name) is not None for name in ("md", "ref", "dest"))
+        # Цель ссылки Markdown и голый адрес читают и Markdown-читатели: голый адрес они делают ссылкой (_readings).
+        markdown = any(m.group(name) is not None for name in ("md", "ref", "dest", "url", "dq", "sq"))
         if self._is_own(target, markdown) and not (css and any("\\" in reading for reading in _readings(m.group()))):
             return False        # ссылка на наш же узел восстанавливается как обычный текст
         restored = self._inner(m.group())
