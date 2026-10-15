@@ -31,6 +31,9 @@ from cleaner.core.types import ChatState, Settings
         # Слова перед тире после «пароль», «--» и связка «это» перед значением.
         "пароль а б в г д е " * 5000, "пароль " + "a-" * 50000 + " — x", "пароль -- " * 10000, "пароль — это " * 8000,
         "".join("пароль — слово%d " % i for i in range(5000)),
+        # Скобки в конце значения, атрибут и вызов с именами после ключа.
+        "password=" + ")" * 100000, "password=" + "a." * 50000 + "1", "password=f(" + "a," * 50000 + "1)",
+        "pwd=" + "(a)" * 30000,
         # Имя, часть которого — метка (5.7, шаг 4).
         "<ORG_1>." * 20000, "a.<ORG_1>." * 10000, "<ORG_1>a." * 15000, "<ORG_1" * 20000, "<ORG_1>." + "a.b." * 25000,
     ],
@@ -41,7 +44,8 @@ from cleaner.core.types import ChatState, Settings
         "spaced_field", "spaced_fields", "pwd_paths", "token_templates", "net_use", "mysql", "add_key",
         "distinct_tokens", "distinct_short_tokens",
         "password_words", "password_hyphenated_word", "password_double_hyphens", "password_copulas",
-        "password_distinct_words", "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail",
+        "password_distinct_words", "closing_brackets", "attribute_chain", "call_names", "bracket_pairs",
+        "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):

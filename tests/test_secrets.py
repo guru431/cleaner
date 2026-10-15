@@ -474,6 +474,87 @@ def test_passwords_with_brackets_are_still_found(text, value):
 @pytest.mark.parametrize(
     "text",
     [
+        "password = self.password", "token = settings.SECRET_KEY", 'api_key = os.environ.get("K", "d")',
+        "password = get_secret(name)", "password = get_secret(name, default)", "token = tokens[i]",
+        "$password = $cred.Password", "secret: config.oauth.client_secret", "pwd = decrypt(blob,key)",
+    ],
+    ids=["self", "settings", "environ_get", "call_name", "call_two_names", "index_name", "powershell", "chain",
+         "call_no_space"],
+)
+def test_attribute_or_call_with_names_under_a_secret_key_is_code(text):
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: атрибут через точку и вызов с аргументами после ключа
+    становились секретом («self.password», «get_secret(name»)."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("password = Summer.2024", "Summer.2024"), ("pwd=Ab.Cd", "Ab.Cd"), ("password: summer.night", "summer.night"),
+        ("password: My.Password", "My.Password"), ('password = "self.password"', "self.password"),
+        ("password=Ab(1)", "Ab(1)"), ("password=Pass(word)", "Pass(word)"), ("Пароль: Ivan.Petrov", "Ivan.Petrov"),
+    ],
+    ids=["dot_digits", "dot_words", "lower_words", "secret_word", "quoted", "call_digit", "capital_call", "phrase"],
+)
+def test_passwords_with_a_dot_or_brackets_that_are_no_code_are_still_found(text, value):
+    """Атрибут — код, только если первое имя со строчной буквы, «_» или «$» и последнее содержит слово секрета;
+    вызов с аргументами — если имя функции такое же, а аргументы — имена."""
+    assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("pwd=Ab[1]", "Ab[1]"), ("password=(Qw1)", "(Qw1)"), ("f(password=abc)", "abc"), ("pwd=Ab{1}", "Ab{1}"),
+        ("connect(pwd=Ab[1])", "Ab[1]"), ("password=(Qw1).", "(Qw1)"), ("token=Ab(1)]", "Ab(1)"),
+    ],
+    ids=["square", "round", "call_end", "curly", "inside_call", "full_stop", "foreign_square"],
+)
+def test_closing_bracket_stays_with_the_value_when_its_pair_is_inside(text, value):
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: закрывающая скобка отрезалась всегда («Ab[1»)."""
+    assert found(text) == {value}
+
+
+def test_word_or_number_in_brackets_is_still_prose():
+    for text in (
+        "password: (optional)", "Пароль (временный) действует сутки", "password: (empty)", "token: (N/A)",
+        "Requirements for password: (1) eight characters", "Пароль: (см. выше)", "password = (none)",
+    ):
+        assert found(text) == set(), text
+
+
+def test_private_key_header_in_prose_is_not_a_secret():
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: правило detect-secrets брало фразу заголовка за секрет."""
+    for text in (
+        "Файл начинается со строки BEGIN RSA PRIVATE KEY", "ключ BEGIN OPENSSH PRIVATE KEY, а не PuTTY-User-Key-File-2",
+    ):
+        assert found(text) == set(), text
+
+
+def test_private_key_block_after_its_header_in_prose_is_one_fragment():
+    block = "REDACTED_PRIVATE_KEY"
+    assert found(f"Файл начинается со строки BEGIN RSA PRIVATE KEY:\n{block}\n") == {block}
+
+
+ARTIFACTORY = "AKC" + "p8Xk2pQ9vLm4Rt7Wz1"
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        (f'"artifactory": "{ARTIFACTORY}"', ARTIFACTORY), (f"токен {ARTIFACTORY} в профиле", ARTIFACTORY),
+        ("в профиле указан AP6abcdEFGH12 и всё", "AP6abcdEFGH12"),
+    ],
+    ids=["quoted", "spaces", "password"],
+)
+def test_artifactory_value_is_found_without_its_surroundings(text, value):
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: значение правила Artifactory включало кавычки и пробелы."""
+    assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "PWD=/home/ivanov", "OLDPWD=~/src", "msbuild /p:Configuration=Release",
         "dotnet msbuild /p:Configuration=Release;Platform=x64", "mysqldump --password --verbose crm",
         "Пароль по-прежнему не подходит", "пароль кто-то сменил",

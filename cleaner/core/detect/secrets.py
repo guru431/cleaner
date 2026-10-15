@@ -167,27 +167,45 @@ _NOT_SECRET = frozenset({
     "enabled", "disabled", "bearer", "basic", "string", "text", "prompt", "да", "нет", "ok",
 })
 # Подстановки и выражения — не значения: ${VAR}, $(...), $env:VAR, %VAR%, {{...}}, <...>, [[...]],
-# $VAR и $var без цифр (переменная), (... . «$ecret123» с цифрами — значение.
+# $VAR и $var без цифр (переменная), «(…» без закрывающей скобки и слово или число в скобках — пояснение
+# («(optional)», «(см. выше)», «(1)»). «$ecret123» с цифрами и «(Qw1)» — значения.
 _TEMPLATE = re.compile(
-    r"^(?:[*xX•·.]+|\$\{.*\}|\$\(.*|\$env:\w+|%\w+%|\{\{.*\}\}|<[^>]*>|\[\[[^\]]*\]\]|\$[A-Za-z_]+|\(.*)$"
+    r"^(?:[*xX•·.]+|\$\{.*\}|\$\(.*|\$env:\w+|%\w+%|\{\{.*\}\}|<[^>]*>|\[\[[^\]]*\]\]|\$[A-Za-z_]+"
+    r"|\([^)]*|\((?:[^\W\d_]+(?:[./-][^\W\d_]+)*\.?|\d+)\))$"
 )
+# Закрывающая скобка в конце значения без кавычек — его часть, если её пара внутри значения («Ab[1]», «(Qw1)»);
+# иначе это скобка вокруг («f(password=abc)»).
+_OPENING = {")": "(", "]": "[", "}": "{"}
 # Вызов или индекс в коде после ключа — тоже не значение: «password = input()», «token = os.environ["TOKEN"]»,
 # «api_key=config.get("key")» давали секреты «input(», «os.environ[», и обрывок кода скрывался во всём чате.
 # Имя через точку перед скобкой — код всегда («getpass.getpass()», «$cred.GetNetworkCredential().Password»).
-# Имя без точки — только когда скобка кончает значение и за ней сразу «)», «]» или кавычка (вызов без
-# аргументов, аргумент или индекс строкой): «password=Ab(1» и «Summer2024(» в конце строки — пароли.
-# Значение в кавычках не проверяется: «"Qwerty1("» — строка, а не выражение.
-_CALL = re.compile(r"\$?[A-Za-z_]\w*(?P<dotted>(?:\.[A-Za-z_]\w*)+)?[(\[]")
+# Имя без точки — когда скобки пусты («input()»), за скобкой сразу кавычка (аргумент или индекс строкой) или
+# в скобках только имена из букв, а имя функции — со строчной буквы, «_» или «$» («get_secret(name)», «tokens[i]»;
+# аргументы после «, » в значение не входят). «password=Ab(1», «Ab(1)», «Pass(word)», «Summer2024(» — пароли.
+# Атрибут без скобок — код, если имена из букв и «_», первое — со строчной буквы, «_» или «$», а последнее содержит
+# слово секрета: «self.password», «settings.SECRET_KEY», «$cred.Password». «Summer.2024», «Ab.Cd», «summer.night»,
+# «My.Password» — пароли. Значение в кавычках не проверяется: «"Qwerty1("», «"self.password"» — строки.
+_CALL = re.compile(r"(?P<name>\$?[A-Za-z_]\w*)(?P<dotted>(?:\.[A-Za-z_]\w*)+)?[(\[]")
+_CLOSING = {"(": ")", "[": "]"}
+_VARIABLE = re.compile(r"\$|[a-z_]")
+_NAMES = re.compile(r"[A-Za-z_][A-Za-z_.]*(?:,[A-Za-z_][A-Za-z_.]*)*")
+_ATTRIBUTE = re.compile(r"(?:\$[A-Za-z_]|[a-z_])[A-Za-z_]*(?:\.[A-Za-z_]+)*\.(?P<last>[A-Za-z_]+)")
 
 # Правила по энтропии и по ключевым словам шумят на обычном тексте; контекст у нас свой.
 # Правила npm, JWT и OpenAI без начала слова перебирают строку от каждого «//», «eyJ», «sk-» —
 # квадратичное время под общей блокировкой интерпретатора, то есть остановка службы для всех.
 # Их токены находят свои правила: _TOKEN (npm_, sk-), _JWT и ключ «_authToken=» в .npmrc.
 # IP-адреса — работа слоя 3: там они получают подмену и восстанавливаются (спецификация 6.2).
+# Правило приватных ключей находит только фразу заголовка («BEGIN RSA PRIVATE KEY») — и в прозе тоже, а сам ключ
+# не скрывает; блок PEM целиком находит _PEM.
 _SKIPPED_PLUGINS = frozenset({
     "Base64HighEntropyString", "HexHighEntropyString", "KeywordDetector",
-    "NpmDetector", "JwtTokenDetector", "OpenAIDetector", "IPPublicDetector",
+    "NpmDetector", "JwtTokenDetector", "OpenAIDetector", "IPPublicDetector", "PrivateKeyDetector",
 })
+# Выражение без групп отдаёт совпадение целиком, а правило Artifactory берёт в него и края: пробел, «=», «:» и кавычку
+# перед значением, пробел или кавычку после. Края в значение не входят («=» в конце — часть ключа Azure в base64).
+_LEADING_EDGE = " \t\r\n=:\""
+_TRAILING_EDGE = " \t\r\n\""
 # Правила IBM, Cloudant и Softlayer разбирают пробелы вокруг «=» тремя повторами подряд (« *», « +»,
 # « *»): на длинном ряде пробелов это кубическое время. Ряд сжимается до одного пробела — повторы
 # принимают любое их число, а двух пробелов подряд нет ни в одном значении этих правил.
@@ -217,14 +235,18 @@ def _library_rules() -> tuple[re.Pattern[str], ...]:
 
 def _library_hits(squeezed: str) -> dict[str, list[int]]:
     """Значения правил в строке -> их начала, в порядке analyze_string. Значение — как у него: findall отдаёт
-    непустые группы совпадения, а у выражения без групп — всё совпадение."""
+    непустые группы совпадения, а у выражения без групп — всё совпадение (здесь — без краёв, см. _LEADING_EDGE)."""
     hits: dict[str, list[int]] = {}
     for regex in _library_rules():
         groups = range(1, regex.groups + 1) if regex.groups else (0,)
         for m in regex.finditer(squeezed):
             for group in groups:
-                if len(m.group(group) or "") >= 8:
-                    hits.setdefault(m.group(group), []).append(m.start(group))
+                value, start = m.group(group) or "", m.start(group)
+                if not group:                           # края совпадения целиком (_LEADING_EDGE)
+                    stripped = value.lstrip(_LEADING_EDGE)
+                    value, start = stripped.rstrip(_TRAILING_EDGE), start + len(value) - len(stripped)
+                if len(value) >= 8:
+                    hits.setdefault(value, []).append(start)
     return hits
 
 
@@ -285,8 +307,7 @@ def _value(m: re.Match[str], minimum: int = 3) -> tuple[int, int] | None:
         if _TEMPLATE.match(m.group(group)):    # до обрезки: закрывающая скобка — часть подстановки
             return None
         if group == "bare":
-            while end > start and m.string[end - 1] in ".,)]}":
-                end -= 1
+            end = _trimmed_end(m.string, start, end)
             if _code(m.string, start, end):
                 return None
         value = m.string[start:end]
@@ -296,11 +317,34 @@ def _value(m: re.Match[str], minimum: int = 3) -> tuple[int, int] | None:
     return None
 
 
+def _trimmed_end(string: str, start: int, end: int) -> int:
+    """Конец значения string[start:end] без точек, запятых и скобок в конце, кроме скобки с парой внутри (_OPENING).
+    Скобки считаются один раз: пересчёт на каждом знаке шёл квадратичное время на ряде «)))…»."""
+    balance = {c: string.count(o, start, end) - string.count(c, start, end) for c, o in _OPENING.items()}
+    while end > start and string[end - 1] in ".,)]}":
+        closing = string[end - 1]
+        if closing in balance:
+            if balance[closing] >= 0:          # открывающих не меньше, чем закрывающих: пара последней внутри
+                break
+            balance[closing] += 1
+        end -= 1
+    return end
+
+
 def _code(string: str, start: int, end: int) -> bool:
-    """Значение без кавычек string[start:end] — вызов или индекс в коде (см. _CALL)."""
+    """Значение без кавычек string[start:end] — вызов, индекс или атрибут в коде (см. _CALL)."""
     call = _CALL.match(string, start, end)
-    return call is not None and (
-        call.group("dotted") is not None or (call.end() == end < len(string) and string[end] in ")]\"'")
+    if call is None:
+        attribute = _ATTRIBUTE.fullmatch(string, start, end)
+        return attribute is not None and _KEY_WORD.search(attribute.group("last")) is not None
+    if call.group("dotted") is not None or (call.end() == end < len(string) and string[end] in ")]\"'"):
+        return True
+    closed = string[end - 1] == _CLOSING[string[call.end() - 1]]
+    if not closed and not string.startswith(",", end):     # за значением — следующий аргумент («f(name, x)»)
+        return False
+    arguments = string[call.end():end - closed]
+    return (closed and not arguments) or (
+        _VARIABLE.match(call.group("name")) is not None and _NAMES.fullmatch(arguments) is not None
     )
 
 
