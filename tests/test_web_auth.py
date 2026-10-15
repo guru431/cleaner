@@ -1,9 +1,12 @@
 import asyncio
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode
 
+import anyio
 import pytest
+from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 
 from cleaner.web import auth
@@ -176,17 +179,75 @@ def test_spraying_random_logins_after_the_pause_keeps_the_account_count(clock):
 def test_password_checks_over_the_limit_get_try_later_and_are_not_failures(browser, repo, monkeypatch):
     """Обзор 1В: Argon2 — 64 МиБ на проверку, а анонимных входов в пуле потоков до сорока одновременно.
     Сверх предела проверка ждёт свободного места, не дождалась — «попробуйте позже»."""
-    monkeypatch.setattr(auth, "_hashing", threading.BoundedSemaphore(1))
-    monkeypatch.setattr(auth, "HASH_WAIT", 0)
+    gate = threading.Event()
+    with ThreadPoolExecutor(1) as slots:
+        monkeypatch.setattr(auth, "_hashing", slots)
+        monkeypatch.setattr(auth, "HASH_WAIT", 0.2)
+        b = browser()
+        b.user("ivan")
+        assert b.login("ivan", "неверно").status_code == 401         # место освобождается и после неудачи
+        slots.submit(gate.wait, 5)                                    # единственное место занято другим входом
+        busy = b.login("ivan")
+        gate.set()
+        assert busy.status_code == 503 and "попробуйте позже" in busy.text
+        assert b.login("ivan").status_code == 303
+    assert [e.event for e in repo.audit_events()] == ["login", "login_failed"]
+
+
+def _shared_threads(total: int) -> None:
+    anyio.to_thread.current_default_thread_limiter().total_tokens = total
+
+
+def test_logins_waiting_for_a_password_slot_hold_no_shared_threads(browser, monkeypatch):
+    """Находка «Small gaps…»: вход, ждущий места для Argon2, держал поток общего пула Starlette до 5 с, и сорок
+    параллельных POST /login останавливали все страницы. Теперь ожидание — в цикле событий, без потока."""
+    entered, gate = threading.Semaphore(0), threading.Event()
+
+    class Held(PasswordHasher):
+        def verify(self, hash, password):
+            entered.release()
+            gate.wait(5)
+            return super().verify(hash, password)
+
     b = browser()
     b.user("ivan")
-    assert b.login("ivan", "неверно").status_code == 401             # место освобождается и после неудачи
-    auth._hashing.acquire()                                           # единственное место занято другим входом
-    busy = b.login("ivan")
-    auth._hashing.release()
-    assert busy.status_code == 503 and "попробуйте позже" in busy.text
-    assert b.login("ivan").status_code == 303
-    assert [e.event for e in repo.audit_events()] == ["login", "login_failed"]
+    with b.client as client:                    # один цикл событий на все запросы, как у uvicorn
+        monkeypatch.setattr(auth, "_hasher", Held(time_cost=1, memory_cost=1024, parallelism=1))
+        client.portal.call(_shared_threads, auth.HASH_SLOTS)     # общий пул — четыре потока вместо сорока
+        client.get("/login")
+        form = {"login": "ivan", "password": "неверно", "csrf": client.cookies["cleaner_login"]}
+        statuses: list[int] = []
+        logins = [threading.Thread(target=lambda: statuses.append(client.post("/login", data=form).status_code))
+                  for _ in range(auth.HASH_SLOTS + 2)]
+        page = threading.Thread(target=lambda: statuses.append(client.get("/login").status_code))
+        try:
+            for login in logins:
+                login.start()
+            assert all(entered.acquire(timeout=5) for _ in range(auth.HASH_SLOTS))     # места заняты, двое ждут
+            page.start()
+            page.join(2)
+            assert statuses == [200]            # страница не ждёт, пока входы освободят потоки
+        finally:
+            gate.set()
+            for thread in (*logins, page):
+                thread.join(5)
+    assert sorted(statuses) == [200] + [401] * (auth.HASH_SLOTS + 2)
+
+
+def test_admin_password_hashing_waits_for_the_same_slots(monkeypatch):
+    """Находка «Small gaps…»: хэш нового пароля (создание пользователя, смена пароля) шёл мимо предела в четыре места."""
+    monkeypatch.setattr(auth, "_hasher", PasswordHasher(time_cost=1, memory_cost=1024, parallelism=1))
+    gate, hashed = threading.Event(), []
+    with ThreadPoolExecutor(1) as slots:
+        monkeypatch.setattr(auth, "_hashing", slots)
+        slots.submit(gate.wait, 5)                                    # единственное место занято входом
+        admin = threading.Thread(target=lambda: hashed.append(auth.hash_password("пароль-администратора")))
+        admin.start()
+        admin.join(0.2)
+        waited = list(hashed)
+        gate.set()
+        admin.join(5)
+    assert waited == [] and hashed[0].startswith("$argon2id$")
 
 
 def test_hsts_header_only_under_tls(repo, clock):

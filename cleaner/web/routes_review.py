@@ -55,6 +55,11 @@ def _warnings(item: Item) -> list[str]:
             f"На страницах {_pages(item.meta['unread_pages'])} распознавание не нашло текста: "
             "их содержимое в очищенный текст не попало."
         )
+    if item.meta.get("hidden_sheets"):          # только число: имена листов — данные пользователя, а meta не шифруется
+        warnings.append(
+            f"Скрытые листы книги ({item.meta['hidden_sheets']}) не извлечены: их содержимое в очищенный текст "
+            "не попало. Если оно нужно — покажите листы в Excel и загрузите файл снова."
+        )
     ran = item.meta.get("layers")
     if ran is None:             # текст очищен до появления слоёв 4 и 5 (этап 1): выключенными они не были (m-12)
         return warnings

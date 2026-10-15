@@ -163,6 +163,20 @@ def test_text_cleaned_before_layers_4_and_5_is_not_reported_as_cleaned_without_t
     assert "&lt;TERM_1&gt;" in page and "не выполнялся" not in page
 
 
+def test_hidden_sheets_left_out_of_the_text_are_reported(ivan, repo):
+    """Находка «Small gaps…»: в meta — только число скрытых листов, имена листов — данные пользователя."""
+    chat_id = ivan.chat()
+    state, version = repo.load_state(chat_id)
+    book = Item(uuid.uuid4().hex, 0, "input", "Сотрудник", "Сотрудник", source="file",
+                meta={"kind": "xlsx", "hidden_sheets": 2, "layers": ["ner", "llm"]})
+    plain = Item(uuid.uuid4().hex, 0, "input", "Сотрудник", "Сотрудник", source="file",
+                 meta={"kind": "xlsx", "layers": ["ner", "llm"]})
+    repo.commit_chat(chat_id, state, version, [book, plain])
+    notice = "Скрытые листы книги (2) не извлечены: их содержимое в очищенный текст не попало"
+    assert notice in ivan.get(f"/chats/{chat_id}/items/{book.id}").text
+    assert "Скрытые листы" not in ivan.get(f"/chats/{chat_id}/items/{plain.id}").text
+
+
 def test_failed_residual_risk_check_says_so(ivan, repo, engines):
     engines.completer.answers = ["не JSON"]
     chat_id = ivan.chat()
