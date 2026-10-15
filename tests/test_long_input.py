@@ -79,6 +79,8 @@ from cleaner.core.types import EntityType as T
         ".a" * 15000, "*.ab" * 8000, ">.ab.cd" * 5000,
         # «\\.» — выражение в строке JSON (второе ревью, P3): имя входа e-mail не начинается со второй «\».
         "a\\\\.b." * 4000, "1\\\\.2\\\\.3\\\\.4\\\\." * 2000,
+        # «\@» — «@» адреса в строке Perl (ревью раунда 5, P3): цепочки адресов, ряды без домена и «\\@».
+        "a\\@b.c." * 8000, "a\\@" * 30000, "a.b\\@" * 15000, "a\\\\@b.c" * 10000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -99,6 +101,7 @@ from cleaner.core.types import EntityType as T
         "email_labels_open", "email_labels_after",
         "escaped_mixed", "escaped_after_expressions", "escaped_word_bounds", "escaped_open_word_bound", "escaped_labels",
         "mixed_case_parts", "leading_dots", "wildcards", "after_label_signs", "json_mixed", "json_addresses",
+        "escaped_at_chain", "escaped_at_run", "escaped_at_logins", "escaped_backslash_at",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):

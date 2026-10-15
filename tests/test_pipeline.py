@@ -973,6 +973,25 @@ def test_email_with_escaped_dots_next_to_a_replacement_keeps_them(state, setting
     assert restore(state, expected, settings).text == text.replace("domain-1", "contoso").replace("example", "ru")
 
 
+def test_email_written_with_an_escaped_at_is_masked_and_restored_with_it(state, settings):
+    """Ревью раунда 5, P3: в строке Perl и PHP «ivanov\\@contoso.ru» скрывался только домен, а имя входа уходило в облако.
+    Адрес через «\\@» — адрес; значение — как написано, и метка восстанавливается с «\\@», как адрес через «\\.». Рядом с
+    выданной заменой он делится, и «\\» остаётся перед «@». Повторная вставка ничего не меняет."""
+    text = r'my $to = "ivanov\@contoso.ru"; # и почта ivanov@contoso.ru'
+    result = sanitize(state, text, settings)
+    assert result.sanitized == r'my $to = "<EMAIL_1>"; # и почта <EMAIL_2>' and result.deliverable
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert (len(state.entities), len(state.surrogates)) == counts
+    assert restore(state, result.sanitized, settings).text == text
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    near = r'$cc = "petrov\@srv02.domain-1.example";'
+    expected = r'$cc = "<ACCOUNT_1>\@host-2.domain-1.example";'
+    assert sanitize(state, near, settings).sanitized == expected
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert restore(state, expected, settings).text == r'$cc = "petrov\@srv02.contoso.ru";'
+
+
 def test_ipv4_written_with_escaped_dots_is_one_address_with_the_same_separators(state, settings):
     """Второе ревью, P2: «^10\\.1\\.2\\.35$» не находился, а известный адрес в такой записи получал отдельную метку <IP_N>.
     Это тот же адрес — та же сущность и та же подмена, записанная через «\\.»; восстановление пишет оригинал с тем же

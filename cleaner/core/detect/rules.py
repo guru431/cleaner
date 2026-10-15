@@ -22,10 +22,11 @@ _AFTER = 15
 # Адрес в регулярном выражении или правиле почты пишут через «\.» («^i\.ivanov@contoso\.ru$»), внутри строки JSON, Java,
 # C# — через «\\.» (hostmap.dotted): это точка и в имени входа, и в домене. После «\» имя входа начинается только с
 # буквы или цифры («CORP\ivanov@…»): иначе каждое «\.» и «\\.» цепочки «a\.a\.…» без «@» было бы началом попытки до
-# конца цепочки.
+# конца цепочки. В строке Perl и PHP в двойных кавычках и в выражении Perl «@» пишут через «\» («ivanov\@contoso.ru»):
+# одна обратная косая перед «@» — часть адреса; «\\@» — обратная косая и массив Perl, не адрес.
 _DOMAIN_PART = rf"(?:[\w-]+|{_LABEL.pattern})"
 _EMAIL = re.compile(
-    rf"(?<![\w.+-])(?:(?<!\\)|(?=[\w+-]))(?:[\w.+-]|\\{{1,2}}\.)+@"
+    rf"(?<![\w.+-])(?:(?<!\\)|(?=[\w+-]))(?:[\w.+-]|\\{{1,2}}\.)+\\?@"
     rf"(?:{_DOMAIN_PART}(?:\\{{0,2}}\.{_DOMAIN_PART})+|{_LABEL.pattern})"
 )
 # «схема://» прямо перед «…@хост»: то, что до «@», — пользователь адреса, а не e-mail. Знаки «?#=»
@@ -297,9 +298,11 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         if url and not _NOT_USERINFO.search(url.group("user") + local):
             continue        # пользователь адреса, а не e-mail: вход — правило _URL_LOGIN ниже
         if _IPV4_DOMAIN.fullmatch(hostmap.dotted(domain)):
-            # Вход вида ivanov@10.1.2.5; служебный («user@», «root@») человека не выдаёт, как и в адресе.
-            if local.lower() not in skip:
-                add(m.start(), m.start() + len(local), EntityType.ACCOUNT)
+            # Вход вида ivanov@10.1.2.5; служебный («user@», «root@») человека не выдаёт, как и в адресе. «\» перед «@» —
+            # не часть имени входа.
+            login = local.removesuffix("\\")
+            if login.lower() not in skip:
+                add(m.start(), m.start() + len(login), EntityType.ACCOUNT)
             continue
         add(m.start(), end, EntityType.EMAIL, True)
     for m in _URL_LOGIN.finditer(text):

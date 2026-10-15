@@ -63,6 +63,19 @@ def test_open_address_in_another_notation_is_not_a_leak(state, settings, change)
     assert leaked("x 010.001.002.005 y", state, change(state, settings)) == []
 
 
+@pytest.mark.parametrize("text, found", [
+    (r'my $to = "ivanov\@contoso.ru";', r"ivanov\@contoso.ru"),
+    (r"/^ivanov\@contoso\.ru$/", r"ivanov\@contoso\.ru"),
+    (r'"ivanov\\@contoso.ru"', None),
+], ids=["perl", "regex", "escaped-backslash"])
+def test_known_email_written_with_an_escaped_at_is_a_leak(state, settings, text, found):
+    """Ревью раунда 5, P3: адрес в строке Perl и PHP пишут через «\\@» — это тот же адрес, и проверка утечек находит
+    известный. «\\\\@» — обратная косая и массив Perl, не «@»: такой записи адреса нет."""
+    sanitize(state, "почта ivanov@contoso.ru", settings)
+    [email] = state.entities.values()
+    assert leaked(text, state, settings) == ([(found, email.id)] if found else [])
+
+
 def test_replacement_and_other_addresses_are_not_leaks(state, settings):
     """Подмена в другой записи — подмена, как на шаге 1, даже если совпала с настоящим адресом другой сущности
     (позже в чате появился адрес, равный выданной подмене); адрес не из чата, адрес внутри цепочки через двоеточие

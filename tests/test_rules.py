@@ -62,6 +62,26 @@ def test_backslash_and_dot_elsewhere_make_no_email(text):
     assert T.EMAIL not in types(text)
 
 
+@pytest.mark.parametrize("text, expected", [
+    (r'my $to = "ivanov\@contoso.ru";', {(T.EMAIL, r"ivanov\@contoso.ru")}),
+    (r'$to = "i.ivanov\@mail.contoso.ru";', {(T.EMAIL, r"i.ivanov\@mail.contoso.ru")}),
+    (r"if ($from =~ /^ivanov\@srv02\.contoso\.ru$/)", {(T.EMAIL, r"ivanov\@srv02\.contoso\.ru")}),
+    (r'"ssh ivanov\@10.1.2.5"', {(T.ACCOUNT, "ivanov")}),
+], ids=["perl", "dotted-login", "regex", "address"])
+def test_email_with_an_escaped_at_is_found(text, expected):
+    """Ревью раунда 5, P3: в строке Perl и PHP в двойных кавычках и в выражении Perl «@» пишут через «\\» — домен скрывал
+    слой 3, а имя входа уходило открытым. Одна обратная косая перед «@» — часть адреса и остаётся в его значении."""
+    assert found(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    r'"ivanov\\@contoso.ru"', r'print "user\@ ok"', r"C:\Users\@admin",
+], ids=["escaped-backslash", "no-domain", "path"])
+def test_escaped_at_elsewhere_makes_no_email(text):
+    """Обратная сторона: «\\\\@» — обратная косая и массив Perl, не «@»; без домена с точкой адреса нет."""
+    assert T.EMAIL not in types(text)
+
+
 def test_phone_in_two_notations():
     result = found("Тел. +7 (916) 123-45-67, запасной 89161234567")
     assert (T.PHONE, "+7 (916) 123-45-67") in result
