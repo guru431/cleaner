@@ -13,6 +13,15 @@ from cleaner.clock import Clock
 
 MIN_PASSWORD = 12
 _hasher = PasswordHasher()          # Argon2id с параметрами библиотеки по умолчанию
+# Проверка берёт 64 МиБ, а вход выполняется в пуле потоков — до сорока анонимных проверок разом, около
+# 2,5 ГиБ. Одновременно идут не больше HASH_SLOTS; остальные ждут места не дольше HASH_WAIT секунд.
+HASH_SLOTS = 4
+HASH_WAIT = 5.0
+_hashing = threading.BoundedSemaphore(HASH_SLOTS)
+
+
+class Busy(Exception):
+    """Места для проверки пароля заняты дольше HASH_WAIT: пароль не проверялся."""
 
 
 def hash_password(password: str) -> str:
@@ -23,13 +32,18 @@ def hash_password(password: str) -> str:
 
 def verify_password(password_hash: str | None, password: str) -> bool:
     """Для неизвестного логина хэш всё равно считается: по времени ответа логины не различить."""
-    if password_hash is None:
-        _hasher.hash(password)
-        return False
+    if not _hashing.acquire(timeout=HASH_WAIT):
+        raise Busy()
     try:
-        return _hasher.verify(password_hash, password)
-    except (VerificationError, InvalidHashError):
-        return False
+        if password_hash is None:
+            _hasher.hash(password)
+            return False
+        try:
+            return _hasher.verify(password_hash, password)
+        except (VerificationError, InvalidHashError):
+            return False
+    finally:
+        _hashing.release()
 
 
 def new_token() -> str:
@@ -75,14 +89,15 @@ class Throttle:
             self.failures[login.lower()] = (count + 1, self.clock.now())
 
     def _forget(self) -> None:
-        """Место под новый логин. Забываются записи без действующей паузы: иначе перебор случайных
-        логинов вытеснил бы запись атакуемой учётной записи и обнулил её счёт. Если пауза действует
-        у всех, уходит самая старая запись."""
-        expired = [key for key in self.failures if not self._wait(key)]
-        for key in expired:
+        """Место под новый логин. Забываются записи без действующей паузы и меньше чем с пятью неудачами:
+        иначе перебор случайных логинов вытеснил бы запись атакуемой учётной записи и обнулил её счёт —
+        и когда её пауза уже истекла. Нет таких — уходит одна запись без паузы, нет и их — самая давняя.
+        Есть ли логин в базе, не учитывается: иначе по ответам 401 и 429 после перебора было бы видно,
+        какие логины существуют."""
+        idle = [key for key in self.failures if not self._wait(key)]      # от давней неудачи к свежей
+        light = [key for key in idle if self.failures[key][0] < self.FREE]
+        for key in light or idle[:1] or [next(iter(self.failures))]:
             del self.failures[key]
-        if not expired:
-            self.failures.pop(next(iter(self.failures)))
 
     def succeeded(self, login: str) -> None:
         with self.lock:

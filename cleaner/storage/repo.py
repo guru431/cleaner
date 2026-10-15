@@ -22,6 +22,14 @@ class StaleState(Exception):
     """Состояние чата изменилось после чтения: работу нужно повторить на свежем."""
 
 
+class CheckpointBusy(Exception):
+    """Чат удалён, но журнал WAL не усечён: копии его страниц, с ключом, остаются там до следующей
+    контрольной точки. Её не пускает другое соединение с базой — копия, eval."""
+
+
+_CHECKPOINT_ATTEMPTS = 3            # каждая попытка сама ждёт читателей до busy_timeout (5 с)
+
+
 # Слои 4 и 5 по умолчанию для чатов без явного решения (FR-3.8). Слой 4 включён по умолчанию;
 # слой 5 — после замера задачи 23 (раздел 19 спецификации).
 DEFAULT_LAYERS = {"ner": True, "llm": False}
@@ -251,11 +259,18 @@ class Repository:
         """Строки чата и его ключ удаляются; secure_delete перезаписывает их на диске (FR-1.4).
 
         Копии страниц с ключом чата остаются в файле журнала WAL до контрольной точки, а соединение
-        службы живёт долго: контрольная точка с усечением журнала выполняется сразу.
+        службы живёт долго: контрольная точка с усечением журнала выполняется сразу. Занята (первый
+        столбец ответа — 1) — ещё попытка; между попытками замок отпущен, чтобы служба не стояла.
+        Не вышло — CheckpointBusy: чат удалён, а молчать о копиях в журнале нельзя.
         """
         with self.lock:
             self.conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
-            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        for _ in range(_CHECKPOINT_ATTEMPTS):
+            with self.lock:
+                busy = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+            if not busy:
+                return
+        raise CheckpointBusy(chat_id)
 
     def load_state(self, chat_id: str) -> tuple[ChatState, int]:
         row = self._one("SELECT state_enc, version FROM chats WHERE id = ?", chat_id)

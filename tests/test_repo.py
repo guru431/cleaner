@@ -6,7 +6,7 @@ import pytest
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Policy
 from cleaner.storage import crypto, db
-from cleaner.storage.repo import Item, Repository, StaleState
+from cleaner.storage.repo import CheckpointBusy, Item, Repository, StaleState
 
 
 def new_chat(repo, title="Чат"):
@@ -72,6 +72,14 @@ def test_deleted_chat_key_is_gone_from_the_wal_file(tmp_path, repo):
     repo.delete_chat(chat)
     raw = b"".join(path.read_bytes() for path in tmp_path.glob("cleaner.db*"))
     assert bytes(wrapped) not in raw
+
+
+def test_deleting_a_chat_does_not_hide_a_wal_that_was_not_truncated(repo, wal_reader):
+    """Обзор 1В: занятая контрольная точка — копии страниц с ключом чата остались в журнале WAL."""
+    user, chat = new_chat(repo)
+    with pytest.raises(CheckpointBusy):
+        repo.delete_chat(chat)
+    assert repo.chat(chat) is None
 
 
 def test_wrong_master_key_stops_the_start(tmp_path, repo, clock):

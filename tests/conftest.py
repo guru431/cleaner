@@ -176,6 +176,19 @@ def repo(tmp_path, clock):
     conn.close()
 
 
+@pytest.fixture
+def wal_reader(tmp_path, repo):
+    """Другое соединение держит снимок базы (копия, eval): контрольная точка с усечением журнала WAL не
+    проходит. Соединение службы его не ждёт — без пятисекундного busy_timeout."""
+    repo.conn.execute("PRAGMA busy_timeout = 0")
+    reader = db.connect(tmp_path / "cleaner.db")
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM chats").fetchone()
+    yield reader
+    reader.execute("COMMIT")
+    reader.close()
+
+
 class Browser:
     """Браузер для тестов: свои cookie, вход, формы с токеном."""
 

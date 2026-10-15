@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 from urllib.parse import urlencode
 
 import pytest
@@ -155,6 +156,37 @@ def test_spraying_random_logins_does_not_reset_a_throttled_account(clock):
         throttle.failed(f"random{number}")
     assert throttle.wait("ivan") == 2.0
     assert len(throttle.failures) <= auth.Throttle._KEEP
+
+
+def test_spraying_random_logins_after_the_pause_keeps_the_account_count(clock):
+    """Обзор 1В: пауза учётной записи истекла — перебор случайных логинов всё равно не обнуляет её счёт.
+    Вытесняются записи с меньше чем пятью неудачами; есть ли логин в базе, не важно: иначе по ответам
+    401 и 429 после перебора было бы видно, какие логины существуют."""
+    throttle = auth.Throttle(clock)
+    for _ in range(6):
+        throttle.failed("ivan")
+    clock.advance(seconds=3)
+    for number in range(auth.Throttle._KEEP):
+        throttle.failed(f"random{number}")
+    throttle.failed("ivan")
+    assert throttle.wait("ivan") == 4.0
+    assert len(throttle.failures) <= auth.Throttle._KEEP
+
+
+def test_password_checks_over_the_limit_get_try_later_and_are_not_failures(browser, repo, monkeypatch):
+    """Обзор 1В: Argon2 — 64 МиБ на проверку, а анонимных входов в пуле потоков до сорока одновременно.
+    Сверх предела проверка ждёт свободного места, не дождалась — «попробуйте позже»."""
+    monkeypatch.setattr(auth, "_hashing", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(auth, "HASH_WAIT", 0)
+    b = browser()
+    b.user("ivan")
+    assert b.login("ivan", "неверно").status_code == 401             # место освобождается и после неудачи
+    auth._hashing.acquire()                                           # единственное место занято другим входом
+    busy = b.login("ivan")
+    auth._hashing.release()
+    assert busy.status_code == 503 and "попробуйте позже" in busy.text
+    assert b.login("ivan").status_code == 303
+    assert [e.event for e in repo.audit_events()] == ["login", "login_failed"]
 
 
 def test_hsts_header_only_under_tls(repo, clock):
