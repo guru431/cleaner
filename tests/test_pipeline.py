@@ -308,6 +308,16 @@ def test_real_name_next_to_a_label_part_is_masked(state, settings, retype, text,
     assert (len(state.entities), len(state.surrogates)) == counts
 
 
+def test_name_longer_than_a_dns_name_is_masked_and_restored_by_parts(state, settings):
+    """FINDINGS P2 «Layer 3 takes quadratic time on a long dotted run»: имя длиннее 253 знаков целиком в таблицу не
+    записывается — поиск замен перебирал бы цепочки частей до его длины, — но скрывается и восстанавливается по частям."""
+    text = "цепочка " + "srv-01." * 40 + "contoso.ru"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "цепочка " + "host-1." * 40 + "domain-1.example" and result.deliverable
+    assert sanitize(state, result.sanitized, settings).sanitized == result.sanitized
+    assert restore(state, result.sanitized, settings).text == text
+
+
 def test_rule_inside_a_name_with_a_label_part_leaves_the_label(state, settings):
     """Правило пользователя поглощает фрагмент целиком (5.7): метка во фрагмент имени не входит и остаётся (FR-5.9)."""
     sanitize(state, "узел srv01.contoso.ru и srv01", settings)

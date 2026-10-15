@@ -24,6 +24,9 @@ _LEGAL_FORMS = frozenset(
     {"ооо", "зао", "оао", "пао", "ао", "ип", "нко", "гуп", "муп", "фгуп", "llc", "inc", "ltd", "gmbh", "corp", "co"}
 )
 _NAME = re.compile(r"[\w-]+(?:\.[\w-]+)*")
+# Подмена имени в тексте. Номера длиннее двадцати цифр счётчик не выдаст, и дальше цепочка цифр не берётся: все её
+# начала собирались бы квадратичное время.
+_ISSUED_NAME = re.compile(r"(host|sub|domain)-([0-9]{1,20})")
 _STRICTNESS = {Policy.BLOCK: 2, Policy.HIDE: 1}         # прочие политики — 0
 
 
@@ -111,6 +114,8 @@ class Resolver:
         self.real_ips: set[str] = set()
         self._text_addresses: set[str] | None = None
         self._open_addresses: set[str] | None = None
+        self._text_names: set[str] | None = None
+        self._text_labels: set[str] | None = None
 
     @staticmethod
     def _dictionary_key(type_: EntityType, value: str) -> str:
@@ -169,8 +174,15 @@ class Resolver:
         return self.state.issued[key]
 
     def _taken(self, candidate: str) -> bool:
+        if self._text_names is None:
+            # Подмены «host-N», «sub-N», «domain-N», которые стоят в тексте, и внутри слова тоже: «host-12» — это и
+            # «host-1». Собираются один раз на текст: искать каждую новую по всему тексту было бы квадратично.
+            self._text_names = {
+                f"{m.group(1)}-{m.group(2)[:length]}"
+                for m in _ISSUED_NAME.finditer(self.text_lower) for length in range(1, len(m.group(2)) + 1)
+            }
         return (
-            candidate in self.text_lower
+            candidate in self._text_names
             or (T.HOST, candidate) in self.index
             or (T.DOMAIN, candidate) in self.index
         )
@@ -183,9 +195,11 @@ class Resolver:
 
     def _label_taken(self, type_: EntityType, number: int) -> bool:
         """Метка с этим номером уже встречалась как посторонняя или стоит в тексте (в любом виде)."""
+        if self._text_labels is None:      # один раз на текст, как и подмены имён (_taken)
+            self._text_labels = {m.group() for m in labels.SHAPE.finditer(self.text)}
         for style in ("angle", "square"):
             label = labels.format_label(style, type_, number)
-            if label in self.state.foreign_labels or label in self.text:
+            if label in self.state.foreign_labels or label in self._text_labels:
                 return True
         return False
 
@@ -405,6 +419,9 @@ class Resolver:
         policies = self.settings.policies
         primary = max(owners, key=lambda owner: (_STRICTNESS.get(policies.get(owner[0].type), 0), owner[1]))[0]
         surrogate = ".".join([*fakes, domain_fake])
-        if left:
+        # Имя длиннее имени DNS (253 знака) — цепочка вроде «a.a.a….ru» — целиком не записывается: поиск замен и
+        # проверка ссылок перебирают цепочки частей до длины самой длинной записанной, и имя из тысяч частей делало бы
+        # их кубическими. Его части выданы, и восстанавливается оно по частям.
+        if left and len(value) <= 253:
             self.state.surrogates.setdefault(surrogate, Surrogate(primary.id, value, "host"))
         return primary, surrogate

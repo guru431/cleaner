@@ -2,15 +2,19 @@
 
 Очистка не ограничена по времени, поэтому одна такая вставка заняла бы обработчик на минуту.
 """
+import re
 import time
 
 import pytest
 
 from cleaner.core.detect import rules
-from cleaner.core.detect.base import DetectContext
+from cleaner.core.detect.base import DetectContext, load_builtin
+from cleaner.core.detect.merge import MergedSpan
+from cleaner.core.entities.resolve import Resolver
 from cleaner.core.pipeline import DETECTORS, sanitize
 from cleaner.core.restore import StreamRestorer, restore
 from cleaner.core.types import ChatState, Settings
+from cleaner.core.types import EntityType as T
 
 
 @pytest.mark.parametrize(
@@ -39,6 +43,8 @@ from cleaner.core.types import ChatState, Settings
         "BEGIN PRIVATE KEY\nMIIEowIBAAKCAQEA\n" + "-" * 100000, "BEGIN PRIVATE KEY\nMIIEowIBAAKCAQEA\nEND PRIVATE KEY\n" * 5000,
         # Имя, часть которого — метка (5.7, шаг 4).
         "<ORG_1>." * 20000, "a.<ORG_1>." * 10000, "<ORG_1>a." * 15000, "<ORG_1" * 20000, "<ORG_1>." + "a.b." * 25000,
+        # Цепочка частей через точку, которая кончается не однобуквенной частью: её суффиксы сверяются со списками.
+        "abc.def." * 20000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -50,7 +56,7 @@ from cleaner.core.types import ChatState, Settings
         "password_distinct_words", "closing_brackets", "attribute_chain", "call_names", "bracket_pairs",
         "camel_attribute", "pem_begins", "dashes", "pem_dashed_headers", "pem_bare_headers", "pem_dashed_body",
         "pem_bare_blocks",
-        "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail",
+        "labels", "labels_parts", "labels_glued", "labels_open", "labels_tail", "dotted_words",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
@@ -59,6 +65,38 @@ def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
         started = time.perf_counter()
         detector.detect(text, ctx)
         assert time.perf_counter() - started < 0.5, detector.name
+
+
+@pytest.mark.parametrize(
+    "text", ["abc.def." * 2500, "abc.def." * 2500 + "ru", "srv-01." * 2500 + "contoso.ru", "a." * 10000 + "ru"],
+    ids=["words", "words_suffix", "parts_suffix", "letters_suffix"],
+)
+def test_sanitize_again_and_restore_are_fast_on_a_long_dotted_run(text):
+    """FINDINGS P2 «Layer 3 takes quadratic time on a long dotted run»: суффиксы цепочки сверялись со списками
+    квадратичное время, а цепочка с настоящим суффиксом становилась одним именем из тысяч частей — и поиск замен в
+    следующем тексте и в ответе перебирал цепочки частей до его длины."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    for step in ("sanitize", "again", "restore", "link"):
+        started = time.perf_counter()
+        if step == "restore":
+            restore(state, sanitized, Settings())
+        elif step == "link":
+            restore(state, f"https://{sanitized}/", Settings())
+        else:
+            sanitized = sanitize(state, text, Settings()).sanitized
+        assert time.perf_counter() - started < 0.5, step
+
+
+@pytest.mark.parametrize("name, type_", [("h{}.contoso.ru", T.HOST), ("u{}@contoso.ru", T.EMAIL)], ids=["hosts", "emails"])
+def test_new_replacements_are_checked_against_the_text_once(name, type_):
+    """Подмена имени и метка не должны совпасть со строкой текста (FR-5.7): каждая новая искалась по всему тексту, и
+    тысячи новых имён или адресов в длинном тексте давали квадратичное время."""
+    text = "слово " * 80000 + " ".join(name.format(i) for i in range(4000))
+    spans = [MergedSpan(m.start(), m.end(), type_, ("infra",)) for m in re.finditer(r"\S+[.@]\S+", text)]
+    resolver = Resolver(ChatState(chat_id="long", net_key=bytes(32)), Settings(), text, load_builtin().generic_labels)
+    started = time.perf_counter()
+    resolver.run(text, spans)
+    assert time.perf_counter() - started < 0.5
 
 
 def test_run_of_eights_gives_no_phones():
