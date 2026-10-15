@@ -511,17 +511,88 @@ def test_rule_off_whole_parts_keeps_the_stricter_policy_of_the_record(state, tex
     assert sanitize(state, text, lenient).sanitized == text.rsplit(" ", 1)[0] + " <TERM_1>"
 
 
-def test_rule_parts_of_a_split_record_keep_their_own_types(state):
+@pytest.mark.parametrize("email", [Policy.MASK, Policy.BLOCK])
+def test_rule_parts_of_a_split_record_keep_their_own_types(state, email):
     """Рядом с выданной заменой поглощённая запись делится (5.10), и каждая часть, задетая правилом, получает тип своего
-    правила, а не самого длинного: «ivanov» (PERSON) и «fabrikam» (TERM) в ivanov@host-1.fabrikam.ru. Запись строже
-    правила делится так же: политику частей держат их правила."""
-    settings = Settings(policies=default_policies() | {T.EMAIL: Policy.BLOCK, T.TERM: Policy.HIDE})
+    правила, а не самого длинного: «ivanov» (PERSON) и «fabrikam» (TERM) в ivanov@host-1.fabrikam.ru. Адрес строже своих
+    частей не делится: при EMAIL=BLOCK части держали бы только свои политики, и выдача не блокировалась (5.10)."""
+    settings = Settings(policies=default_policies() | {T.EMAIL: email, T.TERM: Policy.HIDE})
     sanitize(state, "узел srv01.contoso.ru", settings)
     ops.mask(state, "fabrikam", T.TERM)
     ops.mask(state, "ivanov", T.PERSON)
     result = sanitize(state, "почта ivanov@host-1.fabrikam.ru", settings)
-    assert result.sanitized == "почта <PERSON_1>@host-1.<TERM_1>"
+    if email is Policy.BLOCK:
+        assert result.sanitized == "почта <EMAIL_1>"
+        assert [state.entities[s.entity_id].type for s in result.blocked] == [T.EMAIL]
+        return
+    assert result.sanitized == "почта <PERSON_1>@host-1.<TERM_1>" and result.deliverable
     assert restore(state, result.sanitized, settings).text == "почта ivanov@srv01.<TERM_1>"
+
+
+@pytest.mark.parametrize("text, split, original", [
+    ("Писал с petrov@domain-1.example", "Писал с <ACCOUNT_1>@domain-1.example", "Писал с petrov@contoso.ru"),
+    ("почта petrov@srv02.domain-1.example", "почта <ACCOUNT_1>@host-2.domain-1.example", "почта petrov@srv02.contoso.ru"),
+    (
+        "почта postmaster@srv02.domain-1.example", "почта postmaster@host-2.domain-1.example",
+        "почта postmaster@srv02.contoso.ru",
+    ),
+], ids=["login", "login-and-part", "role-mailbox-and-part"])
+@pytest.mark.parametrize("policy", [Policy.MASK, Policy.HIDE, Policy.BLOCK])
+def test_email_next_to_a_replacement_keeps_the_email_policy(state, text, split, original, policy):
+    """Ревью раунда 5, P2: адрес рядом с выданной заменой делился (5.10), и его части держали политики ACCOUNT и HOST, а
+    не EMAIL: при «скрывать без восстановления» <ACCOUNT_1>@domain-1.example восстанавливался в адрес целиком, при
+    «блокировать» выдача не блокировалась. Адрес строже своих частей — одна метка EMAIL, и её значение — адрес с
+    оригиналом замены, а не с подменой: так он восстанавливается и после смены политики, и сам адрес в тексте — та же
+    метка. При обычной политике адрес делится, как прежде."""
+    settings = Settings(policies=default_policies() | {T.EMAIL: policy})
+    sanitize(state, "Сервер srv-dc01.contoso.ru", settings)
+    result = sanitize(state, text, settings)
+    expected = split if policy is Policy.MASK else text.rsplit(" ", 1)[0] + " <EMAIL_1>"
+    assert result.sanitized == expected
+    assert [state.entities[s.entity_id].type for s in result.blocked] == ([T.EMAIL] if policy is Policy.BLOCK else [])
+    counts = (len(state.entities), len(state.surrogates))
+    assert sanitize(state, expected, settings).sanitized == expected        # повторная вставка ничего не меняет
+    assert sanitize(state, text, settings).sanitized == expected            # повторная очистка — тоже
+    assert (len(state.entities), len(state.surrogates)) == counts
+    restored = restore(state, expected, settings)
+    assert restored.text == (expected if policy is Policy.HIDE else original)
+    assert restore(state, expected, Settings()).text == original
+    if policy is not Policy.MASK:
+        assert sanitize(state, original, settings).sanitized == expected
+
+
+@pytest.mark.parametrize("policies, text, expected", [
+    (
+        {T.EMAIL: Policy.HIDE, T.ACCOUNT: Policy.HIDE}, "Писал с petrov@domain-1.example",
+        "Писал с <ACCOUNT_1>@domain-1.example",
+    ),
+    ({T.EMAIL: Policy.BLOCK}, "Ответ ушёл на postmaster@domain-1.example", "Ответ ушёл на postmaster@domain-1.example"),
+    ({T.EMAIL: Policy.HIDE}, "Ответ ушёл на postmaster@domain-1.example", "Ответ ушёл на postmaster@domain-1.example"),
+], ids=["parts-as-strict", "nothing-new-block", "nothing-new-hide"])
+def test_email_next_to_a_replacement_is_split_when_its_parts_are_as_strict(state, policies, text, expected):
+    """Обратная сторона: адрес, части которого не мягче его самого, делится, как прежде, а служебный ящик при выданном
+    домене — та же замена, без новой сущности, и выдачу не блокирует."""
+    settings = Settings(policies=default_policies() | policies)
+    sanitize(state, "Сервер srv-dc01.contoso.ru", settings)
+    before = len(state.entities)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert len(state.entities) == before + ("<ACCOUNT_1>" in expected)
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("почта ivanov@host-1.fabrikam.ru", "почта <ACCOUNT_1>@host-1.domain-2.example"),
+    ("почта ivanov@srv02.domain-1.example", "почта <EMAIL_1>"),
+], ids=["domain-blocks", "no-domain"])
+def test_email_next_to_a_replacement_is_split_when_a_part_blocks(state, text, expected):
+    """Адрес не делится, только если ни одна его часть и так не блокирует выдачу: домен при DOMAIN=BLOCK блокирует её
+    своей меткой, а «блокировать» строже «скрывать без восстановления». Часть имени перед заменой — не домен."""
+    settings = Settings(policies=default_policies() | {T.EMAIL: Policy.HIDE, T.DOMAIN: Policy.BLOCK})
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected
+    blocked = [state.entities[s.entity_id].type for s in result.blocked]
+    assert blocked == ([T.DOMAIN] if "domain-2" in expected else [])
 
 
 @pytest.mark.parametrize("text, expected", [

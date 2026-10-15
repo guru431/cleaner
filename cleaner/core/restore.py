@@ -796,6 +796,22 @@ def restore(state: ChatState, answer: str, settings: Settings) -> RestoreResult:
     return RestoreResult("".join(parts), segments, restorer.counters)
 
 
+def originals(state: ChatState, settings: Settings) -> Callable[[str], str]:
+    """Значение с выданными заменами внутри — с их оригиналами, как в ответе, но без проверки ссылок: это значение из
+    текста пользователя, а не ответ модели. Так конвейер узнаёт, какой адрес написан с заменой внутри (pipeline._outside).
+    Восстановление собирается при первом значении, одно на очистку: собранное заново для каждого значения, оно проходило
+    бы всю таблицу чата, и тысячи таких адресов в тексте давали бы квадратичное время."""
+    restorer: _Restorer | None = None
+
+    def original(value: str) -> str:
+        nonlocal restorer
+        if restorer is None:
+            restorer = _Restorer(state, settings)
+        return "".join(piece for piece, _, _ in restorer.run([(value, None, value)], links=False))
+
+    return original
+
+
 # Знаки, из которых состоит замена в любом допустимом виде записи: метки (в том числе «\<PERSON\_1\>»,
 # «&lt;PERSON_1&gt;», «[[PERSON_1]]»), адреса с длиной префикса, IPv6, MAC, имена узлов.
 _TOKEN_CHAR = re.compile(r"[\w.:/<>\[\]&;\\-]")

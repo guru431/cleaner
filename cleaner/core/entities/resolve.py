@@ -142,7 +142,9 @@ class Resolver:
                     self.real_ips.add(_ip_text(text[span.start:span.end]))
                 except ValueError:
                     pass
-        return [self._resolve(span, text[span.start:span.end]) for span in spans]
+        return [
+            self._resolve(span, text[span.start:span.end] if span.value is None else span.value) for span in spans
+        ]
 
     def _resolve(self, span: MergedSpan, value: str) -> ResolvedSpan:
         origin = "manual" if "manual" in span.sources else "dictionary" if "dict" in span.sources else "detector"

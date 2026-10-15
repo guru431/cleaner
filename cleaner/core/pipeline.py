@@ -6,11 +6,12 @@ import bisect
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from types import ModuleType
 from typing import Protocol
 
-from cleaner.core import leakcheck, surrogates
+from cleaner.core import leakcheck, restore, surrogates
 from cleaner.core.detect import dictionary, infra, ner, orgs, rules, secrets
 from cleaner.core.detect.base import DetectContext, Detector
 from cleaner.core.detect.merge import MergedSpan, merge
@@ -72,8 +73,29 @@ def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext
     return MergedSpan(start, end, EntityType.HOST, span.sources)           # домен из неё выделит Resolver
 
 
+def _types(text: str, piece: MergedSpan) -> list[EntityType]:
+    """Типы, которые часть записи получит при подмене (resolve._name): часть имени узла — HOST у частей слева от домена и
+    DOMAIN у домена в ней; в части перед заменой и в части без точки домена нет."""
+    if piece.type is not EntityType.HOST:
+        return [piece.type]
+    value = hostmap.dotted(text[piece.start:piece.end])
+    if piece.precedes or "." not in value:
+        return [EntityType.HOST]
+    return [EntityType.HOST] * bool(hostmap.parts(value)[0]) + [EntityType.DOMAIN]
+
+
+def _split_holds(text: str, pieces: list[MergedSpan], ctx: DetectContext) -> bool:
+    """Держат ли части адреса e-mail его политику: каждая не мягче EMAIL или одна и так блокирует выдачу («блокировать»
+    строже «скрывать без восстановления»). Часть, которой пользователь дал тип строже адреса, — часть правила (merge)."""
+    policies = ctx.settings.policies
+    strictness = [STRICTNESS.get(policies.get(type_), 0) for piece in pieces for type_ in _types(text, piece)]
+    own = STRICTNESS.get(policies.get(EntityType.EMAIL), 0)
+    return min(strictness) >= own or max(strictness) == STRICTNESS[Policy.BLOCK]
+
+
 def _outside(
     text: str, span: MergedSpan, ranges: list[tuple[int, int]], starts: list[int], ctx: DetectContext,
+    originals: Callable[[str], str],
 ) -> list[MergedSpan]:
     """Что скрыть из фрагмента: его целиком, его части вне выданных замен или ничего."""
     i = bisect.bisect_right(starts, span.start) - 1
@@ -100,6 +122,11 @@ def _outside(
             if piece:
                 pieces += _placed(text, piece, ranges, starts, ctx)
         position = max(position, end)
+    if at >= 0 and pieces and not _split_holds(text, pieces, ctx):
+        # Адрес строже своих частей не делится (5.10): метки частей восстанавливали бы его при EMAIL «скрывать без
+        # восстановления» и не блокировали бы выдачу при «блокировать». Значение метки — адрес с оригиналами замен:
+        # «petrov@domain-1.example» — это petrov@contoso.ru, и подмена в значении восстанавливалась бы подменой.
+        return [replace(span, value=originals(text[span.start:span.end]))]
     return pieces
 
 
@@ -200,11 +227,14 @@ def _passes(
 ) -> list[ResolvedSpan]:
     """Шаги 5.2–5.8 до трёх раз (раздел 5.10); находки слоёв 4–5 добавляются к каждому проходу."""
     resolved: list[ResolvedSpan] = []
+    originals = restore.originals(state, settings)
     for _ in range(_MAX_PASSES):
         before = _forms(state)
         ctx = _context(state, settings)
         found = [span for detector in detectors for span in detector.detect(text, ctx)] + extra
-        merged = [part for m in merge(text, found, ctx) for part in _outside(text, m, protected, starts, ctx)]
+        merged = [
+            part for m in merge(text, found, ctx) for part in _outside(text, m, protected, starts, ctx, originals)
+        ]
         resolved = Resolver(state, settings, text, ctx.builtin.generic_labels).run(text, merged)
         if _forms(state) == before:
             break
