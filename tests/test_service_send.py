@@ -16,7 +16,7 @@ class FakeCloud:
         self.pieces, self.error, self.stop_after, self.truncated = pieces, error, stop_after, truncated
         self.calls: list[tuple] = []
 
-    def __call__(self, ctx, connection, state, settings, *, cancel=None, outcome=None, transport=None):
+    def __call__(self, ctx, connection, state, settings, *, cancel=None, outcome=None, transport=None, on_open=None):
         self.calls.append((ctx, connection, state is not None))
         for number, piece in enumerate(self.pieces):
             if cancel is not None and cancel.is_set():
@@ -153,6 +153,72 @@ def test_stop_reaches_the_live_answer_only_while_it_runs(repo, chat, provider):
     fn(*args)
     with pytest.raises(KeyError):
         service.stop(chat[1], item.id)
+
+
+def test_second_send_while_the_answer_runs_is_refused(repo, chat, provider):
+    """Обзор этапа 3: двойное нажатие прошло бы проверку отпечатка и отправило оплаченный запрос дважды."""
+    jobs = []
+    fake = FakeCloud("x")
+    service = ready(repo, chat, provider, fake, send_submit=lambda fn, *args: jobs.append((fn, args)))
+    shown = service.outgoing(chat[1]).outgoing.context.digest()
+    service.send(chat[1], chat[0], shown)
+    with pytest.raises(SendRefused, match="ещё идёт"):
+        service.send(chat[1], chat[0], shown)
+    assert len(jobs) == 1 and len(answers := [i for i in repo.items(chat[1]) if i.kind == "answer"]) == 1
+    fn, args = jobs[0]
+    fn(*args)
+    assert answers[0].id == answer(repo, chat).id and answer(repo, chat).status == "done"
+
+
+def test_answer_cut_by_a_provider_error_is_left_out_and_the_question_can_go_again(repo, chat, provider):
+    """FR-8.9: после обрыва ошибкой провайдера вопрос можно отправить снова — оборванный ответ в запрос не входит."""
+    service = ready(repo, chat, provider, FakeCloud("Начало ", error=ProviderError(status=502)))
+    send(service, chat)
+    assert answer(repo, chat).meta["aborted"] is True
+    preview = service.outgoing(chat[1])
+    assert preview.skipped == [(2, "ответ оборван ошибкой провайдера")]
+    assert [m.role for m in preview.outgoing.context.messages] == ["user"]
+
+
+def test_answer_longer_than_the_text_limit_is_cut(repo, chat, provider):
+    fake = FakeCloud(*(["слово "] * 50))
+    service = ready(repo, chat, provider, fake, max_text_chars=60)
+    send(service, chat)
+    stored = answer(repo, chat)
+    assert stored.status == "partial" and len(stored.original) <= 66 and "длиннее 60 знаков" in stored.meta["error"]
+
+
+def test_service_stop_saves_running_answers_as_partial_with_its_own_reason(repo, chat, provider):
+    jobs = []
+    service = ready(repo, chat, provider, FakeCloud("Часть. ", "Ещё."), send_submit=lambda fn, *args: jobs.append((fn, args)))
+    item = send(service, chat)
+    closed = []
+    service.live.get(item.id).on_open(lambda: closed.append(True))
+    service.live.cancel_all()
+    assert closed == [True]
+    fn, args = jobs[0]
+    fn(*args)
+    stored = answer(repo, chat)
+    assert stored.status == "failed" and stored.meta["error"].startswith("Служба остановлена")
+
+
+def test_deleting_a_chat_stops_its_running_answer(repo, chat, provider):
+    jobs = []
+    service = ready(repo, chat, provider, FakeCloud("x"), send_submit=lambda fn, *args: jobs.append((fn, args)))
+    item = send(service, chat)
+    service.stop_chat(chat[1])
+    assert service.live.get(item.id).cancel.is_set() and service.live.get(item.id).reason == "Чат удалён"
+
+
+def test_truncated_local_answer_is_partial(repo, chat, engines):
+    user, chat_id = chat
+    engines.completer.answers = ["Начало длинного ответа"]
+    engines.completer.truncated = True
+    service = ChatService(repo, engines=engines)
+    service.add_input(chat_id, user, "Вопрос")
+    item = service.ask_local(chat_id, user)
+    stored = repo.item(chat_id, item.id)
+    assert (stored.status, stored.meta) == ("partial", {"error": "Ответ обрезан пределом длины"})
 
 
 def test_truncated_answer_is_partial(repo, chat, provider):

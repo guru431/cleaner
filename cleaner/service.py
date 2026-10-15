@@ -34,6 +34,8 @@ _RISK_IDLE = ("", "done", "failed", "interrupted")     # состояния пр
 INPUT_SOURCES = ("paste", "instruction")                # вставленный текст и инструкция пользователя для модели (FR-8.5)
 LOCAL_ANSWER_TOKENS = 4096
 _SEND_INTERNAL = "Внутренняя ошибка отправки"
+_STOPPED = "Остановлено"
+_SERVICE_STOPPED = "Служба остановлена во время ответа: сохранена полученная часть"
 
 Work = Callable[[ChatState, list[Item], Settings], tuple[list[Item], list[Item]]]
 Submit = Callable[..., None]
@@ -123,17 +125,47 @@ class LiveAnswer:
 
     def __init__(self) -> None:
         self._parts: list[str] = []
+        self._size = 0
         self._lock = threading.Lock()
         self.cancel = threading.Event()
+        self.reason = ""                                 # почему ответ прерван: остановка, удаление чата, служба
+        self._closer: Callable[[], None] | None = None
         self.finished = False
 
     def append(self, piece: str) -> None:
         with self._lock:
             self._parts.append(piece)
+            self._size += len(piece)
 
     def text(self) -> str:
         with self._lock:
             return "".join(self._parts)
+
+    def size(self) -> int:
+        with self._lock:
+            return self._size
+
+    def on_open(self, closer: Callable[[], None]) -> None:
+        """egress передаёт, чем закрыть соединение: остановка прерывает и ожидание молчащего провайдера."""
+        with self._lock:
+            self._closer = closer
+        if self.cancel.is_set():
+            self._close()
+
+    def stop(self, reason: str) -> None:
+        with self._lock:
+            self.reason = self.reason or reason
+        self.cancel.set()
+        self._close()
+
+    def _close(self) -> None:
+        with self._lock:
+            closer = self._closer
+        if closer is not None:
+            try:
+                closer()
+            except Exception:           # соединение уже закрыто или закрывается: читающий поток выйдет сам
+                pass
 
 
 class LiveAnswers:
@@ -158,8 +190,9 @@ class LiveAnswers:
     def cancel_all(self) -> None:
         """Остановка службы: идущие ответы прерываются и сохраняются неполными."""
         with self._lock:
-            for answer in self._answers.values():
-                answer.cancel.set()
+            answers = list(self._answers.values())
+        for answer in answers:
+            answer.stop(_SERVICE_STOPPED)
 
 
 def link(provider: Provider) -> cloud.Connection:
@@ -284,6 +317,8 @@ class ChatService:
             meta["ocr_pages"] = list(extracted.ocr_pages)
         if extracted.unread_pages:
             meta["unread_pages"] = list(extracted.unread_pages)
+        if extracted.hidden_sheets:
+            meta["hidden_sheets"] = extracted.hidden_sheets      # только число: имена листов — данные пользователя
         self.repo.set_item_original(chat_id, item.id, extracted.text, meta)
         return replace(item, original=extracted.text, meta=meta)
 
@@ -457,6 +492,10 @@ class ChatService:
             elif item.source == "local":
                 skipped.append((item.seq, "ответ локальной модели: в нём оригиналы"))
                 continue
+            elif item.meta.get("aborted"):
+                # Ответ, оборванный ошибкой провайдера, — не ход диалога: иначе повторить вопрос нельзя (FR-8.9).
+                skipped.append((item.seq, "ответ оборван ошибкой провайдера"))
+                continue
             elif item.status in ("done", "partial") and item.original:
                 turns.append(Turn("assistant", item.original))
             else:
@@ -486,6 +525,9 @@ class ChatService:
         built: dict[str, OutgoingContext] = {}
 
         def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
+            if any(i.kind == "answer" and i.source == "api" and i.status in ("queued", "running") for i in items):
+                # Двойное нажатие прошло бы проверку отпечатка: идущий ответ в запрос не входит (оплаченный дубль).
+                raise SendRefused("Предыдущий ответ облака ещё идёт: дождитесь его или остановите")
             outgoing = self._build(chat_id, state, items, settings, provider, model).outgoing
             if outgoing.context.digest() != digest:
                 raise SendRefused("Запрос изменился после показа: проверьте его ещё раз")
@@ -509,22 +551,27 @@ class ChatService:
         """Задание: поток ответа — в память для страницы, по окончании — в элемент чата. Обрыв сохраняет полученное."""
         live = self.live.start(item_id)
         outcome: dict = {}
-        error = ""
+        error, aborted = "", False
         state, settings = None, None
         try:
             state, _ = self.repo.load_state(chat_id)
             settings = self.repo.settings()
-            for piece in self.cloud_send(context, connection, state, settings, cancel=live.cancel, outcome=outcome):
+            stream = self.cloud_send(
+                context, connection, state, settings, cancel=live.cancel, outcome=outcome, on_open=live.on_open,
+            )
+            for piece in stream:
                 live.append(piece)
+                if live.size() > self.max_text_chars:
+                    live.stop(f"Ответ длиннее {self.max_text_chars} знаков: дальше он не читается")
             if live.cancel.is_set():
-                error = "Остановлено"
+                error = live.reason or _STOPPED
             elif outcome.get("truncated"):
                 error = "Ответ обрезан пределом длины, заданным в подключении"
         except cloud.LeakDetected as exc:
             error = "В исходящем тексте найден оригинал: запрос не отправлен"
             self.repo.audit("leak", user_id, chat_id, count=exc.count, stage="send")
         except ProviderError as exc:
-            error = str(exc)
+            error, aborted = str(exc), True
             self.repo.audit("error", user_id, chat_id, kind="ProviderError", stage="send", status=exc.status)
         except Exception as exc:
             if isinstance(exc, KeyError) and self.repo.chat(chat_id) is None:
@@ -538,7 +585,8 @@ class ChatService:
         try:
             item = self.repo.item(chat_id, item_id)
             if item is not None:
-                meta = {key: value for key, value in item.meta.items() if key != "error"} | ({"error": error} if error else {})
+                meta = {key: value for key, value in item.meta.items() if key not in ("error", "aborted")}
+                meta |= ({"error": error} if error else {}) | ({"aborted": True} if aborted and text else {})
                 self.repo.finish_answer(chat_id, item_id, text, status, meta)
         except KeyError:
             pass                                          # чат удалили
@@ -553,7 +601,14 @@ class ChatService:
         live = self.live.get(item_id) if item is not None and item.source == "api" else None
         if live is None:
             raise KeyError(item_id)
-        live.cancel.set()
+        live.stop(_STOPPED)
+
+    def stop_chat(self, chat_id: str) -> None:
+        """Перед удалением чата: его идущие ответы прерываются, чтобы поток провайдера не читался впустую."""
+        for item in self.repo.items(chat_id):
+            live = self.live.get(item.id) if item.kind == "answer" and item.source == "api" else None
+            if live is not None:
+                live.stop("Чат удалён")
 
     def check_provider(self, provider: Provider, model: str) -> str:
         """FR-8.2: проверочный запрос без данных пользователя. ProviderError — отказ провайдера."""
@@ -599,8 +654,11 @@ class ChatService:
     def run_local(self, chat_id: str, item_id: str, user_id: str, messages: list[dict[str, str]]) -> None:
         try:
             self.repo.set_item_status(chat_id, item_id, "running")
-            text = self.engines.client().complete(messages, max_tokens=LOCAL_ANSWER_TOKENS, truncated_ok=True)
-            self.repo.finish_answer(chat_id, item_id, text, "done", {})
+            text, truncated = self.engines.client().answer(messages, max_tokens=LOCAL_ANSWER_TOKENS)
+            if truncated:
+                self.repo.finish_answer(chat_id, item_id, text, "partial", {"error": "Ответ обрезан пределом длины"})
+            else:
+                self.repo.finish_answer(chat_id, item_id, text, "done", {})
         except KeyError:
             return                                        # чат удалили, пока ждали модель
         except Exception as exc:

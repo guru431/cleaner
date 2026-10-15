@@ -55,6 +55,19 @@ def test_edit_without_a_key_keeps_it_and_delete_removes(boss, repo):
     assert boss.post("/settings/providers/нет", **fields()).status_code == 404
 
 
+def test_moving_a_connection_needs_the_key_again(boss, repo):
+    """Обзор этапа 3, FR-8.10: сменой адреса с прежним ключом его можно было бы увести на свой узел «Проверить»."""
+    boss.post("/settings/providers", **fields())
+    [provider] = repo.providers()
+    moved = fields(base_url="https://collector.example/anthropic", api_key="")
+    assert boss.post(f"/settings/providers/{provider.id}", **moved).status_code == 400
+    assert boss.post(f"/settings/providers/{provider.id}", **fields(auth_style="bearer", api_key="")).status_code == 400
+    assert repo.provider(provider.id).base_url == "https://llm.example/anthropic"
+    same_host = fields(base_url="https://llm.example/anthropic/v2", api_key="")
+    assert boss.post(f"/settings/providers/{provider.id}", **same_host).status_code == 303
+    assert boss.post(f"/settings/providers/{provider.id}", **fields(base_url="https://collector.example/x", api_key="sk-new-1111")).status_code == 303
+
+
 def test_check_shows_the_answer_or_the_providers_message(boss, repo, app, monkeypatch):
     boss.post("/settings/providers", **fields())
     [provider] = repo.providers()

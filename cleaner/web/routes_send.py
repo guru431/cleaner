@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 
@@ -15,7 +16,7 @@ from cleaner.web import render
 from cleaner.web.deps import Viewer, get_form, get_viewer, own_chat, page, repo_of, service_of
 
 router = APIRouter()
-_TICK = 0.25          # как часто поток ответа проверяет новые фрагменты, секунды
+_TICK = 1.0           # как часто поток ответа показывает новые фрагменты, секунды: каждый показ — восстановление префикса
 
 
 @router.post("/chats/{chat_id}/provider")
@@ -81,7 +82,9 @@ def stream(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
             if live is not None:
                 text = live.text()
                 if len(text) > seen:
-                    shown = restorer.feed(text[seen:])
+                    # Восстановление всего показанного префикса — в потоке, не в цикле событий: на длинном ответе
+                    # с большой таблицей оно идёт десятки миллисекунд и остановило бы страницы всех пользователей.
+                    shown = await anyio.to_thread.run_sync(restorer.feed, text[seen:])
                     seen = len(text)
                     yield f"data: {json.dumps({'text': shown}, ensure_ascii=False)}\n\n"
             if live is None or live.finished:

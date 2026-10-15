@@ -17,7 +17,7 @@ def provider(repo):
 def cloud(app, monkeypatch):
     calls = []
 
-    def fake(ctx, connection, state, settings, *, cancel=None, outcome=None, transport=None):
+    def fake(ctx, connection, state, settings, *, cancel=None, outcome=None, transport=None, on_open=None):
         calls.append(ctx)
         yield "Ответ про "
         yield "<EMAIL_1>"

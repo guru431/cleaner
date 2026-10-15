@@ -64,8 +64,10 @@ def test_completion_failures_have_codes(response, code):
 
 def test_answer_to_a_question_may_be_cut_by_length():
     """FR-9.4: обрезанный ответ на вопрос пользователя полезнее отказа; слою 5 он по-прежнему не годится."""
-    answer = client(lambda request: chat_answer("начало ответа", "length"))
-    assert answer.complete([{"role": "user", "content": "x"}], max_tokens=8, truncated_ok=True) == "начало ответа"
+    cut = client(lambda request: chat_answer("начало ответа", "length"))
+    assert cut.answer([{"role": "user", "content": "x"}], max_tokens=8) == ("начало ответа", True)
+    whole = client(lambda request: chat_answer("весь ответ"))
+    assert whole.answer([{"role": "user", "content": "x"}], max_tokens=8) == ("весь ответ", False)
 
 
 def test_unreachable_gateway_is_unavailable():

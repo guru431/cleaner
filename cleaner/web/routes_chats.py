@@ -117,6 +117,7 @@ def delete(request: Request, chat_id: str, form: dict[str, str] = Depends(get_fo
     if form.get("confirm") != "yes":
         raise HTTPException(400, "Подтвердите удаление")          # FR-1.4
     repo = repo_of(request)
+    service_of(request).stop_chat(chat_id)          # идущие ответы облака — прервать, а не дочитывать впустую
     try:
         repo.delete_chat(chat_id)
     except CheckpointBusy as exc:

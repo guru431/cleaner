@@ -120,10 +120,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
             engines=Engines(repo, cfg.models_dir, max_text_chars=cfg.max_text_chars),
             max_file_mb=cfg.max_file_mb,
         )
-        # Журнал доступа выключен: в строке запроса бывает поиск по названиям чатов (SEC-11).
+        # Журнал доступа выключен: в строке запроса бывает поиск по названиям чатов (SEC-11). Открытый поток ответа
+        # облака (события сервера) не держит остановку: через 5 с соединения рвутся, и lifespan сохраняет идущие
+        # ответы неполными, а не systemd убивает процесс через 90 с с потерей полученного.
         uvicorn.run(
             app, host=cfg.host, port=cfg.port, ssl_certfile=cfg.tls_cert or None, ssl_keyfile=cfg.tls_key or None,
-            access_log=False, server_header=False, proxy_headers=False,
+            access_log=False, server_header=False, proxy_headers=False, timeout_graceful_shutdown=5,
         )
     return 0
 

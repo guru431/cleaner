@@ -6,6 +6,7 @@ import io
 import json
 from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
+from urllib.parse import urlsplit
 
 import regex
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -338,9 +339,17 @@ def add_provider(request: Request, form: dict[str, str] = Depends(get_form), vie
 
 @router.post("/providers/{provider_id}")
 def update_provider(request: Request, provider_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
-    if repo_of(request).provider(provider_id) is None:
+    old = repo_of(request).provider(provider_id)
+    if old is None:
         raise HTTPException(404, "Подключение не найдено")
     provider, key = _provider_form(form, provider_id)
+    # Ключ уходит туда, куда указывает адрес: без нового ключа сменой адреса его можно было бы увести на свой узел
+    # кнопкой «Проверить» (FR-8.10).
+    moved = (urlsplit(provider.base_url).hostname, urlsplit(provider.base_url).port) != (
+        urlsplit(old.base_url).hostname, urlsplit(old.base_url).port,
+    ) or provider.auth_style != old.auth_style
+    if moved and key is None:
+        raise HTTPException(400, "Адрес или способ передачи ключа изменился: укажите ключ заново")
     repo_of(request).update_provider(provider, key)
     repo_of(request).audit("provider_changed", viewer.user.id, action="update", id=provider_id, key_changed=key is not None)
     return _redirect("/settings/providers")
