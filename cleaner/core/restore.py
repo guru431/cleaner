@@ -50,6 +50,30 @@ def _css_args(depth: int) -> str:
     return level
 
 
+def _css_name(name: str) -> str:
+    """Имя функции или правила CSS в любой записи, которую браузер прочтёт как это имя (CSS Syntax 3): каждый
+    знак — сам или экранированный. Код — до шести шестнадцатеричных цифр («\\72», «\\000052»), один пробельный
+    знак или CRLF за ним входят в экранирование («u\\72 l(» — это url(). За кодом короче шести цифр не стоит
+    ещё цифра: «\\726c» — другой знак; код из шести цифр кончается сам: «s\\000072c(» — это src(). Знак, который не
+    шестнадцатеричная цифра, экранируется и так: «\\r» — это «r», а «\\a» — перевод строки, не «a». Регистр не
+    важен: _LINK собран без учёта регистра. Длина каждого варианта ограничена, поэтому поиск остаётся линейным."""
+    parts = []
+    for char in name:
+        code = "|".join(sorted({f"{ord(c):x}" for c in (char.lower(), char.upper())}))
+        escaped = rf"\\(?:0000(?:{code})|0{{0,3}}(?:{code})(?![0-9a-f]))(?:\r\n|[ \t\r\n\f])?"
+        if char.lower() not in "0123456789abcdef":
+            escaped += rf"|\\{re.escape(char)}"
+        parts.append(rf"(?:{re.escape(char)}|{escaped})")
+    return "".join(parts)
+
+
+# Имена, по которым браузер загружает адрес сам, — в любой записи: «u\72l(», «@\69mport», «image-s\65t(» в
+# элементе style, в файле CSS и в атрибуте style загружают так же, как url(), @import и image-set().
+_URL = _css_name("url")
+_IMPORT = "@" + _css_name("import")
+_SET = rf"(?:(?:{_css_name('-webkit-')})?{_css_name('image-set')}|{_css_name('src')})"
+
+
 # Атрибут тянется и через строки до той же кавычки: браузер выбрасывает из адреса переводы строк.
 # Это линейно — поиск каждого атрибута кончается на следующей такой же кавычке. Определение ссылки
 # Markdown — только в начале строки, как в CommonMark, цель в угловых скобках может стоять на
@@ -61,11 +85,11 @@ def _css_args(depth: int) -> str:
 _LINK = re.compile(
     r"\]\((?P<md>(?:[^()\r\n]|\([^()\r\n]*\))*)\)"
     r"|(?m:^)[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*(?:\r?\n[ \t]*)?<(?P<ref>[^\r\n]*)>"
-    r"|(?<![\w-])(?:href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content)"
+    r"|(?<![\w-])(?P<name>href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content)"
     r"\s*=\s*(?P<quote>[\"'])(?P<attr>[\s\S]*?)(?P=quote)"
-    r"|(?:(?<![\w-])url\(\s*|@import\s*)(?P<cq>[\"'])(?P<css>(?:\\[\s\S]|[^\\])*?)(?:(?P=cq)|\Z)"
-    r"|(?<![\w-])url\((?P<cssu>(?:\\[\s\S]|[^\\()\"'])*)\)"
-    rf"|(?<![\w-])(?:(?:-webkit-)?image-set|src)\((?P<set>{_css_args(_CSS_DEPTH)}(?=[)\]}}])|[\s\S]*)"
+    rf"|(?:(?<![\w-]){_URL}\(\s*|{_IMPORT}\s*)(?P<cq>[\"'])(?P<css>(?:\\[\s\S]|[^\\])*?)(?:(?P=cq)|\Z)"
+    rf"|(?<![\w-]){_URL}\((?P<cssu>(?:\\[\s\S]|[^\\()\"'])*)\)"
+    rf"|(?<![\w-]){_SET}\((?P<set>{_css_args(_CSS_DEPTH)}(?=[)\]}}])|[\s\S]*)"
     rf"|(?P<mailto>mailto:[^\s\"'`]*{_END})"
     rf"|(?<=\")(?P<dq>{_START}[^\s\"`]*{_END})"
     rf"|(?<=')(?P<sq>{_START}[^\s'`]*{_END})"
@@ -258,7 +282,12 @@ class _Restorer:
             m.group(name) for name in ("md", "ref", "attr", "css", "cssu", "set", "mailto", "dq", "sq", "url")
             if m.group(name)
         ), "")
-        if self._is_own(target):
+        # Экранирования CSS браузер раскрывает до загрузки — и в имени, и в адресе: «\2f\2f evil…» — это
+        # «//evil…», «наш\40 evil…» — «наш@evil…». Хост, видный в тексте, тогда не тот, что загрузят, поэтому
+        # ссылка CSS (url(), @import, image-set(), src(), атрибут style) с «\» нашей не бывает.
+        css = any(m.group(name) is not None for name in ("css", "cssu", "set"))
+        css = css or (m.group("name") or "").lower() == "style"
+        if self._is_own(target) and not (css and "\\" in m.group()):
             return False        # ссылка на наш же узел восстанавливается как обычный текст
         restored = self._inner(m.group())
         if target[:2] in ("//", "/\\", "\\/", "\\\\") and any(m.group("dq", "sq", "url")) and _nowhere(restored):

