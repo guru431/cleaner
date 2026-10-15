@@ -380,6 +380,35 @@ def test_selection_inside_a_name_leaves_the_issued_replacement_next_to_it(state,
     assert restore(state, expected, settings).text == text.replace("host-1", "srv01")
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("почта ivanov@host-1.fabrikam.ru", "почта <ACCOUNT_1>@host-1.<TERM_1>"),
+    ("почта postmaster@srv-db02.host-1.fabrikam.ru", "почта postmaster@host-2.host-1.<TERM_1>"),
+    ("почта ivanov@srv02.fabrikam.ru", "почта <TERM_1>"),
+], ids=["part-before", "role-mailbox", "no-replacement"])
+def test_selection_inside_an_email_leaves_the_issued_replacement_next_to_it(state, settings, text, expected):
+    """Обзор пакета, Minor: выделение внутри имени узла уже не поглощало выданную в нём замену, а внутри адреса e-mail —
+    поглощало: <TERM_1> восстанавливался в «ivanov@host-1.fabrikam.ru», с подменой вместо srv01. Адрес делится, как
+    имя: имя входа — ACCOUNT, части имени — как рядом с заменой (5.10), задетые правилом — его тип."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    ops.mask(state, "fabrikam", T.TERM)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert restore(state, expected, settings).text == text.replace("host-1", "srv01")
+
+
+def test_email_with_a_strict_part_next_to_a_replacement_is_split_and_blocked(state):
+    """Та же находка вместе с политикой части: адрес, который поглотила часть со строже политикой, рядом с выданной
+    заменой делится так же, и часть блокирует выдачу своей меткой."""
+    settings = Settings(policies=default_policies() | {T.SECRET: Policy.BLOCK})
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == "srv01").id, T.SECRET)
+    result = sanitize(state, "почта ivanov@srv01.domain-1.example", settings)
+    assert result.sanitized == "почта <ACCOUNT_1>@<SECRET_1>.domain-1.example"
+    assert [state.entities[s.entity_id].type for s in result.blocked] == [T.SECRET]
+    assert restore(state, result.sanitized, settings).text == "почта ivanov@srv01.contoso.ru"
+
+
 def test_email_with_a_retyped_host_part_stays_an_email(state, settings):
     """FINDINGS «Retyping a host name part: what it leaves» (2): правило смены типа части имени поглощало адрес e-mail с
     этой частью — он становился меткой TERM. Правило на целой части имени после «@» адрес не поглощает (5.7, шаг 4)."""

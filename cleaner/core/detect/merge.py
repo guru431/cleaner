@@ -17,8 +17,10 @@ class MergedSpan:
     type: EntityType
     sources: tuple[str, ...]
     searchable: bool = True    # Span.searchable
-    # Где во фрагменте лежат правила пользователя, поглотившие имя (5.7): выданную замену в нём они не трогают (5.10).
+    # Где во фрагменте лежат правила пользователя, поглотившие имя или адрес e-mail (5.7): выданную замену в нём они не
+    # трогают (5.10). mail — поглощён адрес: части вне правил — части адреса (имя входа — ACCOUNT).
     ruled: tuple[tuple[int, int], ...] = ()
+    mail: bool = False
     # Фрагмент имени стоит через точку после выданной замены или метки и перед ней (5.10): это часть имени, а не имя.
     follows: bool = False
     precedes: bool = False
@@ -150,8 +152,10 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
         type_ = kept or senior.type
         # Искомым значение делает любая находка того же типа: слово после «Пароль —», которое нашли и словарём чата.
         searchable = any(s.searchable for s in group if s.type is senior.type)
-        ruled = ()
-        if senior.source == "manual" and not kept and any(s.source != "manual" and s.type in _NAME_TYPES for s in group):
+        ruled, mail = (), False
+        records = {s.type for s in group if s.source != "manual"} & {*_NAME_TYPES, EntityType.EMAIL}
+        if senior.source == "manual" and not kept and records:
             ruled = tuple((s.start, s.end) for s in group if s.source == "manual")
-        merged.append(MergedSpan(start, end, type_, sources, searchable, ruled))
+            mail = EntityType.EMAIL in records
+        merged.append(MergedSpan(start, end, type_, sources, searchable, ruled, mail))
     return _join_names(text, merged)

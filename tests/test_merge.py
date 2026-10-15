@@ -65,6 +65,10 @@ def test_rule_swallowing_a_name_records_where_it_lies():
     assert (kept.type, kept.ruled) == (T.HOST, ())
     [alone] = merge("Проект Заря", [Span(7, 11, T.TERM, "manual")], CTX)
     assert (alone.type, alone.ruled) == (T.TERM, ())
+    # Адрес e-mail — так же; конвейер поделит его по «@» на имя входа и части имени.
+    email = [Span(0, 25, T.EMAIL, "rules", validated=True), Span(14, 22, T.TERM, "manual")]
+    [mail] = merge("ivanov@host-1.fabrikam.ru", email, CTX)
+    assert (mail.type, mail.ruled, mail.mail, merged.mail) == (T.TERM, ((14, 22),), True, False)
 
 
 def test_partial_overlap_covers_the_union():
