@@ -112,6 +112,34 @@ def test_allowlist_pragma_does_not_switch_the_library_rules_off():
     assert found(f"sendgrid: {SENDGRID}  # pragma: allowlist secret") == {SENDGRID}
 
 
+UNSIGNED_JWT = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ('//registry.npmjs.org/:_au' 'thToken=0f1e2d3c-4b5a-6978' '-8796-a5b4c3d2e1f0',
+         '0f1e2d3c-4b5a-6978' '-8796-a5b4c3d2e1f0'),
+        ("//registry.npmjs.org/:_authToken=npm_" + "a1B2c3D4e5F6" * 3, "npm_" + "a1B2c3D4e5F6" * 3),
+        ("ключ REDACTED_OPENAI_KEY в логе",
+         "REDACTED_OPENAI_KEY"),
+        (f"заголовок {UNSIGNED_JWT} в логе", UNSIGNED_JWT),
+    ],
+)
+def test_tokens_of_the_slow_library_rules_are_found_by_own_rules(text, value):
+    """Находка «NpmDetector is quadratic…»: правила npm, OpenAI и JWT из detect-secrets квадратичны
+    на длинной строке и выключены; их токены находят свои правила."""
+    assert found(text) == {value}
+
+
+def test_library_rules_still_see_a_key_after_a_run_of_spaces():
+    """Ряд пробелов сжимается перед правилами detect-secrets, а значение ищется в настоящей строке."""
+    key = "Zx81kLmN02pQ" * 3 + "Ab1-Cd2_"
+    assert len(key) == 44
+    text = "ibm_cloud_iam_key" + " " * 40 + key
+    assert found(text) == {key}
+
+
 @pytest.mark.parametrize(
     "text, value",
     [
@@ -182,6 +210,29 @@ def test_short_value_under_a_key_is_kept():
         assert found(text) == set(), text
 
 
+def test_short_counter_or_word_under_a_key_is_not_a_secret():
+    """Находка «Small regressions … plan 1В»: после minimum=2 счётчик и «ok» становились секретом."""
+    for text in ("max_token: 2048", '"maxToken": 4096', "pass: ok"):
+        assert found(text) == set(), text
+    assert found("pass: Qwerty1") == {"Qwerty1"}
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("Password=P@ss1;Persist Security Info=False", "P@ss1"),
+        ("Server=db01;Password=P@ss1;User ID=sa", "P@ss1"),
+        ("Password=P@ss1;Initial Catalog=crm;Integrated Security=True", "P@ss1"),
+        ("pwd=Qw;er ty=3", "Qw;er"),
+        ("Password=Pa;Ss Word", "Pa;Ss"),
+    ],
+)
+def test_spaced_field_name_of_capitalised_words_ends_the_value(text, value):
+    """Находка «Small regressions … plan 1В»: в строках ADO.NET имя поля из слов с заглавной буквы
+    («Persist Security Info», «User ID») — следующее поле, а не продолжение пароля."""
+    assert found(text) == {value}
+
+
 def test_long_key_names_still_hold_secrets():
     """Финальный обзор 1В: предел длины имени ключа пропускал длинные ключи Spring и переменных окружения."""
     for text in (
@@ -198,3 +249,110 @@ def test_pair_inside_another_value_is_still_found():
 def test_password_without_a_login_in_a_url_is_found():
     """Обзор партии P1: стандартная запись Redis «redis://:пароль@хост»."""
     assert found("redis://:Qwerty12@cache.contoso.ru") == {"Qwerty12"}
+
+
+@pytest.mark.parametrize("text", ["Сервер 85.143.10.20", "сборка 5.0.10.12", "listen 0.0.0.0:443"])
+def test_ip_addresses_are_left_to_layer_3(text):
+    """Находка «false SECRET … hits»: правило IP из detect-secrets делало адрес секретом без восстановления,
+    а адреса получают подмену в слое 3 (спецификация 6.2)."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '"max_new_tokens": 1024', '"maxNewTokens": "1024"', "cached_tokens: 12",
+        "cancellationToken: cancellationToken", "accessToken: AccessToken;", "db_password = db_password",
+        "$pwd1 = Read-Host -AsSecureString", "$env:DB_PASSWORD = Get-Content .\\pass.txt",
+        "Authorization: bearer authentication", "Bearer authentication-scheme",
+        "bearer authentication/authorization",
+    ],
+)
+def test_counters_and_code_under_secret_keys_are_left_alone(text):
+    """Находка «false SECRET … hits»: счётчик токенов, имя той же переменной, вызов команды и слова
+    после «bearer» — не секреты, а каждое такое число потом скрывалось во всём чате."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("password=123456", "123456"),
+        ("password: password", "password"),
+        ("accessToken: AccessToken1;", "AccessToken1"),
+        ("$pwd1 = Qwerty123", "Qwerty123"),
+        ("$pwd1 = Read-Host1", "Read-Host1"),
+        ("api_token=9f8e7d6c5b4a", "9f8e7d6c5b4a"),
+        ("Authorization: Bearer Zx81kLmN02pQ", "Zx81kLmN02pQ"),
+        ("bearer Zx81kLmNoPqRsTuVwX", "Zx81kLmNoPqRsTuVwX"),
+    ],
+)
+def test_values_next_to_counters_and_code_are_still_found(text, value):
+    assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "PWD=/home/ivanov", "OLDPWD=~/src", "msbuild /p:Configuration=Release",
+        "dotnet msbuild /p:Configuration=Release;Platform=x64", "mysqldump --password --verbose crm",
+        "Пароль по-прежнему не подходит", "пароль кто-то сменил",
+    ],
+)
+def test_paths_properties_flags_and_prose_are_left_alone(text):
+    """Находка «false positives that damage the text…»: рабочий каталог оболочки, свойство MSBuild,
+    следующий параметр и русское слово через дефис становились секретом без восстановления."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("Server=db01;UID=sa;PWD=Qwerty123!;", "Qwerty123!"),
+        ("PWD=Qwerty123!", "Qwerty123!"),
+        ("runas /p:Qwerty123", "Qwerty123"),
+        ("tool /p:dGVzdDE=", "dGVzdDE="),
+        ("msbuild /p:CertificatePassword=Secret123", "Secret123"),
+        ("mysqldump --password Qwerty123 crm", "Qwerty123"),
+        ("mysqldump --password=-Qwerty123 crm", "-Qwerty123"),
+        ("Пароль: по-прежнему", "по-прежнему"),
+        ("Временный пароль Пароль-2024 действует сутки", "Пароль-2024"),
+    ],
+)
+def test_passwords_next_to_paths_properties_flags_and_prose_are_found(text, value):
+    assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        (r"net use \\srv-fs01\share Qwerty123 /user:CONTOSO\ivanov", "Qwerty123"),
+        (r"net use Z: \\srv-fs01\share Qwerty123 /user:ivanov", "Qwerty123"),
+        (r"NET USE \\srv-fs01\share /user:CONTOSO\ivanov /persistent:no Qwerty123", "Qwerty123"),
+        ("mysql -uroot -pQwerty123 crm", "Qwerty123"),
+        ("mysqldump -h db01 -u app -p'S3cr3t pass' crm", "S3cr3t pass"),
+        ("mariadb-dump -uapp -pS3cr3t crm", "S3cr3t"),
+        ("sshpass -p Qwerty123 ssh admin@srv-db01", "Qwerty123"),
+        ("sshpass -pQwerty123 scp a.txt srv-db01:", "Qwerty123"),
+        ('<add key="DbPassword" value="Qwerty123"/>', "Qwerty123"),
+        ("<add key='Smtp.Password' value='Qwerty123' />", "Qwerty123"),
+    ],
+)
+def test_password_at_its_place_in_a_known_command_is_found(text, value):
+    """Идея «Command-specific password rules»: пароль без слова-ключа на своём месте в команде."""
+    assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        r"net use \\srv-fs01\share /user:CONTOSO\ivanov", r"net use \\srv-fs01\share * /user:ivanov",
+        r"net use Z: \\srv-fs01\share /persistent:yes", "net use \\\\srv-fs01\\share\nдальше текст",
+        "mysql -u root -p crm", "mysql -p", "mysql -P3306 -h db01 crm", "mysql -uroot crm | grep -pattern",
+        "sshpass -f ~/.pw ssh srv-db01", "sshpass -e ssh srv-db01",
+        '<add key="PageSize" value="20"/>', '<add key="PasswordMinLength" value="8"/>',
+        '<add key="DbPassword" value="${DB_PASS}"/>',
+    ],
+)
+def test_known_command_without_a_password_is_left_alone(text):
+    assert found(text) == set()
