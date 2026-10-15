@@ -293,19 +293,27 @@ class _Restorer:
         self.issued = set(state.issued.values())      # свои замены сущностей; имени узла целиком среди них нет
         self.fake_nets: set[int] = set()
         self.macs = {}
-        self.own_hosts = {
+        # Имя длиннее 253 знаков чаты, сохранённые до 15.10.2026, хранят целиком; его части выданы и сами, и оно
+        # проверяется по ним (6.4) — иначе дерево ниже было бы глубиной в тысячи частей.
+        own_hosts = {
             text.lower() for text, surrogate in state.surrogates.items()
-            if surrogate.kind in ("host", "ip", "ip6")
+            if surrogate.kind in ("host", "ip", "ip6") and len(surrogate.original or "") <= 253
         }
         # Метка, выданная адресу или имени узла вместо подмены (совпадение адресов, значение не того вида),
         # в хосте ссылки ведёт на наш же узел: «http://<IP_1>:8080/». Модель пишет её и без скобок.
         for text, surrogate in state.surrogates.items():
             if surrogate.kind == "label" and state.entities[surrogate.entity_id].type in _HOST_TYPES:
                 bare = text.strip("<>[]").lower()
-                self.own_hosts |= {bare, f"<{bare}>", f"&lt;{bare}&gt;"}
-        # Больше частей, чем в самой длинной выданной подмене, одна цепочка не займёт: без этого
-        # предела хост «a.a.a…» из тысяч частей проверялся бы квадратичное время.
-        self.depth = max((text.count(".") + 1 for text in self.own_hosts), default=0)
+                own_hosts |= {bare, f"<{bare}>", f"&lt;{bare}&gt;"}
+        # Наши хосты — деревом частей, как в поиске замен (surrogates.Finder); None — хост кончается здесь. Цепочка
+        # частей хоста ссылки проходится, пока она — начало нашего: перебор всех цепочек до числа частей самого
+        # длинного занимал на хосте из тысяч частей секунды.
+        self.own_hosts: dict[str | None, dict] = {}
+        for host in own_hosts:
+            node = self.own_hosts
+            for part in host.split("."):
+                node = node.setdefault(part, {})
+            node[None] = {}
         self.domains = {fake.lower() for slot, fake in state.issued.items() if slot.endswith("|dns")}
         self.generic = load_builtin().generic_labels
         for text, surrogate in state.surrogates.items():
@@ -356,8 +364,10 @@ class _Restorer:
         for first in range(len(labels_)):
             if first not in reachable:
                 continue
-            for last in range(first + 1, min(len(labels_), first + self.depth) + 1):
-                if ".".join(labels_[first:last]) in self.own_hosts:
+            node, last = self.own_hosts, first
+            while last < len(labels_) and (node := node.get(labels_[last])) is not None:
+                last += 1
+                if None in node:
                     reachable.add(last)
         return len(labels_) in reachable
 

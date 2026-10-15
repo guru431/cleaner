@@ -14,7 +14,7 @@ from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities.resolve import Resolver
 from cleaner.core.pipeline import DETECTORS, sanitize
 from cleaner.core.restore import StreamRestorer, restore
-from cleaner.core.types import ChatState, Settings
+from cleaner.core.types import ChatState, Settings, Surrogate
 from cleaner.core.types import EntityType as T
 
 
@@ -272,3 +272,33 @@ def test_restore_is_fast_on_links_written_with_references_in_prose(text):
     started = time.perf_counter()
     restore(state, text + "<EMAIL_1>", Settings())
     assert time.perf_counter() - started < 0.5
+
+
+def test_link_host_check_walks_a_tree_of_parts():
+    """Наблюдение раунда имён узлов, P3: проверка хоста ссылки собирала все цепочки частей до числа частей самой длинной
+    записанной подмены — после имени из 125 частей хост из 20 000 частей проверялся 2,2 с. Части проходятся по дереву,
+    как в поиске замен (surrogates.Finder)."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "узел " + "a." * 125 + "ru", Settings())
+    started = time.perf_counter()
+    restore(state, "https://" + "host-1." * 5000 + "x/", Settings())
+    assert time.perf_counter() - started < 0.3
+
+
+def test_names_longer_than_a_dns_name_kept_by_older_chats_are_found_by_parts():
+    """Чаты, сохранённые до 15.10.2026, хранят целиком и имена длиннее 253 знаков: поиск замен и проверка хоста ссылки
+    проходили бы такое имя по дереву на всю его глубину с каждой части. В деревья оно не берётся и находится, и
+    восстанавливается по частям (6.4)."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    name = "a." * 3000 + "ru"
+    whole = sanitize(state, "узел " + name, Settings()).sanitized.removeprefix("узел ")
+    state.surrogates[whole] = Surrogate(state.surrogates["host-1"].entity_id, name, "host")    # как в старом чате
+    assert restore(state, whole, Settings()).text == name
+    assert sanitize(state, whole, Settings()).sanitized == whole
+    for step in ("sanitize", "restore"):
+        started = time.perf_counter()
+        if step == "sanitize":
+            sanitize(state, "host-1." * 3000 + "x", Settings())
+        else:
+            restore(state, "https://" + "host-1." * 3000 + "x/", Settings())
+        assert time.perf_counter() - started < 0.3, step
