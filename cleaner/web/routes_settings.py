@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
 
@@ -14,10 +15,11 @@ from cleaner.core.detect.base import DetectorError, load_builtin
 from cleaner.core.detect.dictionary import PATTERN_TIMEOUT
 from cleaner.core.detect.llm import CompletionError
 from cleaner.core.types import EntityType, Policy
+from cleaner.egress import ProviderError, cloud
 from cleaner.engines import GATEWAY_KEY_ENV, LocalSettings, local_settings, save_local_settings
-from cleaner.storage.repo import User
+from cleaner.storage.repo import Provider, User
 from cleaner.web import auth, render
-from cleaner.web.deps import Viewer, get_admin, get_form, page, repo_of
+from cleaner.web.deps import Viewer, get_admin, get_form, page, repo_of, service_of
 
 router = APIRouter(prefix="/settings")
 
@@ -34,7 +36,10 @@ EVENTS = (
     "dictionary_changed", "dictionary_import", "pattern_changed", "policy_changed",
     "user_created", "user_disabled", "user_enabled", "password_changed", "error", "jobs_interrupted",
     "settings_changed", "gold_added", "gold_deleted", "risk_check", "layer_changed",
+    "provider_changed", "cloud_send", "local_answer",
 )
+PROTOCOL_NAMES = {"openai": "OpenAI-совместимый", "anthropic": "Anthropic-совместимый"}
+AUTH_NAMES = {"bearer": "Authorization: Bearer", "x-api-key": "x-api-key"}
 _SHOWN = 50
 
 
@@ -282,6 +287,89 @@ def save_layers(request: Request, form: dict[str, str] = Depends(get_form), view
     repo.set_layer_defaults(values)
     repo.audit("settings_changed", viewer.user.id, section="layers", **values)
     return _redirect("/settings/local-llm")
+
+
+# --- подключения к облачным моделям (FR-8.1, FR-8.2, FR-8.10, SEC-13) ----------------------
+
+def _providers_page(request: Request, viewer: Viewer, result: str = "", failed: bool = False, detail: str = "") -> Response:
+    return page(
+        request, "providers.html", viewer, providers=repo_of(request).providers(), protocols=PROTOCOL_NAMES,
+        auth_styles=AUTH_NAMES, result=result, failed=failed, detail=detail,
+    )
+
+
+def _provider_form(form: dict[str, str], provider_id: str = "") -> tuple[Provider, str | None]:
+    """Подключение из формы и новый ключ (None — прежний). HTTPException 400 с причиной."""
+    name, url = form.get("name", "").strip(), form.get("base_url", "").strip()
+    protocol, auth_style = form.get("protocol", ""), form.get("auth_style", "")
+    models = tuple(dict.fromkeys(line.strip() for line in form.get("models", "").splitlines() if line.strip()))
+    key = form.get("api_key", "").strip() or None
+    if not name or not url or not models:
+        raise HTTPException(400, "Укажите название, адрес и хотя бы одну модель")
+    if protocol not in PROTOCOL_NAMES or auth_style not in AUTH_NAMES:
+        raise HTTPException(400, "Неизвестный протокол или способ передачи ключа")
+    if key is None and not provider_id:
+        raise HTTPException(400, "Укажите ключ")
+    try:
+        cloud.check_url(url)
+        max_tokens = int(form.get("max_tokens", "") or 4096)
+        extra = json.loads(form.get("extra_body", "").strip() or "{}")
+        cloud.check_extra_body(extra)
+    except ValueError as exc:
+        raise HTTPException(400, f"Подключение не сохранено: {exc}") from None
+    if not 1 <= max_tokens <= 1_000_000:
+        raise HTTPException(400, "Предел длины ответа — от 1 до 1 000 000 токенов")
+    enabled = form.get("enabled") == "yes"
+    return Provider(provider_id, name, protocol, url, auth_style, key or "", models, max_tokens, extra, enabled), key
+
+
+@router.get("/providers")
+def providers(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
+    return _providers_page(request, viewer)
+
+
+@router.post("/providers")
+def add_provider(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    provider, _ = _provider_form(form)
+    provider_id = repo_of(request).add_provider(provider)
+    repo_of(request).audit("provider_changed", viewer.user.id, action="add", id=provider_id)
+    return _redirect("/settings/providers")
+
+
+@router.post("/providers/{provider_id}")
+def update_provider(request: Request, provider_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    if repo_of(request).provider(provider_id) is None:
+        raise HTTPException(404, "Подключение не найдено")
+    provider, key = _provider_form(form, provider_id)
+    repo_of(request).update_provider(provider, key)
+    repo_of(request).audit("provider_changed", viewer.user.id, action="update", id=provider_id, key_changed=key is not None)
+    return _redirect("/settings/providers")
+
+
+@router.post("/providers/{provider_id}/delete")
+def delete_provider(request: Request, provider_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    if not repo_of(request).delete_provider(provider_id):
+        raise HTTPException(404, "Подключение не найдено")
+    repo_of(request).audit("provider_changed", viewer.user.id, action="delete", id=provider_id)
+    return _redirect("/settings/providers")
+
+
+@router.post("/providers/{provider_id}/check")
+def check_provider(request: Request, provider_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    """FR-8.2: проверочный запрос без пользовательских данных; показывается и сообщение провайдера."""
+    provider = repo_of(request).provider(provider_id)
+    if provider is None:
+        raise HTTPException(404, "Подключение не найдено")
+    model = form.get("model", "")
+    if model not in provider.models:
+        raise HTTPException(400, "Выберите модель из списка подключения")
+    try:
+        answer = service_of(request).check_provider(provider, model)
+    except ProviderError as exc:
+        return _providers_page(request, viewer, f"«{provider.name}», {model}: {exc}", failed=True, detail=exc.detail)
+    except ValueError as exc:
+        return _providers_page(request, viewer, f"«{provider.name}»: {exc}", failed=True)
+    return _providers_page(request, viewer, f"«{provider.name}», {model} ответил: {answer or '(пустой ответ)'}")
 
 
 # --- пользователи (FR-12.1) -------------------------------------------------------
