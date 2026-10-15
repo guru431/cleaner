@@ -1,0 +1,8 @@
+{# Сетка страниц настроек: меню разделов слева, содержимое справа. #}
+{% extends "base.html" %}
+{% from "_settings_nav.html" import nav %}
+{% block main_class %}split{% endblock %}
+{% block main %}
+{{ nav(request.url.path) }}
+<section class="work"><div class="content">{% block content %}{% endblock %}</div></section>
+{% endblock %}

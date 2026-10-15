@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% from "_ui.html" import icon %}
+{% block title %}Проверка — {{ chat.title }} — Cleaner{% endblock %}
+{% block main %}
+<div class="bar">
+  <nav class="crumbs"><a href="/chats/{{ chat.id }}" title="{{ chat.title }}">{{ chat.title }}</a><span class="sep">/</span><h1>Проверка текста {{ item.seq }}</h1></nav>
+  <span class="spacer"></span>
+  <a class="btn" href="/chats/{{ chat.id }}/entities">Таблица замен</a>
+  {% if retry %}
+  <form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/retry">
+    {% include "_csrf.html" %}
+    <button>{% if item.status == "done" %}Очистить заново всеми включёнными слоями{% else %}Повторить{% endif %}</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if pending %}
+<section class="summary">
+  {% if item.status in ("queued", "running") %}
+  <p class="muted" data-poll="/chats/{{ chat.id }}/items/{{ item.id }}/status">{% if item.status == "queued" %}Текст в очереди{% else %}Текст обрабатывается{% endif %}… <span data-progress>{{ item.meta.progress or "" }}</span></p>
+  {% else %}
+  <p class="flash bad">Текст не обработан: {{ item.meta.error }}</p>
+  {% endif %}
+</section>
+{% else %}
+<section class="summary">
+  <div class="badges">
+    {% for name, count in summary %}<span class="badge">{{ name }} — {{ count }}</span>{% else %}<span class="muted">Замен нет</span>{% endfor %}
+    {% if leaks %}
+    <span class="badge bad">{{ icon("warning") }}найдено оригиналов — {{ leaks }}</span>
+    {% else %}
+    <span class="badge good">{{ icon("check") }}оригиналов в очищенном тексте нет</span>
+    {% endif %}
+  </div>
+  {% for text in warnings %}<p class="flash warn">{{ text }}</p>{% endfor %}
+  {% for text, count in notices %}<p class="flash warn">{{ text }} ({{ count }})</p>{% endfor %}
+  {% if exposed %}
+  <p class="flash warn">Прежний вариант этого текста содержал открытым значение, которое теперь скрывается: {{ exposed | join("; ") }}. Если текст уже был передан, значение ушло открытым.</p>
+  {% endif %}
+  {% if leaks %}
+  <p class="flash bad">Проверка утечек: найдено оригиналов — {{ leaks }}. Выдача заблокирована, пока они не скрыты.</p>
+  {% endif %}
+  {% if blocked %}
+  <p class="flash bad">Фрагментов типа с политикой «блокировать» — {{ blocked }}. Выдача заблокирована, пока они есть в тексте.</p>
+  {% endif %}
+</section>
+
+<div class="compare">
+  <section class="panel">
+    <header class="panel-head"><h2 class="title">Оригинал</h2><span class="state">выделите фрагмент, чтобы скрыть его</span></header>
+    <pre class="text" id="original">
+{{ original }}</pre>
+  </section>
+  <section class="panel">
+    <header class="panel-head">
+      <h2 class="title">Очищенный</h2>
+      {% if deliverable %}
+      <span class="actions">
+        <button type="button" data-copy="sanitized">{{ icon("copy") }}<span>Скопировать</span></button>
+        <a class="btn" href="/chats/{{ chat.id }}/items/{{ item.id }}/download">{{ icon("download") }}Скачать .txt</a>
+      </span>
+      {% endif %}
+    </header>
+    <pre class="text" id="sanitized">
+{{ sanitized }}</pre>
+  </section>
+</div>
+
+<form method="post" action="/chats/{{ chat.id }}/mask" class="panel mask-row">
+  {% include "_csrf.html" %}
+  <input type="hidden" name="item_id" value="{{ item.id }}">
+  <label for="mask-value">Скрыть фрагмент</label>
+  <textarea id="mask-value" name="value" rows="1" required placeholder="Выделите фрагмент в оригинале или впишите его"></textarea>
+  <select name="type" aria-label="Тип">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select>
+  <button class="primary">Скрывать во всём чате</button>
+</form>
+
+<div class="tabs" data-tabs data-tabs-remember>
+  <div class="tab-list" role="tablist">
+    <button type="button" role="tab" data-tab="fragments" aria-selected="true">Замены в этом тексте ({{ fragments | length }})</button>
+    {# Состояние проверки — и на ярлыке: выбрана может быть другая вкладка, а без sessionStorage выбор не переживает перенаправление. #}
+    <button type="button" role="tab" data-tab="risk" aria-selected="false">Остаточный риск
+      {%- if item.risk_status in ("queued", "running") %} <span class="badge">идёт проверка</span>
+      {%- elif item.risk_status == "failed" %} <span class="badge bad">ошибка проверки</span>
+      {%- elif item.risk_status == "interrupted" %} <span class="badge bad">проверка прервана</span>
+      {%- endif %}</button>
+    {% if viewer.is_admin %}<button type="button" role="tab" data-tab="dictionary" aria-selected="false">В словарь</button>{% endif %}
+    <button type="button" role="tab" data-tab="gold" aria-selected="false">Эталон</button>
+  </div>
+  <div class="tab-panel on" role="tabpanel" data-tab-panel="fragments">
+    <table class="grid">
+      <thead><tr><th>Фрагмент</th><th>Замена</th><th>Тип</th><th></th></tr></thead>
+      <tbody>
+      {% for f in fragments %}
+      <tr>
+        <td class="mono">{{ f.value }}</td><td class="mono nowrap">{{ f.surrogate }}</td><td class="nowrap">{{ f.type }}</td>
+        <td class="actions">
+          <form method="post" action="/chats/{{ chat.id }}/unmask">
+            {% include "_csrf.html" %}
+            <input type="hidden" name="item_id" value="{{ item.id }}">
+            <input type="hidden" name="value" value="{{ f.value }}">
+            <button class="danger">Снять замену во всём чате</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="empty">Замен в этом тексте нет</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="tab-panel" role="tabpanel" data-tab-panel="risk">
+    <p class="muted">Локальная модель пробует по очищенному тексту назвать организацию, людей и место. Верная догадка подсказывает, что ещё стоит скрыть.</p>
+    {% if item.risk_status in ("queued", "running") %}
+    <p class="muted" data-poll="/chats/{{ chat.id }}/items/{{ item.id }}/status" data-poll-field="risk">Локальная модель проверяет текст…</p>
+    {% elif item.risk_status == "failed" %}
+    <p class="flash bad">Проверка не выполнена: локальная модель недоступна или ответила не по правилам.</p>
+    {% elif item.risk_status == "interrupted" %}
+    <p class="flash bad">Проверка прервана перезапуском службы: запустите её ещё раз.</p>
+    {% elif risk is not none %}
+    <ul>
+      {% for guess in risk.guesses %}
+      <li>{{ risk_kinds[guess.kind] }}: «{{ guess.guess }}»{% if guess.clue %} — по фрагменту «{{ guess.clue }}»{% endif %}</li>
+      {% else %}
+      <li>Модель не смогла определить ни организацию, ни людей, ни место.</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if item.risk_status not in ("queued", "running") %}
+    <form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/risk">{% include "_csrf.html" %}<button>Проверить остаточный риск</button></form>
+    {% endif %}
+  </div>
+  {% if viewer.is_admin %}
+  <div class="tab-panel" role="tabpanel" data-tab-panel="dictionary">
+    <p class="muted">Значение попадёт в словарь организации и будет действовать во всех чатах.</p>
+    <form method="post" action="/chats/{{ chat.id }}/dictionary" class="inline-form">
+      {% include "_csrf.html" %}
+      <input type="hidden" name="item_id" value="{{ item.id }}">
+      <input name="value" placeholder="Значение" required aria-label="Значение">
+      <select name="list" aria-label="Список"><option value="always">всегда скрывать</option><option value="never">никогда не скрывать</option></select>
+      <select name="type" aria-label="Тип">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select>
+      <button class="primary">Добавить</button>
+    </form>
+  </div>
+  {% endif %}
+  <div class="tab-panel" role="tabpanel" data-tab-panel="gold">
+    <p class="muted">Сначала проверьте замены. Копия текста с текущей разметкой попадёт в набор для измерения качества и останется в нём после удаления чата.</p>
+    <form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/gold">{% include "_csrf.html" %}<button>Сохранить как эталон</button></form>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

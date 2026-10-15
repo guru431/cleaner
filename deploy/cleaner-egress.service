@@ -1,0 +1,14 @@
+[Unit]
+Description=Cleaner: границы выхода наружу (порт 443, журнал отказов)
+# Своя таблица nftables: ufw её не трогает, порядок относительно него не важен.
+After=network-online.target
+Wants=network-online.target
+Before=cleaner.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cleaner-egress.sh
+
+[Install]
+WantedBy=multi-user.target

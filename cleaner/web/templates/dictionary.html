@@ -1,0 +1,59 @@
+{% extends "_settings.html" %}
+{% block title %}Словарь — Cleaner{% endblock %}
+{% block content %}
+<h1>Словарь организации</h1>
+<p class="lead">Значения из списка «всегда скрывать» скрываются в каждом чате, из списка «никогда не скрывать» — остаются открытыми.</p>
+
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Добавить</h2></header>
+  <div class="panel-body">
+    <form method="post" action="/settings/dictionary" class="form">
+      {% include "_csrf.html" %}
+      <label class="field"><span>Список</span><select name="list"><option value="always">всегда скрывать</option><option value="never">никогда не скрывать</option></select></label>
+      <label class="field"><span>Значение</span><input name="value" required></label>
+      <label class="field"><span>Тип</span><select name="type">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select></label>
+      <label class="field"><span>Варианты написания</span><span class="control">
+        <textarea name="aliases" rows="2"></textarea>
+        <small class="hint">По одному в строке</small>
+      </span></label>
+      <label class="field"><span>Комментарий</span><input name="comment"></label>
+      <div class="buttons"><button class="primary">Добавить</button></div>
+    </form>
+  </div>
+</section>
+
+{% for title, rows in (("Всегда скрывать", always), ("Никогда не скрывать", never)) %}
+<section class="panel">
+  <header class="panel-head"><h2 class="title">{{ title }}</h2><span class="state">{{ rows | length }}</span></header>
+  <table class="grid">
+    <thead><tr><th>Значение</th><th>Тип</th><th>Варианты</th><th>Комментарий</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr>
+      <td class="mono">{{ r.value }}</td><td class="nowrap">{{ types[r.type] if r.type else "" }}</td>
+      <td class="mono">{{ r.aliases | join(", ") }}</td><td>{{ r.comment }}</td>
+      <td class="actions"><form method="post" action="/settings/dictionary/{{ r.id }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="empty">Пусто</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endfor %}
+
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Импорт из CSV</h2><span class="state">выгрузка AD или DNS; сначала предпросмотр</span></header>
+  <div class="panel-body">
+    <form method="post" action="/settings/dictionary/import" class="form">
+      {% include "_csrf.html" %}
+      <label class="field"><span>Содержимое файла CSV</span><textarea name="csv" rows="8" class="mono" required></textarea></label>
+      <label class="field"><span>Колонка</span><input name="column" placeholder="Имя колонки из первой строки"></label>
+      <label class="field"><span>Разделитель</span><select name="delimiter"><option value="comma">запятая</option><option value="semicolon">точка с запятой</option><option value="tab">табуляция</option></select></label>
+      <label class="field"><span>Список</span><select name="list"><option value="always">всегда скрывать</option><option value="never">никогда не скрывать</option></select></label>
+      <label class="field"><span>Тип</span><select name="type">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select></label>
+      <div class="buttons"><button name="action" value="preview" class="primary">Показать, что будет добавлено</button></div>
+    </form>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,43 @@
+{% extends "_settings.html" %}
+{% block title %}Шаблоны — Cleaner{% endblock %}
+{% block content %}
+<h1>Пользовательские шаблоны</h1>
+<p class="lead">Регулярные выражения для своих видов данных. Найденное скрывается как фрагмент выбранного типа.</p>
+<section class="panel">
+  <table class="grid">
+    <thead><tr><th>Название</th><th>Выражение</th><th>Тип</th><th></th></tr></thead>
+    <tbody>
+    {% for p in rows %}
+    <tr>
+      <td>{{ p.name }}</td><td><code>{{ p.regex }}</code></td><td class="nowrap">{{ types[p.type] }}</td>
+      <td class="actions"><form method="post" action="/settings/patterns/{{ p.id }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="empty">Шаблонов нет</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Новый шаблон</h2></header>
+  <div class="panel-body">
+    <form method="post" action="/settings/patterns" class="form">
+      {% include "_csrf.html" %}
+      <label class="field"><span>Название</span><input name="name" value="{{ form.name or '' }}" required></label>
+      <label class="field"><span>Регулярное выражение</span><input name="regex" class="mono" value="{{ form.regex or '' }}" required></label>
+      <label class="field"><span>Тип</span><select name="type">{% for code, name in types.items() %}<option value="{{ code.value }}"{% if form.type == code.value %} selected{% endif %}>{{ name }}</option>{% endfor %}</select></label>
+      <label class="field"><span>Тестовая строка</span><textarea name="sample" rows="3" class="mono">
+{{ form.sample or '' }}</textarea></label>
+      <div class="buttons">
+        <button name="action" value="test">Проверить</button>
+        <button name="action" value="save" class="primary">Проверить и сохранить</button>
+      </div>
+    </form>
+    {% if matches is not none %}
+    <p class="counters">Совпадений: {{ matches | length }}</p>
+    <ul class="values">{% for m in matches %}<li>{{ m }}</li>{% endfor %}</ul>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

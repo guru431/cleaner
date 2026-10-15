@@ -1,0 +1,2 @@
+{# Общие куски разметки. Иконка — символ из static/icons.svg, цвет — currentColor. #}
+{% macro icon(name) %}<svg class="icon" aria-hidden="true"><use href="/static/icons.svg#{{ name }}"></use></svg>{% endmacro %}

@@ -1,0 +1,26 @@
+# Стандартные учётные записи и служебные имена доменов
+administrator
+администратор
+admin
+guest
+гость
+system
+public
+default
+default user
+all users
+defaultaccount
+wdagutilityaccount
+root
+nobody
+localservice
+networkservice
+local service
+network service
+everyone
+users
+krbtgt
+builtin
+authority
+workgroup
+service

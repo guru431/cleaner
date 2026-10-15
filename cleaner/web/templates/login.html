@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Вход — Cleaner{% endblock %}
+{% block main_class %}center{% endblock %}
+{% block main %}
+<div class="login">
+  <div class="login-brand">
+    <h1>Cleaner</h1>
+    <p class="muted">Очистка текста перед облачной моделью</p>
+  </div>
+  <form method="post" action="/login" class="panel login-form">
+    {% if error %}<p class="flash bad">{{ error }}</p>{% endif %}
+    <input type="hidden" name="csrf" value="{{ login_csrf }}">
+    <label class="stack">Логин <input name="login" autocomplete="username" required autofocus></label>
+    <label class="stack">Пароль <input name="password" type="password" autocomplete="current-password" required></label>
+    <button class="primary wide">Войти</button>
+  </form>
+</div>
+{% endblock %}

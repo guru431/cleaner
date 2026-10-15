@@ -3,3 +3,18 @@
 .claude/.env
 .claude/settings.local.json
 .claude/settings.local.json.bak
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# local data: development database and master key
+/data/
+
+# models downloaded by `cleaner models download` for development
+/models/
+
+# brainstorming and plan-execution scratch (ledgers, briefs, mockups)
+.superpowers/

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Ошибка — Cleaner{% endblock %}
+{% block main_class %}center{% endblock %}
+{% block main %}
+<section class="panel narrow">
+  <header class="panel-head"><h1 class="title">Ошибка {{ code }}</h1></header>
+  <div class="panel-body">
+    <p>{{ message }}</p>
+    <p><a href="/chats">К списку чатов</a></p>
+  </div>
+</section>
+{% endblock %}

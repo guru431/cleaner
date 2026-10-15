@@ -1,0 +1,40 @@
+[Unit]
+Description=Cleaner: очистка данных перед облачными LLM
+# Адрес example должен уже быть на интерфейсе: служба слушает только его.
+# Границы выхода наружу (этап 3) ставит cleaner-egress.service; Requires= не годится: перезапуск
+# таблицы (обновление списка сетей) перезапускал бы и службу. Без таблицы служба не стартует (ExecStartPre).
+After=network-online.target cleaner-egress.service
+Wants=network-online.target cleaner-egress.service
+
+[Service]
+User=cleaner
+Group=cleaner
+WorkingDirectory=/opt/cleaner
+EnvironmentFile=/etc/cleaner/cleaner.env
+Environment="CLEANER_CONFIG=/etc/cleaner/cleaner.toml"
+Environment="HOME=/var/lib/cleaner"
+Environment="HF_HUB_OFFLINE=1"
+Environment="TRANSFORMERS_OFFLINE=1"
+Environment="HF_HUB_DISABLE_TELEMETRY=1"
+Environment="DO_NOT_TRACK=1"
+Environment="TOKENIZERS_PARALLELISM=false"
+# Без таблицы nftables cleaner_egress выход наружу не ограничен — тогда служба не стартует.
+# «+» — проверка от root: правила nftables учётной записи cleaner не видны.
+ExecStartPre=+/usr/local/sbin/cleaner-egress.sh check
+ExecStart=/opt/cleaner/.venv/bin/python -m cleaner serve
+MemoryMax=8G
+Nice=10
+CPUWeight=20
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/cleaner
+Restart=always
+RestartSec=20
+# Выход наружу (этап 3, SEC-15): только TCP 443 — таблица nftables cleaner_egress (cleaner-egress.sh) по учётной
+# записи cleaner; IPAddressDeny=, как у остальных служб сервера, закрыл бы и его.
+
+[Install]
+WantedBy=multi-user.target

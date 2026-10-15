@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Cleaner{% endblock %}</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+{% if viewer %}
+{% set section = "settings" if request.url.path.startswith("/settings") else "chats" %}
+<header class="top">
+  <a class="brand" href="/chats">Cleaner</a>
+  <nav class="sections">
+    <a href="/chats"{% if section == "chats" %} class="on" aria-current="true"{% endif %}>Чаты</a>
+    {% if viewer.is_admin %}<a href="/settings"{% if section == "settings" %} class="on" aria-current="true"{% endif %}>Настройки</a>{% endif %}
+  </nav>
+  <span class="who">{{ viewer.user.login }}</span>
+  <button type="button" class="theme" data-theme-toggle title="Светлая или тёмная тема" aria-label="Светлая или тёмная тема">
+    <svg class="icon i-moon" aria-hidden="true"><use href="/static/icons.svg#moon"></use></svg>
+    <svg class="icon i-sun" aria-hidden="true"><use href="/static/icons.svg#sun"></use></svg>
+  </button>
+  <form method="post" action="/logout">{% include "_csrf.html" %}<button>Выйти</button></form>
+</header>
+{% endif %}
+<main class="{% block main_class %}page{% endblock %}">{% block main %}{% endblock %}</main>
+</body>
+</html>

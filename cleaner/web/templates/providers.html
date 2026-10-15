@@ -1,0 +1,84 @@
+{% extends "_settings.html" %}
+{% block title %}Подключения — Cleaner{% endblock %}
+{% macro fields(p=None) %}
+  <label class="field"><span>Название</span><input name="name" value="{{ p.name if p else '' }}" maxlength="100" required></label>
+  <label class="field"><span>Протокол</span><select name="protocol">
+    {% for value, label in protocols.items() %}<option value="{{ value }}"{% if p and p.protocol == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+  </select></label>
+  <label class="field"><span>Адрес</span><span class="control">
+    <input name="base_url" value="{{ p.base_url if p else '' }}" placeholder="https://api.example.com/v1" required>
+    <small class="hint">Для OpenAI-совместимого — до /chat/completions, для Anthropic-совместимого — до /v1/messages</small>
+  </span></label>
+  <label class="field"><span>Передача ключа</span><select name="auth_style">
+    {% for value, label in auth_styles.items() %}<option value="{{ value }}"{% if p and p.auth_style == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+  </select></label>
+  <label class="field"><span>Ключ</span><span class="control">
+    <input type="password" name="api_key" autocomplete="off"{% if not p %} required{% endif %}>
+    {% if p %}<small class="hint">Пусто — оставить прежний (…{{ p.key_tail }})</small>{% endif %}
+  </span></label>
+  <label class="field"><span>Модели</span><span class="control">
+    <textarea name="models" rows="3" required>{{ p.models | join("\n") if p else '' }}</textarea>
+    <small class="hint">По одной в строке</small>
+  </span></label>
+  <label class="field"><span>Предел длины ответа</span><span class="control">
+    <input name="max_tokens" value="{{ p.max_tokens if p else 4096 }}" inputmode="numeric">
+    <small class="hint">Токенов</small>
+  </span></label>
+  <label class="field"><span>Дополнительные параметры</span><span class="control">
+    <textarea name="extra_body" rows="2" class="mono" placeholder='{"temperature": 0.2}'>{{ (p.extra_body | tojson) if p and p.extra_body else '' }}</textarea>
+    <small class="hint">Параметры запроса, JSON</small>
+  </span></label>
+  <div class="field"><span></span><label class="check"><input type="checkbox" name="enabled" value="yes"{% if not p or p.enabled %} checked{% endif %}> Включено</label></div>
+{% endmacro %}
+{% block content %}
+<h1>Подключения к облачным моделям</h1>
+<p class="lead">Запрос уходит только очищенным и только после подтверждения пользователя. Адрес — только HTTPS (HTTP — для петли). Ключ после сохранения не показывается: видны последние четыре знака.</p>
+{% if result %}<p class="flash {{ 'bad' if failed else 'good' }}">{{ result }}</p>{% endif %}
+{% if detail %}<p class="muted">Сообщение провайдера: {{ detail }}</p>{% endif %}
+{% if providers %}
+<section class="panel">
+  <table class="grid">
+    <thead><tr><th>Название</th><th>Протокол и адрес</th><th>Ключ</th><th>Модели</th><th></th></tr></thead>
+    <tbody>
+    {% for p in providers %}
+    <tr>
+      <td>{{ p.name }}{% if not p.enabled %} <span class="badge warn">выключено</span>{% endif %}</td>
+      <td>{{ protocols[p.protocol] }}<div class="sub mono">{{ p.base_url }}</div></td>
+      <td>{{ auth_styles[p.auth_style] }}<div class="sub mono">…{{ p.key_tail }}</div></td>
+      <td>{{ p.models | join(", ") }}<div class="sub">до {{ p.max_tokens }} токенов</div></td>
+      <td class="actions">
+        <form method="post" action="/settings/providers/{{ p.id }}/check">
+          {% include "_csrf.html" %}
+          <select name="model" aria-label="Модель">{% for m in p.models %}<option>{{ m }}</option>{% endfor %}</select>
+          <button>Проверить</button>
+        </form>
+        <details class="inline" name="edit">
+          <summary class="btn">Изменить</summary>
+          <div class="pop">
+            <form method="post" action="/settings/providers/{{ p.id }}" class="form">
+              {% include "_csrf.html" %}{{ fields(p) }}
+              <div class="buttons"><button class="primary">Сохранить</button></div>
+            </form>
+          </div>
+        </details>
+        <form method="post" action="/settings/providers/{{ p.id }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% else %}
+<p class="muted">Подключений нет: чаты работают в ручном режиме.</p>
+{% endif %}
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Новое подключение</h2></header>
+  <div class="panel-body">
+    <form method="post" action="/settings/providers" class="form">
+      {% include "_csrf.html" %}
+      {{ fields() }}
+      <div class="buttons"><button class="primary">Добавить</button></div>
+    </form>
+  </div>
+</section>
+{% endblock %}

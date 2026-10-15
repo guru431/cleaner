@@ -1,0 +1,57 @@
+"""Фоновые задания: извлечение текста, слои 4 и 5, запросы к локальной модели (раздел 14 спецификации).
+
+Пулы потоков в процессе службы: общий из двух, свои у разбора файлов и отправок облаку (app.create_app).
+Состояние пишет само задание — в items.status; страница опрашивает его раз в секунду. Очередь не переживает
+перезапуск: прерванное становится failed (NFR-6).
+"""
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Callable
+from concurrent.futures import Executor, Future, ThreadPoolExecutor, wait
+
+log = logging.getLogger("cleaner.jobs")
+
+WORKERS = 2
+INTERRUPTED = "Обработка прервана перезапуском службы: запустите её ещё раз"
+# Сколько остановка службы ждёт идущие задания. systemd ждёт остановки 90 с, а страница распознавания
+# идёт до минуты: дольше ждать незачем, недождавшиеся помечаются прерванными.
+STOP_WAIT = 30.0
+
+
+class Jobs:
+    def __init__(self, executor: Executor | None = None, stop_wait: float = STOP_WAIT):
+        self._executor = executor or ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="cleaner-job")
+        self._stop_wait = stop_wait
+        self._pending: set[Future] = set()      # add и discard атомарны под GIL: отдельный замок не нужен
+
+    def submit(self, fn: Callable[..., None], *args: object) -> None:
+        future = self._executor.submit(_run, fn, args)
+        self._pending.add(future)
+        future.add_done_callback(self._pending.discard)
+
+    def shutdown(self) -> int:
+        return shutdown(self)
+
+
+def shutdown(*pools: Jobs) -> int:
+    """Остановка службы: новые задания не принимаются, ждущие в очереди отменяются сразу во всех пулах, идущие —
+    ждём вместе не дольше stop_wait секунд. По очереди пул файлов брал бы следующий скан, пока ждётся общий,
+    а остановка росла бы на stop_wait с каждым пулом. Возвращает число недождавшихся: их элементы помечает
+    прерванными вызывающий, пока соединение с базой открыто (app.lifespan)."""
+    for pool in pools:
+        pool._executor.shutdown(wait=False, cancel_futures=True)
+    started, unfinished = time.monotonic(), 0
+    for pool in pools:                   # срок у каждого пула свой, отсчёт — от общего начала
+        _, left = wait(set(pool._pending), timeout=max(0.0, pool._stop_wait - (time.monotonic() - started)))
+        unfinished += len(left)
+    return unfinished
+
+
+def _run(fn: Callable[..., None], args: tuple[object, ...]) -> None:
+    """Задание само отмечает отказ в элементе; сюда доходит только непредвиденное — в лог по виду, без текста (SEC-11)."""
+    try:
+        fn(*args)
+    except Exception as exc:
+        log.error("фоновое задание %s: %s", getattr(fn, "__name__", "?"), type(exc).__name__)
