@@ -317,6 +317,23 @@ def test_one_letter_after_a_backslash_is_not_a_login(text):
     assert T.ACCOUNT not in {type_ for type_, _ in found(r"вход contoso\n", ctx)}
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        r"reg query HKLM\Software /s", r"reg add HKCU\Environment /v X /d 1", r"reg query HKCR\Directory",
+        r"reg load HKU\S-1-5-18 ntuser.dat", r"reg query HKCC\System", r"reg query hklm\software",
+        r"reg query HKEY_LOCAL_MACHINE\SOFTWARE /s", r"Get-ItemProperty HKLM:\Software",
+    ],
+)
+def test_registry_hive_is_not_a_domain(text):
+    r"""FINDINGS «Small gaps left by the findings batch of 15.10»: «HKLM\Software» давал домен HKLM и вход Software."""
+    assert values(text) == set()
+
+
+def test_domain_login_next_to_a_registry_path_is_still_found():
+    assert found(r"reg query HKLM\Software /s под CORP\ivanov") == {(T.DOMAIN, "CORP"), (T.ACCOUNT, "ivanov")}
+
+
 def test_short_login_after_a_domain_is_still_found():
     assert accounts(r"вход CONTOSO\ab, CONTOSO\nikolaev, ERROR\tester") == {"ab", "nikolaev", "tester"}
 
