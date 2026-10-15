@@ -1,11 +1,17 @@
 import json
 import logging
 import os
+import socket
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import uvicorn
 from argon2 import PasswordHasher
 
+from cleaner import __main__ as cli
 from cleaner.__main__ import main
 from cleaner.storage import crypto, db
 from cleaner.storage.repo import Repository
@@ -82,6 +88,86 @@ def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monk
     assert os.environ["HF_HUB_OFFLINE"] == "1" and os.environ["TRANSFORMERS_OFFLINE"] == "1"
     # Обзор плана 2+4, m-7: предупреждения Docling бывают с текстом ячеек документа — в журнал службы они не идут.
     assert all(logging.getLogger(name).level == logging.CRITICAL for name in ("docling", "transformers", "gliner"))
+
+
+@pytest.fixture
+def offline_env(monkeypatch):
+    """serve ставит переменные OFFLINE в окружение процесса: после теста — прежние значения."""
+    for name in cli.OFFLINE:
+        monkeypatch.setenv(name, "")
+
+
+def test_serve_exits_without_waiting_for_jobs_the_stop_left_running(home, monkeypatch, offline_env):
+    """Находка «Small gaps left by the findings batch of 15.10»: когда uvicorn.run возвращается (Ctrl+C), интерпретатор
+    при выходе ждал поток пула, пока его задание не кончится, — скан идёт минуты, — а запись задания в закрытую базу
+    падала ошибкой. Недождавшиеся задания уже помечены прерванными: процесс выходит сразу, но после закрытия базы."""
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, init(home))
+    left, exits = [0], []
+
+    def run(app, **kwargs):
+        app.state.unfinished_jobs = left[0]          # столько заданий остановка службы не дождалась (app.lifespan)
+        exits.append(app.state.repo.conn)
+
+    def exit_now():
+        with pytest.raises(sqlite3.ProgrammingError):
+            exits[-1].execute("SELECT 1")            # база уже закрыта
+        exits.append("exit")
+
+    monkeypatch.setattr(uvicorn, "run", run)
+    monkeypatch.setattr(cli, "_exit_now", exit_now)
+    assert main(["serve"]) == 0 and "exit" not in exits      # все дождались: обычный выход
+    left[0] = 1
+    main(["serve"])
+    assert exits[-1] == "exit"
+
+
+# Служба в отдельном процессе: задание идёт дольше ожидания остановки, сигнал — когда порт уже слушается.
+_STUCK_SERVE = """
+import signal, socket, sys, threading, time
+import cleaner.web.app as web
+from cleaner.__main__ import main
+from cleaner.web.jobs import Jobs
+
+port, sig, create_app = int(sys.argv[1]), getattr(signal, sys.argv[2]), web.create_app
+
+def stop_when_listening():
+    while True:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    signal.raise_signal(sig)
+
+def stuck_app(*args, **kwargs):
+    app = create_app(*args, jobs=Jobs(stop_wait=0.1), **kwargs)
+    app.state.jobs.submit(threading.Event().wait, 60)
+    threading.Thread(target=stop_when_listening, daemon=True).start()
+    return app
+
+web.create_app = stuck_app
+sys.exit(main(["serve"]))
+"""
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("sig", ["SIGTERM", "SIGINT"])
+def test_service_process_ends_right_after_the_stop_marks_unfinished_jobs(home, monkeypatch, sig):
+    """Находка «Small gaps left by the findings batch of 15.10»: по SIGTERM (systemd) uvicorn после остановки
+    повторяет сигнал, и процесс кончается сразу; по SIGINT (Ctrl+C) uvicorn.run возвращается, и процесс жил,
+    пока задание не кончится. Около трёх секунд на запуск дочернего процесса — поэтому integration."""
+    key = init(home)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    config = home / "cleaner.toml"
+    config.write_text(config.read_text(encoding="utf-8") + f"[server]\nport = {port}\n", encoding="utf-8")
+    env = {**os.environ, crypto.MASTER_KEY_ENV: key, "CLEANER_CONFIG": str(config)}
+    root = Path(__file__).resolve().parents[1]
+    done = subprocess.run(
+        [sys.executable, "-c", _STUCK_SERVE, str(port), sig], cwd=root, env=env, capture_output=True, timeout=20,
+    )
+    assert done.returncode == 0 or sig == "SIGTERM", done.stderr.decode(errors="replace")[-2000:]
 
 
 def test_models_verify_names_what_is_missing(home, capsys):

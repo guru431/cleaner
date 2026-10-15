@@ -85,6 +85,15 @@ def _quiet_libraries() -> None:
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
 
+def _exit_now() -> None:
+    """Выход без ожидания потоков пулов заданий: обычный выход ждёт каждый поток ThreadPoolExecutor, пока его
+    задание не кончится. Журнал сбрасывается здесь: atexit при os._exit не выполняется."""
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     cfg, env_file = _config(args), Path(args.env_file)
     if cfg.db_path.exists():
@@ -127,6 +136,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
             app, host=cfg.host, port=cfg.port, ssl_certfile=cfg.tls_cert or None, ssl_keyfile=cfg.tls_key or None,
             access_log=False, server_header=False, proxy_headers=False, timeout_graceful_shutdown=5,
         )
+    if app.state.unfinished_jobs:
+        # uvicorn.run вернулся (Ctrl+C; по SIGTERM процесс кончается раньше — uvicorn повторяет сигнал), а задания,
+        # которых остановка не дождалась, уже помечены прерванными, и база закрыта: их результат записать некуда.
+        # Иначе процесс жил бы до конца задания (скан — минуты) с запросами к шлюзу и ошибкой записи в журнале.
+        _exit_now()
     return 0
 
 

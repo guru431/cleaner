@@ -105,8 +105,10 @@ def create_app(
         yield
         # Остановка: соединение с базой закрывается после этого (__main__). Недождавшиеся задания помечаются
         # здесь, пока оно открыто, — а не случайной ошибкой записи в закрытую базу и пометкой при следующем старте.
+        # Их потоки процесс не ждёт: по SIGTERM uvicorn сразу после этого повторяет сигнал, и процесс кончается,
+        # а если uvicorn.run вернулся (Ctrl+C), serve выходит по unfinished_jobs, закрыв базу (раздел 14).
         service.live.cancel_all()            # идущие ответы облака сохраняются неполными
-        shutdown(jobs, sends, files)
+        app.state.unfinished_jobs = shutdown(jobs, sends, files)
         _interrupt(repo)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -114,6 +116,7 @@ def create_app(
     app.state.clock = clock
     app.state.engines = engines                      # cleaner.engines.Engines; в тестах — заглушка
     app.state.jobs = jobs
+    app.state.unfinished_jobs = 0                    # сколько заданий остановка не дождалась (lifespan)
     app.state.max_file_bytes = max_file_mb * 1024 * 1024
     app.state.service = service
     app.state.throttle = auth.Throttle(clock)

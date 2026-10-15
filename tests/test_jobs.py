@@ -170,13 +170,16 @@ def test_service_stop_marks_unfinished_texts_interrupted_while_the_database_is_o
     user = repo.create_user("ivan", "hash", "user")
     chat_id = repo.create_chat(user, "Чат")
     job, started, release, seen = blocking_job()
-    with TestClient(create_app(repo, clock, secure_cookies=False, engines=engines, jobs=jobs)):
+    app = create_app(repo, clock, secure_cookies=False, engines=engines, jobs=jobs)
+    assert app.state.unfinished_jobs == 0
+    with TestClient(app):
         item = repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", "почта a@x.example", None, status="running"))
         jobs.submit(job)                                        # задание этого текста ещё идёт
         assert started.wait(5)
     stored = repo.item(chat_id, item.id)
     assert (stored.status, stored.meta["error"]) == ("failed", INTERRUPTED)
     assert [e.details for e in repo.audit_events("jobs_interrupted")] == [{"count": 1}]
+    assert app.state.unfinished_jobs == 1            # по нему serve выходит, не дожидаясь потока задания (__main__)
     release.set()
     executor.shutdown(wait=True)
 
