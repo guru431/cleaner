@@ -46,7 +46,7 @@ def _rank(span: Span) -> int:
 
 # Шаг 3 (раздел 5.7): части имени рядом — фамилия, имя, отчество, инициалы — один PERSON. Имя — до четырёх слов
 # («Ильхам Гейдар оглы Алиев», «Иванов И. И.»); ряд длиннее — список людей через пробел, и части остаются как найдены.
-_NAME_WORDS = 4
+NAME_WORDS = 4
 _NAME_GAP = re.compile(r"[ \t]+")
 _INITIAL_GAP = re.compile(r"\.[ \t]*")
 _LONE_LETTER = re.compile(r"(?<![^\W\d_])[^\W\d_]$")
@@ -102,7 +102,7 @@ def _join_names(text: str, spans: list[MergedSpan]) -> list[MergedSpan]:
                 words += count
                 if listed:
                     out.append(span)
-                elif words <= _NAME_WORDS:
+                elif words <= NAME_WORDS:
                     out[-1] = _joined(text, run)
                 else:
                     listed = True

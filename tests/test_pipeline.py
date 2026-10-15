@@ -581,6 +581,33 @@ def test_overlapping_dictionary_values_are_hidden_but_not_searched_as_a_whole(st
     assert "Иван" not in later.sanitized and later.deliverable
 
 
+@pytest.mark.parametrize("first", ["run", "person"])
+def test_run_of_names_longer_than_a_name_neither_joins_a_person_nor_is_joined(state, first):
+    """Наблюдение раунда 3 имён узлов, P3: «Иван Иван» словаря, слитое в «Иван Иван Иван Иван Иван» (5.7, шаг 2), задавало
+    человеку значение для восстановления в пять слов (5.9: самое полное написание): позже найденное «Иван Иван»
+    присоединялось к слиянию и восстанавливалось пятью словами, а слияние после «Иван Иван» подменяло значение человека.
+    Слияние длиннее имени — не упоминание: оно восстанавливается как написано, человек — своим написанием."""
+    settings = Settings(always=(DictEntry(T.PERSON, "Иван Иван"),))
+    run, person = "Иван Иван Иван Иван Иван", "Пришёл Иван Иван."
+    texts = (run, person) if first == "run" else (person, run)
+    sanitized = {text: sanitize(state, text, settings).sanitized for text in texts}
+    assert re.fullmatch(r"<PERSON_\d>", sanitized[run]) and re.fullmatch(r"Пришёл <PERSON_\d>\.", sanitized[person])
+    assert sanitized[run] not in sanitized[person]
+    for text in texts:
+        assert restore(state, sanitized[text], settings).text == text
+        assert sanitize(state, text, settings).sanitized == sanitized[text]
+
+
+def test_run_of_overlapping_findings_up_to_four_words_is_one_person(state, settings):
+    """Та же находка с другой стороны: слияние до четырёх слов — имя (5.7, шаг 3), и упоминание человека к нему
+    присоединяется, а значение для восстановления — самое полное написание, как прежде (5.9)."""
+    ner = Marks({"Иванов Иван": T.PERSON, "Иван Иванович": T.PERSON})
+    assert sanitize(state, "Звонил Иванов Иван Иванович.", settings, Layers(ner=ner)).sanitized == "Звонил <PERSON_1>."
+    later = sanitize(state, "Позже Иванов перезвонил", settings, Layers(ner=Marks({"Иванов": T.PERSON})))
+    assert later.sanitized == "Позже <PERSON_1> перезвонил"
+    assert restore(state, later.sanitized, settings).text == "Позже Иванов Иван Иванович перезвонил"
+
+
 def test_overlapping_rule_values_are_hidden_but_not_searched_as_a_whole(state, settings):
     """То же у правила пользователя «la la» в «la la la …»: слияние — своя сущность, которая восстанавливается целиком,
     а её написание — значение правила. Смена её типа даёт правило на это значение, а не на всю цепочку."""

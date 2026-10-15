@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 from uuid import uuid4
 
-from cleaner.core.detect.merge import MergedSpan
+from cleaner.core.detect.merge import NAME_WORDS, MergedSpan
 from cleaner.core.entities import hostmap, labels, macsid, names, netmap
 from cleaner.core.match import has_invisible, normalize
 from cleaner.core.types import STRICTNESS, ChatState, Entity, EntityType, Settings, Surrogate
@@ -122,6 +122,7 @@ class Resolver:
         self._text_names: set[str] | None = None
         self._text_labels: set[str] | None = None
         self._searched: set[str] | None = None      # написания сущностей чата — при первом слиянии находок (_remember)
+        self._runs: dict[str, bool] = {}            # сущности людей: слияние ли это находок длиннее имени (_run)
 
     @staticmethod
     def _dictionary_key(type_: EntityType, value: str) -> str:
@@ -244,8 +245,12 @@ class Resolver:
         return entity, self._label(entity)
 
     def _person(self, key: str, value: str, origin: str, searchable: bool = True, forms: tuple[str, ...] = ()) -> Entity:
-        """Человек: тот же ключ (словарь, объединение, прежнее написание) или единственная совместимая сущность (5.9)."""
-        mention = names.parse(value)
+        """Человек: тот же ключ (словарь, объединение, прежнее написание) или единственная совместимая сущность (5.9).
+        Слияние находок длиннее имени (forms, 5.7, шаги 2 и 3) — не упоминание: к человеку оно не присоединяется и
+        значения для восстановления не задаёт, а упоминания не присоединяются к нему (_run). Иначе позже найденное
+        «Иван Иван» восстанавливалось слиянием «Иван Иван Иван Иван Иван», а слияние подменяло значение человека."""
+        run = bool(forms) and len(value.split()) > NAME_WORDS
+        mention = () if run else names.parse(value)
         merged_into = self.state.key_alias.get(f"{T.PERSON.value}:{key}")
         entity = self.state.entities.get(merged_into) if merged_into else self.index.get((T.PERSON, key))
         if entity is None:
@@ -254,12 +259,12 @@ class Resolver:
             folded = normalize(value)
             entity = next((
                 e for e in self.state.entities.values()
-                if e.type is T.PERSON and any(normalize(form) == folded for form in e.forms)
+                if e.type is T.PERSON and not self._run(e) and any(normalize(form) == folded for form in e.forms)
             ), None)
         if entity is None and mention:
             fitting = [
                 e for e in self.state.entities.values()
-                if e.type is T.PERSON and e.forms and names.compatible(mention, e)
+                if e.type is T.PERSON and e.forms and not self._run(e) and names.compatible(mention, e)
             ]
             if len(fitting) == 1:
                 entity = fitting[0]
@@ -268,8 +273,19 @@ class Resolver:
             entity = self._entity(T.PERSON, key, value, origin, searchable, forms)
         else:
             self._remember(entity, value, searchable, forms)
-        names.absorb(entity, mention, value)
+        if not run:
+            names.absorb(entity, mention, value)
         return entity
+
+    def _run(self, entity: Entity) -> bool:
+        """Сущность слияния находок длиннее имени (_person): ключ длиннее четырёх слов, а целиком значение не искомо —
+        ни одно написание не совпадает с ключом. Так узнаются и слияния, записанные чатами до 15.10.2026. Ответ
+        запоминается на проход: ключ слияния бывает длиной в текст."""
+        if entity.id not in self._runs:
+            self._runs[entity.id] = len(entity.key.split()) > NAME_WORDS and all(
+                normalize(form) != entity.key for form in entity.forms
+            )
+        return self._runs[entity.id]
 
     # --- подмены ----------------------------------------------------------
 
