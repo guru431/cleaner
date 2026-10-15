@@ -133,10 +133,22 @@ def test_zero_padded_address_is_found():
 
 
 def test_zero_padded_address_is_masked_and_restored():
+    """Запись с нулями впереди сводится к обычной: подмена — переставленный адрес, а не метка, и восстанавливается
+    обычная запись адреса."""
     state = ChatState(chat_id="padded", net_key=bytes(32))
     result = sanitize(state, "узел 010.001.002.005", Settings())
-    assert "010.001.002.005" not in result.sanitized
-    assert restore(state, result.sanitized, Settings()).text == "узел 010.001.002.005"
+    assert "010.001.002.005" not in result.sanitized and "<IP_" not in result.sanitized
+    assert restore(state, result.sanitized, Settings()).text == "узел 10.1.2.5"
+
+
+def test_zero_padded_and_plain_spellings_are_one_address():
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: «010.001.002.005» получал метку и был
+    отдельной сущностью от 10.1.2.5."""
+    state = ChatState(chat_id="padded", net_key=bytes(32))
+    result = sanitize(state, "узлы 010.001.002.005 и 10.1.2.5", Settings())
+    padded, plain = (span.surrogate for span in result.spans)
+    assert padded == plain and padded.startswith("10.") and padded.endswith(".5") and padded != "10.1.2.5"
+    assert len(state.entities) == 1
 
 
 def test_lowercase_domain_known_from_an_earlier_text():
@@ -315,6 +327,23 @@ def test_one_letter_after_a_backslash_is_not_a_login(text):
     assert values(text) == set()
     ctx = DetectContext(Settings(), known=(("contoso", T.DOMAIN),))
     assert T.ACCOUNT not in {type_ for type_, _ in found(r"вход contoso\n", ctx)}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        r"reg query HKLM\Software /s", r"reg add HKCU\Environment /v X /d 1", r"reg query HKCR\Directory",
+        r"reg load HKU\S-1-5-18 ntuser.dat", r"reg query HKCC\System", r"reg query hklm\software",
+        r"reg query HKEY_LOCAL_MACHINE\SOFTWARE /s", r"Get-ItemProperty HKLM:\Software",
+    ],
+)
+def test_registry_hive_is_not_a_domain(text):
+    r"""FINDINGS «Small gaps left by the findings batch of 15.10»: «HKLM\Software» давал домен HKLM и вход Software."""
+    assert values(text) == set()
+
+
+def test_domain_login_next_to_a_registry_path_is_still_found():
+    assert found(r"reg query HKLM\Software /s под CORP\ivanov") == {(T.DOMAIN, "CORP"), (T.ACCOUNT, "ivanov")}
 
 
 def test_short_login_after_a_domain_is_still_found():

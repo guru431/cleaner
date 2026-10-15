@@ -55,6 +55,9 @@ _DOTTED = re.compile(r"(?<![\w.$@-])(?:\w(?:[\w-]{0,61}\w)?\.)+[^\W\d_][\w-]{1,6
 _DOMAIN_LOGIN = re.compile(
     r"(?<![\w\\./-])(?P<dom>[A-Za-z][A-Za-z0-9-]{1,14})\\{1,2}(?P<login>\w[\w.$-]{0,63})(?![\w\\])"
 )
+# Корни реестра в коротком виде («reg query HKLM\Software /s») — не домены, а раздел за ними — не вход.
+# Длинные («HKEY_LOCAL_MACHINE\…») шаблон домена не берёт: в нём нет «_».
+_REGISTRY_HIVES = frozenset({"hklm", "hkcu", "hkcr", "hku", "hkcc"})
 _FILE_EXT = re.compile(
     r"\.(?:txt|log|docx?|xlsx?|pptx?|pdf|exe|dll|ps1|psm1|bat|cmd|ini|cfg|conf|xml|json|ya?ml|csv|zip|7z|rar"
     r"|bak|tmp|sys|dat|msi|png|jpe?g|gif|lnk|reg|evtx?|py|sh|sql|db|mdb|pst|ost|html?)$",
@@ -81,18 +84,11 @@ _DN = re.compile(
 )
 
 
-def _unpadded(address: str) -> str:
-    """«010.001.002.005» из таблиц и выгрузок — это 10.1.2.5: ipaddress нулей впереди не принимает.
-    Только если все четыре числа дополнены до трёх цифр: «01.02.03.04» — скорее номер, чем адрес."""
-    octets = address.split(".")
-    return ".".join(str(int(octet)) for octet in octets) if all(len(octet) == 3 for octet in octets) else address
-
-
 def _ipv4(text: str) -> Iterator[Span]:
     for m in _IPV4.finditer(text):
         address, _, prefix = m.group().partition("/")
         try:
-            ip = ipaddress.IPv4Address(_unpadded(address))
+            ip = ipaddress.IPv4Address(netmap.unpadded(address))
         except ValueError:
             continue
         if not netmap.is_maskable(ip) or _VERSION_BEFORE.search(text[max(0, m.start() - 16):m.start()]):
@@ -195,7 +191,7 @@ def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:
             known_domains.update(form.lower() for form in (entry.value, *entry.aliases))
     for m in _DOMAIN_LOGIN.finditer(text):
         dom, login = m.group("dom"), m.group("login").rstrip(".-")
-        if dom.lower() in builtin or not (dom.isupper() or dom.lower() in known_domains):
+        if dom.lower() in builtin or dom.lower() in _REGISTRY_HIVES or not (dom.isupper() or dom.lower() in known_domains):
             continue
         if not login or _FILE_EXT.search(login) or (login[0] in "ntr" and login[1:2].isupper()):
             continue        # путь к файлу или экранированный перевод строки, а не учётная запись

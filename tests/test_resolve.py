@@ -158,6 +158,32 @@ def test_surrogate_written_after_a_label_and_a_colon_is_taken(state, text, real,
     assert resolve(state, text, (real, T.IP)) == [fake]
 
 
+@pytest.mark.parametrize(
+    "text, real, fake",
+    [
+        ("было 2001:0db8:0001::0001, узел 2a00:1450:4010::65", "2a00:1450:4010::65", "2001:db8:1::2"),
+        ("было 2001:DB8:1:0:0:0:0:1, узел 2a00:1450:4010::65", "2a00:1450:4010::65", "2001:db8:1::2"),
+        ("было 203.000.113.001, DNS 8.8.8.8", "8.8.8.8", "203.0.113.2"),
+        ("интерфейс 203.0.113.1/24, DNS 8.8.8.8", "8.8.8.8", "203.0.113.2"),
+    ],
+)
+def test_surrogate_equal_to_an_address_written_otherwise_is_taken(state, text, real, fake):
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: проверка сравнивала запись, а не адрес, и подмена
+    2001:db8:1::1 совпадала с «2001:0db8:0001::0001» текста — ответ не мог их различить."""
+    assert resolve(state, text, (real, T.IP)) == [fake]
+
+
+@pytest.mark.parametrize(
+    "text, real, fake",
+    [
+        ("было 2001:db8:1::10, узел 2a00:1450:4010::65", "2a00:1450:4010::65", "2001:db8:1::1"),
+        ("было 203.0.113.10/24, DNS 8.8.8.8", "8.8.8.8", "203.0.113.1"),
+    ],
+)
+def test_surrogate_next_to_another_address_is_issued(state, text, real, fake):
+    assert resolve(state, text, (real, T.IP)) == [fake]
+
+
 def test_address_inside_a_longer_colon_chain_is_not_taken(state):
     assert resolve(state, "ab:cd:2001:db8:1::1 и 2a00:1450:4010::65", ("2a00:1450:4010::65", T.IP)) == [
         "2001:db8:1::1"

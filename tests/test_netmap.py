@@ -50,6 +50,14 @@ def test_service_addresses_are_not_maskable():
         assert netmap.is_maskable(ipaddress.ip_address(address)), address
 
 
+def test_zero_padded_address_is_read_as_decimal():
+    assert netmap.parse("010.001.002.005") == (ipaddress.IPv4Address("10.1.2.5"), None)
+    assert netmap.parse("192.168.001.000/24") == (ipaddress.IPv4Address("192.168.1.0"), 24)
+    for token in ("01.02.03.04", "010.1.2.5"):
+        with pytest.raises(ValueError):
+            netmap.parse(token)
+
+
 def test_public_addresses_get_documentation_addresses_in_order(state):
     assert netmap.fake_ip("85.143.10.20", state) == "203.0.113.1"
     assert netmap.fake_ip("8.8.4.4", state) == "203.0.113.2"

@@ -25,10 +25,22 @@ _KEEP_V6 = tuple(ipaddress.ip_network(net) for net in ("::/127", "ff00::/8", "20
 _LINK_LOCAL_V6 = ipaddress.ip_network("fe80::/10")
 
 
+def unpadded(address: str) -> str:
+    """«010.001.002.005» из таблиц и выгрузок — это 10.1.2.5: ipaddress нулей впереди не принимает.
+    Только если все четыре числа дополнены до трёх цифр: «01.02.03.04» — скорее номер, чем адрес."""
+    octets = address.split(".")
+    if len(octets) == 4 and all(len(octet) == 3 and octet.isdecimal() for octet in octets):
+        return ".".join(str(int(octet)) for octet in octets)
+    return address
+
+
 def parse(token: str) -> tuple[Address, int | None]:
-    """Адрес и длина префикса (если указана). ValueError, если токен — не адрес."""
+    """Адрес и длина префикса (если указана). ValueError, если токен — не адрес.
+
+    Запись с нулями впереди читается как обычная (unpadded): у неё та же сущность и та же подмена,
+    а восстанавливается обычная запись адреса."""
     address, _, prefix = token.partition("/")
-    return ipaddress.ip_address(address.split("%")[0]), (int(prefix) if prefix else None)
+    return ipaddress.ip_address(unpadded(address.split("%")[0])), (int(prefix) if prefix else None)
 
 
 def is_maskable(ip: Address) -> bool:

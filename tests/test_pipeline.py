@@ -109,6 +109,15 @@ def test_public_surrogate_does_not_repeat_an_address_of_the_text(state, settings
     assert restore(state, result.sanitized, settings).text == text
 
 
+def test_surrogate_does_not_repeat_an_address_of_the_text_in_another_notation(state, settings):
+    """FINDINGS «Small gaps left by the findings batch of 15.10»: подмена совпадала с адресом текста в полной записи,
+    и восстановление возвращало чужой адрес вместо документационного."""
+    text = "было 2001:0db8:0001::0001, узел 2a00:1450:4010::65"
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "было 2001:0db8:0001::0001, узел 2001:db8:1::2"
+    assert restore(state, result.sanitized, settings).text == text
+
+
 def test_sanitized_text_pasted_back_changes_nothing(state, settings):
     """Обзор 1А, P2 (FR-5.9): своя замена в другом виде записи — всё равно своя."""
     text = (
