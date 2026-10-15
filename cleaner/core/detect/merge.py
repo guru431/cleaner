@@ -169,6 +169,13 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
         sources = tuple(dict.fromkeys(s.source for s in group))
         value = text[start:end].lower()
         senior = min(group, key=lambda s: (_rank(s), s.start - s.end))
+        if senior.source == "manual":
+            # Пересекающиеся правила пользователя: старшее — со строже политикой, при равных — самое длинное. Иначе
+            # «Иван Иванов» (PERSON) поверх «Иванов» (SECRET, блокировать) давал метку человека, и выдача не блокировалась.
+            senior = max(
+                (s for s in group if s.source == "manual"),
+                key=lambda s: (STRICTNESS.get(policies.get(s.type), 0), s.end - s.start),
+            )
         # Списки исключений действуют только на точное значение и не отменяют решение пользователя. Адрес — то же
         # значение в любой записи: «2a00:1450:4010::65» в тексте и «2a00:1450:4010:0:0:0:0:65» в списке, «10.1.2.5» и
         # «010.001.002.005», «10.1.2.0» и «10.1.2.0/24» (длину /24 и больше слой 3 во фрагмент не берёт).

@@ -92,6 +92,20 @@ def test_rule_off_whole_parts_keeps_the_stricter_policy_of_the_record_it_swallow
     assert merge("srv.contoso.ru", spans, blocked)[0].type is T.HOST
 
 
+def test_overlapping_user_rules_keep_the_strictest_policy():
+    """Пересекающиеся правила пользователя давали фрагменту тип самого длинного, какой бы ни была политика: «Иван Иванов»
+    (PERSON) и «Иванов» (SECRET, блокировать) давали <PERSON_1>, и выдача не блокировалась. Тип — правила со строже
+    политикой; при равных — самого длинного, как прежде."""
+    text = "Иван Иванов"
+    spans = [Span(0, 11, T.PERSON, "manual"), Span(5, 11, T.SECRET, "manual")]
+    for changed, expected in (
+        ({T.SECRET: Policy.BLOCK}, T.SECRET), ({T.SECRET: Policy.HIDE}, T.SECRET), ({T.SECRET: Policy.MASK}, T.PERSON),
+        ({T.SECRET: Policy.BLOCK, T.PERSON: Policy.BLOCK}, T.PERSON),
+    ):
+        [merged] = merge(text, spans, DetectContext(Settings(policies=default_policies() | changed)))
+        assert merged.type is expected, changed
+
+
 def test_partial_overlap_covers_the_union():
     spans = [Span(0, 10, T.PHONE, "rules"), Span(5, 16, T.CARD, "rules", validated=True)]
     assert merge("0123456789abcdef", spans, CTX) == [
