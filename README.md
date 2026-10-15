@@ -46,7 +46,8 @@ set -a; . data/cleaner.env; set +a
 - LLM для слоя 5 — шлюз example (`:30000`).
 - Второй экземпляр (с 2026-10-15) — example, `https://example5464`, из домашней сети
   192.168.0.0/20 и VPN example/20. Слой 5 — роль `local-chat` шлюза llm_routers на этом же хосте
-  (gemma4); распознавание сканов там не работает: маршрут `/pages/ocr` шлюза другого формата.
+  (gemma4); сканы распознаёт HunyuanOCR по маршруту `/pages/ocr` — в настройках «Модель распознавания
+  сканов» стоит `tencent/HunyuanOCR` (на example поле пустое: там служба `ocr-ru`).
 - Адрес, сети клиентов и шлюз хоста — профиль `deploy/hosts/<hostname -s>.conf`.
 - Разработка — в основном на build-host (`D:\vsc\cleaner`), с workstation проект сводится через git.
 - Установка и обновление (доставка `git archive`, установщик, проверка) — по шагам в

@@ -69,8 +69,9 @@ ssh -i ~/.ssh/example -p 34012 -o BatchMode=yes example@example 'sudo bash /usr/
 Второй экземпляр с 2026-10-15: `https://example5464`, клиенты — 192.168.0.0/20 и VPN example/20
 (профиль `deploy/hosts/example.conf`). Слой 5 — роль `local-chat` шлюза llm_routers на этом же хосте
 (`http://127.0.0.1:4000/v1`, ключ потребителя `cleaner` — `GATEWAY_KEY_CLEANER` в vault `local-config`, на хосте —
-строка `CLEANER_GATEWAY_KEY` в `/etc/cleaner/cleaner.env`); распознавание сканов не работает — маршрут
-`/pages/ocr` там OpenAI-совместимый, а не ocr-ru. Администратор `admin`, пароль — `CLEANER_example_ADMIN_PASSWORD`
+строка `CLEANER_GATEWAY_KEY` в `/etc/cleaner/cleaner.env`). Сканы — HunyuanOCR по маршруту `/pages/ocr` (с 2026-10-16;
+маршрут ключу выдан в `llm_routers/gateway/consumers.yaml`): он OpenAI-совместимый, а не ocr-ru, поэтому в настройке
+«Модель распознавания сканов» — `tencent/HunyuanOCR`; слот OCR на время страницы снимает gemma4. Администратор `admin`, пароль — `CLEANER_example_ADMIN_PASSWORD`
 в vault `local-config`. Доступ с workstation: `ssh -i ~/.ssh/studio_deploy_key -p 22222 deploy@example, sudo без пароля;
 доставка и установка — те же команды, что для example, с этим адресом (пароль администратора при первой
 установке — с клавиатуры, `ssh -t`). `ai-egress-guard.sh` и `check-egress.sh` на example нет — проверка их
@@ -83,4 +84,4 @@ ssh -i ~/.ssh/example -p 34012 -o BatchMode=yes example@example 'sudo bash /usr/
 (0700), а установщик запускается как `sudo env PIP_NO_INDEX=1 PIP_FIND_LINKS=/root/cleaner-wheels bash …/install-cleaner.sh …`;
 хэши сверяются по тому же файлу. Модели — копией `models/` с workstation (`tar` по SSH в `/opt/cleaner/models`,
 владелец `cleaner`, проверка — `models verify` в `check-cleaner.sh`). Настройки локальной модели на example в базе
-службы: `http://127.0.0.1:4000/v1`, `local-chat`, схема JSON параметром.
+службы: `http://127.0.0.1:4000/v1`, `local-chat`, схема JSON параметром, модель распознавания `tencent/HunyuanOCR`.
