@@ -1,6 +1,8 @@
 """Разбор доменных имён."""
 from __future__ import annotations
 
+from functools import lru_cache
+
 import tldextract
 
 INTERNAL_SUFFIXES = ("local", "lan", "corp", "internal", "intra", "home", "localdomain", "ad")
@@ -31,7 +33,11 @@ def parts(name: str) -> tuple[list[str], str]:
     return left, registrable
 
 
+@lru_cache(maxsize=65536)
 def has_known_suffix(name: str) -> bool:
+    """Ответ для имени не меняется, а спрашивают его часто: метки с именем в значении проверяются при каждой сборке
+    восстановления (labels.domain_labels), и поток ответа собирает её на каждом куске — tldextract на 20 000 меток
+    стоил 55 мс на сборку."""
     return bool(_extract(name.lower()).suffix)
 
 

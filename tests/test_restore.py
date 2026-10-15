@@ -1,4 +1,5 @@
 import ipaddress
+import time
 
 import pytest
 
@@ -1265,3 +1266,18 @@ def test_base_tag_and_srcdoc_keep_labels(settings, answer):
 
 def test_relative_link_without_a_base_tag_still_restores(settings):
     assert "ivanov@contoso.ru" in restore(link_state(), '<img src="p?q=<EMAIL_1>"> база данных <basement>', settings).text
+
+
+def test_restorer_setup_is_fast_on_a_chat_with_many_dotted_labels(settings):
+    """Второе ревью: метки, значение которых — имя с точкой («i.ivanov»), сверялись со списком суффиксов (tldextract)
+    при каждой сборке восстановления, а поток ответа собирает её на каждом куске: 20 000 таких меток — 63 мс на сборку,
+    300 слов ответа — 20 с процессора. Ответ суффиксов для одного имени не меняется и запоминается."""
+    state = ChatState(chat_id="many", net_key=bytes(32))
+    for n in range(1, 20001):
+        entity = Entity(f"e{n}", T.ACCOUNT, n, f"i.ivanov{n}", f"i.ivanov{n}", "detector")
+        state.entities[entity.id] = entity
+        state.surrogates[f"<ACCOUNT_{n}>"] = Surrogate(entity.id)
+    started = time.perf_counter()
+    for _ in range(20):
+        assert restore(state, "ответ про <ACCOUNT_1>", settings).text == "ответ про i.ivanov1"
+    assert time.perf_counter() - started < 0.6
