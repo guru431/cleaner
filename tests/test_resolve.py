@@ -215,6 +215,21 @@ def test_surrogate_next_to_another_address_is_issued(state, text, real, fake):
     assert resolve(state, text, (real, T.IP)) == [fake]
 
 
+def test_ipv6_network_keeps_its_written_notation_for_restoring(state):
+    """Решение владельца 15.10.2026: сеть IPv6 восстанавливается так, как написана; ключ сущности — канонический."""
+    [fake] = resolve(state, "сеть 2A00:1450:4010:0::/64", ("2A00:1450:4010:0::/64", T.IP))
+    [entity] = state.entities.values()
+    assert (entity.key, entity.restore_value) == ("2a00:1450:4010::/64", "2A00:1450:4010:0::/64")
+    assert state.surrogates[fake].original == "2A00:1450:4010:0::/64"
+
+
+def test_ipv6_given_a_label_instead_of_a_surrogate_keeps_its_written_notation(state):
+    settings = Settings(never=frozenset({"2001:db8:1::1"}))
+    assert resolve(state, "узел 2A00:1450:4010:0::0065", ("2A00:1450:4010:0::0065", T.IP), settings=settings) == ["<IP_1>"]
+    [entity] = state.entities.values()
+    assert (entity.key, entity.restore_value) == ("2a00:1450:4010::65", "2A00:1450:4010:0::0065")
+
+
 def test_address_inside_a_longer_colon_chain_is_not_taken(state):
     assert resolve(state, "ab:cd:2001:db8:1::1 и 2a00:1450:4010::65", ("2a00:1450:4010::65", T.IP)) == [
         "2001:db8:1::1"

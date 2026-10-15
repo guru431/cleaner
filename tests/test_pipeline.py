@@ -8,7 +8,7 @@ from cleaner.core.detect.base import DetectorError
 from cleaner.core.entities import ops
 from cleaner.core.pipeline import Layers, sanitize
 from cleaner.core.restore import restore
-from cleaner.core.types import ChatRule, DictEntry, Policy, Settings, Span, default_policies
+from cleaner.core.types import ChatRule, DictEntry, Policy, Settings, Span, Surrogate, default_policies
 from cleaner.core.types import EntityType as T
 
 
@@ -116,6 +116,54 @@ def test_surrogate_does_not_repeat_an_address_of_the_text_in_another_notation(st
     result = sanitize(state, text, settings)
     assert result.sanitized == "было 2001:0db8:0001::0001, узел 2001:db8:1::2"
     assert restore(state, result.sanitized, settings).text == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["узел 2A00:1450:4010:0::0065", "узел 2a00:1450:4010:0:0:0:0:65", "Source:2A00:1450:4010::65."],
+    ids=["padded", "full", "label"],
+)
+def test_ipv6_is_restored_as_written(state, settings, text):
+    """Решение владельца 15.10.2026: IPv6 восстанавливается в записи из текста, а не в канонической (2a00:1450:4010::65)."""
+    result = sanitize(state, text, settings)
+    assert "2001:db8:1::1" in result.sanitized
+    assert restore(state, result.sanitized, settings).text == text
+
+
+def test_two_notations_of_one_ipv6_are_one_entity_restored_as_first_written(state, settings):
+    result = sanitize(state, "узел 2A00:1450:4010:0::0065, он же 2a00:1450:4010::65", settings)
+    assert result.sanitized == "узел 2001:db8:1::1, он же 2001:db8:1::1"
+    assert sanitize(state, "снова 2a00:1450:4010:0:0:0:0:65", settings).sanitized == "снова 2001:db8:1::1"
+    assert len(state.entities) == 1
+    assert restore(state, "ответ: 2001:db8:1::1", settings).text == "ответ: 2A00:1450:4010:0::0065"
+
+
+def test_zero_padded_ipv4_is_still_restored_in_the_plain_notation(state, settings):
+    """Раздел 5.4: у IPv4 запись с нулями впереди восстанавливается простой — и адрес, и сеть без длины префикса."""
+    address = sanitize(state, "узел 010.001.002.005", settings).sanitized
+    assert restore(state, address, settings).text == "узел 10.1.2.5"
+    network = sanitize(state, "сеть 010.001.000.000/16", settings).sanitized
+    assert restore(state, network, settings).text == "сеть 10.1.0.0/16"
+    assert restore(state, network.split("/")[0], settings).text == "сеть 10.1.0.0"
+
+
+@pytest.mark.parametrize("leaked", ["2a00:1450:4010::65", "2A00:1450:4010:0::0065"], ids=["canonical", "written"])
+def test_leak_check_finds_an_ipv6_in_the_canonical_and_in_the_written_notation(state, settings, leaked):
+    """Запись из текста хранится для восстановления, но каноническая остаётся искомой: проверка утечек
+    по-прежнему находит адрес, записанный не так, как в первом тексте."""
+    sanitize(state, "узел 2A00:1450:4010:0::0065", settings)
+    assert len(leakcheck.check(f"x {leaked} y", state, settings)) == 1
+
+
+def test_ipv6_of_a_chat_saved_with_the_canonical_notation_still_restores_to_it(state, settings):
+    """Чаты, сохранённые до 15.10.2026, хранят каноническую запись: она и восстанавливается, без миграции."""
+    sanitize(state, "узел 2A00:1450:4010:0::0065", settings)
+    [entity] = state.entities.values()
+    entity.restore_value, entity.forms = "2a00:1450:4010::65", ["2a00:1450:4010::65"]
+    state.surrogates["2001:db8:1::1"] = Surrogate(entity.id, "2a00:1450:4010::65", "ip6")
+    assert sanitize(state, "снова 2A00:1450:4010:0::0065", settings).sanitized == "снова 2001:db8:1::1"
+    assert len(state.entities) == 1
+    assert restore(state, "ответ: 2001:db8:1::1", settings).text == "ответ: 2a00:1450:4010::65"
 
 
 def test_sanitized_text_pasted_back_changes_nothing(state, settings):

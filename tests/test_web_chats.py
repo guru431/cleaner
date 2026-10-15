@@ -38,6 +38,19 @@ def test_answer_is_restored_with_the_view_as_received(ivan):
     assert "Напишите на &lt;EMAIL_1&gt; и &lt;PERSON_7&gt;" in page      # вид «как получено» (FR-7.11)
 
 
+def test_answer_shows_the_replacements_of_the_texts_since_the_previous_answer(ivan):
+    """FR-7.5: счётчик ответа — замены в его запросе, а не вся таблица замен чата (у второго ответа в ней 3)."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example и b@x.example")
+    ivan.post(f"/chats/{chat_id}/answer", answer="Ответ <EMAIL_1>")
+    ivan.post(f"/chats/{chat_id}/input", text="ещё c@x.example")
+    ivan.post(f"/chats/{chat_id}/answer", answer="Ответ <EMAIL_3>")
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert re.findall(r"Замен в текстах после прошлого ответа: (\d+), восстановлено: (\d+)", page) == [
+        ("2", "1"), ("1", "1"),
+    ]
+
+
 def test_markup_in_title_text_and_answer_is_shown_as_text(ivan):
     chat_id = ivan.chat("<img src=x onerror=alert(1)>")
     ivan.post(f"/chats/{chat_id}/input", text="<script>alert(1)</script> a@x.example")

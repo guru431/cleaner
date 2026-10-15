@@ -492,8 +492,7 @@ def restore(state: ChatState, answer: str, settings: Settings) -> RestoreResult:
             segments.append(Segment(position, position + len(piece), kind))
         parts.append(piece)
         position += len(piece)
-    counters = {**restorer.counters, "table": len(state.surrogates)}
-    return RestoreResult("".join(parts), segments, counters)
+    return RestoreResult("".join(parts), segments, restorer.counters)
 
 
 # Знаки, из которых состоит замена в любом допустимом виде записи: метки (в том числе «\<PERSON\_1\>»,

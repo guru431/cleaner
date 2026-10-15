@@ -436,11 +436,14 @@ class ChatService:
         state, _ = self.repo.load_state(chat_id)
         settings = self.repo.settings()
         views: list[InputView | AnswerView] = []
+        # «Замен в запросе» (FR-7.5): замены во входных текстах после предыдущего ответа, у первого — с начала чата.
+        in_request = 0
         for item in self.repo.items(chat_id):
             if item.kind == "input":
                 if item.status != "done":
                     views.append(InputView(item, [], []))
                     continue
+                in_request += len(item.spans)
                 leaks = leakcheck.check(item.sanitized or "", state, settings)
                 blocked = [
                     span for span in item.spans
@@ -453,7 +456,13 @@ class ChatService:
                 # настоящий адрес в выданной подсети иначе приняли бы за выведенный (FR-7.6).
                 views.append(AnswerView(item, RestoreResult(item.original, [], {})))
             else:
-                views.append(AnswerView(item, restore(state, item.original, settings)))
+                result = restore(state, item.original, settings)
+                result.counters["in_request"] = in_request
+                views.append(AnswerView(item, result))
+            if item.kind == "answer" and item.original and not item.meta.get("aborted"):
+                # Отказ без текста и ответ, оборванный ошибкой провайдера (FR-8.9), границей не считаются: вопрос
+                # уходит снова, и в запросе следующего ответа — те же тексты.
+                in_request = 0
         return ChatView(state, settings, views)
 
     # --- облачная модель (FR-8) и локальная вместо облачной (FR-9.4) --------------------------

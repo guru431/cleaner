@@ -86,6 +86,34 @@ def test_answer_is_restored_in_the_view(repo, chat):
     assert isinstance(second, AnswerView) and second.result.text == "Ответьте на a@x.example"
 
 
+def in_request(service: ChatService, chat_id: str) -> list[int | None]:
+    return [e.result.counters.get("in_request") for e in service.view(chat_id).items if isinstance(e, AnswerView)]
+
+
+def test_replacements_in_the_request_are_counted_since_the_previous_answer(repo, chat):
+    """FR-7.5, решение владельца 15.10.2026: «замен в запросе» — замены во входных текстах после предыдущего ответа
+    (у первого — с начала чата), а не размер таблицы замен чата: здесь в ней 2, затем 3 замены."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    service.add_input(chat_id, user, "почта a@x.example и b@x.example")
+    service.add_input(chat_id, user, "снова a@x.example")
+    service.add_answer(chat_id, user, "Ответ про <EMAIL_1>")
+    service.add_input(chat_id, user, "ещё c@x.example")
+    service.add_answer(chat_id, user, "Ответ про <EMAIL_3>")
+    service.add_answer(chat_id, user, "Ещё ответ без нового вопроса")
+    assert in_request(service, chat_id) == [3, 1, 0]
+
+
+def test_instruction_before_an_answer_is_part_of_its_request(repo, chat):
+    user, chat_id = chat
+    service = ChatService(repo)
+    service.add_input(chat_id, user, "почта a@x.example")
+    service.add_answer(chat_id, user, "Ответ")
+    service.add_input(chat_id, user, "Копию пиши на b@x.example и c@x.example", source="instruction")
+    service.add_answer(chat_id, user, "Ответ")
+    assert in_request(service, chat_id) == [1, 2]
+
+
 def test_masking_a_value_marks_texts_where_it_was_open(repo, chat):
     user, chat_id = chat
     service = ChatService(repo)
