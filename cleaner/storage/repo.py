@@ -22,6 +22,14 @@ class StaleState(Exception):
     """Состояние чата изменилось после чтения: работу нужно повторить на свежем."""
 
 
+class CheckpointBusy(Exception):
+    """Чат удалён, но журнал WAL не усечён: копии его страниц, с ключом, остаются там до следующей
+    контрольной точки. Её не пускает другое соединение с базой — копия, eval."""
+
+
+_CHECKPOINT_ATTEMPTS = 3            # каждая попытка сама ждёт читателей до busy_timeout (5 с)
+
+
 # Слои 4 и 5 по умолчанию для чатов без явного решения (FR-3.8). Слой 4 включён по умолчанию;
 # слой 5 — после замера задачи 23 (раздел 19 спецификации).
 DEFAULT_LAYERS = {"ner": True, "llm": False}
@@ -67,7 +75,7 @@ class Item:
     status: str = "done"                                 # queued | running | done | failed; план «3» добавит partial
     meta: dict = field(default_factory=dict)             # вид файла, страницы, слои, ход, причина отказа — без текста
     model_spans: list[dict] = field(default_factory=list)  # находки слоёв 4–5: start, end, type, source, score
-    risk_status: str = ""                                # "" | queued | running | done | failed
+    risk_status: str = ""                                # "" | queued | running | done | failed | interrupted
 
 
 @dataclass(frozen=True)
@@ -251,11 +259,18 @@ class Repository:
         """Строки чата и его ключ удаляются; secure_delete перезаписывает их на диске (FR-1.4).
 
         Копии страниц с ключом чата остаются в файле журнала WAL до контрольной точки, а соединение
-        службы живёт долго: контрольная точка с усечением журнала выполняется сразу.
+        службы живёт долго: контрольная точка с усечением журнала выполняется сразу. Занята (первый
+        столбец ответа — 1) — ещё попытка; между попытками замок отпущен, чтобы служба не стояла.
+        Не вышло — CheckpointBusy: чат удалён, а молчать о копиях в журнале нельзя.
         """
         with self.lock:
             self.conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
-            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        for _ in range(_CHECKPOINT_ATTEMPTS):
+            with self.lock:
+                busy = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+            if not busy:
+                return
+        raise CheckpointBusy(chat_id)
 
     def load_state(self, chat_id: str) -> tuple[ChatState, int]:
         row = self._one("SELECT state_enc, version FROM chats WHERE id = ?", chat_id)
@@ -312,7 +327,11 @@ class Repository:
         self, chat_id: str, state: ChatState, version: int,
         new_items: Iterable[Item] = (), updated_items: Iterable[Item] = (),
     ) -> None:
-        """Состояние и элементы — одной транзакцией. StaleState, если чат успели изменить."""
+        """Состояние и элементы — одной транзакцией. StaleState, если чат успели изменить.
+
+        Если очищенный текст элемента изменился, догадки проверки риска стираются, а идущая проверка
+        отменяется: они о прежнем тексте (FR-9.3). Сравнение — здесь, а не у вызывающего: так его не обойти.
+        """
         key = self._dek(chat_id)
         now = self._now()
         with self.lock, transaction(self.conn):
@@ -327,6 +346,15 @@ class Repository:
                 seq += 1
                 self._insert_item(key, chat_id, item, seq, now)
             for item in updated_items:
+                row = self.conn.execute(
+                    "SELECT sanitized_enc FROM items WHERE id = ? AND chat_id = ?", (item.id, chat_id)
+                ).fetchone()
+                sealed = row["sanitized_enc"] if row else None
+                before = None if sealed is None else self._dec(key, sealed, f"items.sanitized:{item.id}")
+                if before != item.sanitized:
+                    self.conn.execute(
+                        "UPDATE items SET risk_enc = NULL, risk_status = '' WHERE id = ? AND chat_id = ?", (item.id, chat_id)
+                    )
                 self.conn.execute(
                     "UPDATE items SET original_enc = ?, sanitized_enc = ?, spans = ?, notices = ?, exposed = ?, "
                     "status = ?, meta = ?, model_spans = ? WHERE id = ? AND chat_id = ?",
@@ -365,6 +393,15 @@ class Repository:
 
         self._update_meta(chat_id, item_id, change, status)
 
+    def queue_item(self, chat_id: str, item_id: str) -> bool:
+        """Готовый или отказавший входной текст — снова в очередь, одним UPDATE. False — он уже в очереди
+        или в работе: двойное нажатие «Повторить» не запускает модели дважды. Причина и ход стираются."""
+        return self._run(
+            "UPDATE items SET status = 'queued', meta = json_remove(meta, '$.error', '$.progress') "
+            "WHERE id = ? AND chat_id = ? AND kind = 'input' AND status IN ('done', 'failed')",
+            item_id, chat_id,
+        ) == 1
+
     def set_item_progress(self, chat_id: str, item_id: str, progress: str) -> None:
         """Ход долгой обработки, например «3/12» страниц распознавания (NFR-4)."""
         self._update_meta(chat_id, item_id, lambda meta: meta.update(progress=progress))
@@ -391,21 +428,28 @@ class Repository:
                     "UPDATE items SET status = 'failed', meta = ? WHERE id = ?",
                     (json.dumps(meta, ensure_ascii=False), row["id"]),
                 )
-            self.conn.execute("UPDATE items SET risk_status = 'failed' WHERE risk_status IN ('queued', 'running')")
+            # Своё состояние, а не failed: экран говорит «прервана, запустите ещё раз», а не «модель недоступна».
+            self.conn.execute("UPDATE items SET risk_status = 'interrupted' WHERE risk_status IN ('queued', 'running')")
         return len(rows)
 
-    def set_item_risk_status(self, chat_id: str, item_id: str, status: str) -> None:
-        if self._run("UPDATE items SET risk_status = ? WHERE id = ? AND chat_id = ?", status, item_id, chat_id) != 1:
-            raise KeyError(item_id)
+    def set_item_risk_status(self, chat_id: str, item_id: str, status: str, current: tuple[str, ...]) -> bool:
+        """Переход проверки риска — только из состояний current, одним UPDATE; False — перехода не было.
+        Двойное нажатие не запускает модель дважды, а проверку, которую отменила смена очищенного текста
+        (commit_chat), задание не продолжает."""
+        marks = ", ".join("?" * len(current))
+        return self._run(
+            f"UPDATE items SET risk_status = ? WHERE id = ? AND chat_id = ? AND risk_status IN ({marks})",
+            status, item_id, chat_id, *current,
+        ) == 1
 
-    def set_item_risk(self, chat_id: str, item_id: str, risk: dict) -> None:
-        """Догадки локальной модели: верная догадка — это оригинал, поэтому они зашифрованы (FR-9.3)."""
+    def set_item_risk(self, chat_id: str, item_id: str, risk: dict) -> bool:
+        """Догадки локальной модели: верная догадка — это оригинал, поэтому они зашифрованы (FR-9.3).
+        Записываются, только пока проверка идёт; False — её отменила смена текста или чат удалён."""
         sealed = self._enc(self._dek(chat_id), json.dumps(risk, ensure_ascii=False), f"items.risk:{item_id}")
-        changed = self._run(
-            "UPDATE items SET risk_enc = ?, risk_status = 'done' WHERE id = ? AND chat_id = ?", sealed, item_id, chat_id
-        )
-        if changed != 1:
-            raise KeyError(item_id)
+        return self._run(
+            "UPDATE items SET risk_enc = ?, risk_status = 'done' WHERE id = ? AND chat_id = ? AND risk_status = 'running'",
+            sealed, item_id, chat_id,
+        ) == 1
 
     def item_risk(self, chat_id: str, item_id: str) -> dict | None:
         row = self._one("SELECT risk_enc FROM items WHERE id = ? AND chat_id = ?", item_id, chat_id)
@@ -523,6 +567,12 @@ class Repository:
             for row in self._all("SELECT * FROM dictionary ORDER BY created_at, id")
         ]
 
+    def in_dictionary(self, list_: str, value: str) -> bool:
+        """Значение уже есть в списке — без учёта регистра, как при импорте CSV. Значения зашифрованы,
+        поэтому сравнение — после расшифровки."""
+        wanted = value.lower()
+        return any(row.list == list_ and row.value.lower() == wanted for row in self.dictionary())
+
     def delete_dictionary(self, entry_id: str) -> None:
         self._run("DELETE FROM dictionary WHERE id = ?", entry_id)
 
@@ -537,8 +587,8 @@ class Repository:
             for row in self._all("SELECT * FROM patterns ORDER BY name")
         ]
 
-    def delete_pattern(self, pattern_id: str) -> None:
-        self._run("DELETE FROM patterns WHERE id = ?", pattern_id)
+    def delete_pattern(self, pattern_id: str) -> bool:
+        return self._run("DELETE FROM patterns WHERE id = ?", pattern_id) == 1
 
     def policies(self) -> dict[EntityType, Policy]:
         result = default_policies()

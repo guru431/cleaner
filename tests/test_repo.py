@@ -6,7 +6,7 @@ import pytest
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Policy
 from cleaner.storage import crypto, db
-from cleaner.storage.repo import Item, Repository, StaleState
+from cleaner.storage.repo import CheckpointBusy, Item, Repository, StaleState
 
 
 def new_chat(repo, title="Чат"):
@@ -72,6 +72,14 @@ def test_deleted_chat_key_is_gone_from_the_wal_file(tmp_path, repo):
     repo.delete_chat(chat)
     raw = b"".join(path.read_bytes() for path in tmp_path.glob("cleaner.db*"))
     assert bytes(wrapped) not in raw
+
+
+def test_deleting_a_chat_does_not_hide_a_wal_that_was_not_truncated(repo, wal_reader):
+    """Обзор 1В: занятая контрольная точка — копии страниц с ключом чата остались в журнале WAL."""
+    user, chat = new_chat(repo)
+    with pytest.raises(CheckpointBusy):
+        repo.delete_chat(chat)
+    assert repo.chat(chat) is None
 
 
 def test_wrong_master_key_stops_the_start(tmp_path, repo, clock):
@@ -158,6 +166,9 @@ def test_failure_reason_is_kept_and_cleared(repo):
     assert repo.item(chat, item.id).meta == {"error": "Файл защищён паролем"}
     repo.set_item_status(chat, item.id, "queued")
     assert repo.item(chat, item.id).meta == {}
+    repo.set_item_status(chat, item.id, "failed", "Файл защищён паролем")
+    assert repo.queue_item(chat, item.id) and not repo.queue_item(chat, item.id)
+    assert (repo.item(chat, item.id).status, repo.item(chat, item.id).meta) == ("queued", {})
 
 
 def test_interrupted_processing_fails_at_start(repo):
@@ -165,10 +176,10 @@ def test_interrupted_processing_fails_at_start(repo):
     repo.add_item(chat, Item("a" * 32, 0, "input", "x", None, status="running"))
     repo.add_item(chat, Item("b" * 32, 0, "input", "y", None, status="queued"))
     repo.add_item(chat, Item("c" * 32, 0, "input", "z", "z"))
-    repo.set_item_risk_status(chat, "c" * 32, "running")
+    assert repo.set_item_risk_status(chat, "c" * 32, "running", ("",))
     assert repo.fail_interrupted("прервано") == 2
     assert [(i.status, i.meta.get("error"), i.risk_status) for i in repo.items(chat)] == [
-        ("failed", "прервано", ""), ("failed", "прервано", ""), ("done", None, "failed"),
+        ("failed", "прервано", ""), ("failed", "прервано", ""), ("done", None, "interrupted"),
     ]
 
 
@@ -176,7 +187,8 @@ def test_extracted_text_and_risk_are_stored_encrypted(tmp_path, repo):
     user, chat = new_chat(repo)
     item = repo.add_item(chat, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="running"))
     repo.set_item_original(chat, item.id, "извлечено Kk41", {"kind": "docx"})
-    repo.set_item_risk(chat, item.id, {"guesses": [{"kind": "org", "guess": "Ромашка Gg52", "clue": ""}]})
+    assert repo.set_item_risk_status(chat, item.id, "running", ("",))
+    assert repo.set_item_risk(chat, item.id, {"guesses": [{"kind": "org", "guess": "Ромашка Gg52", "clue": ""}]})
     stored = repo.item(chat, item.id)
     assert (stored.original, stored.meta, stored.risk_status) == ("извлечено Kk41", {"kind": "docx"}, "done")
     assert repo.item_risk(chat, item.id)["guesses"][0]["guess"] == "Ромашка Gg52"

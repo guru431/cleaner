@@ -15,6 +15,7 @@ from cleaner.storage.repo import Item
 from cleaner.web import render
 from cleaner.web.deps import Viewer, get_admin, get_form, get_viewer, own_chat, page, repo_of, service_of
 from cleaner.web.routes_chats import LAYER_NAMES, can_retry, input_view
+from cleaner.web.routes_settings import DUPLICATE
 
 router = APIRouter()
 _ITEM_ID = re.compile(r"[0-9a-f]{32}")
@@ -54,7 +55,9 @@ def _warnings(item: Item) -> list[str]:
             f"На страницах {_pages(item.meta['unread_pages'])} распознавание не нашло текста: "
             "их содержимое в очищенный текст не попало."
         )
-    ran = item.meta.get("layers", [])
+    ran = item.meta.get("layers")
+    if ran is None:             # текст очищен до появления слоёв 4 и 5 (этап 1): выключенными они не были (m-12)
+        return warnings
     for layer, label in LAYER_NAMES.items():
         if layer not in ran:
             warnings.append(
@@ -209,6 +212,8 @@ def to_dictionary(request: Request, chat_id: str, form: dict[str, str] = Depends
     if list_ not in ("always", "never") or not value:
         raise HTTPException(400, "Укажите значение и список")
     repo = repo_of(request)
+    if repo.in_dictionary(list_, value):
+        raise HTTPException(400, DUPLICATE)
     repo.add_dictionary(list_, value, _type(form) if list_ == "always" else None)
     repo.audit("dictionary_changed", viewer.user.id, chat_id, action="add", list=list_)
     service_of(request).refresh(chat_id, viewer.user.id)

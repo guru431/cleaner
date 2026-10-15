@@ -125,6 +125,16 @@ def test_text_left_running_fails_at_start_and_can_be_run_again(ivan, repo, clock
     assert ivan.post(f"/chats/{chat_id}/items/{'0' * 32}/retry").status_code == 404
 
 
+def test_chat_deleted_while_the_wal_is_held_is_gone_and_the_error_is_logged(ivan, repo, wal_reader):
+    """Обзор 1В: журнал WAL не усечён — администратор видит это в журнале событий, удаление всё равно состоялось."""
+    chat_id = ivan.chat()
+    response = ivan.post(f"/chats/{chat_id}/delete", confirm="yes")
+    assert response.headers["location"] == "/chats"
+    assert ivan.get(f"/chats/{chat_id}").status_code == 404
+    assert [e.details for e in repo.audit_events("error")] == [{"kind": "CheckpointBusy", "stage": "delete"}]
+    assert len(repo.audit_events("chat_deleted")) == 1
+
+
 def flat(html: str) -> str:
     return " ".join(html.split())
 

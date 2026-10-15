@@ -1,14 +1,17 @@
 """Чаты: список с поиском, лента, ввод текста и ответа модели, состояние обработки, скачивание."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from cleaner.service import ChatView, EditRefused, InputView, TextTooLong
-from cleaner.storage.repo import Chat, Item
+from cleaner.storage.repo import Chat, CheckpointBusy, Item
 from cleaner.web import render
 from cleaner.web.deps import Upload, Viewer, get_form, get_upload, get_viewer, own_chat, page, repo_of, service_of
 
+log = logging.getLogger("cleaner.web")
 router = APIRouter()
 _TITLE = 200
 LAYER_NAMES = {"ner": "Слой 4 — модели распознавания имён", "llm": "Слой 5 — локальная модель"}
@@ -101,8 +104,14 @@ def delete(request: Request, chat_id: str, form: dict[str, str] = Depends(get_fo
     own_chat(request, chat_id, viewer)
     if form.get("confirm") != "yes":
         raise HTTPException(400, "Подтвердите удаление")          # FR-1.4
-    repo_of(request).delete_chat(chat_id)
-    repo_of(request).audit("chat_deleted", viewer.user.id, chat_id)
+    repo = repo_of(request)
+    try:
+        repo.delete_chat(chat_id)
+    except CheckpointBusy as exc:
+        # Удаление состоялось; копии страниц в журнале WAL сотрёт следующая контрольная точка — администратору в журнал.
+        log.error("удаление чата: %s", type(exc).__name__)
+        repo.audit("error", viewer.user.id, chat_id, kind=type(exc).__name__, stage="delete")
+    repo.audit("chat_deleted", viewer.user.id, chat_id)
     return RedirectResponse("/chats", status_code=303)
 
 

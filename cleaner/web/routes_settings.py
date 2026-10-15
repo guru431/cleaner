@@ -28,6 +28,7 @@ POLICY_NAMES = {
     Policy.OFF: "не искать",
 }
 DELIMITERS = {"comma": ",", "semicolon": ";", "tab": "\t"}
+DUPLICATE = "Такое значение уже есть в этом списке словаря"
 EVENTS = (
     "login", "login_failed", "logout", "chat_created", "chat_deleted", "sanitize", "restore", "edit", "leak",
     "dictionary_changed", "dictionary_import", "pattern_changed", "policy_changed",
@@ -107,6 +108,8 @@ def add_entry(request: Request, form: dict[str, str] = Depends(get_form), viewer
     type_ = _type(form.get("type", "")) if list_ == "always" else None
     aliases = tuple(alias.strip() for alias in form.get("aliases", "").splitlines() if alias.strip())
     repo = repo_of(request)
+    if repo.in_dictionary(list_, value):
+        raise HTTPException(400, DUPLICATE)
     repo.add_dictionary(list_, value, type_, aliases, form.get("comment", "").strip())
     repo.audit("dictionary_changed", viewer.user.id, action="add", list=list_)
     return _redirect("/settings/builtin" if form.get("back") == "builtin" else "/settings/dictionary")
@@ -206,7 +209,8 @@ def save_pattern(request: Request, form: dict[str, str] = Depends(get_form), vie
 @router.post("/patterns/{pattern_id}/delete")
 def delete_pattern(request: Request, pattern_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
     repo = repo_of(request)
-    repo.delete_pattern(pattern_id)
+    if not repo.delete_pattern(pattern_id):
+        raise HTTPException(404, "Шаблон не найден")
     repo.audit("pattern_changed", viewer.user.id, action="delete")
     return _redirect("/settings/patterns")
 

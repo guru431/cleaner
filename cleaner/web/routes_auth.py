@@ -45,7 +45,10 @@ def login(request: Request, form: dict[str, str] = Depends(_login_fields)) -> Re
     if wait:
         return _login_page(request, expected, 429, f"Слишком много попыток. Повторите через {math.ceil(wait)} с")
     user = repo.user_by_login(name)
-    password_ok = auth.verify_password(user.password_hash if user else None, str(form.get("password", "")))
+    try:
+        password_ok = auth.verify_password(user.password_hash if user else None, str(form.get("password", "")))
+    except auth.Busy:                   # пароль не проверялся: это не неудачная попытка
+        return _login_page(request, expected, 503, "Сервер занят проверкой других входов — попробуйте позже")
     if not password_ok or user.disabled:
         throttle.failed(name)
         repo.audit("login_failed", user.id if user else None)
