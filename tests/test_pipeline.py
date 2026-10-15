@@ -463,6 +463,21 @@ def test_email_with_a_label_in_its_domain_is_found(state, settings, text, expect
     assert sanitize(state, expected, settings).sanitized == expected
 
 
+def test_chain_of_overlapping_emails_is_hidden_but_not_searched_as_a_whole(state, settings):
+    """Наблюдение раунда имён узлов, P2: в «a@b.c.» * N адреса пересекаются (следующий начинается в домене
+    предыдущего), и второй проход сливал найденные написания в один фрагмент длиной в текст. Он становился искомым
+    написанием, и поиск известных значений разрезал его с каждого слова: 160 КБ — 2,6 с, 500 КБ — 12 с. Искомы сами
+    адреса; цепочка скрыта одной меткой и восстанавливается целиком."""
+    text = "a@b.c." * 50
+    result = sanitize(state, text, settings)
+    assert result.sanitized == "<EMAIL_3>@b.c." and result.deliverable
+    assert sorted(form for e in state.entities.values() for form in e.forms) == ["a@b.c.a", "b.c.a@b.c.a"]
+    assert sanitize(state, text, settings).sanitized == result.sanitized
+    assert restore(state, result.sanitized, settings).text == text
+    sanitize(state, "почта ivanov@contoso.ru", settings)      # адрес с одним «@» — искомое написание, как прежде
+    assert any("ivanov@contoso.ru" in e.forms for e in state.entities.values())
+
+
 def test_email_without_an_at_sign_next_to_a_replacement_does_not_stop_sanitizing(state, settings):
     """Фрагмент типа EMAIL без «@» бывает — правило пользователя с этим типом; рядом с заменой он делится, как прежде."""
     sanitize(state, "узел srv01.contoso.ru", settings)

@@ -151,7 +151,12 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
         kept = senior.source == "manual" and _name_kept(text, group, start, end, policies)
         type_ = kept or senior.type
         # Искомым значение делает любая находка того же типа: слово после «Пароль —», которое нашли и словарём чата.
+        # Цепочка пересекающихся адресов e-mail («a@b.c.a@b.c.a…»: каждый следующий начинается в домене предыдущего) —
+        # не адрес: искомы сами адреса, слой 1 нашёл их по отдельности, а цепочку длиной в текст искали бы с каждого
+        # слова текста (match.find_forms) — квадратичное время.
         searchable = any(s.searchable for s in group if s.type is senior.type)
+        if type_ is EntityType.EMAIL and text.count("@", start, end) > 1:
+            searchable = False
         ruled, mail = (), False
         records = {s.type for s in group if s.source != "manual"} & {*_NAME_TYPES, EntityType.EMAIL}
         if senior.source == "manual" and not kept and records:

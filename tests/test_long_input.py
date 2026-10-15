@@ -87,13 +87,18 @@ def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
 
 
 @pytest.mark.parametrize(
-    "text", ["abc.def." * 2500, "abc.def." * 2500 + "ru", "srv-01." * 2500 + "contoso.ru", "a." * 10000 + "ru"],
-    ids=["words", "words_suffix", "parts_suffix", "letters_suffix"],
+    "text",
+    [
+        "abc.def." * 2500, "abc.def." * 2500 + "ru", "srv-01." * 2500 + "contoso.ru", "a." * 10000 + "ru",
+        "a@b.c." * 3000,
+    ],
+    ids=["words", "words_suffix", "parts_suffix", "letters_suffix", "email_chain"],
 )
 def test_sanitize_again_and_restore_are_fast_on_a_long_dotted_run(text):
     """FINDINGS P2 «Layer 3 takes quadratic time on a long dotted run»: суффиксы цепочки сверялись со списками
     квадратичное время, а цепочка с настоящим суффиксом становилась одним именем из тысяч частей — и поиск замен в
-    следующем тексте и в ответе перебирал цепочки частей до его длины."""
+    следующем тексте и в ответе перебирал цепочки частей до его длины. Цепочка пересекающихся адресов e-mail
+    становилась искомым написанием длиной в текст (test_pipeline, цепочка адресов)."""
     state = ChatState(chat_id="long", net_key=bytes(32))
     for step in ("sanitize", "again", "restore", "link"):
         started = time.perf_counter()
