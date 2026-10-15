@@ -592,6 +592,18 @@ def test_email_next_to_a_replacement_is_split_when_its_parts_are_as_strict(state
     assert len(state.entities) == before + ("<ACCOUNT_1>" in expected)
 
 
+def test_email_split_check_sees_the_type_a_retyped_part_gets(state):
+    """Ревью раунда 6, P3: проверка, держат ли части адреса его политику, считала часть имени HOST, а часть, которой
+    пользователь дал другой тип, получает метку этого типа. При EMAIL=HIDE, HOST=BLOCK и srv02 → TERM адрес делился на
+    <ACCOUNT_1>@<TERM_1>.domain-1.example: ничто не блокировало, и ответ восстанавливал адрес целиком."""
+    settings = Settings(policies=default_policies() | {T.EMAIL: Policy.HIDE, T.HOST: Policy.BLOCK})
+    sanitize(state, "Сервер srv-dc01.contoso.ru", settings)
+    ops.mask(state, "srv02", T.TERM)
+    result = sanitize(state, "почта petrov@srv02.domain-1.example", settings)
+    assert result.sanitized == "почта <EMAIL_1>"
+    assert restore(state, result.sanitized, settings).text == "почта <EMAIL_1>"
+
+
 @pytest.mark.parametrize("text, expected", [
     ("почта ivanov@host-1.fabrikam.ru", "почта <ACCOUNT_1>@host-1.domain-2.example"),
     ("почта ivanov@srv02.domain-1.example", "почта <EMAIL_1>"),

@@ -18,6 +18,7 @@ from cleaner.core.detect.merge import MergedSpan, merge
 from cleaner.core.entities import hostmap, labels
 from cleaner.core.entities.resolve import ResolvedSpan, Resolver, name_parts
 from cleaner.core.leakcheck import Leak
+from cleaner.core.match import normalize
 from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
 
 DETECTORS = (rules, secrets, infra, dictionary, orgs)
@@ -73,20 +74,26 @@ def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext
     return MergedSpan(start, end, EntityType.HOST, span.sources)           # домен из неё выделит Resolver
 
 
-def _types(text: str, piece: MergedSpan) -> list[EntityType]:
+def _types(text: str, piece: MergedSpan, ctx: DetectContext) -> list[EntityType]:
     """Типы, которые часть записи получит при подмене (resolve._name): часть имени узла — HOST у частей слева от домена и
-    DOMAIN у домена в ней."""
+    DOMAIN у домена в ней, а часть, которой пользователь дал другой тип (правило чата), — тип правила (resolve._manual)."""
     if piece.type is not EntityType.HOST:
         return [piece.type]
     left, registrable = name_parts(hostmap.dotted(text[piece.start:piece.end]), piece.precedes)
-    return [EntityType.HOST] * bool(left) + [EntityType.DOMAIN] * bool(registrable)
+    retyped = {
+        normalize(value): type_ for value, type_, _ in ctx.manual
+        if type_ is not None and type_ not in (EntityType.HOST, EntityType.DOMAIN)
+    }
+    return [retyped.get(normalize(part), EntityType.HOST) for part in left] + (
+        [retyped.get(normalize(registrable), EntityType.DOMAIN)] if registrable else []
+    )
 
 
 def _split_holds(text: str, pieces: list[MergedSpan], ctx: DetectContext) -> bool:
     """Держат ли части адреса e-mail его политику: каждая не мягче EMAIL или одна и так блокирует выдачу («блокировать»
     строже «скрывать без восстановления»). Часть, которой пользователь дал тип строже адреса, — часть правила (merge)."""
     policies = ctx.settings.policies
-    strictness = [STRICTNESS.get(policies.get(type_), 0) for piece in pieces for type_ in _types(text, piece)]
+    strictness = [STRICTNESS.get(policies.get(type_), 0) for piece in pieces for type_ in _types(text, piece, ctx)]
     own = STRICTNESS.get(policies.get(EntityType.EMAIL), 0)
     return min(strictness) >= own or max(strictness) == STRICTNESS[Policy.BLOCK]
 
