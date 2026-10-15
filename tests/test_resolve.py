@@ -1,3 +1,4 @@
+from cleaner.core.detect.base import load_builtin
 from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities.resolve import Resolver, canonical_key
 from cleaner.core.types import ChatState, DictEntry, Settings
@@ -6,12 +7,18 @@ from cleaner.core.types import EntityType as T
 GENERIC = frozenset({"www", "mail"})
 
 
-def resolve(state: ChatState, text: str, *spans: tuple[str, T], settings: Settings = Settings()) -> list[str]:
+def resolve(
+    state: ChatState, text: str, *spans: tuple[str, T], settings: Settings = Settings(), generic: frozenset[str] = GENERIC,
+) -> list[str]:
     merged = [
         MergedSpan(text.index(value), text.index(value) + len(value), type_, ("infra",))
         for value, type_ in spans
     ]
-    return [r.surrogate for r in Resolver(state, settings, text, GENERIC).run(text, merged)]
+    return [r.surrogate for r in Resolver(state, settings, text, generic).run(text, merged)]
+
+
+def searched_forms(state: ChatState) -> set[str]:
+    return {form for entity in state.entities.values() for form in entity.forms}
 
 
 def test_labels_are_numbered_per_type_and_stay_the_same(state):
@@ -87,6 +94,25 @@ def test_alias_whose_lead_part_is_of_another_kind_keeps_its_own_entity(state):
     assert resolve(state, text, *spans, settings=Settings(always=(entry,))) == [
         "host-1.domain-1.example", "mail.domain-1.example",
     ]
+
+
+def test_tech_words_in_front_of_a_domain_stay_and_are_not_searched(state):
+    """Находка «Detection: false positives…»: после k8s.contoso.ru слово k8s не скрывается во всём тексте."""
+    words = ("k8s", "k3s", "s3", "i18n", "l10n", "x64", "x86", "amd64", "arm64", "win10", "win11", "ipv4", "ipv6", "utf8")
+    names = [f"{word}.contoso.ru" for word in words]
+    text = " ".join(names)
+    surrogates = resolve(state, text, *((name, T.HOST) for name in names), generic=load_builtin().generic_labels)
+    assert surrogates == [f"{word}.domain-1.example" for word in words]
+    assert searched_forms(state) == {"contoso.ru"}
+
+
+def test_short_host_names_with_digits_stay_searchable(state):
+    labels = ("srv-db02", "dc01", "web-03", "k8s-01", "win10-pc", "s3a")
+    names = [f"{label}.contoso.ru" for label in labels]
+    text = " ".join(names)
+    surrogates = resolve(state, text, *((name, T.HOST) for name in names), generic=load_builtin().generic_labels)
+    assert surrogates == [f"host-{number}.domain-1.example" for number in range(1, len(labels) + 1)]
+    assert searched_forms(state) == {"contoso.ru", *labels}
 
 
 def test_addresses_macs_and_sids(state):
