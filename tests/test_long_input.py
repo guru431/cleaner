@@ -9,7 +9,7 @@ import pytest
 from cleaner.core.detect import rules
 from cleaner.core.detect.base import DetectContext
 from cleaner.core.pipeline import DETECTORS, sanitize
-from cleaner.core.restore import restore
+from cleaner.core.restore import StreamRestorer, restore
 from cleaner.core.types import ChatState, Settings
 
 
@@ -112,4 +112,18 @@ def test_restore_is_fast_on_many_tags_arguments_and_bare_links(text):
     sanitize(state, "почта ivanov@contoso.ru", Settings())
     started = time.perf_counter()
     restore(state, text + "<EMAIL_1>", Settings())
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(
+    "text", ['href="' * 20000, "](" * 30000, "url(" * 25000, "@import " * 12000, "[a]: <\n" * 15000],
+    ids=["attributes", "markdown", "css_url", "import", "definitions"],
+)
+def test_stream_restore_is_fast_on_many_unclosed_link_openers(text):
+    """Обзор этапа 3: поиск незакрытой ссылки в показываемом префиксе линеен."""
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    sanitize(state, "почта ivanov@contoso.ru", Settings())
+    restorer = StreamRestorer(state, Settings())
+    started = time.perf_counter()
+    restorer.feed(text + " <EMAIL_1> ")
     assert time.perf_counter() - started < 0.5

