@@ -333,3 +333,44 @@ def restore(state: ChatState, answer: str, settings: Settings) -> RestoreResult:
         position += len(piece)
     counters = {**restorer.counters, "table": len(state.surrogates)}
     return RestoreResult("".join(parts), segments, counters)
+
+
+# Знаки, из которых состоит замена в любом допустимом виде записи: метки (в том числе «\<PERSON\_1\>»,
+# «&lt;PERSON_1&gt;», «[[PERSON_1]]»), адреса с длиной префикса, IPv6, MAC, имена узлов.
+_TOKEN_CHAR = re.compile(r"[\w.:/<>\[\]&;\-]")
+_HOLD = 512
+
+
+class StreamRestorer:
+    """Потоковый режим (раздел 7): показывается восстановление префикса, в котором замена не может оборваться.
+
+    Префикс кончается последним пробельным знаком. Хвост без пробелов длиннее 512 знаков (минифицированный
+    JSON) отдаётся до последнего знака, который не входит ни в одну запись замены. feed возвращает весь
+    показываемый текст, а не прирост: восстановление длинного префикса может изменить начало (ссылка,
+    закрытая позже). Итог — finish(): полное восстановление всего ответа.
+    """
+
+    def __init__(self, state: ChatState, settings: Settings):
+        self.state = state
+        self.settings = settings
+        self.text = ""
+        self._cut = 0
+        self._shown = ""
+
+    def _safe_end(self) -> int:
+        end = max(self.text.rfind(" "), self.text.rfind("\n"), self.text.rfind("\t"), self.text.rfind("\r")) + 1
+        if len(self.text) - end > _HOLD:
+            tail = self.text[end:]
+            end += max((i + 1 for i, ch in enumerate(tail) if not _TOKEN_CHAR.match(ch)), default=0)
+        return end
+
+    def feed(self, chunk: str) -> str:
+        self.text += chunk
+        cut = self._safe_end()
+        if cut != self._cut:
+            self._cut = cut
+            self._shown = restore(self.state, self.text[:cut], self.settings).text
+        return self._shown
+
+    def finish(self) -> RestoreResult:
+        return restore(self.state, self.text, self.settings)

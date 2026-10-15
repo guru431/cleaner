@@ -4,7 +4,7 @@ import pytest
 
 from cleaner.core.entities import netmap, ops
 from cleaner.core.pipeline import sanitize
-from cleaner.core.restore import RestoreResult, restore
+from cleaner.core.restore import RestoreResult, StreamRestorer, restore
 from cleaner.core.types import ChatRule, ChatState, Entity, Policy, Settings, Surrogate, default_policies
 from cleaner.core.types import EntityType as T
 
@@ -465,3 +465,42 @@ def test_file_and_protocol_relative_links_to_a_host_stay_foreign(settings, answe
     число вместо IPv4 и второй адрес оставляют ссылку чужой."""
     result = restore(person_state(), answer, settings)
     assert (result.text, kinds(result)) == (answer, ["foreign_link"])
+
+
+def _stream_state() -> ChatState:
+    state = person_state()
+    sanitize(state, "почта i.petrov@contoso.ru, узел srv-db02.contoso.ru, адрес 10.1.2.5", Settings())
+    return state
+
+
+def test_label_cut_at_every_position_restores_like_the_whole_answer(settings):
+    """AC-3.3: метка разрезана между фрагментами в каждой позиции — промежуточный показ не врёт, итог как у целого."""
+    state = _stream_state()
+    [host] = [text for text, s in state.surrogates.items() if text.startswith("host-") and "domain-" in text]
+    [ip] = [text for text, s in state.surrogates.items() if s.kind == "ip"]
+    answer = f"Связаться: <PERSON_10> и <PERSON_1>, \\<EMAIL\\_1\\>; узел {host}, адрес {ip}.\nГотово"
+    whole = restore(state, answer, settings).text
+    for cut in range(len(answer) + 1):
+        restorer = StreamRestorer(state, settings)
+        shown = [restorer.feed(answer[:cut]), restorer.feed(answer[cut:])]
+        for text in shown:
+            assert "Иван Петров0" not in text and "Иван Петров" not in text.replace("Иван Петров,", ""), (cut, text)
+            assert whole.startswith(text), (cut, text)
+        assert restorer.finish().text == whole
+
+
+def test_nothing_is_shown_before_the_first_space(settings):
+    restorer = StreamRestorer(person_state(), settings)
+    assert restorer.feed("<PERSON_1") == ""
+    assert restorer.feed("0>") == ""
+    assert restorer.feed(" пишет") == "Пётр Сидоров "
+
+
+def test_long_tail_without_spaces_is_released_before_an_unfinished_replacement(settings):
+    """Минифицированный JSON без пробелов: отдаётся до последнего знака, который в замену не входит."""
+    restorer = StreamRestorer(person_state(), settings)
+    payload = '{"items":[' + ",".join(['{"v":"x"}'] * 70) + '],"who":"<PERSON_1'
+    shown = restorer.feed(payload)
+    assert shown.endswith('"who":"') and "PERSON" not in shown
+    assert restorer.feed('0>"}').endswith('"who":"Пётр Сидоров"}')       # «"}» закрыли замену — хвост отдан
+    assert restorer.finish().text == restorer.feed("")
