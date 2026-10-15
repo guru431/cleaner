@@ -8,7 +8,7 @@ import pytest
 from pdfgen import make_pdf
 
 from cleaner.ingest.documents import Docling
-from cleaner.ingest.extract import ExtractError
+from cleaner.ingest.extract import ExtractError, Extractor
 from cleaner.models import DOCLING_DIR
 
 pytestmark = pytest.mark.integration
@@ -56,6 +56,12 @@ def office_files() -> dict[str, bytes]:
 @pytest.mark.parametrize("kind", ["docx", "xlsx", "pptx", "html", "eml"])
 def test_office_mail_and_web_documents_convert_offline(docling, kind, no_network):
     assert CANARY in docling.convert(office_files()[kind], kind)
+
+
+@pytest.mark.parametrize("kind", ["docx", "xlsx", "pptx"])
+def test_size_check_lets_ordinary_office_files_through_to_docling(docling, kind, no_network):
+    """Проверка размера до Docling не отклоняет обычный файл, сохранённый python-docx, openpyxl и python-pptx."""
+    assert CANARY in Extractor(docling, lambda image, mime: "").extract(f"file.{kind}", office_files()[kind]).text
 
 
 def test_spreadsheet_stays_a_table(docling, no_network):

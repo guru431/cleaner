@@ -1,3 +1,7 @@
+import io
+import struct
+import zipfile
+
 import pytest
 from pdfgen import make_pdf
 
@@ -156,6 +160,101 @@ def test_large_image_is_refused_before_recognition():
     with pytest.raises(ExtractError, match="больше 20 МБ"):
         Extractor(Documents(), ocr).extract("huge.png", PNG + b"\x00" * (20 * 1024 * 1024))
     assert ocr.calls == []
+
+
+SHEET = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData>{tail}</worksheet>'
+
+
+def package(parts: dict[str, bytes | str]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, body in parts.items():
+            archive.writestr(name, body)
+    return buffer.getvalue()
+
+
+def book(rows: str, tail: str = "", name: str = "xl/worksheets/sheet1.xml") -> bytes:
+    """Книга из одного листа; общие строки и картинка — части, которые проверка должна пропустить."""
+    return package({
+        "xl/sharedStrings.xml": '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>x</t></si></sst>',
+        "xl/media/image1.png": PNG, name: SHEET.format(rows=rows, tail=tail),
+    })
+
+
+def declared(data: bytes, size: int) -> bytes:
+    """Первый член ZIP заявлен в каталоге размером size, как у ZIP-бомбы; сжатых данных — байты."""
+    raw = bytearray(data)
+    struct.pack_into("<I", raw, raw.find(b"PK\x01\x02") + 24, size)
+    return bytes(raw)
+
+
+@pytest.mark.parametrize("name", ["bomb.docx", "bomb.pptx", "bomb.xlsx"])
+def test_office_file_unpacking_past_the_limit_is_refused_before_docling(name):
+    """Находка «A large XLSX can push the service past MemoryMax»: размер — по каталогу ZIP, без распаковки."""
+    documents = Documents()
+    with pytest.raises(ExtractError, match="больше 512 МБ"):
+        Extractor(documents, Ocr()).extract(name, declared(package({"word/document.xml": "<w:document/>"}), 513 * 2**20))
+    assert documents.calls == []
+
+
+def test_markup_is_limited_separately_from_pictures():
+    """Память Docling растёт с XML (DOCX — до 41 МБ на 1 МБ), а картинки большого документа почти не сжимаются."""
+    documents = Documents()
+    with pytest.raises(ExtractError, match="разметка без сжатия больше 32 МБ"):
+        Extractor(documents, Ocr()).extract("big.docx", declared(package({"word/document.xml": "<w:document/>"}), 33 * 2**20))
+    pictures = declared(package({"word/media/image1.png": PNG, "word/document.xml": "<w:document/>"}), 100 * 2**20)
+    assert Extractor(documents, Ocr()).extract("photos.docx", pictures).kind == "docx"
+    assert documents.calls == ["docx"]
+
+
+def test_spreadsheet_whose_text_must_exceed_the_limit_is_refused_before_docling():
+    """Ячейка со значением — не меньше трёх знаков Markdown: 101 ячейка при пределе 300 знаков — отказ сразу."""
+    from openpyxl import Workbook
+
+    def xlsx(cells: int) -> bytes:
+        workbook = Workbook()
+        for index in range(cells):
+            workbook.active.cell(row=index // 10 + 1, column=index % 10 + 1, value=index)
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        return buffer.getvalue()
+
+    documents = Documents()
+    assert Extractor(documents, Ocr(), max_chars=300).extract("t.xlsx", xlsx(100)).kind == "xlsx"
+    with pytest.raises(ExtractError, match="текст заведомо длиннее 300 знаков"):
+        Extractor(documents, Ocr(), max_chars=300).extract("t.xlsx", xlsx(101))
+    assert documents.calls == ["xlsx"]
+
+
+def test_cells_without_coordinates_and_sheets_under_any_name_are_counted():
+    """Как у openpyxl: строка и ячейка без атрибута r — следующие по счёту; лист ищется по корню, а не по имени."""
+    rows = "<row>" + "<c><v>1</v></c>" * 51 + "</row>" + '<row><c t="inlineStr"><is><t>x</t></is></c><c s="1"/></row>'
+    with pytest.raises(ExtractError, match="длиннее 150 знаков"):
+        Extractor(Documents(), Ocr(), max_chars=150).extract("t.xlsx", book(rows, name="xl/data/custom.xml"))
+    assert Extractor(Documents(), Ocr(), max_chars=156).extract("t.xlsx", book(rows)).kind == "xlsx"
+
+
+@pytest.mark.parametrize(("rows", "tail", "reason"), [
+    # Столбцы A:C объединены целиком — файл в килобайт, а Docling повторяет текст в 3 млн клеток (замер: +4,3 ГБ).
+    ('<row r="1"><c r="A1" t="s"><v>0</v></c></row>', '<mergeCells><mergeCell ref="A1:C1048576"/></mergeCells>', "текст"),
+    ('<row r="1"><c r="A1" t="s"><v>0</v></c></row>', '<mergeCells><mergeCell ref="A:C"/></mergeCells>', "текст"),
+    # Две ячейки по углам: Docling создаёт объект на каждую клетку между ними (замер: 210 байт на клетку).
+    ('<row r="1"><c r="A1"><v>1</v></c></row><row r="100000"><c r="K100000"><v>2</v></c></row>', "", "для разбора"),
+    # То же без координат: строка после 99999-й — 100000-я, одиннадцатая ячейка — столбец K.
+    ('<row r="1"><c><v>1</v></c></row><row r="99999"/><row>' + "<c/>" * 10 + "<c><v>2</v></c></row>", "", "для разбора"),
+    ('<row r="1"><c r="A1"><v>1</v></c></row>', '<hyperlinks><hyperlink ref="A1:Z50000"/></hyperlinks>', "для разбора"),
+])
+def test_sheet_area_that_would_not_fit_in_memory_is_refused_before_docling(rows, tail, reason):
+    documents = Documents()
+    with pytest.raises(ExtractError, match=f"Таблица слишком большая.*{reason}"):
+        Extractor(documents, Ocr()).extract("t.xlsx", book(rows, tail))
+    assert documents.calls == []
+
+
+def test_spreadsheet_within_the_limits_goes_to_docling():
+    rows = '<row r="1"><c r="A1"><v>1</v></c></row><row r="1000"><c r="Z1000"><v>2</v></c></row>'
+    merge = '<mergeCells><mergeCell ref="A2:Z2"/></mergeCells>'
+    assert Extractor(Documents(), Ocr()).extract("t.xlsx", book(rows, merge)).kind == "xlsx"
 
 
 def test_huge_page_is_rendered_within_the_recognition_limit():

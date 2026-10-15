@@ -56,9 +56,11 @@ def save_local_settings(repo: Repository, settings: LocalSettings) -> None:
 class Engines:
     def __init__(
         self, repo: Repository, models_dir: Path, environ: Mapping[str, str] = os.environ, transport: object = None,
+        max_text_chars: int = 500_000,
     ):
         self.repo = repo
         self.models_dir = models_dir
+        self.max_text_chars = max_text_chars    # таблицу, текст которой заведомо длиннее, разбор отклоняет до Docling
         self.key = environ.get(GATEWAY_KEY_ENV, "")
         self._transport = transport          # только для тестов: httpx.MockTransport
         self._client: LocalLLM | None = None
@@ -89,7 +91,7 @@ class Engines:
 
     def extractor(self) -> Extractor:
         """Разбор файлов; страницы сканов — в ocr-ru через шлюз (раздел 9)."""
-        return Extractor(self._documents, lambda image, mime: self.client().ocr_page(image, mime))
+        return Extractor(self._documents, lambda image, mime: self.client().ocr_page(image, mime), self.max_text_chars)
 
     def ner(self):
         """Слой 4: модели грузятся при первом обращении (несколько секунд), дальше — из памяти."""

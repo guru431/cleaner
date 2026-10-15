@@ -1,4 +1,6 @@
+import io
 import json
+import zipfile
 
 import httpx
 import pytest
@@ -60,6 +62,19 @@ def test_extractor_sends_scans_to_the_gateway(repo, tmp_path):
 def test_documents_need_their_models(repo, tmp_path):
     with pytest.raises(ExtractError, match="модели Docling не загружены"):
         Engines(repo, tmp_path, environ={}).extractor().extract("a.docx", b"PK\x03\x04" + b"\x00" * 8)
+
+
+def test_spreadsheet_is_measured_against_the_configured_text_limit(repo, tmp_path):
+    """Таблица, текст которой заведомо длиннее max_text_chars, получает отказ до Docling (моделей здесь нет)."""
+    sheet = ('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1">'
+             + "<c><v>1</v></c>" * 11 + "</row></sheetData></worksheet>")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("xl/worksheets/sheet1.xml", sheet)
+    with pytest.raises(ExtractError, match="длиннее 30 знаков"):
+        Engines(repo, tmp_path, environ={}, max_text_chars=30).extractor().extract("t.xlsx", buffer.getvalue())
+    with pytest.raises(ExtractError, match="модели Docling не загружены"):
+        Engines(repo, tmp_path, environ={}, max_text_chars=33).extractor().extract("t.xlsx", buffer.getvalue())
 
 
 def test_layer_5_goes_to_the_gateway_with_the_configured_model(repo, tmp_path):
