@@ -53,6 +53,8 @@ def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext
     value = text[start:end]
     if not _WORD.search(value):
         return None         # одни разделители
+    if any(start < ruled_end and ruled_start < end for ruled_start, ruled_end in span.ruled):
+        return MergedSpan(start, end, span.type, span.sources)      # часть, которую задело правило пользователя
     if span.type is EntityType.DN:
         # Имя атрибута без значения («CN=» перед заменой) ничего не выдаёт.
         return MergedSpan(start, end, EntityType.DN, span.sources) if "=" in value else None
@@ -79,9 +81,9 @@ def _outside(
         last += 1
     if first == last:
         return _placed(text, span, ranges, starts, ctx)
-    if span.type not in _COMPOSED:
+    if span.type not in _COMPOSED and not span.ruled:
         return [span]
-    if span.type not in _SPLIT:
+    if span.type not in _SPLIT and not span.ruled:
         return []
     pieces, position = [], span.start
     for start, end in [*ranges[first:last], (span.end, span.end)]:

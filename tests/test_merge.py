@@ -33,6 +33,16 @@ def test_manual_rule_on_a_whole_part_of_a_name_keeps_the_name_type():
         assert merge(text, spans, CTX)[0].type is expected, manual
 
 
+def test_rule_swallowing_a_name_records_where_it_lies():
+    """Конвейер оставит выданную замену в имени и отдаст правилу только задетые им части (5.10)."""
+    [merged] = merge("host-1.fabrikam.ru", [Span(0, 18, T.HOST, "infra"), Span(7, 15, T.TERM, "manual")], CTX)
+    assert (merged.type, merged.ruled) == (T.TERM, ((7, 15),))
+    [kept] = merge("srv01.contoso.ru", [Span(0, 16, T.HOST, "infra"), Span(0, 5, T.TERM, "manual")], CTX)
+    assert (kept.type, kept.ruled) == (T.HOST, ())
+    [alone] = merge("Проект Заря", [Span(7, 11, T.TERM, "manual")], CTX)
+    assert (alone.type, alone.ruled) == (T.TERM, ())
+
+
 def test_partial_overlap_covers_the_union():
     spans = [Span(0, 10, T.PHONE, "rules"), Span(5, 16, T.CARD, "rules", validated=True)]
     assert merge("0123456789abcdef", spans, CTX) == [MergedSpan(0, 16, T.CARD, ("rules",))]

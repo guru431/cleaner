@@ -363,6 +363,23 @@ def test_rule_inside_a_name_with_a_label_part_leaves_the_label(state, settings):
     assert sanitize(state, "Проверь <TERM_1>.fabrikam.ru", settings).sanitized == "Проверь <TERM_1>.<TERM_2>"
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("Проверь host-1.fabrikam.ru", "Проверь host-1.<TERM_1>"),
+    ("Проверь srv-db02.host-1.fabrikam.ru", "Проверь host-2.host-1.<TERM_1>"),
+    ("Проверь srv02.fabrikam.ru", "Проверь <TERM_1>"),
+], ids=["part-before", "parts-around", "no-replacement"])
+def test_selection_inside_a_name_leaves_the_issued_replacement_next_to_it(state, settings, text, expected):
+    """FINDINGS «Retyping a host name part: what it leaves» (3): выделение не на целой части поглощало имя вместе с
+    выданной заменой — <TERM_1> восстанавливался в «host-1.fabrikam.ru», с подменой вместо оригинала. Замену правило не
+    трогает (FR-5.9) и поглощает только задетые им части; имя без замены — целиком, как прежде (5.7)."""
+    sanitize(state, "узел srv01.contoso.ru", settings)
+    ops.mask(state, "fabrikam", T.TERM)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected and result.deliverable
+    assert sanitize(state, expected, settings).sanitized == expected
+    assert restore(state, expected, settings).text == text.replace("host-1", "srv01")
+
+
 def test_labels_with_dots_outside_names_stay_as_they_are(state, settings):
     sanitize(state, "узел srv01.contoso.ru, сайт contoso.ru", settings)
     ops.retype(state, next(e for e in state.entities.values() if e.type is T.DOMAIN).id, T.ORG)

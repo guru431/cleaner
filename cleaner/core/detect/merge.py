@@ -17,6 +17,8 @@ class MergedSpan:
     type: EntityType
     sources: tuple[str, ...]
     searchable: bool = True    # Span.searchable
+    # Где во фрагменте лежат правила пользователя, поглотившие имя (5.7): выданную замену в нём они не трогают (5.10).
+    ruled: tuple[tuple[int, int], ...] = ()
     # Фрагмент имени стоит через точку после выданной замены или метки и перед ней (5.10): это часть имени, а не имя.
     follows: bool = False
     precedes: bool = False
@@ -133,8 +135,12 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
                     opened = netmap.addresses(ctx.settings.never | ctx.unmask)
                 if netmap.canonical_forms(value) & opened:
                     continue
-        type_ = (senior.source == "manual" and _name_kept(text, group, start, end)) or senior.type
+        kept = senior.source == "manual" and _name_kept(text, group, start, end)
+        type_ = kept or senior.type
         # Искомым значение делает любая находка того же типа: слово после «Пароль —», которое нашли и словарём чата.
         searchable = any(s.searchable for s in group if s.type is senior.type)
-        merged.append(MergedSpan(start, end, type_, sources, searchable))
+        ruled = ()
+        if senior.source == "manual" and not kept and any(s.source != "manual" and s.type in _NAME_TYPES for s in group):
+            ruled = tuple((s.start, s.end) for s in group if s.source == "manual")
+        merged.append(MergedSpan(start, end, type_, sources, searchable, ruled))
     return _join_names(text, merged)
