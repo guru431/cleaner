@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
+from collections.abc import Callable
 from functools import lru_cache
 
 from cleaner.core.detect.base import DetectContext
@@ -144,6 +146,13 @@ _NOT_SECRET = frozenset({
 _TEMPLATE = re.compile(
     r"^(?:[*xX•·.]+|\$\{.*\}|\$\(.*|\$env:\w+|%\w+%|\{\{.*\}\}|<[^>]*>|\[\[[^\]]*\]\]|\$[A-Za-z_]+|\(.*)$"
 )
+# Вызов или индекс в коде после ключа — тоже не значение: «password = input()», «token = os.environ["TOKEN"]»,
+# «api_key=config.get("key")» давали секреты «input(», «os.environ[», и обрывок кода скрывался во всём чате.
+# Имя через точку перед скобкой — код всегда («getpass.getpass()», «$cred.GetNetworkCredential().Password»).
+# Имя без точки — только когда скобка кончает значение и за ней сразу «)», «]» или кавычка (вызов без
+# аргументов, аргумент или индекс строкой): «password=Ab(1» и «Summer2024(» в конце строки — пароли.
+# Значение в кавычках не проверяется: «"Qwerty1("» — строка, а не выражение.
+_CALL = re.compile(r"\$?[A-Za-z_]\w*(?P<dotted>(?:\.[A-Za-z_]\w*)+)?[(\[]")
 
 # Правила по энтропии и по ключевым словам шумят на обычном тексте; контекст у нас свой.
 # Правила npm, JWT и OpenAI без начала слова перебирают строку от каждого «//», «eyJ», «sk-» —
@@ -158,20 +167,57 @@ _SKIPPED_PLUGINS = frozenset({
 # « *»): на длинном ряде пробелов это кубическое время. Ряд сжимается до одного пробела — повторы
 # принимают любое их число, а двух пробелов подряд нет ни в одном значении этих правил.
 _SPACES = re.compile(" {2,}")
+# Сколько разных значений строки ищется по всей строке. Только такой поиск находит повтор значения без контекста
+# его правила («aws_key="…"», а дальше по строке то же значение без ключа), но стоит длину строки на каждое
+# значение: строка выгрузки с тысячами разных токенов шла квадратичное время (8000 SID на строке в 472 КБ — 3,4 с).
+# Остальные значения берутся там, где их нашли правила; повтор без контекста находит следующий проход очистки
+# по известным значениям чата (слой 3), а пропущенный — проверка утечек.
+_REPEATS = 50
 
 
 @lru_cache(maxsize=1)
-def _library_plugins() -> tuple:
-    """Правила detect-secrets как объекты. Через них, а не через scan_line: тот читает
-    общие для процесса настройки, которые меняет любой параллельный вызов, и слушается
-    пометки «pragma: allowlist secret» во вставленном тексте."""
+def _library_rules() -> tuple[re.Pattern[str], ...]:
+    """Выражения правил detect-secrets (denylist) по порядку правил. Не scan_line: тот читает общие для процесса
+    настройки, которые меняет любой параллельный вызов, и слушается пометки «pragma: allowlist secret» во вставленном
+    тексте. И не analyze_string: все включённые правила берут его общим, а он отдаёт значения без позиций."""
     from detect_secrets.core.plugins.util import get_mapping_from_secret_type_to_class
 
     return tuple(
-        cls()
+        regex
         for cls in get_mapping_from_secret_type_to_class().values()
         if cls.__name__ not in _SKIPPED_PLUGINS
+        for regex in cls().denylist
     )
+
+
+def _library_hits(squeezed: str) -> dict[str, list[int]]:
+    """Значения правил в строке -> их начала, в порядке analyze_string. Значение — как у него: findall отдаёт
+    непустые группы совпадения, а у выражения без групп — всё совпадение."""
+    hits: dict[str, list[int]] = {}
+    for regex in _library_rules():
+        groups = range(1, regex.groups + 1) if regex.groups else (0,)
+        for m in regex.finditer(squeezed):
+            for group in groups:
+                if len(m.group(group) or "") >= 8:
+                    hits.setdefault(m.group(group), []).append(m.start(group))
+    return hits
+
+
+def _unsqueezed(line: str) -> Callable[[int], int]:
+    """Позиция в строке со сжатыми рядами пробелов -> позиция в настоящей строке."""
+    after: list[int] = []      # первая позиция сжатой строки после ряда
+    removed: list[int] = []    # сколько пробелов выброшено до неё
+    total = 0
+    for m in _SPACES.finditer(line):
+        total += m.end() - m.start() - 1
+        after.append(m.end() - total)
+        removed.append(total)
+
+    def original(position: int) -> int:
+        index = bisect_right(after, position)
+        return position + (removed[index - 1] if index else 0)
+
+    return original
 
 
 def _library_spans(text: str, own: list[Span]) -> list[Span]:
@@ -184,18 +230,22 @@ def _library_spans(text: str, own: list[Span]) -> list[Span]:
         taken[span.start:span.end] = b"\x01" * (span.end - span.start)
     offset = 0
     for line in text.splitlines(keepends=True):
-        squeezed = _SPACES.sub(" ", line)
-        values = dict.fromkeys(value for plugin in _library_plugins() for value in plugin.analyze_string(squeezed))
-        for value in values:
-            if len(value) < 8:
-                continue
-            position = line.find(value)    # значение ищется в настоящей строке, не в сжатой
-            while position >= 0:
+        hits = _library_hits(_SPACES.sub(" ", line))
+        original = _unsqueezed(line) if len(hits) > _REPEATS else None
+        for index, (value, starts) in enumerate(hits.items()):
+            if original is None or index < _REPEATS:
+                places = []                    # все вхождения, и там, где правило значения не видит
+                position = line.find(value)    # значение ищется в настоящей строке, не в сжатой
+                while position >= 0:
+                    places.append(position)
+                    position = line.find(value, position + 1)
+            else:                              # значение с рядом пробелов внутри в настоящей строке другое
+                places = [p for p in map(original, starts) if line.startswith(value, p)]
+            for position in places:
                 start, end = offset + position, offset + position + len(value)
                 if taken.find(1, start, end) < 0:
                     spans.append(Span(start, end, EntityType.SECRET, name, validated=True))
                     taken[start:end] = b"\x01" * len(value)
-                position = line.find(value, position + 1)
         offset += len(line)
     return spans
 
@@ -212,11 +262,21 @@ def _value(m: re.Match[str], minimum: int = 3) -> tuple[int, int] | None:
         if group == "bare":
             while end > start and m.string[end - 1] in ".,)]}":
                 end -= 1
+            if _code(m.string, start, end):
+                return None
         value = m.string[start:end]
         if len(value) < minimum or value.lower() in _NOT_SECRET or _TEMPLATE.match(value):
             return None
         return start, end
     return None
+
+
+def _code(string: str, start: int, end: int) -> bool:
+    """Значение без кавычек string[start:end] — вызов или индекс в коде (см. _CALL)."""
+    call = _CALL.match(string, start, end)
+    return call is not None and (
+        call.group("dotted") is not None or (call.end() == end < len(string) and string[end] in ")]\"'")
+    )
 
 
 def _looks_like_password(value: str) -> bool:

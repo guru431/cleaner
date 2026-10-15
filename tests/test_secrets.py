@@ -2,6 +2,7 @@ import pytest
 
 from cleaner.core.detect import secrets
 from cleaner.core.detect.base import DetectContext
+from cleaner.core.pipeline import sanitize
 from cleaner.core.types import Settings
 
 CTX = DetectContext(Settings())
@@ -130,6 +131,35 @@ def test_tokens_of_the_slow_library_rules_are_found_by_own_rules(text, value):
     """Находка «NpmDetector is quadratic…»: правила npm, OpenAI и JWT из detect-secrets квадратичны
     на длинной строке и выключены; их токены находят свои правила."""
     assert found(text) == {value}
+
+
+AWS_SECRETS = [f"{n:04d}" + "Ab" * 18 for n in range(60)]          # 40 знаков, как секретный ключ AWS
+
+
+@pytest.mark.parametrize("separator", [",", "   "], ids=["commas", "runs_of_spaces"])
+def test_every_token_of_a_line_with_hundreds_of_distinct_tokens_is_found(separator):
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: на такой строке значения больше не ищутся
+    по всей строке, а берутся там, где их нашли правила (ряды пробелов перед правилами сжимаются)."""
+    sids = ["AC%032x" % n for n in range(300)]
+    text = separator.join(f'"account_sid":"{sid}"' for sid in sids)
+    spans = secrets.detect(text, CTX)
+    assert sorted(text[s.start:s.end] for s in spans) == sorted(sids)
+
+
+def test_repeat_of_a_token_without_its_context_is_found_on_an_ordinary_line():
+    """Правило AWS видит ключ только рядом со словом «aws»; повтор того же значения дальше по строке скрывается."""
+    value = AWS_SECRETS[0]
+    text = f'aws_key="{value}"; echo {value} | base64'
+    assert [text[s.start:s.end] for s in secrets.detect(text, CTX)] == [value, value]
+
+
+def test_repeat_on_a_line_with_many_distinct_tokens_is_found_by_the_second_pass(state, settings):
+    """Дальше _REPEATS разных значений строки повтор без контекста слой 2 не ищет; его находит второй проход
+    очистки по известным значениям чата."""
+    text = "".join(f'aws_key="{value}";' for value in AWS_SECRETS) + " echo " + AWS_SECRETS[-1]
+    assert len(secrets.detect(text, CTX)) == len(AWS_SECRETS)
+    sanitized = sanitize(state, text, settings).sanitized
+    assert not any(value in sanitized for value in AWS_SECRETS), sanitized[-80:]
 
 
 def test_library_rules_still_see_a_key_after_a_run_of_spaces():
@@ -288,6 +318,32 @@ def test_counters_and_code_under_secret_keys_are_left_alone(text):
     ],
 )
 def test_values_next_to_counters_and_code_are_still_found(text, value):
+    assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password = input()", 'token = os.environ["TOKEN"]', "secret = getpass.getpass()", 'api_key=config.get("key")',
+        "password = getpass('Пароль: ')", "self.token = kwargs['token']", "token = os.environ.get(TOKEN_NAME)",
+        "$password = $cred.GetNetworkCredential().Password", 'password: request.form["password"]',
+    ],
+)
+def test_call_or_subscript_under_a_secret_key_is_code(text):
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: вызов и индекс после ключа становились секретом
+    («input(», «os.environ[»), и этот обрывок кода потом скрывался во всём чате."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ('password = "Qwerty1("', "Qwerty1("), ("password = 'getpass()'", "getpass()"), ("password=Ab(1", "Ab(1"),
+        ("password=Summer2024(", "Summer2024("), ("password=Qw!7(", "Qw!7("), ("Пароль: Ab(1", "Ab(1"),
+    ],
+)
+def test_passwords_with_brackets_are_still_found(text, value):
+    """Значение в кавычках — строка, а не код; скобка внутри пароля или в его конце без закрытого вызова — пароль."""
     assert found(text) == {value}
 
 

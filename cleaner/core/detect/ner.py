@@ -24,7 +24,8 @@ _CATEGORY = {
     # Номера документов без своего типа в ТЗ и без правила в слоях 1–3.
     "DRIVER_LICENSE": "document", "MILITARY_ID": "document", "BIRTH_CERTIFICATE": "document",
 }
-_TYPES = {"person": EntityType.PERSON, "org": EntityType.ORG, "address": EntityType.ADDRESS, "document": EntityType.PASSPORT}
+# Адреса GLiNER («location address») здесь нет: это часть адреса наравне с частями русской модели (_addresses).
+_TYPES = {"person": EntityType.PERSON, "org": EntityType.ORG, "document": EntityType.PASSPORT}
 # Между частями одного почтового адреса — запятые, точки, пробелы и служебные слова.
 ADDRESS_GAP = re.compile(
     r"(?:[\s,.:№-]|\b(?:г|гор|город|ул|улица|пр|просп|проспект|пер|переулок|ш|шоссе|наб|набережная|б-р|бульвар|"
@@ -32,6 +33,17 @@ ADDRESS_GAP = re.compile(
     re.IGNORECASE,
 )
 _ADDRESS_GAP_MAX = 40
+# Адрес GLiNER — адрес и без улицы: открытые наборы размечают адресом и место («в Москве», «на Мойке»), и правило
+# русской модели «город сам не скрывается» снизило бы полноту «Организаций и почтовых адресов» на hivetrace с 0,886
+# до 0,858. Кроме находки с числом, которое не похоже на дом: «location address» GLiNER называет и «1С». Дом — число
+# отдельным словом («Ленина 5», «10 Downing St»), от двух цифр («12к1»; номер документа тоже остаётся скрытым — слои 1–3
+# без контекста его не находят) или слово улицы рядом с номером («ул. Мира 5А»).
+_HOUSE = re.compile(
+    r"\d{2}|(?<![^\W\d_])\d(?![^\W\d_])"
+    r"|\b(?:ул|улиц\w*|пр|просп|пр-т|проспект\w*|пер|переул\w*|ш|шоссе|наб|набережн\w*|б-р|бульвар\w*|пл|площад\w*"
+    r"|проезд\w*|тупик\w*|алле[яиюе]|мкр|микрорайон\w*|street|st|avenue|ave|road|rd|lane|ln|boulevard|blvd|drive|dr)\b",
+    re.IGNORECASE,
+)
 _WORD = re.compile(r"\S+")
 # Строчные буквы вплотную к цифрам — пароль: «sunflower77», «Qwerty2024». Не серия документа «АА1234567» и не логин
 # или имя через подчёркивание («ivanov_test», «ИВАНОВА_МАРИЯ»): слой 5 их пропускает, а без находки слоя 4 они
@@ -95,6 +107,28 @@ def _common_words(text: str, found: Found) -> bool:
     )
 
 
+# Не организации, хотя GLiNER при пороге 0,25 называет их так, заглавными и без названия рядом: номера документов
+# и реестры, страховки, налоги и режимы налогообложения, ЖКХ, а также организационно-правовая форма сама по себе
+# («ИП», «ООО»; форма с названием в кавычках — правило orgs.py, формы — те же, что там). На открытых наборах это
+# самый частый шум ORG. Государственные органы (ФНС, ПФР, МВД, ГИБДД, МФЦ) — организации и сюда не входят: их
+# открывает словарь «никогда не скрывать» (раздел 5.5 ТЗ), а не модель.
+_NOT_ORGANISATIONS = frozenset({
+    "снилс", "инн", "кпп", "огрн", "огрнип", "бик", "окпо", "оквэд", "октмо", "окато", "егрюл", "егрип", "егрн",
+    "птс", "стс", "ву", "эцп", "кэп", "укэп", "фио", "паспорт",
+    "омс", "дмс", "осаго", "каско",
+    "ндс", "ндфл", "усн", "енвд", "псн", "осно", "есхн", "нпд", "енс", "енп", "аусн", "жкх", "жку",
+    "ооо", "оао", "зао", "пао", "нао", "ао", "ип", "фгуп", "фгбу", "фгбоу", "гуп", "муп", "гбу", "мбу", "ано", "нко",
+    "тоо", "тсж", "снт", "общество с ограниченной ответственностью", "акционерное общество",
+    "публичное акционерное общество", "непубличное акционерное общество", "закрытое акционерное общество",
+    "открытое акционерное общество", "llc", "ltd", "inc", "gmbh", "jsc", "plc",
+})
+_EDGE = " \t\r\n.,;:!?\"'«»„“”()"
+
+
+def _not_organisation(text: str, found: Found) -> bool:
+    return _CATEGORY[found.label] == "org" and text[found.start:found.end].strip(_EDGE).lower() in _NOT_ORGANISATIONS
+
+
 def identifier(text: str, span: Span) -> bool:
     """PERSON или ORG, похожий на пароль («sunflower77»); слово берётся целиком — модель может пометить «sunflower»
     внутри «sunflower77»."""
@@ -106,8 +140,18 @@ def identifier(text: str, span: Span) -> bool:
     return span.type in (EntityType.PERSON, EntityType.ORG) and _IDENTIFIER.search(text, start, end) is not None
 
 
+def _street(text: str, part: Found) -> bool:
+    """Часть, с которой соседние части становятся адресом: улица или дом русской модели, адрес GLiNER (см. _HOUSE)."""
+    if _CATEGORY[part.label] != "address":
+        return _CATEGORY[part.label] == "street"
+    value = text[part.start:part.end]
+    return not any(c.isdigit() for c in value) or _HOUSE.search(value) is not None
+
+
 def _addresses(text: str, parts: list[Found]) -> list[tuple[int, int, float]]:
-    """Части адреса подряд — один ADDRESS, если среди них есть улица или дом: город или страна сами не скрываются."""
+    """Части адреса подряд — один ADDRESS, если среди них есть улица или дом: город или страна сами не скрываются.
+    Адрес GLiNER рядом с частями русской модели входит в тот же ADDRESS: двумя находками запятая между ними
+    оставалась открытой."""
     groups: list[list[Found]] = []
     for part in sorted(parts, key=lambda f: f.start):
         gap = text[groups[-1][-1].end:part.start] if groups else ""
@@ -117,7 +161,7 @@ def _addresses(text: str, parts: list[Found]) -> list[tuple[int, int, float]]:
             groups.append([part])
     return [
         (group[0].start, max(p.end for p in group), max(p.score for p in group))
-        for group in groups if any(_CATEGORY[p.label] == "street" for p in group)
+        for group in groups if any(_street(text, p) for p in group)
     ]
 
 
@@ -134,11 +178,11 @@ class NerLayer:
         for tagger in self.taggers:
             found += [f for f in _joined([
                 f for f in tagger.tag(text) if f.label in _CATEGORY and f.score >= THRESHOLD and f.end > f.start
-            ]) if not _common_words(text, f)]
+            ]) if not _common_words(text, f) and not _not_organisation(text, f)]
         spans = [
             Span(f.start, f.end, _TYPES[_CATEGORY[f.label]], name, f.score)
             for f in found if _CATEGORY[f.label] in _TYPES
         ]
-        places = [f for f in found if _CATEGORY[f.label] in ("street", "place")]
+        places = [f for f in found if _CATEGORY[f.label] in ("street", "place", "address")]
         spans += [Span(start, end, EntityType.ADDRESS, name, score) for start, end, score in _addresses(text, places)]
         return spans

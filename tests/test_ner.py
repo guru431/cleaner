@@ -1,3 +1,7 @@
+import re
+
+import pytest
+
 from cleaner.core.detect.ner import THRESHOLD, Found, NerLayer, identifier, windows
 from cleaner.core.pipeline import Layers, sanitize
 from cleaner.core.types import EntityType as T
@@ -31,6 +35,44 @@ def test_address_parts_become_one_address_only_with_a_street_or_house():
     text = "Офис: г. Тестовск, ул. Примерная, д. 5. Филиал в Москве."
     found = (Found(9, 17, "CITY", 0.9), Found(23, 32, "STREET", 0.9), Found(37, 38, "HOUSE", 0.9), Found(49, 55, "CITY", 0.9))
     assert spans(text, *found) == [("Тестовск, ул. Примерная, д. 5", T.ADDRESS, "ner")]
+
+
+def test_gliner_address_with_a_number_that_is_no_house_is_not_hidden():
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: «location address» GLiNER называет и «1С»
+    («Копию отправили в Сбербанк и в 1С.» → <ADDRESS_1>); одна цифра вплотную к букве — не номер дома."""
+    text = "Копию отправили в Сбербанк и в 1С, офис 5А"
+    assert spans(text, found_at(text, "1С", "location address"), found_at(text, "5А", "location address")) == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["ул. Ленина, д. 5", "Ленина 5", "Тверская 12к1", "ул. Мира 5А", "10 Downing Street", "Baker St 1B", "4509 123456"],
+)
+def test_gliner_address_with_a_street_or_a_house_is_hidden(value):
+    """Число в находке — дом; номер документа GLiNER тоже называет адресом, и он остаётся скрытым: слои 1–3 без
+    контекста и с испорченной контрольной суммой его не находят."""
+    text = f"Адрес: {value}, дальше текст"
+    assert spans(text, found_at(text, value, "location address")) == [(value, T.ADDRESS, "ner")]
+
+
+def test_lone_gliner_place_is_still_an_address():
+    """Открытые наборы размечают адресом и место без улицы («в Москве», «на Мойке»): по правилу русской модели
+    полнота класса «Организации и почтовые адреса» на hivetrace упала бы с 0,886 до 0,858 — решает владелец."""
+    text = "Встреча в Москве, потом дворец на Мойке"
+    found = (found_at(text, "Москве", "location address"), found_at(text, "Мойке", "location address"))
+    assert spans(text, *found) == [("Москве", T.ADDRESS, "ner"), ("Мойке", T.ADDRESS, "ner")]
+
+
+def test_gliner_address_and_parts_of_the_russian_model_make_one_address():
+    """Адрес GLiNER и части русской модели рядом — один адрес вместе с запятыми между ними: двумя находками
+    запятая оставалась открытой, и адрес не считался скрытым (на открытых наборах так открыты были три адреса)."""
+    text = "Офис: Тестовск, Северный район, Примерный проспект, 56. Филиал в Москве."
+    found = (
+        found_at(text, "Тестовск, Северный район", "location address"),
+        found_at(text, "Примерный проспект", "STREET"), found_at(text, "56", "HOUSE"),
+        found_at(text, "Москве", "CITY"),
+    )
+    assert spans(text, *found) == [("Тестовск, Северный район, Примерный проспект, 56", T.ADDRESS, "ner")]
 
 
 def test_organisations_documents_and_labels_of_other_layers():
@@ -67,6 +109,26 @@ def test_lowercase_organisation_of_common_nouns_is_dropped():
     kept = ("Ромашка", "автосити", "алексей", "чапаевская аллея")     # заглавная, не из словаря, имя, прилагательное
     found = [found_at(text, value, "organization") for value in ("из бухгалтерии", "банк", "отдел кадров", *kept)]
     assert spans(text, *found) == [(value, T.ORG, "ner") for value in kept]
+
+
+def word_at(text, value, label):
+    m = re.search(rf"(?<!\w){re.escape(value)}(?!\w)", text)
+    return Found(m.start(), m.end(), label, 0.5)
+
+
+def test_document_acronyms_and_bare_legal_forms_are_not_organisations():
+    """Находка «Layers 2 and 4: what the batch of 15.10 left»: GLiNER называет организацией номера документов,
+    налоги, страховки и форму без названия (СНИЛС, ОСАГО, ЖКХ, «ИП»)."""
+    text = "Укажите СНИЛС, ИНН и ОГРНИП. Для ИП нужен полис ОСАГО и КАСКО, оплата ЖКХ без НДС; формы ООО и АО."
+    noise = ("СНИЛС", "ИНН", "ОГРНИП", "ИП", "ОСАГО", "КАСКО", "ЖКХ", "НДС", "ООО", "АО")
+    assert spans(text, *(word_at(text, value, "organization") for value in noise)) == []
+
+
+def test_state_bodies_and_named_organisations_stay_organisations():
+    """ФНС, ПФР и МВД — настоящие организации: открыть их можно словарём «никогда не скрывать», модель не решает."""
+    text = "Справку из ФНС и ПФР отправили в ООО «Ромашка», копию — в МВД и ИП Петров."
+    kept = ("ФНС", "ПФР", "ООО «Ромашка»", "МВД", "ИП Петров")
+    assert spans(text, *(word_at(text, value, "organization") for value in kept)) == [(value, T.ORG, "ner") for value in kept]
 
 
 def test_password_is_told_by_the_whole_word():
