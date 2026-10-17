@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from cleaner.core import surrogates
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.llm import SCHEMA, CompletionError, LlmLayer, chunks, parse_items
 from cleaner.core.pipeline import Layers, sanitize
@@ -90,6 +91,23 @@ def test_unavailable_model_fails_at_once(state, settings):
     with pytest.raises(DetectorError, match="Слой 5: локальная модель недоступна"):
         sanitize(state, "почта a@x.example", settings, Layers(llm=LlmLayer(completer)))
     assert len(completer.requests) == 1
+
+
+def test_replacement_search_is_built_once_per_pass(state, monkeypatch):
+    """FINDINGS P3 «На горячем пути слоя 5 для каждого кандидата модели заново с…»: поиск замен собирался на каждую
+    строку модели и каждый раз проходил всю таблицу чата — 4 с на 120 000 знаков при 12 000 заменах."""
+    built = []
+
+    class Counted(surrogates.Finder):
+        def __init__(self, *args, **kwargs):
+            built.append(1)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(surrogates, "Finder", Counted)
+    answer = items(*((f"слово{n}", "TERM") for n in range(30)))
+    text = " ".join(f"слово{n}" for n in range(1200))      # две части
+    LlmLayer(Completer(answer, answer)).find(text, text, state)
+    assert built == [1]
 
 
 def test_schema_is_sent_only_when_the_setting_says_so():

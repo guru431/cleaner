@@ -14,8 +14,9 @@ VERSION = "2023-06-01"
 
 
 def request(ctx: OutgoingContext, connection: Connection) -> tuple[str, dict[str, str], dict]:
+    # max_tokens из дополнительных параметров подключения важнее предела подключения, как у OpenAI-совместимого.
     body = {
-        **connection.extra_body, "model": ctx.model, "max_tokens": connection.max_tokens,
+        "max_tokens": connection.max_tokens, **connection.extra_body, "model": ctx.model,
         "messages": [{"role": message.role, "content": message.text} for message in ctx.messages], "stream": True,
     }
     if ctx.system:

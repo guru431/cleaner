@@ -28,11 +28,14 @@ def ocr(gateway: str, key: str, image: bytes) -> dict:
         except urllib.error.HTTPError as exc:
             if exc.code != 503:
                 return {"error": exc.code, "body": exc.read().decode("utf-8", "replace")[:200]}
-            time.sleep(min(60, int(exc.headers.get("Retry-After") or 10)))
+            retry_after = exc.headers.get("Retry-After") or ""
+            time.sleep(min(60, int(retry_after) if retry_after.isdigit() else 10))     # или дата HTTP — тогда 10 с
     return {"error": 503}
 
 
 def main() -> None:
+    if len(sys.argv) < 4:
+        sys.exit(__doc__)
     gateway, out, files = sys.argv[1], Path(sys.argv[2]), [Path(p) for p in sys.argv[3:]]
     key = os.environ["CLEANER_GATEWAY_KEY"]
     out.mkdir(parents=True, exist_ok=True)

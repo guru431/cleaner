@@ -1042,7 +1042,13 @@ _BASE = re.compile(r"<\s*base[\s/>]", re.IGNORECASE)
 
 def restore(state: ChatState, answer: str, settings: Settings) -> RestoreResult:
     """Подставляет оригиналы вместо замен чата. Замены сопоставляются только точно."""
-    restorer = _Restorer(state, settings)
+    return _restore(_Restorer(state, settings), answer)
+
+
+def _restore(restorer: _Restorer, answer: str) -> RestoreResult:
+    """Восстановление готовым _Restorer: от прежнего ответа остаются только сведения о таблице чата."""
+    restorer.counters = dict.fromkeys(restorer.counters, 0)
+    restorer.tags = None
     restorer.base = _BASE.search(answer) is not None
     parts: list[str] = []
     segments: list[Segment] = []
@@ -1107,6 +1113,10 @@ class StreamRestorer:
     JSON) отдаётся до последнего знака, который не входит ни в одну запись замены. Незакрытая ссылка
     останавливает показ перед собой. feed возвращает весь показываемый текст, а не прирост. Итог — finish():
     полное восстановление всего ответа.
+
+    Префикс восстанавливается каждый раз целиком: наша ли ссылка, решает и текст после неё (<base>, адрес e-mail,
+    ссылка linkify-it). Таблица чата за ответ не меняется, и _Restorer собирается один раз: на 12 000 заменах сборка —
+    33 мс на каждый показ.
     """
 
     def __init__(self, state: ChatState, settings: Settings):
@@ -1115,6 +1125,7 @@ class StreamRestorer:
         self.text = ""
         self._cut = 0
         self._shown = ""
+        self._restorer: _Restorer | None = None
 
     def _safe_end(self) -> int:
         end = max(self.text.rfind(" "), self.text.rfind("\n"), self.text.rfind("\t"), self.text.rfind("\r")) + 1
@@ -1129,7 +1140,9 @@ class StreamRestorer:
         cut = _unclosed_link(self.text[:cut])
         if cut != self._cut:
             self._cut = cut
-            self._shown = restore(self.state, self.text[:cut], self.settings).text
+            if self._restorer is None:
+                self._restorer = _Restorer(self.state, self.settings)
+            self._shown = _restore(self._restorer, self.text[:cut]).text
         return self._shown
 
     def finish(self) -> RestoreResult:

@@ -39,6 +39,14 @@ def test_verify_finds_changed_missing_and_extra_files(tmp_path):
     assert models.verify(tmp_path, fake_spec("absent")) == ["нет каталога: выполните models download"]
 
 
+@pytest.mark.parametrize("manifest", ["{}", "[]", '{"files": []}'])
+def test_verify_reports_a_manifest_without_the_file_list(tmp_path, manifest):
+    """FINDINGS P3 «verify() переживает повреждённый JSON манифеста, но не маниф...»: KeyError вместо ответа."""
+    final = models.install(tmp_path, fake_spec())
+    (final / models.MANIFEST).write_text(manifest, encoding="utf-8")
+    assert models.verify(tmp_path, fake_spec()) == ["нет манифеста или он повреждён"]
+
+
 def test_install_refuses_an_existing_directory_and_replaces_a_broken_download(tmp_path):
     (tmp_path / "demo.incoming").mkdir()
     (tmp_path / "demo.incoming" / "half.bin").write_bytes(b"x")

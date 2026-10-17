@@ -14,9 +14,9 @@ def request(ctx: OutgoingContext, connection: Connection) -> tuple[str, dict[str
     messages = [{"role": "system", "content": ctx.system}] if ctx.system else []
     messages += [{"role": message.role, "content": message.text} for message in ctx.messages]
     body = {**connection.extra_body, "model": ctx.model, "messages": messages, "stream": True}
-    # Рассуждающие модели OpenAI отвергают max_tokens и ждут max_completion_tokens: если он задан в
+    # Рассуждающие модели OpenAI отвергают max_tokens и ждут max_completion_tokens: если он (или max_tokens) задан в
     # дополнительных параметрах подключения, предел подключения не дописывается.
-    if "max_completion_tokens" not in body:
+    if "max_completion_tokens" not in body and "max_tokens" not in body:
         body["max_tokens"] = connection.max_tokens
     return f"{connection.base_url.rstrip('/')}/chat/completions", {}, body
 

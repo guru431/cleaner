@@ -99,11 +99,11 @@ def parse_items(raw: str) -> list[tuple[str, str]]:
     ]
 
 
-def _acceptable(value: str, chunk: str, state: ChatState) -> bool:
+def _acceptable(value: str, chunk: str, finder: surrogates.Finder) -> bool:
     """Дословно во входной части, не пустая, без выданных замен и меток (раздел 5.6, шаг 3)."""
     return (
         1 < len(value) <= _MAX_VALUE and value in chunk
-        and not labels.SHAPE.search(value) and not surrogates.find(state, value)
+        and not labels.SHAPE.search(value) and not finder.finditer(value)
     )
 
 
@@ -120,14 +120,17 @@ class LlmLayer:
 
     def find(self, text: str, sanitized: str, state: ChatState) -> list[Span]:
         """Строки, найденные моделью в очищенном тексте, — фрагменты оригинала: позиции ищет код."""
+        # Поиск замен — один на проход: собранный для каждой строки модели, он проходил бы всю таблицу чата (4 с
+        # на 120 000 знаков при 12 000 заменах).
+        finder = surrogates.Finder(state, loose=True)
         accepted: dict[str, EntityType] = {}
         for start, end in chunks(sanitized):
-            for value, type_ in self._ask(sanitized[start:end], state, retry=True):
+            for value, type_ in self._ask(sanitized[start:end], finder, retry=True):
                 accepted.setdefault(value, type_)
         forms = [(value, "letters", type_) for value, type_ in accepted.items()]
         return [Span(start, end, type_, name) for start, end, type_ in find_forms(text, forms)]
 
-    def _ask(self, chunk: str, state: ChatState, retry: bool) -> list[tuple[str, EntityType]]:
+    def _ask(self, chunk: str, finder: surrogates.Finder, retry: bool) -> list[tuple[str, EntityType]]:
         messages = [{"role": "system", "content": PROMPT}, {"role": "user", "content": chunk}]
         try:
             raw = self.completer.complete(messages, max_tokens=MAX_TOKENS, json_schema=SCHEMA if self.send_schema else None)
@@ -136,18 +139,18 @@ class LlmLayer:
             # Пустой ответ — тот же сбой модели на этой части, что и обрыв: повтор половинами, а не отказ сразу.
             if exc.code not in ("length", "empty") or not retry:
                 raise DetectorError(f"Слой 5: {exc}") from None
-            return self._halves(chunk, state)
+            return self._halves(chunk, finder)
         except ValueError:
             if not retry:
                 raise DetectorError("Слой 5: ответ локальной модели не разбирается") from None
-            return self._halves(chunk, state)
+            return self._halves(chunk, finder)
         found = [(value.strip(), kind) for value, kind in pairs]
-        return [(value, _type(kind)) for value, kind in found if _acceptable(value, chunk, state)]
+        return [(value, _type(kind)) for value, kind in found if _acceptable(value, chunk, finder)]
 
-    def _halves(self, chunk: str, state: ChatState) -> list[tuple[str, EntityType]]:
+    def _halves(self, chunk: str, finder: surrogates.Finder) -> list[tuple[str, EntityType]]:
         """Повтор половинами — один раз: вторая неудача прерывает очистку."""
         half = (len(chunk) + 1) // 2 + OVERLAP // 2
         found: list[tuple[str, EntityType]] = []
         for start, end in chunks(chunk, size=half, overlap=OVERLAP // 2):
-            found += self._ask(chunk[start:end], state, retry=False)
+            found += self._ask(chunk[start:end], finder, retry=False)
         return found

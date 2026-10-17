@@ -126,8 +126,11 @@ def verify(models_dir: Path, spec: ModelSpec) -> list[str]:
     try:
         manifest = json.loads((final / MANIFEST).read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        manifest = None
+    expected = manifest.get("files") if isinstance(manifest, dict) else None
+    if not isinstance(expected, dict):
         return ["нет манифеста или он повреждён"]
-    expected, actual = manifest["files"], _files(final)
+    actual = _files(final)
     problems = [f"изменён файл {name}" for name in sorted(expected) if name in actual and actual[name] != expected[name]]
     problems += [f"нет файла {name}" for name in sorted(set(expected) - set(actual))]
     problems += [f"лишний файл {name}" for name in sorted(set(actual) - set(expected))]

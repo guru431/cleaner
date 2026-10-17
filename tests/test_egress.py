@@ -224,6 +224,16 @@ def test_max_completion_tokens_replaces_max_tokens():
     assert recorder.json["max_completion_tokens"] == 4000 and "max_tokens" not in recorder.json
 
 
+@pytest.mark.parametrize(
+    "protocol, chunks", [("openai", openai_chunks("x")), ("anthropic", anthropic_chunks("x"))], ids=["openai", "anthropic"],
+)
+def test_max_tokens_in_extra_body_wins_over_the_connection_limit(protocol, chunks):
+    """FINDINGS P2 «Если пользователь задал max_tokens в extra_body подключения,...»: предел подключения затирал его молча."""
+    recorder = Recorder(chunks)
+    run(probe_context("p", "m"), connection(protocol, max_tokens=8000), recorder)
+    assert recorder.json["max_tokens"] == 8000
+
+
 def test_extra_body_cannot_add_tools_or_replace_messages():
     check_extra_body({"temperature": 0.2, "provider": {"data_collection": "deny"}})
     for extra in ({"tools": []}, {"messages": []}, {"model": "x"}, {"web_search_options": {}}, {"plugins": []},
