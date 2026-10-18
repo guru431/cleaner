@@ -196,6 +196,19 @@ def test_example_profile_opens_the_home_lan_and_vpn_and_uses_the_local_gateway()
     assert (srv["GATEWAY"], srv["SERVER_GUARD"]) == ("127.0.0.1:4000", "0")
 
 
+def test_example_perimeter_keeps_the_port_open_to_the_profile_clients():
+    """Периметр llm_routers удаляет на example правила ufw не из своего nets.env: 2026-10-16 он закрыл службу
+    клиентам. Порт и сети там — копия профиля, правила — с комментарием установщика. Тест llm_routers видит
+    только свой репозиторий."""
+    nets = ROOT.parent / "llm_routers" / "example" / "deploy" / "nets.env"
+    if not nets.exists():
+        pytest.skip("репозитория llm_routers рядом нет")
+    perimeter = _profile(nets)
+    cfg = config.load(DEPLOY / "cleaner.toml")
+    assert (perimeter["CLEANER_PORT"], perimeter["CLEANER_NETS"]) == (str(cfg.port), _profile(HOSTS / "example.conf")["CLIENTS"])
+    assert "comment 'cleaner'" in (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+
+
 def test_installer_renders_the_service_address_from_the_profile():
     """Адрес службы в /etc/cleaner/cleaner.toml берётся из профиля, и установщик проверяет подстановку."""
     text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")

@@ -36,7 +36,7 @@ set -a; . data/cleaner.env; set +a
 .venv/Scripts/python.exe -m pytest                       # быстрый набор (≤ 60 с)
 .venv/Scripts/python.exe -m pytest tests/<файл>.py       # точечно
 .venv/Scripts/python.exe -m pytest -m "not manual"       # полный
-.venv/Scripts/python.exe -m pytest tests/test_long_input.py -m integration   # после правки слоёв 1–3
+.venv/Scripts/python.exe -m pytest tests/test_long_input.py -m integration   # после правки слоёв 1–3 и восстановления
 ```
 
 ## Где работает

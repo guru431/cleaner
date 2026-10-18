@@ -12,7 +12,7 @@ tests:
   full: .venv/Scripts/python.exe -m pytest -m "not manual"
 
 Данные в тестах — только вымышленные. Настоящие тексты в репозиторий не попадают.
-Правка слоёв 1–3 — ещё `.venv/Scripts/python.exe -m pytest tests/test_long_input.py -m integration`: обход всех слоёв по длинным рядам (19 с) вынесен из быстрого набора ради нормы 60 с.
+Правка слоёв 1–3 и восстановления — ещё `.venv/Scripts/python.exe -m pytest tests/test_long_input.py -m integration`: обход всех слоёв по длинным рядам и сторожа линейности (около 40 с) вынесены из быстрого набора ради нормы 60 с, пороги в секундах краснеют от нагрузки машины.
 
 ## Запуск для разработки
 
@@ -75,7 +75,9 @@ ssh -i ~/.ssh/example -p 34012 -o BatchMode=yes example@example 'sudo bash /usr/
 в vault `local-config`. Доступ с workstation: `ssh -i ~/.ssh/studio_deploy_key -p 22222 deploy@example, sudo без пароля;
 доставка и установка — те же команды, что для example, с этим адресом (пароль администратора при первой
 установке — с клавиатуры, `ssh -t`). `ai-egress-guard.sh` и `check-egress.sh` на example нет — проверка их
-пропускает. Python там тоже 3.12, `requirements-linux.txt` общий.
+пропускает. Python там тоже 3.12, `requirements-linux.txt` общий. Правила ufw для 5464 на example держит и периметр
+llm_routers (`CLEANER_PORT`, `CLEANER_NETS` в `example/deploy/nets.env`; всё, чего там нет, его прогон удаляет): смена
+`CLIENTS` профиля — там же, совпадение сторожит `tests/test_deploy.py`.
 
 Интернет у example медленный (~0,1 МБ/с 2026-10-15): окружение, собранное `pip` с хоста, качалось бы часами. Колёса
 берутся на workstation — `.venv/Scripts/python.exe -m pip download --no-deps --require-hashes -r requirements-linux.txt -d <каталог>
