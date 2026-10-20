@@ -144,7 +144,11 @@
       {% if local %}
       <form method="post" action="/chats/{{ chat.id }}/ask-local" class="ask-local">
         {% include "_csrf.html" %}
+        {% if local_pending %}
+        <button disabled title="{{ local_pending }}">Спросить локальную модель</button>
+        {% else %}
         <button title="Без очистки: текст не покидает сервер">Спросить локальную модель</button>
+        {% endif %}
       </form>
       {% endif %}
     </div>

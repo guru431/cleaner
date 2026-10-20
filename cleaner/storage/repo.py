@@ -209,20 +209,28 @@ class Repository:
         return [self._user(row) for row in self._all("SELECT * FROM users ORDER BY login")]
 
     def set_password(self, user_id: str, password_hash: str) -> None:
-        self._run("UPDATE users SET password_hash = ? WHERE id = ?", password_hash, user_id)
-        self._run("DELETE FROM sessions WHERE user_id = ?", user_id)
+        """Новый хэш и закрытие сессий — одной транзакцией: и для другого соединения (команда cleaner user)
+        нет мгновения, когда пароль уже новый, а сессии по старому ещё действуют."""
+        with self.lock, transaction(self.conn):
+            self.conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+            self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
 
     def set_disabled(self, user_id: str, disabled: bool) -> None:
-        self._run("UPDATE users SET disabled = ? WHERE id = ?", int(disabled), user_id)
-        if disabled:
-            self._run("DELETE FROM sessions WHERE user_id = ?", user_id)
+        with self.lock, transaction(self.conn):
+            self.conn.execute("UPDATE users SET disabled = ? WHERE id = ?", (int(disabled), user_id))
+            if disabled:
+                self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
 
-    def create_session(self, token_hash: str, user_id: str, csrf: str) -> None:
+    def create_session(self, token_hash: str, user_id: str, csrf: str, password_hash: str) -> bool:
+        """Сессия — одной записью и только для того хэша пароля, что проверен при входе, у включённой учётной
+        записи. Пока Argon2 проверял пароль, его могли сменить, а запись — отключить: сессии они уже закрыли,
+        и новая по отозванному паролю не открывается. False — сессии нет."""
         now = self._now()
-        self._run(
-            "INSERT INTO sessions(token_hash, user_id, csrf, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
-            token_hash, user_id, csrf, now, now,
-        )
+        return self._run(
+            "INSERT INTO sessions(token_hash, user_id, csrf, created_at, last_seen_at) SELECT ?, ?, ?, ?, ? "
+            "WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash = ? AND disabled = 0)",
+            token_hash, user_id, csrf, now, now, user_id, password_hash,
+        ) == 1
 
     def session(self, token_hash: str) -> Session | None:
         row = self._one("SELECT * FROM sessions WHERE token_hash = ?", token_hash)
@@ -354,7 +362,8 @@ class Repository:
         """Состояние и элементы — одной транзакцией. StaleState, если чат успели изменить.
 
         Если очищенный текст элемента изменился, догадки проверки риска стираются, а идущая проверка
-        отменяется: они о прежнем тексте (FR-9.3). Сравнение — здесь, а не у вызывающего: так его не обойти.
+        отменяется вместе с её заданием: они о прежнем тексте (FR-9.3). Сравнение — здесь, а не у
+        вызывающего: так его не обойти.
         """
         key = self._dek(chat_id)
         now = self._now()
@@ -377,7 +386,8 @@ class Repository:
                 before = None if sealed is None else self._dec(key, sealed, f"items.sanitized:{item.id}")
                 if before != item.sanitized:
                     self.conn.execute(
-                        "UPDATE items SET risk_enc = NULL, risk_status = '' WHERE id = ? AND chat_id = ?", (item.id, chat_id)
+                        "UPDATE items SET risk_enc = NULL, risk_status = '', risk_job = NULL WHERE id = ? AND chat_id = ?",
+                        (item.id, chat_id),
                     )
                 self.conn.execute(
                     "UPDATE items SET original_enc = ?, sanitized_enc = ?, spans = ?, notices = ?, exposed = ?, "
@@ -463,27 +473,52 @@ class Repository:
                     (json.dumps(meta, ensure_ascii=False), row["id"]),
                 )
             # Своё состояние, а не failed: экран говорит «прервана, запустите ещё раз», а не «модель недоступна».
-            self.conn.execute("UPDATE items SET risk_status = 'interrupted' WHERE risk_status IN ('queued', 'running')")
+            self.conn.execute(
+                "UPDATE items SET risk_status = 'interrupted', risk_job = NULL WHERE risk_status IN ('queued', 'running')"
+            )
         return len(rows)
 
-    def set_item_risk_status(self, chat_id: str, item_id: str, status: str, current: tuple[str, ...]) -> bool:
-        """Переход проверки риска — только из состояний current, одним UPDATE; False — перехода не было.
-        Двойное нажатие не запускает модель дважды, а проверку, которую отменила смена очищенного текста
-        (commit_chat), задание не продолжает."""
+    def queue_risk(self, chat_id: str, item_id: str, current: tuple[str, ...]) -> str | None:
+        """Проверка риска — в очередь из состояний current с новым заданием, одним UPDATE; None — её уже
+        поставили: двойное нажатие не запускает модель дважды. Задание сверяют все её дальнейшие переходы."""
+        job = uuid.uuid4().hex
+        marks = ", ".join("?" * len(current))
+        changed = self._run(
+            f"UPDATE items SET risk_status = 'queued', risk_job = ? WHERE id = ? AND chat_id = ? AND risk_status IN ({marks})",
+            job, item_id, chat_id, *current,
+        )
+        return job if changed == 1 else None
+
+    def set_item_risk_status(self, chat_id: str, item_id: str, job: str, status: str, current: tuple[str, ...]) -> bool:
+        """Переход проверки риска — только своего задания и из состояний current, одним UPDATE; False — перехода
+        не было. Проверку, которую отменила смена очищенного текста (commit_chat), задание не продолжает, а
+        отказ прежнего задания не ложится на новую проверку того же элемента."""
         marks = ", ".join("?" * len(current))
         return self._run(
-            f"UPDATE items SET risk_status = ? WHERE id = ? AND chat_id = ? AND risk_status IN ({marks})",
-            status, item_id, chat_id, *current,
+            f"UPDATE items SET risk_status = ? WHERE id = ? AND chat_id = ? AND risk_job = ? AND risk_status IN ({marks})",
+            status, item_id, chat_id, job, *current,
         ) == 1
 
-    def set_item_risk(self, chat_id: str, item_id: str, risk: dict) -> bool:
+    def set_item_risk(self, chat_id: str, item_id: str, job: str, sanitized: str | None, risk: dict) -> bool:
         """Догадки локальной модели: верная догадка — это оригинал, поэтому они зашифрованы (FR-9.3).
-        Записываются, только пока проверка идёт; False — её отменила смена текста или чат удалён."""
-        sealed = self._enc(self._dek(chat_id), json.dumps(risk, ensure_ascii=False), f"items.risk:{item_id}")
-        return self._run(
-            "UPDATE items SET risk_enc = ?, risk_status = 'done' WHERE id = ? AND chat_id = ? AND risk_status = 'running'",
-            sealed, item_id, chat_id,
-        ) == 1
+
+        Записываются, только пока идёт это задание и очищенный текст тот, что видела модель (sanitized); False —
+        проверку отменила смена текста, её место заняла новая или чат удалён. Задание стирает commit_chat — он
+        один меняет очищенный текст; сверка самого текста — на случай записи мимо него."""
+        key = self._dek(chat_id)
+        sealed = self._enc(key, json.dumps(risk, ensure_ascii=False), f"items.risk:{item_id}")
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT sanitized_enc FROM items WHERE id = ? AND chat_id = ? AND risk_job = ? AND risk_status = 'running'",
+                (item_id, chat_id, job),
+            ).fetchone()
+            if row is None:
+                return False
+            current = None if row["sanitized_enc"] is None else self._dec(key, row["sanitized_enc"], f"items.sanitized:{item_id}")
+            if current != sanitized:
+                return False
+            self.conn.execute("UPDATE items SET risk_enc = ?, risk_status = 'done' WHERE id = ?", (sealed, item_id))
+        return True
 
     def item_risk(self, chat_id: str, item_id: str) -> dict | None:
         row = self._one("SELECT risk_enc FROM items WHERE id = ? AND chat_id = ?", item_id, chat_id)

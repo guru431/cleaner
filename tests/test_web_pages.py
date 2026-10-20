@@ -128,7 +128,8 @@ def test_risk_poll_stays_in_the_page_while_its_tab_is_not_selected(ivan, repo):
     chat_id = ivan.chat()
     ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
     item_id = repo.items(chat_id)[0].id
-    repo.set_item_risk_status(chat_id, item_id, "running", ("",))
+    job = repo.queue_risk(chat_id, item_id, ("",))
+    repo.set_item_risk_status(chat_id, item_id, job, "running", ("queued",))
     page = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
     assert 'class="tab-panel" role="tabpanel" data-tab-panel="risk"' in page
     assert f'data-poll="/chats/{chat_id}/items/{item_id}/status" data-poll-field="risk"' in page
@@ -146,9 +147,10 @@ def test_risk_check_state_is_on_its_tab_label(ivan, repo):
     item_id = repo.items(chat_id)[0].id
     path = f"/chats/{chat_id}/items/{item_id}"
     assert risk_tab(ivan.get(path).text) == "Остаточный риск"
-    labels = {}
-    for status, current in (("queued", ""), ("running", "queued"), ("failed", "running"), ("interrupted", "failed")):
-        repo.set_item_risk_status(chat_id, item_id, status, (current,))
+    job = repo.queue_risk(chat_id, item_id, ("",))
+    labels = {"queued": risk_tab(ivan.get(path).text)}
+    for status, current in (("running", "queued"), ("failed", "running"), ("interrupted", "failed")):
+        repo.set_item_risk_status(chat_id, item_id, job, status, (current,))
         labels[status] = risk_tab(ivan.get(path).text)
     assert labels == {
         "queued": 'Остаточный риск <span class="badge">идёт проверка</span>',
@@ -156,8 +158,8 @@ def test_risk_check_state_is_on_its_tab_label(ivan, repo):
         "failed": 'Остаточный риск <span class="badge bad">ошибка проверки</span>',
         "interrupted": 'Остаточный риск <span class="badge bad">проверка прервана</span>',
     }
-    repo.set_item_risk_status(chat_id, item_id, "running", ("interrupted",))
-    repo.set_item_risk(chat_id, item_id, {"guesses": []})
+    repo.set_item_risk_status(chat_id, item_id, job, "running", ("interrupted",))
+    repo.set_item_risk(chat_id, item_id, job, repo.item(chat_id, item_id).sanitized, {"guesses": []})
     assert risk_tab(ivan.get(path).text) == "Остаточный риск"
 
 

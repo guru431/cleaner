@@ -112,7 +112,7 @@ def test_import_writes_all_values_at_once(repo):
 
 def test_users_sessions_and_audit(repo, clock):
     user = repo.create_user("ivan", "hash1", "admin")
-    repo.create_session("t1", user, "csrf1")
+    assert repo.create_session("t1", user, "csrf1", "hash1")
     clock.advance(minutes=5)
     repo.touch_session("t1")
     assert repo.session("t1").last_seen_at == clock.now().isoformat(timespec="seconds")
@@ -124,6 +124,17 @@ def test_users_sessions_and_audit(repo, clock):
     assert [(a.event, a.details) for a in repo.audit_events("login")] == [("login", {"details_ok": 1})]
     assert [a.event for a in repo.audit_events(since="2026-10-15")] == ["logout"]
     assert [a.event for a in repo.audit_events(before="2026-10-15")] == ["login"]
+
+
+def test_session_opens_only_for_the_checked_password_of_an_enabled_account(repo):
+    """Аудит 21.10.2026: сессия сверяет хэш, проверенный при входе, с нынешним — в той же записи."""
+    user = repo.create_user("ivan", "hash1", "user")
+    assert not repo.create_session("t0", user, "csrf0", "hash0")
+    repo.set_disabled(user, True)
+    assert not repo.create_session("t1", user, "csrf1", "hash1")
+    repo.set_disabled(user, False)
+    assert repo.create_session("t2", user, "csrf2", "hash1")
+    assert [repo.session(token) is not None for token in ("t0", "t1", "t2")] == [False, False, True]
 
 
 def test_backup_opens_with_the_same_key(tmp_path, repo, clock):
@@ -176,19 +187,42 @@ def test_interrupted_processing_fails_at_start(repo):
     repo.add_item(chat, Item("a" * 32, 0, "input", "x", None, status="running"))
     repo.add_item(chat, Item("b" * 32, 0, "input", "y", None, status="queued"))
     repo.add_item(chat, Item("c" * 32, 0, "input", "z", "z"))
-    assert repo.set_item_risk_status(chat, "c" * 32, "running", ("",))
+    job = repo.queue_risk(chat, "c" * 32, ("",))
+    assert job and repo.set_item_risk_status(chat, "c" * 32, job, "running", ("queued",))
     assert repo.fail_interrupted("прервано") == 2
     assert [(i.status, i.meta.get("error"), i.risk_status) for i in repo.items(chat)] == [
         ("failed", "прервано", ""), ("failed", "прервано", ""), ("done", None, "interrupted"),
     ]
+    assert not repo.set_item_risk_status(chat, "c" * 32, job, "running", ("interrupted",))     # задание прервано
+
+
+def test_risk_transitions_belong_to_their_job(repo):
+    """Аудит 21.10.2026: прежняя проверка, сброшенная сменой текста, не завершает новую — ни догадками, ни отказом;
+    догадки о другом очищенном тексте не записываются и у своего задания."""
+    user, chat = new_chat(repo)
+    item = repo.add_item(chat, Item("d" * 32, 0, "input", "Проект Заря", "Проект Заря"))
+    old = repo.queue_risk(chat, item.id, ("",))
+    assert repo.set_item_risk_status(chat, item.id, old, "running", ("queued",))
+    state, version = repo.load_state(chat)
+    repo.commit_chat(chat, state, version, updated_items=[replace(item, sanitized="Проект <TERM_1>")])
+    assert repo.queue_risk(chat, item.id, ("",)) is not None and repo.queue_risk(chat, item.id, ("",)) is None
+    assert not repo.set_item_risk_status(chat, item.id, old, "running", ("queued",))
+    [new] = [row["risk_job"] for row in repo.conn.execute("SELECT risk_job FROM items")]
+    assert repo.set_item_risk_status(chat, item.id, new, "running", ("queued",))
+    assert not repo.set_item_risk(chat, item.id, old, "Проект Заря", {"guesses": []})
+    assert not repo.set_item_risk_status(chat, item.id, old, "failed", ("running",))
+    assert not repo.set_item_risk(chat, item.id, new, "Проект Заря", {"guesses": []})
+    assert repo.set_item_risk(chat, item.id, new, "Проект <TERM_1>", {"guesses": []})
+    assert (repo.item(chat, item.id).risk_status, repo.item_risk(chat, item.id)) == ("done", {"guesses": []})
 
 
 def test_extracted_text_and_risk_are_stored_encrypted(tmp_path, repo):
     user, chat = new_chat(repo)
     item = repo.add_item(chat, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="running"))
     repo.set_item_original(chat, item.id, "извлечено Kk41", {"kind": "docx"})
-    assert repo.set_item_risk_status(chat, item.id, "running", ("",))
-    assert repo.set_item_risk(chat, item.id, {"guesses": [{"kind": "org", "guess": "Ромашка Gg52", "clue": ""}]})
+    job = repo.queue_risk(chat, item.id, ("",))
+    assert repo.set_item_risk_status(chat, item.id, job, "running", ("queued",))
+    assert repo.set_item_risk(chat, item.id, job, None, {"guesses": [{"kind": "org", "guess": "Ромашка Gg52", "clue": ""}]})
     stored = repo.item(chat, item.id)
     assert (stored.original, stored.meta, stored.risk_status) == ("извлечено Kk41", {"kind": "docx"}, "done")
     assert repo.item_risk(chat, item.id)["guesses"][0]["guess"] == "Ромашка Gg52"
