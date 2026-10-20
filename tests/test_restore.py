@@ -1,9 +1,8 @@
 import ipaddress
-import time
 
 import pytest
 
-from cleaner.core.entities import netmap, ops
+from cleaner.core.entities import hostmap, netmap, ops
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import RestoreResult, StreamRestorer, restore
 from cleaner.core.types import ChatRule, ChatState, Entity, Policy, Settings, Surrogate, default_policies
@@ -1675,19 +1674,23 @@ def test_relative_link_without_a_base_tag_still_restores(settings):
     assert "ivanov@contoso.ru" in restore(link_state(), '<img src="p?q=<EMAIL_1>"> база данных <basement>', settings).text
 
 
-def test_restorer_setup_is_fast_on_a_chat_with_many_dotted_labels(settings):
+def test_restorer_setup_asks_the_suffix_list_once_per_dotted_label(settings, monkeypatch):
     """Второе ревью: метки, значение которых — имя с точкой («i.ivanov»), сверялись со списком суффиксов (tldextract)
     при каждой сборке восстановления, а поток ответа собирает её на каждом куске: 20 000 таких меток — 63 мс на сборку,
-    300 слов ответа — 20 с процессора. Ответ суффиксов для одного имени не меняется и запоминается. С пределом
-    сравнивается медиана сборки: под нагрузкой соседних процессов сумма двадцати сборок и без ошибки выходила за 0,6 с."""
+    300 слов ответа — 20 с процессора. Ответ суффиксов для одного имени не меняется и запоминается: вторая сборка список
+    не спрашивает. Счёт вызовов, а не секунды: порог в секундах краснел от нагрузки машины без ошибки в коде (аудит
+    21.10.2026); скорость сборки на 20 000 метках сторожит tests/test_long_input.py."""
+    asked = []
+    extract = hostmap._extract
+    monkeypatch.setattr(hostmap, "_extract", lambda name: asked.append(name) or extract(name))
+    hostmap.has_known_suffix.cache_clear()          # ответы, запомненные другими тестами, скрыли бы вызовы
     state = ChatState(chat_id="many", net_key=bytes(32))
-    for n in range(1, 20001):
+    for n in range(1, 301):
         entity = Entity(f"e{n}", T.ACCOUNT, n, f"i.ivanov{n}", f"i.ivanov{n}", "detector")
         state.entities[entity.id] = entity
         state.surrogates[f"<ACCOUNT_{n}>"] = Surrogate(entity.id)
-    times = []
-    for _ in range(20):
-        started = time.perf_counter()
-        assert restore(state, "ответ про <ACCOUNT_1>", settings).text == "ответ про i.ivanov1"
-        times.append(time.perf_counter() - started)
-    assert sorted(times)[10] * 20 < 0.6
+    assert restore(state, "ответ про <ACCOUNT_1>", settings).text == "ответ про i.ivanov1"
+    first = len(asked)
+    assert first >= 300
+    assert restore(state, "ответ про <ACCOUNT_2>", settings).text == "ответ про i.ivanov2"
+    assert len(asked) == first
