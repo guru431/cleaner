@@ -690,10 +690,9 @@ class ChatService:
         context = probe_context(provider.id, model)
         return "".join(self.cloud_send(context, link(provider), None, None))[:500]
 
-    def _local_messages(self, chat_id: str, items: list[Item]) -> list[dict[str, str]]:
+    @staticmethod
+    def _local_messages(state: ChatState, settings: Settings, items: list[Item]) -> list[dict[str, str]]:
         """FR-9.4: локальной модели — оригиналы; ответы облака — восстановленными, локальные — как есть."""
-        state, _ = self.repo.load_state(chat_id)
-        settings = self.repo.settings()
         system, messages = [], []
         for item in items:
             if item.kind == "input":
@@ -729,7 +728,7 @@ class ChatService:
             if local_pending(items):
                 # Двойная отправка формы заняла бы оба потока общего пула одной генерацией, а очистка ждала бы.
                 raise SendRefused(LOCAL_PENDING)
-            built["messages"] = self._local_messages(chat_id, items)
+            built["messages"] = self._local_messages(state, settings, items)
             return [Item(uuid.uuid4().hex, 0, "answer", "", None, source="local", status="queued")], []
 
         [item] = self._apply(chat_id, work)
