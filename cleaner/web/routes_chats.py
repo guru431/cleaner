@@ -6,7 +6,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from cleaner.service import ChatView, EditRefused, InputView, TextTooLong
+from cleaner.service import LOCAL_PENDING, ChatView, EditRefused, InputView, TextTooLong, local_pending
 from cleaner.storage.repo import Chat, CheckpointBusy, Item
 from cleaner.web import render
 from cleaner.web.deps import Upload, Viewer, get_form, get_upload, get_viewer, own_chat, page, repo_of, service_of
@@ -98,6 +98,7 @@ def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depe
         layers=service_of(request).layers(chat_id), layer_names=LAYER_NAMES,
         choices=_choices(request), chosen=f"{provider_id}|{model}" if provider_id else "",
         local=request.app.state.engines is not None,
+        local_pending=LOCAL_PENDING if local_pending(entry.item for entry in view.items) else "",
     )
 
 

@@ -152,7 +152,8 @@ def test_check_interrupted_by_a_restart_says_so_and_can_be_run_again(ivan, repo,
     chat_id = ivan.chat()
     ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
     item_id = first_item(repo, chat_id)
-    repo.set_item_risk_status(chat_id, item_id, "running", ("",))
+    job = repo.queue_risk(chat_id, item_id, ("",))
+    repo.set_item_risk_status(chat_id, item_id, job, "running", ("queued",))
     create_app(repo, clock, secure_cookies=False, engines=engines, jobs=jobs)          # перезапуск службы
     page = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
     assert "Проверка прервана перезапуском службы" in page and "недоступна" not in page

@@ -1,6 +1,8 @@
+import threading
+
 import pytest
 
-from cleaner.core import leakcheck
+from cleaner.core import leakcheck, risk
 from cleaner.core.detect import infra
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.leakcheck import Leak
@@ -457,6 +459,49 @@ def test_guesses_of_a_check_overtaken_by_an_edit_are_not_stored(repo, chat, engi
     stored = repo.item(chat_id, item.id)
     assert (stored.sanitized, stored.risk_status, repo.item_risk(chat_id, item.id)) == ("Проект <TERM_1> запущен", "", None)
     assert repo.audit_events("risk_check") == []
+
+
+@pytest.mark.parametrize("ending", ["guesses", "error"])
+def test_an_old_check_ending_late_leaves_the_check_of_the_new_text_alone(repo, chat, engines, ending):
+    """Аудит 21.10.2026: проверка A шла, правка текста её сбросила, проверка B нового текста уже идёт — и тут
+    A кончается. Её догадки или ошибка — о прежнем тексте: B их не получает и записывает свои."""
+    user, chat_id = chat
+    item = ChatService(repo, engines=engines).add_input(chat_id, user, "Проект Заря запущен")
+    jobs = []
+    service = ChatService(repo, engines=engines, submit=lambda fn, *args: jobs.append(threading.Thread(target=fn, args=args)))
+    entered = {name: threading.Event() for name in "AB"}
+    release = {name: threading.Event() for name in "AB"}
+
+    def model(sanitized):
+        name = "A" if "Заря" in sanitized else "B"
+        entered[name].set()
+        assert release[name].wait(5)
+        if name == "A" and ending == "error":
+            raise DetectorError("модель недоступна")
+        return [risk.Guess("org", f"Ромашка {name}", "")]
+
+    engines.risk = lambda: model
+    try:
+        service.check_risk(chat_id, user, item.id)
+        jobs[0].start()
+        assert entered["A"].wait(5)
+        service.mask_value(chat_id, user, item.id, "Заря", T.TERM)
+        service.check_risk(chat_id, user, item.id)
+        jobs[1].start()
+        assert entered["B"].wait(5)
+        release["A"].set()
+        jobs[0].join(5)
+        assert repo.item(chat_id, item.id).risk_status == "running"
+    finally:
+        for event in release.values():
+            event.set()
+        for job in jobs:
+            if job.ident is not None:
+                job.join(5)
+    stored = repo.item(chat_id, item.id)
+    assert (stored.sanitized, stored.risk_status) == ("Проект <TERM_1> запущен", "done")
+    assert repo.item_risk(chat_id, item.id)["guesses"][0]["guess"] == "Ромашка B"
+    assert [e.details for e in repo.audit_events("risk_check")] == [{"guesses": 1}]
 
 
 def test_double_click_queues_the_text_and_the_check_once(repo, chat, engines, monkeypatch):

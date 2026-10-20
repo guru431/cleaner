@@ -78,6 +78,29 @@ def test_disabled_user_loses_the_session(browser, repo):
     assert b.login("ivan").status_code == 401
 
 
+@pytest.mark.parametrize("change", ["password", "disabled"])
+def test_account_changed_during_the_password_check_gets_no_session(browser, repo, monkeypatch, change):
+    """Аудит 21.10.2026: пока Argon2 проверял старый пароль, его сменили или учётную запись отключили. Смена уже
+    закрыла сессии — вход по проверенному, но отозванному паролю новую не открывает."""
+    b = browser()
+    user = b.user("ivan")
+    real = auth.check_password
+
+    async def changed_meanwhile(password_hash, password):
+        ok = await real(password_hash, password)
+        if change == "password":
+            repo.set_password(user, "$argon2id$другой-хэш")
+        else:
+            repo.set_disabled(user, True)
+        return ok
+
+    monkeypatch.setattr(auth, "check_password", changed_meanwhile)
+    response = b.login("ivan")
+    assert response.status_code == 401 and "Неверный логин или пароль" in response.text
+    assert repo.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+    assert [e.event for e in repo.audit_events()] == ["login_failed"]
+
+
 def test_form_without_the_session_token_is_refused(browser):
     b = browser()
     b.user("ivan")
