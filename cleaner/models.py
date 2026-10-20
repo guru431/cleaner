@@ -10,6 +10,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ class ModelSpec:
     source: str                           # репозиторий Hugging Face или «docling»
     revision: Callable[[], str]           # закреплённая ревизия; у Docling — версия пакета, она закрепляет свои модели
     fetch: Callable[[Path], None]         # загрузка в пустой каталог
+    required: tuple[str, ...] = ()        # файлы, которые читает загрузчик модели; у Docling набор меняется с версией
 
 
 def _fetch_rubert(target: Path) -> None:
@@ -72,10 +74,14 @@ def _fetch_docling(target: Path) -> None:
 
 
 SPECS = (
-    ModelSpec(RUBERT_DIR, _RUBERT[0], lambda: _RUBERT[1], _fetch_rubert),
-    ModelSpec(GLINER_DIR, _GLINER[0], lambda: _GLINER[1], _fetch_gliner),
+    ModelSpec(RUBERT_DIR, _RUBERT[0], lambda: _RUBERT[1], _fetch_rubert,
+              ("config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json")),
+    ModelSpec(GLINER_DIR, _GLINER[0], lambda: _GLINER[1], _fetch_gliner,
+              ("gliner_config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json", "onnx/model_quint8.onnx")),
     ModelSpec(DOCLING_DIR, "docling", lambda: importlib.metadata.version("docling-slim"), _fetch_docling),
 )
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_REDOWNLOAD = "удалите каталог и выполните models download"
 
 
 def _files(directory: Path) -> dict[str, str]:
@@ -120,6 +126,9 @@ def install(models_dir: Path, spec: ModelSpec, fetch: Callable[[Path], None] | N
 
 
 def verify(models_dir: Path, spec: ModelSpec) -> list[str]:
+    """Каталог — та поставка, которую закрепляет spec: источник и ревизия манифеста, обязательные файлы, sha256
+    каждого файла. Самосогласованный каталог прежней ревизии или пустой манифест — тоже провал: это проверка полноты
+    и версии поставки, а не защита от того, кто может менять и модель, и манифест."""
     final = models_dir / spec.directory
     if not final.is_dir():
         return ["нет каталога: выполните models download"]
@@ -128,10 +137,20 @@ def verify(models_dir: Path, spec: ModelSpec) -> list[str]:
     except (OSError, ValueError):
         manifest = None
     expected = manifest.get("files") if isinstance(manifest, dict) else None
-    if not isinstance(expected, dict):
+    if not isinstance(expected, dict) or not all(
+        isinstance(name, str) and isinstance(digest, str) and _SHA256.fullmatch(digest) for name, digest in expected.items()
+    ):
         return ["нет манифеста или он повреждён"]
+    problems = []
+    if not expected:
+        problems.append(f"в манифесте нет файлов: {_REDOWNLOAD}")
+    if manifest.get("source") != spec.source:
+        problems.append(f"источник {manifest.get('source')} вместо {spec.source}: {_REDOWNLOAD}")
+    if manifest.get("revision") != spec.revision():
+        problems.append(f"ревизия {manifest.get('revision')} вместо закреплённой {spec.revision()}: {_REDOWNLOAD}")
+    problems += [f"в манифесте нет обязательного файла {name}" for name in spec.required if name not in expected]
     actual = _files(final)
-    problems = [f"изменён файл {name}" for name in sorted(expected) if name in actual and actual[name] != expected[name]]
+    problems += [f"изменён файл {name}" for name in sorted(expected) if name in actual and actual[name] != expected[name]]
     problems += [f"нет файла {name}" for name in sorted(set(expected) - set(actual))]
     problems += [f"лишний файл {name}" for name in sorted(set(actual) - set(expected))]
     return problems
