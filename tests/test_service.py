@@ -1,3 +1,4 @@
+import re
 import threading
 
 import pytest
@@ -169,6 +170,27 @@ def test_blank_or_absent_fragment_is_refused(repo, chat):
         service.unmask(chat_id, user, [" "])
     with pytest.raises(KeyError):
         service.set_restore_value(chat_id, user, "нет-такой-сущности", "x")
+
+
+def test_edit_held_by_the_stricter_policy_of_the_found_value_is_refused_with_the_reason(repo, chat):
+    """Выделение или смена типа, которые не смягчают политику найденного значения (5.7, шаг 4), ничего не меняли молча —
+    как сбой. Теперь — отказ с причиной без данных пользователя, и правило не сохраняется; где правка легла, она действует."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    repo.set_policy(T.PHONE, Policy.BLOCK)
+    item = service.add_input(chat_id, user, "звонить +79161234567")
+    phone = next(e for e in repo.load_state(chat_id)[0].entities.values() if e.type is T.PHONE)
+    reason = "Тип не изменён: значение найдено как PHONE, и политика этого типа («блокировать») строже выбранного"
+    with pytest.raises(EditRefused, match=re.escape(reason)):
+        service.mask_value(chat_id, user, item.id, "+79161234567", T.TERM)
+    with pytest.raises(EditRefused, match=re.escape(reason)):
+        service.retype(chat_id, user, phone.id, T.TERM)
+    state, _ = repo.load_state(chat_id)
+    assert state.rules == [] and repo.items(chat_id)[0].sanitized == "звонить <PHONE_1>"
+    assert "+79161234567" not in reason
+    repo.set_policy(T.SECRET, Policy.BLOCK)
+    service.mask_value(chat_id, user, item.id, "+79161234567", T.SECRET)    # политика не мягче — правка легла
+    assert repo.items(chat_id)[0].sanitized == "звонить <SECRET_1>"
 
 
 def test_leaks_are_logged_on_sanitizing_and_on_refresh(repo, chat, monkeypatch):

@@ -32,6 +32,23 @@ def test_retype_gives_a_label_of_the_new_type_and_keeps_the_old_one_restorable(s
     assert restore(state, "<ORG_1>", settings).text == "Ромашка"
 
 
+@pytest.mark.parametrize("text, found", [
+    ("звонить +79161234567", T.PHONE), ("почта ivanov@contoso.ru", T.EMAIL), ("пароль: Qwerty123!", T.SECRET),
+], ids=["phone", "email", "secret"])
+def test_retype_does_not_soften_the_stricter_policy_of_the_found_value(state, text, found):
+    """Смена типа при строже политике найденного значения ничего не меняет — для любого типа, а не только для записей
+    (5.7, шаг 4): слой снова находит значение, и та же сущность сохраняет свою метку и блокировку. Правило остаётся и
+    действует, когда политика типа станет не строже: открыть значение можно правилом «открыть»."""
+    blocked = Settings(policies=default_policies() | {found: Policy.BLOCK})
+    first = sanitize(state, text, blocked)
+    [span] = first.spans
+    ops.retype(state, span.entity_id, T.TERM)
+    again = sanitize(state, text, blocked)
+    assert again.sanitized == first.sanitized and [s.entity_id for s in again.blocked] == [span.entity_id]
+    lenient = Settings(policies=default_policies() | {found: Policy.MASK})
+    assert sanitize(state, text, lenient).sanitized == text.rsplit(" ", 1)[0] + " <TERM_1>"
+
+
 @pytest.mark.parametrize("text, expected", [
     ("узел srv01.contoso.ru и srv01", "узел <TERM_1>.domain-1.example и <TERM_1>"),
     ("узел srv01.corp.contoso.ru и srv01", "узел <TERM_1>.sub-2.domain-1.example и <TERM_1>"),

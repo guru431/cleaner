@@ -110,7 +110,7 @@ def _outside(
     last = first
     while last < len(ranges) and ranges[last][0] < span.end:
         last += 1
-    if first == last:
+    if first == last and not span.parted:      # адрес с частью строже себя делится и без замены рядом (merge)
         return _placed(text, span, ranges, starts, ctx)
     if span.type not in _COMPOSED and not span.ruled:
         return [span]
