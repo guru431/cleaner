@@ -8,3 +8,17 @@
   <span class="mode m-light">{{ icon("sun") }}светлая</span>
   <span class="mode m-dark">{{ icon("moon") }}тёмная</span>
 </button>{% endmacro %}
+{# Вид рабочего места: отметки — классы view-… на <html> (theme.js до отрисовки, app.js по нажатию), в localStorage
+   только их имена. Без JS меню не показывается: переключать нечем. Без отметок — исходный компактный вид. #}
+{% macro view_toggle(name, label, hint) %}<button type="button" class="toggle" data-view-toggle="{{ name }}" aria-pressed="false" title="{{ hint }}"><span class="switch"></span>{{ label }}</button>{% endmacro %}
+{% macro view_menu() %}<details class="menu view-menu">
+  <summary class="btn" title="Вид рабочего места: размер текста, плотность строк, свёрнутые панели">{{ icon("layout") }}Вид</summary>
+  <div class="pop" role="group" aria-label="Вид рабочего места">
+    {{ view_toggle("text-large", "Текст элементов крупнее", "Тексты в ленте, на проверке и в таблицах — 14,5 px вместо 12,5") }}
+    {{ view_toggle("rows-loose", "Строки свободнее", "Больше межстрочный интервал и отступы строк таблиц") }}
+    {{ view_toggle("side-folded", "Свернуть список чатов", "Список чатов — узкой полосой слева, лента и проверка шире") }}
+    {{ view_toggle("composer-folded", "Свернуть редактор", "Низ чата — до строки вкладок; нажатие на вкладку разворачивает его") }}
+    {{ view_toggle("reading", "Режим чтения на проверке", "Панели «Оригинал» и «Очищенный» — на всю высоту окна, сводка и вкладки ниже") }}
+    <small class="hint">Запоминается в этом браузере, только оформление.</small>
+  </div>
+</details>{% endmacro %}

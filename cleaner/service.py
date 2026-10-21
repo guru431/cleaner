@@ -95,9 +95,10 @@ def _held(held: tuple[EntityType, ...]) -> dict:
 
 
 def _spans(result: SanitizeResult) -> list[dict]:
+    # Признак подтверждённого формата — только там, где он есть: spans хранятся открыто и на каждый фрагмент.
     return [
         {"start": s.start, "end": s.end, "entity_id": s.entity_id, "surrogate": s.surrogate, "sources": list(s.sources)}
-        | _held(s.held)
+        | ({"validated": True} if s.validated else {}) | _held(s.held)
         for s in result.spans
     ]
 

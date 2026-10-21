@@ -7,6 +7,7 @@ from collections import Counter
 from markupsafe import Markup, escape
 
 from cleaner.core.leakcheck import Leak
+from cleaner.core.match import find_forms
 from cleaner.core.restore import Segment
 from cleaner.core.types import ChatState
 from cleaner.core.types import EntityType as T
@@ -29,7 +30,18 @@ SEGMENT_NAMES = {
     "foreign_link": "посторонняя ссылка",
 }
 
-Mark = tuple[int, int, dict[str, str]]      # начало, конец, атрибуты <mark>; имена атрибутов — только из этого модуля
+# Кто нашёл фрагмент (spans[*].sources) — в порядке слоёв; так их называют экран проверки и его фильтры.
+SOURCE_NAMES = {
+    "manual": "вручную — решение пользователя в этом чате",
+    "rules": "слой 1 — правила",
+    "secrets": "слой 2 — секреты",
+    "infra": "слой 3 — инфраструктура",
+    "dict": "слой 3 — словарь организации, шаблоны, известные значения чата",
+    "ner": "слой 4 — модели распознавания имён",
+    "llm": "слой 5 — локальная модель",
+}
+
+Mark = tuple[int, int, dict[str, str]]     # начало, конец, атрибуты <mark>; имена атрибутов — только из этого модуля
 
 
 def highlight(text: str, marks: list[Mark]) -> Markup:
@@ -89,6 +101,29 @@ def sanitized_marks(item: Item, state: ChatState, leaks: list[Leak], blocked: Bl
             marks.append((start, start + notice["end"] - notice["start"], {"class": "blocked", "title": title}))
     marks += [(leak.start, leak.end, {"class": "leak", "title": "Оригинал в очищенном тексте"}) for leak in leaks]
     return marks
+
+
+OPENED = "Открыто по решению пользователя"
+
+
+def opened_marks(text: str, state: ChatState, marks: list[Mark]) -> list[Mark]:
+    """Значения, с которых пользователь снял замену (правила unmask чата): без метки их видно только по счётчику. Поиск
+    — как у проверки утечек (целыми словами); вхождение, которое задевает другую метку панели (часть замены
+    «domain-1.example» при открытом «domain»), не выделяется — иначе highlight пропустил бы ту метку. В атрибутах —
+    только подпись, без значения."""
+    values = {rule.value for rule in state.rules if rule.action == "unmask"}
+    if not values:
+        return []
+    taken = sorted((start, end) for start, end, _ in marks)
+    starts, reach = [start for start, _ in taken], []
+    for _, end in taken:
+        reach.append(max(end, reach[-1]) if reach else end)        # самый дальний конец меток, начатых не позже
+    result: list[Mark] = []
+    for start, end, _ in find_forms(text, [(value, "letters", None) for value in values]):
+        i = bisect.bisect_left(starts, end) - 1
+        if i < 0 or reach[i] <= start:
+            result.append((start, end, {"class": "opened", "title": OPENED}))
+    return result
 
 
 def leak_marks(leaks: list[Leak]) -> list[Mark]:

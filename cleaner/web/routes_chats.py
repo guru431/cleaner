@@ -18,6 +18,9 @@ log = logging.getLogger("cleaner.web")
 router = APIRouter()
 _TITLE = 200
 LAYER_NAMES = {"ner": "Слой 4 — модели распознавания имён", "llm": "Слой 5 — локальная модель"}
+# Подписи слоёв 4 и 5 для обычной работы — по тому, что они дают: номер слоя требует знать устройство Cleaner и стоит
+# в пояснении (LAYER_NAMES) — в подсказке переключателя, в предупреждении проверки, в настройках умолчаний.
+LAYER_LABELS = {"ner": "Имена и организации", "llm": "Допроверка локальной моделью"}
 OCR_ALL = "Распознать текст на всех страницах PDF"      # подпись отметки в форме «Файл» и совет в предупреждениях
 _LISTED_PAGES = 5           # больше — в заголовке ленты число, а не номера: список целиком — на экране проверки
 
@@ -133,7 +136,7 @@ def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depe
     return page(
         request, "chat.html", viewer, chat=chat, chats=chat_list(request, viewer, q), q=q, entries=_entries(view),
         max_file_mb=request.app.state.max_file_bytes // (1024 * 1024), ocr_all=OCR_ALL,
-        layers=service_of(request).layers(chat_id), layer_names=LAYER_NAMES,
+        layers=service_of(request).layers(chat_id), layer_names=LAYER_NAMES, layer_labels=LAYER_LABELS,
         choices=_choices(request), chosen=f"{provider_id}|{model}" if provider_id else "",
         local=request.app.state.engines is not None,
         local_hint=_local_hint(request) if request.app.state.engines is not None else "",

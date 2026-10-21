@@ -33,6 +33,9 @@ class MergedSpan:
     precedes: bool = False
     # Значение сущности, если оно не текст фрагмента: адрес e-mail с выданной заменой внутри — с её оригиналом (5.10).
     value: str | None = None
+    # Фрагмент целиком — находка старшего типа, подтверждённая контрольной суммой или строгим форматом (Span.validated):
+    # экран проверки объясняет этим замену (FR-6.1). Части записи и слитые из нескольких находок — нет.
+    validated: bool = False
 
 
 def _rank(span: Span) -> int:
@@ -255,5 +258,6 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
         if searchable and not any((s.start, s.end) == (start, end) for s in group):
             forms = tuple(dict.fromkeys(text[s.start:s.end] for s in group if s.type is type_ and s.searchable))
             searchable = False
-        merged.append(MergedSpan(start, end, type_, sources, searchable, forms, ruled, mail, parted=parted))
+        validated = senior.validated and senior.type is type_ and (senior.start, senior.end) == (start, end)
+        merged.append(MergedSpan(start, end, type_, sources, searchable, forms, ruled, mail, parted=parted, validated=validated))
     return _join_names(text, merged)

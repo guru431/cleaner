@@ -6,6 +6,7 @@ from cleaner.core.types import EntityType as T
 from cleaner.core.types import Policy
 from cleaner.storage.repo import Item
 from cleaner.web.app import create_app
+from cleaner.web.routes_review import _back
 
 
 def first_item(repo, chat_id: str) -> str:
@@ -55,6 +56,7 @@ def test_review_marks_a_hidden_blocked_finding_and_a_pasted_blocked_surrogate(iv
     page = ivan.get(f"/chats/{chat_id}/items/{item.id}").text
     assert "Фрагментов типа с политикой «блокировать» — 3." in page
     assert page.count('class="t-SECRET blocked"') == 2
+    assert "Внутри фрагмента найдено значение типа «Телефон»" in page        # карточка «Почему скрыто»
     assert '<mark class="blocked" title="Замена сущности с политикой «блокировать»">domain-1.example</mark>' in page
     repo.set_policy(T.DOMAIN, Policy.MASK)
     assert "Фрагментов типа с политикой «блокировать» — 2." in ivan.get(f"/chats/{chat_id}/items/{item.id}").text
@@ -89,11 +91,17 @@ def test_entity_table_merges_and_changes_the_restore_value(ivan, repo):
     for value in ("Иванов", "Ivanov"):
         ivan.post(f"/chats/{chat_id}/mask", item_id=item_id, value=value, type="PERSON")
     state, _ = repo.load_state(chat_id)
-    first, second = sorted((e for e in state.entities.values() if e.type is T.PERSON), key=lambda e: e.number)
+    first, _ = sorted((e for e in state.entities.values() if e.type is T.PERSON), key=lambda e: e.number)
     email = next(e for e in state.entities.values() if e.type is T.EMAIL)
     table = ivan.get(f"/chats/{chat_id}/entities").text
     assert "&lt;PERSON_2&gt;" in table and "Ivanov" in table
-    ivan.post(f"/chats/{chat_id}/entities/merge", keep=first.id, drop=second.id)
+    assert '<datalist id="peers-PERSON"><option value="&lt;PERSON_1&gt;">' in table
+    assert f'name="keep" value="{first.id}"' in table and 'list="peers-PERSON"' in table
+    # Присоединяемая — по её замене; неизвестная замена и замена другого типа — понятный отказ.
+    for surrogate, refusal in (("<PERSON_9>", "такой замены в таблице чата нет"), ("<EMAIL_1>", "одного типа")):
+        response = ivan.post(f"/chats/{chat_id}/entities/merge", keep=first.id, surrogate=surrogate)
+        assert response.status_code == 400 and refusal in response.text, surrogate
+    ivan.post(f"/chats/{chat_id}/entities/merge", keep=first.id, surrogate=" <PERSON_2> ")
     ivan.post(f"/chats/{chat_id}/entities/{first.id}/restore-value", value="Иванов И. И.")
     ivan.post(f"/chats/{chat_id}/entities/{email.id}/unmask")
     assert repo.items(chat_id)[0].sanitized == "<PERSON_1>, <PERSON_1>, a@x.example"
@@ -255,3 +263,34 @@ def test_failed_residual_risk_check_says_so(ivan, repo, engines):
     ivan.post(f"/chats/{chat_id}/items/{item_id}/risk")
     assert "Проверка не выполнена" in ivan.get(f"/chats/{chat_id}/items/{item_id}").text
     assert [e.details for e in repo.audit_events("error")] == [{"kind": "DetectorError", "stage": "risk"}]
+
+
+def entity_table(browser_, count: int) -> str:
+    chat_id = browser_.chat()
+    browser_.post(f"/chats/{chat_id}/input", text=" ".join(f"u{n}@x.example" for n in range(count)))
+    return chat_id
+
+
+def test_entity_table_grows_linearly_and_pages_on_the_server(ivan):
+    """Аудит 21.10.2026, P2: у каждой строки был список всех сущностей того же типа — 500 сущностей давали 250 000
+    <option> и 12 МБ HTML. Теперь кандидаты — один список на тип, а строк на странице не больше ENTITIES_PAGE."""
+    chats = entity_table(ivan, 200), entity_table(ivan, 400)
+    small, large = (ivan.get(f"/chats/{chat_id}/entities").text for chat_id in chats)
+    options = [page.count("<option") for page in (small, large)]
+    assert options[1] - options[0] <= 210                   # +200 сущностей — +200 кандидатов, а не квадрат
+    assert len(large) < 400_000 and len(large) - len(small) < 25_000     # страница — постоянная, кандидаты — линейно
+    assert large.count("<tr>") == 1 + 100 and "Показаны 1–100 из 400" in large and "страница 1 из 4" in large
+    last = ivan.get(f"/chats/{chats[0]}/entities", page="99").text      # номер за пределами — последняя страница
+    assert "Показаны 101–200 из 200" in last and 'rel="prev"' in last and 'rel="next"' not in last
+
+
+def test_entity_table_filter_by_type_stays_after_an_edit(ivan):
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="a@x.example b@x.example srv01.contoso.ru")
+    table = ivan.get(f"/chats/{chat_id}/entities", type="EMAIL").text
+    assert "Показаны 1–2 из 2" in table and "&lt;EMAIL_2&gt;" in table and "host-1" not in table
+    assert '<input type="hidden" name="back" value="type=EMAIL">' in table
+    assert ivan.get(f"/chats/{chat_id}/entities", type="NOPE").status_code == 400
+    # Адрес возврата собирает сервер: из поля back — только известный код типа и число.
+    assert _back("c1", {"back": "type=EMAIL&page=2"}) == "/chats/c1/entities?type=EMAIL&page=2"
+    assert _back("c1", {"back": "type=<x>&page=//evil.example"}) == "/chats/c1/entities"
