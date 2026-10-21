@@ -154,7 +154,7 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
             continue
         seen.add(value.lower())
         fragments.append({"value": value, "surrogate": span["surrogate"], "type": render.TYPE_NAMES[entity.type]})
-    blocked = frozenset(span["entity_id"] for span in entry.blocked)
+    blocked = render.blocked_at(entry.blocked)
     notices = Counter(notice["code"] for notice in item.notices)
     return page(
         request, "review.html", viewer, chat=chat, item=item, deliverable=entry.deliverable,

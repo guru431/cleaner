@@ -67,7 +67,7 @@ def _entries(view: ChatView) -> list[dict[str, object]]:
                     "retry": can_retry(item),
                 })
                 continue
-            blocked = frozenset(span["entity_id"] for span in entry.blocked)
+            blocked = render.blocked_at(entry.blocked)
             entries.append(common | {
                 "deliverable": entry.deliverable, "leaks": len(entry.leaks), "blocked": len(entry.blocked),
                 "partial": partial_extraction(item.meta),

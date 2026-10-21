@@ -37,6 +37,9 @@ class ResolvedSpan:
     entity_id: str
     surrogate: str
     sources: tuple[str, ...]
+    # Типы автоматических находок, скрытых в фрагменте под меткой другого типа (телефон внутри пароля или выделения):
+    # их политика «блокировать» блокирует выдачу и так (pipeline._held, FR-4.2).
+    held: tuple[EntityType, ...] = ()
 
 
 def canonical_key(type_: EntityType, value: str) -> str:
@@ -455,11 +458,17 @@ class Resolver:
 
         return domain, self._issue(domain, "dns", make)
 
-    def _manual(self, part: str) -> tuple[Entity, str] | None:
+    def _manual(self, part: str, own: EntityType) -> tuple[Entity, str] | None:
         """Часть имени, которой пользователь дал другой тип (смена типа, правило): метка этого типа вместо
-        подмены части, остальные части подменяются как обычно (5.7, шаг 4)."""
+        подмены части, остальные части подменяются как обычно (5.7, шаг 4). own — тип, который у части был бы без
+        правила (HOST у части слева и у короткого имени, DOMAIN у домена): если его политика строже, часть остаётся
+        своего типа. Исключение владельца 15.10.2026 — о строении имени, а не о смягчении политики: метка TERM при HOST
+        «блокировать» давала <TERM_1>.domain-1.example, и выдача не блокировалась."""
         type_ = self.manual.get(normalize(part))
-        return self._labelled(type_, part, "manual") if type_ else None
+        policies = self.settings.policies
+        if type_ is None or STRICTNESS.get(policies.get(type_), 0) < STRICTNESS.get(policies.get(own), 0):
+            return None
+        return self._labelled(type_, part, "manual")
 
     def _name(
         self, value: str, type_: EntityType, origin: str, follows: bool = False, precedes: bool = False,
@@ -478,19 +487,15 @@ class Resolver:
                 return self._netbios(value, origin)
             # Имя узла, которое правило поглотило бы, остаётся HOST, если у HOST политика строже (merge, 5.7): метка
             # правила вернула бы мягкую политику.
-            retyped = self.manual.get(normalize(value))
-            policies = self.settings.policies
-            if retyped and STRICTNESS.get(policies.get(retyped), 0) >= STRICTNESS.get(policies.get(type_), 0):
-                return self._manual(value)
-            return self._part(value, origin, leading=True, standalone=True)
+            return self._manual(value, T.HOST) or self._part(value, origin, leading=True, standalone=True)
         # Часть имени рядом с заменой — не имя целиком (5.10): в частях перед заменой домена нет, одиночная часть после
         # неё — тоже часть. Первой часть после замены не бывает, и отдельным написанием никакая из них не становится.
         left, registrable = name_parts(value, precedes)
-        retyped = self._manual(registrable) if registrable else None
+        retyped = self._manual(registrable, T.DOMAIN) if registrable else None
         domain = retyped or (self._dns(registrable, origin) if registrable else None)
         fakes, owners, leading = [], [], not follows
         for label in left:
-            manual = self._manual(label)
+            manual = self._manual(label, T.HOST)
             if manual is None and label.lower() in self.generic:
                 fakes.append(label)
                 continue

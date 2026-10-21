@@ -88,6 +88,21 @@ def test_blocked_type_makes_the_request_unsendable(state):
     assert outgoing.blocked == 1 and not outgoing.sendable
 
 
+def test_pasted_surrogate_of_a_blocked_entity_blocks_the_request_but_not_in_an_answer(state):
+    """Вставленная пользователем замена сущности «блокировать» держит отправку, как оригинал (FR-4.2). В ответе модели
+    ищутся только оригиналы (FR-8.11): подмена там — эхо отправленного, и её сущность держит отправку своим входным
+    текстом. Оригинал, скрытый в ответе внутри другой метки, держит её и там (held)."""
+    sanitize(state, "домен fabrikam.ru", Settings())
+    blocked = Settings(policies=default_policies() | {T.DOMAIN: Policy.BLOCK}, always=(DictEntry(T.TERM, "fabrikam.ru srv"),))
+    answer = [Turn("user", "Вопрос"), Turn("assistant", "Ответ про domain-1.example"), Turn("user", "Ещё")]
+    assert build_outgoing(state, answer, blocked, "p1", "m1").sendable
+    pasted = [Turn("user", "Вопрос про domain-1.example")]
+    assert build_outgoing(state, pasted, blocked, "p1", "m1").blocked == 1
+    hidden = [Turn("user", "Вопрос"), Turn("assistant", "Ответ: fabrikam.ru srv"), Turn("user", "Ещё")]
+    outgoing = build_outgoing(state, hidden, blocked, "p1", "m1")
+    assert outgoing.context.messages[1].text == "Ответ: <TERM_1>" and outgoing.blocked == 1
+
+
 def test_dictionary_value_in_an_answer_is_masked(state, settings):
     always = Settings(always=(DictEntry(T.TERM, "Ромашка"),))
     turns = [Turn("user", "Вопрос"), Turn("assistant", "Ответ: проект Ромашка"), Turn("user", "Ещё")]
