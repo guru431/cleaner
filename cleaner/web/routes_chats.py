@@ -1,6 +1,7 @@
 """Чаты: список с поиском, лента, ввод текста и ответа модели, состояние обработки, скачивание."""
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import logging
 from urllib.parse import urlsplit
@@ -9,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from cleaner.engines import local_settings
-from cleaner.service import LOCAL_PENDING, ChatView, EditRefused, InputView, TextTooLong, local_pending
+from cleaner.service import LOCAL_PENDING, AnswerView, ChatView, EditRefused, InputView, TextTooLong, local_pending
 from cleaner.storage.repo import Chat, CheckpointBusy, Item
 from cleaner.web import render
 from cleaner.web.deps import Upload, Viewer, get_form, get_upload, get_viewer, own_chat, page, repo_of, service_of
@@ -57,13 +58,64 @@ def can_retry(item: Item) -> bool:
     return item.kind == "input" and item.status in ("done", "failed") and bool(item.original)
 
 
+def layers_ran(item: Item) -> str:
+    """Слои, выполненные для текста. Без отметки — текст очищен до слоёв 4 и 5 (этап 1), их не было (m-12)."""
+    ran = item.meta.get("layers") or []
+    return ", ".join(["1–3"] + [number for layer, number in (("ner", "4"), ("llm", "5")) if layer in ran])
+
+
+def shown_digest(item: Item) -> str:
+    """Отпечаток очищенного текста, показанного пользователю: форма «Отметить проверенным» несёт его, и отметка
+    ложится только на этот текст (repo.mark_reviewed). Текст и так на странице — отпечаток ничего не добавляет."""
+    return hashlib.sha256((item.sanitized or "").encode("utf-8")).hexdigest()
+
+
+STAGES = ("Исходник", "Проверка", "Передача", "Восстановленный ответ")
+
+
+def route(view: ChatView, chat_id: str, chosen: bool) -> dict[str, object]:
+    """Маршрут чата (аудит интерфейса 21.10.2026): этап по последним элементам, готовность текстов и основное действие
+    следующего шага. Готовность — по всем входным текстам чата: запрос собирается из всей истории (раздел 10.1), и
+    текст, изменённый правкой после прошлого ответа, уйдёт в новом виде. Подсказка, а не запрет: копирование и
+    отправку решают проверка утечек и политики, как прежде."""
+    entries = view.items
+    if not entries:
+        return {"stage": 0, "state": "", "action": None, "hint": "Вставьте текст или загрузите файл ниже"}
+    last = entries[-1]
+    if isinstance(last, AnswerView):
+        if last.item.status in ("queued", "running"):
+            return {"stage": 3, "state": "", "action": None, "hint": "Модель отвечает…"}
+        if last.item.status != "failed" and not last.item.meta.get("aborted"):
+            return {"stage": 3, "state": "", "action": None, "hint": "Продолжить — следующий текст или вопрос ниже"}
+        # Ответ не получен — вопрос уходит снова (FR-8.9): этап передачи.
+    inputs = [entry for entry in entries if isinstance(entry, InputView)]
+    ready = [entry.readiness for entry in inputs]
+    if "processing" in ready:
+        return {"stage": 0, "state": "processing", "action": None, "hint": "Дождитесь очистки"}
+    for state in ("blocked", "review"):
+        first = next((entry for entry in inputs if entry.readiness == state), None)
+        if first is not None:
+            return {"stage": 1, "state": state, "action": ("Проверить", f"/chats/{chat_id}/items/{first.item.id}"), "hint": ""}
+    if "reviewed" not in ready:
+        first = inputs[-1] if inputs else None
+        return {"stage": 0, "state": "failed" if first else "", "hint": "",
+                "action": ("Открыть", f"#item-{first.item.id}") if first else None}
+    if chosen:
+        return {"stage": 2, "state": "reviewed", "action": ("Подтвердить отправку…", f"/chats/{chat_id}/send"), "hint": ""}
+    return {"stage": 2, "state": "reviewed", "action": ("Копировать очищенное…", f"/chats/{chat_id}/manual"),
+            "hint": "ответ модели — затем во вкладку «Ответ вручную»"}
+
+
 def _entries(view: ChatView) -> list[dict[str, object]]:
     names = render.surrogates_by_entity(view.state)
     entries: list[dict[str, object]] = []
     for entry in view.items:
         item = entry.item
         if isinstance(entry, InputView):
-            common = {"kind": "input", "id": item.id, "seq": item.seq, "source": item.source, "status": item.status}
+            common = {
+                "kind": "input", "id": item.id, "seq": item.seq, "source": item.source, "status": item.status,
+                "readiness": entry.readiness,
+            }
             if item.status != "done":
                 entries.append(common | {
                     "error": item.meta.get("error", ""), "progress": item.meta.get("progress", ""),
@@ -73,7 +125,8 @@ def _entries(view: ChatView) -> list[dict[str, object]]:
             blocked = render.blocked_at(entry.blocked)
             entries.append(common | {
                 "deliverable": entry.deliverable, "leaks": len(entry.leaks), "blocked": len(entry.blocked),
-                "partial": partial_extraction(item.meta),
+                "partial": partial_extraction(item.meta), "layers": layers_ran(item),
+                "ocr": len(item.meta.get("ocr_pages", [])),
                 "exposed": [", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],
                 "html": render.highlight(item.sanitized or "", render.sanitized_marks(item, view.state, entry.leaks, blocked)),
             })
@@ -138,6 +191,7 @@ def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depe
         max_file_mb=request.app.state.max_file_bytes // (1024 * 1024), ocr_all=OCR_ALL,
         layers=service_of(request).layers(chat_id), layer_names=LAYER_NAMES, layer_labels=LAYER_LABELS,
         choices=_choices(request), chosen=f"{provider_id}|{model}" if provider_id else "",
+        route=route(view, chat_id, bool(provider_id)), stages=STAGES,
         local=request.app.state.engines is not None,
         local_hint=_local_hint(request) if request.app.state.engines is not None else "",
         local_pending=LOCAL_PENDING if local_pending(entry.item for entry in view.items) else "",
@@ -221,6 +275,19 @@ def retry(request: Request, chat_id: str, item_id: str, form: dict[str, str] = D
     own_chat(request, chat_id, viewer)
     try:
         service_of(request).retry(chat_id, viewer.user.id, item_id)
+    except EditRefused as exc:
+        raise HTTPException(400, str(exc)) from None
+    except KeyError:
+        raise HTTPException(404, "Текст не найден") from None
+    return RedirectResponse(f"/chats/{chat_id}/items/{item_id}", status_code=303)
+
+
+@router.post("/chats/{chat_id}/items/{item_id}/reviewed")
+def mark_reviewed(request: Request, chat_id: str, item_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
+    """«Отметить проверенным» на экране проверки: отметка показанного очищенного текста (поле digest)."""
+    own_chat(request, chat_id, viewer)
+    try:
+        service_of(request).mark_reviewed(chat_id, viewer.user.id, item_id, form.get("digest", ""))
     except EditRefused as exc:
         raise HTTPException(400, str(exc)) from None
     except KeyError:

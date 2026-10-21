@@ -131,7 +131,8 @@ def test_chat_pages_open_with_chats_current(ivan, repo):
     chat_id = ivan.chat()
     ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
     item_id = repo.items(chat_id)[0].id
-    for path in ("/chats", f"/chats/{chat_id}", f"/chats/{chat_id}/items/{item_id}", f"/chats/{chat_id}/entities"):
+    paths = ("/chats", f"/chats/{chat_id}", f"/chats/{chat_id}/items/{item_id}", f"/chats/{chat_id}/entities", f"/chats/{chat_id}/manual")
+    for path in paths:
         response = ivan.get(path)
         assert response.status_code == 200, path
         assert re.findall(r'<a href="([^"]+)" class="on"', response.text) == ["/chats"], path
@@ -151,7 +152,7 @@ def test_a_cut_chat_title_is_whole_in_its_tooltip(ivan, repo):
     page = ivan.get(f"/chats/{chat_id}").text
     assert f'<h1 title="{LONG_TITLE}">{LONG_TITLE}</h1>' in page
     assert f'<span class="name" title="{LONG_TITLE}">{LONG_TITLE}</span>' in page
-    for path in (f"/chats/{chat_id}/items/{item_id}", f"/chats/{chat_id}/entities", f"/chats/{chat_id}/send"):
+    for path in (f"/chats/{chat_id}/items/{item_id}", f"/chats/{chat_id}/entities", f"/chats/{chat_id}/send", f"/chats/{chat_id}/manual"):
         assert f'<a href="/chats/{chat_id}" title="{LONG_TITLE}">{LONG_TITLE}</a>' in ivan.get(path).text, path
 
 

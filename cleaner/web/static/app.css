@@ -309,6 +309,14 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 .layers { display: flex; gap: 6px; margin-left: 8px; }
 .layers form { margin: 0; }
 .feed { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
+/* Маршрут чата: этапы, готовность, основное действие — одной строкой под шапкой (аудит интерфейса 21.10.2026). */
+.route { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 16px; border-bottom: 1px solid var(--line); background: var(--bg-sub); }
+.route ol { display: flex; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.route li { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
+.route li + li::before { content: "→"; margin-right: 4px; color: var(--muted); }
+.route li.done { color: var(--good); }
+.route li.on { color: var(--fg); font-weight: 600; }
+.route .btn { height: 24px; padding: 0 8px; }
 .composer { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 8px 16px 12px; background: var(--bg-sub); border-top: 1px solid var(--line); }
 .send-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .send-row form { margin: 0; display: flex; align-items: center; gap: 6px; }
@@ -337,6 +345,11 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
   margin: 12px -24px -24px; padding: 10px 24px; background: var(--bg-sub); border-top: 1px solid var(--line);
 }
 .sticky-bottom form { margin: 0; }
+.badges form { margin: 0; }
+.badges form button { height: 22px; padding: 0 8px; }
+/* Состав запроса на отправке и в переносе вручную: отметки по элементам строкой с переносом. */
+.pick-list { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 8px; }
+.pick .panel-body > .hint { display: block; margin: 0 0 8px; }
 
 /* Рабочее место проверки: поиск, переходы по заменам, легенда-фильтр, синхронная прокрутка, карточка «Почему скрыто».
    Всё это — app.js; без него строки инструментов и карточка не показываются, фильтры таблицы — тоже. */

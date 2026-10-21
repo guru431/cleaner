@@ -22,3 +22,12 @@
     <small class="hint">Запоминается в этом браузере, только оформление.</small>
   </div>
 </details>{% endmacro %}
+{# Готовность текста к передаче (InputView.readiness): у элемента ленты и на проверке — слово о тексте, в маршруте чата
+   (whole) — о чате. «Проверено» — отметка пользователя, а не гарантия (ТЗ, раздел 12). #}
+{% macro readiness(code, whole=false) %}
+{%- if code == "processing" %}<span class="state">{{ "обработка" if whole else "обрабатывается" }}…</span>
+{%- elif code == "review" %}<span class="badge warn" title="Сверьте замены с оригиналом на экране проверки и отметьте текст проверенным">требуется проверка</span>
+{%- elif code == "reviewed" %}<span class="badge good" title="Отмечено пользователем на экране проверки; изменение очищенного текста снимает отметку. Замены не скрывают того, что следует из остального текста">{{ icon("check") }}{{ "проверено пользователем" if whole else "проверено" }}</span>
+{%- elif code == "blocked" %}<span class="badge bad" title="В очищенном тексте найден оригинал или фрагмент типа с политикой «блокировать»: выдачи нет">{{ icon("warning") }}{{ "блокировка" if whole else "заблокирован" }}</span>
+{%- elif code == "failed" %}<span class="badge bad">{{ icon("warning") }}ошибка обработки</span>
+{%- endif %}{% endmacro %}

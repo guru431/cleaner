@@ -3,6 +3,8 @@ import re
 
 import pytest
 
+from cleaner.core.types import EntityType as T
+from cleaner.core.types import Policy
 from cleaner.storage.repo import Item, Provider
 
 KEY = "sk-test-0123456789abcd"
@@ -147,3 +149,73 @@ def test_ask_local_is_off_while_a_local_answer_is_pending(ivan, repo):
     response = ivan.post(f"/chats/{chat_id}/ask-local")
     assert response.status_code == 400 and "ещё идёт" in response.text
     assert [i.id for i in repo.items(chat_id) if i.source == "local"] == ["l" * 32]
+
+
+def three_items(ivan, provider) -> str:
+    """Вопрос 1, ответ вручную 2, вопрос 3."""
+    chat_id = chat_with_question(ivan, provider)
+    ivan.post(f"/chats/{chat_id}/answer", answer="Ответ про <EMAIL_1>")
+    ivan.post(f"/chats/{chat_id}/input", text="Второй вопрос")
+    return chat_id
+
+
+def test_confirmation_can_leave_items_out_and_sends_only_that_selection(ivan, provider, cloud):
+    """Сокращение контекста: состав — в адресе номерами, отправка — только кнопкой с отпечатком этого состава."""
+    chat_id = three_items(ivan, provider)
+    full = ivan.get(f"/chats/{chat_id}/send").text
+    assert all(f'name="include" value="{seq}" checked' in full for seq in (1, 2, 3))
+    short = ivan.get(f"/chats/{chat_id}/send", shown="1,2,3", include=["1", "3"]).text
+    assert "Исключено: Ответ модели 2" in short and 'name="exclude" value="2"' in short
+    assert "соседние вопросы уйдут одним сообщением" in short
+    assert 'name="include" value="2">' in short and "Ответ про" not in short
+    assert ivan.post(f"/chats/{chat_id}/send", digest=digest(short)).status_code == 400    # без состава — другой запрос
+    assert cloud == []
+    assert ivan.post(f"/chats/{chat_id}/send", digest=digest(short), exclude="2").status_code == 303
+    [ctx] = cloud
+    assert [m.role for m in ctx.messages] == ["user"]
+
+
+def test_leaving_out_the_last_question_keeps_the_choice_without_a_send_button(ivan, provider):
+    chat_id = three_items(ivan, provider)
+    page = ivan.get(f"/chats/{chat_id}/send", shown="1,2,3", include=["1", "2"]).text
+    assert "Последним в запросе должен быть вопрос" in page and "Пересобрать" in page
+    assert 'name="digest"' not in page
+
+
+def test_manual_transfer_shows_the_whole_cleaned_dialogue_with_roles(ivan, provider):
+    """Идея аудита 21.10.2026: тот же запрос, что ушёл бы по API, одним текстом — копируется только он."""
+    chat_id = three_items(ivan, provider)
+    ivan.post(f"/chats/{chat_id}/input", text="Отвечай кратко", source="instruction")
+    page = ivan.get(f"/chats/{chat_id}/manual").text
+    text = re.search(r'<pre class="text" id="manual-text">\n(.*?)</pre>', page, re.S).group(1)
+    assert text.startswith("=== Инструкция ===\nВ тексте встречаются обозначения") and "Отвечай кратко" in text
+    assert "=== Вопрос ===\nВопрос: почта &lt;EMAIL_1&gt;" in text and "=== Ответ модели ===\nОтвет про &lt;EMAIL_1&gt;" in text
+    assert "a@x.example" not in page and 'data-copy="manual-text"' in page
+    assert f'href="/chats/{chat_id}/manual"' in ivan.get(f"/chats/{chat_id}").text
+
+
+def test_manual_transfer_offers_no_copy_when_a_fragment_is_blocked(ivan, repo, provider):
+    chat_id = chat_with_question(ivan, provider)
+    repo.set_policy(T.EMAIL, Policy.BLOCK)
+    page = ivan.get(f"/chats/{chat_id}/manual").text
+    assert "Копирование заблокировано" in page and 'data-copy="manual-text"' not in page
+
+
+def test_route_leads_from_review_to_transfer_and_the_mark_is_cleared_by_an_edit(ivan, repo):
+    """Маршрут чата: после очистки — «Проверить», после отметки — «Копировать очищенное…»; правка снимает отметку."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="Проект Заря, почта a@x.example")
+    item_id = repo.items(chat_id)[0].id
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert 'aria-current="step">Проверка</li>' in page and "требуется проверка" in page
+    assert f'<a class="btn primary" href="/chats/{chat_id}/items/{item_id}">Проверить</a>' in page
+    review = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    shown = re.search(r'/reviewed"[^>]*>.*?name="digest" value="([0-9a-f]{64})"', review, re.S).group(1)
+    assert ivan.post(f"/chats/{chat_id}/items/{item_id}/reviewed", digest="0" * 64).status_code == 400
+    assert ivan.post(f"/chats/{chat_id}/items/{item_id}/reviewed", digest=shown).status_code == 303
+    assert "Отметить проверенным" not in ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert "проверено пользователем" in page and f'href="/chats/{chat_id}/manual">Копировать очищенное…</a>' in page
+    assert "анонимн" not in page.lower() and "безопасн" not in page.lower()
+    ivan.post(f"/chats/{chat_id}/mask", item_id=item_id, value="Заря", type="TERM")
+    assert "требуется проверка" in ivan.get(f"/chats/{chat_id}").text
