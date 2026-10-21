@@ -131,6 +131,20 @@ def leak_marks(leaks: list[Leak]) -> list[Mark]:
     return [(leak.start, leak.end, {"class": "leak", "title": "Оригинал в исходящем тексте"}) for leak in leaks]
 
 
+ROLE_NAMES = {"system": "Инструкция", "user": "Вопрос", "assistant": "Ответ модели"}
+
+
+def dialogue(system: str, messages: list[tuple[str, str]], leaks: list[tuple[int, Leak]]) -> Markup:
+    """Очищенный диалог одним текстом для переноса вручную: роли — строками-заголовками, оригиналы, найденные проверкой
+    утечек (номер сообщения, -1 — системная часть), выделены. Кнопка копирует textContent — этот же текст без разметки."""
+    def part(number: int, role: str, text: str) -> Markup:
+        found = [leak for index, leak in leaks if index == number]
+        return escape(f"=== {ROLE_NAMES[role]} ===\n") + highlight(text, leak_marks(found))
+
+    parts = [part(-1, "system", system)] + [part(number, role, text) for number, (role, text) in enumerate(messages)]
+    return Markup("\n\n").join(parts)
+
+
 def restored_marks(segments: list[Segment]) -> list[Mark]:
     return [(s.start, s.end, {"class": f"r-{s.kind}", "title": SEGMENT_NAMES.get(s.kind, s.kind)}) for s in segments]
 

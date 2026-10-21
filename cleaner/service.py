@@ -9,7 +9,7 @@ import threading
 import uuid
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from cleaner.core import leakcheck, risk
@@ -86,6 +86,18 @@ class InputView:
     @property
     def deliverable(self) -> bool:
         return self.item.status == "done" and not self.leaks and not self.blocked
+
+    @property
+    def readiness(self) -> str:
+        """Готовность текста к передаче (аудит интерфейса 21.10.2026): processing | failed | blocked | review | reviewed.
+        «Проверено» — отметка пользователя, а не гарантия: подсказка, копирование и отправку она не запрещает."""
+        if self.item.status in ("queued", "running"):
+            return "processing"
+        if self.item.status != "done":
+            return "failed"
+        if not self.deliverable:
+            return "blocked"
+        return "reviewed" if self.item.reviewed_at else "review"
 
 
 @dataclass
@@ -196,11 +208,16 @@ class SendRefused(EditRefused):
 
 @dataclass
 class Preview:
-    """Экран подтверждения (FR-8.4): ровно то, что уйдёт, и что в запрос не вошло."""
+    """Экран подтверждения (FR-8.4) и перенос вручную: ровно то, что уйдёт, и что в запрос не вошло."""
 
-    outgoing: Outgoing
-    provider: Provider
+    outgoing: Outgoing | None           # None — выбранный пользователем состав не собрать: причина в refused
+    provider: Provider | None           # None — перенос вручную, без подключения
     skipped: list[tuple[int, str]]      # номер элемента в чате и причина
+    # Элементы, которые пользователь может включить в запрос или исключить: номер, роль хода (user | assistant |
+    # system), знаков в сохранённом тексте. excluded — исключённые им из них (раздел 10.1, сокращение контекста).
+    candidates: list[tuple[int, str, int]] = field(default_factory=list)
+    excluded: list[int] = field(default_factory=list)
+    refused: str = ""
 
 
 @dataclass
@@ -606,6 +623,19 @@ class ChatService:
         if stored:
             self.repo.audit("risk_check", user_id, chat_id, guesses=len(guesses))
 
+    # --- отметка «проверено пользователем» (аудит интерфейса 21.10.2026) ---------------------
+
+    def mark_reviewed(self, chat_id: str, user_id: str, item_id: str, digest: str) -> None:
+        """Пользователь отметил очищенный текст проверенным. digest — отпечаток показанного ему текста: изменённый
+        после показа текст не отмечается. Подсказка маршрута в чате, а не разрешение: копирование и отправку она не
+        открывает и не закрывает. Снимается при смене очищенного текста (commit_chat)."""
+        item = self.repo.item(chat_id, item_id)
+        if item is None or item.kind != "input":
+            raise KeyError(item_id)
+        if not self.repo.mark_reviewed(chat_id, item_id, digest):
+            raise EditRefused("Текст изменился после показа или ещё не очищен: проверьте его ещё раз")
+        self.repo.audit("reviewed", user_id, chat_id, seq=item.seq)
+
     # --- ответы модели и вид чата ----------------------------------------------------
 
     def add_answer(self, chat_id: str, user_id: str, text: str) -> Item:
@@ -701,10 +731,13 @@ class ChatService:
                 raise SendRefused("Такого подключения или модели нет")
         self.repo.set_chat_provider(chat_id, provider_id, model if provider_id else "")
 
-    def _turns(self, chat_id: str, items: list[Item]) -> tuple[list[Turn], list[int], list[tuple[int, str]]]:
-        """Ходы запроса из элементов чата, номера их элементов и то, что в запрос не войдёт, с причиной."""
+    def _turns(
+        self, chat_id: str, items: list[Item], exclude: frozenset[int] = frozenset(),
+    ) -> tuple[list[Turn], list[int], list[tuple[int, str]], list[tuple[int, str, int]]]:
+        """Ходы запроса из элементов чата, номера их элементов, то, что в запрос не войдёт, с причиной, и элементы,
+        которые пользователь может включить или исключить. exclude — номера исключённых им: в ходы они не входят."""
         on = self._enabled(chat_id)
-        turns, seqs, skipped = [], [], []
+        turns, seqs, skipped, candidates = [], [], [], []
         for item in items:
             if item.kind == "input":
                 if item.status in ("queued", "running"):
@@ -727,42 +760,79 @@ class ChatService:
             else:
                 skipped.append((item.seq, "ответа нет"))
                 continue
+            candidates.append((item.seq, turns[-1].role, len(item.original)))
+            if item.seq in exclude:
+                turns.pop()
+                continue
             seqs.append(item.seq)
-        return turns, seqs, skipped
+        return turns, seqs, skipped, candidates
 
-    def _build(self, chat_id: str, state: ChatState, items: list[Item], settings: Settings, provider: Provider, model: str) -> Preview:
-        turns, seqs, skipped = self._turns(chat_id, items)
+    def _build(
+        self, chat_id: str, state: ChatState, items: list[Item], settings: Settings, provider: Provider | None, model: str,
+        exclude: frozenset[int] = frozenset(),
+    ) -> Preview:
+        """Запрос из элементов чата без исключённых пользователем (exclude). Отпечаток OutgoingContext покрывает все
+        тексты, поэтому другой состав — другой отпечаток. Состав, который не собрать (последним остался не вопрос), —
+        Preview без запроса: на странице остаётся выбор, чтобы его поправить; без исключений — отказ, как прежде."""
+        turns, seqs, skipped, candidates = self._turns(chat_id, items, exclude)
+        excluded = sorted(exclude & {seq for seq, _, _ in candidates})
         try:
-            outgoing = build_outgoing(state, turns, settings, provider.id, model)
+            outgoing = build_outgoing(state, turns, settings, provider.id if provider else "", model)
         except NotSendable as exc:
-            raise SendRefused(str(exc)) from None
+            if not excluded:
+                raise SendRefused(str(exc)) from None
+            refused = "Последним в запросе должен быть вопрос: включите в запрос последний текст"
+            return Preview(None, provider, sorted(skipped), candidates, excluded, refused)
         skipped += [(seqs[number], "ответ до первого вопроса") for number in outgoing.skipped]
-        return Preview(outgoing, provider, sorted(skipped))
+        return Preview(outgoing, provider, sorted(skipped), candidates, excluded)
 
-    def outgoing(self, chat_id: str) -> Preview:
+    def outgoing(self, chat_id: str, exclude: frozenset[int] = frozenset()) -> Preview:
         """Экран подтверждения: запрос, как он уйдёт сейчас. Состояние чата не записывается."""
         provider, model = self._connection(chat_id)
         state, _ = self.repo.load_state(chat_id)
-        return self._build(chat_id, state, self.repo.items(chat_id), self.repo.settings(), provider, model)
+        return self._build(chat_id, state, self.repo.items(chat_id), self.repo.settings(), provider, model, exclude)
 
-    def send(self, chat_id: str, user_id: str, digest: str) -> Item:
-        """FR-8.4: запрос собирается заново и уходит, только если он совпал с показанным на экране подтверждения."""
+    def manual(self, chat_id: str, exclude: frozenset[int] = frozenset()) -> Preview:
+        """Перенос вручную (сценарий 5.1): тот же запрос, что ушёл бы по API, — та же сборка и проверка утечек (SEC-2), —
+        но без подключения; provider_id и model в OutgoingContext пусты (они нужны только отпечатку). Сборка может выдать
+        замены значениям, которых состояние чата ещё не знало (словарь, пополненный после очистки): тогда состояние
+        записывается — иначе метки скопированного текста не восстановились бы во вставленном ответе. Без новых замен
+        ничего не пишется. В журнал — ничего: скопирован ли текст, серверу неизвестно."""
+        for _ in range(_ATTEMPTS):
+            state, version = self.repo.load_state(chat_id)
+            before = state_to_json(state)
+            preview = self._build(chat_id, state, self.repo.items(chat_id), self.repo.settings(), None, "", exclude)
+            if state_to_json(state) == before:
+                return preview
+            try:
+                self.repo.commit_chat(chat_id, state, version)
+            except StaleState:
+                continue
+            return preview
+        raise StaleState(chat_id)
+
+    def send(self, chat_id: str, user_id: str, digest: str, exclude: frozenset[int] = frozenset()) -> Item:
+        """FR-8.4: запрос собирается заново и уходит, только если он совпал с показанным на экране подтверждения.
+        exclude — исключённые пользователем элементы, как на экране: с другим составом отпечаток не совпадёт."""
         provider, model = self._connection(chat_id)
         built: dict[str, OutgoingContext] = {}
-        in_request = 0
+        in_request = excluded = 0
 
         def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
-            nonlocal in_request
+            nonlocal in_request, excluded
             if any(i.kind == "answer" and i.source == "api" and i.status in ("queued", "running") for i in items):
                 # Двойное нажатие прошло бы проверку отпечатка: идущий ответ в запрос не входит (оплаченный дубль).
                 raise SendRefused("Предыдущий ответ облака ещё идёт: дождитесь его или остановите")
-            outgoing = self._build(chat_id, state, items, settings, provider, model).outgoing
+            preview = self._build(chat_id, state, items, settings, provider, model, exclude)
+            if preview.outgoing is None:
+                raise SendRefused(preview.refused)
+            outgoing = preview.outgoing
             if outgoing.context.digest() != digest:
                 raise SendRefused("Запрос изменился после показа: проверьте его ещё раз")
             if not outgoing.sendable:
                 raise SendRefused("В запросе найден оригинал или фрагмент запрещённого типа: отправка заблокирована")
             built["context"] = outgoing.context
-            in_request = _in_request(items)[-1]
+            in_request, excluded = _in_request(items)[-1], len(preview.excluded)
             meta = {"provider": provider.name, "model": model}
             return [Item(uuid.uuid4().hex, 0, "answer", "", None, source="api", status="running", meta=meta)], []
 
@@ -770,7 +840,7 @@ class ChatService:
         context = built["context"]
         self.repo.audit(
             "cloud_send", user_id, chat_id, provider=provider.id, model=model, messages=len(context.messages),
-            chars=sum(len(text) for text in context.texts()),
+            chars=sum(len(text) for text in context.texts()), excluded=excluded,
         )
         self.live.start(item.id)
         self.send_submit(self.run_send, chat_id, item.id, user_id, context, link(provider), in_request)

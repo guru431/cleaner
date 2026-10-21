@@ -1,0 +1,25 @@
+{# Состав запроса (раздел 10.1, сокращение контекста): отметки «включить в запрос» по номерам элементов, «Пересобрать» —
+   GET с номерами в адресе (номера не данные). Отправка и копирование — только того, что собрано на этой странице. #}
+{% if picks %}
+<form method="get" action="{{ action }}" class="panel pick">
+  <header class="panel-head">
+    <h2 class="title">Состав запроса</h2>
+    <span class="state">{% if outgoing %}итоговый объём — {{ total }} знаков, сообщений — {{ count }} и системная часть{% else %}не собран{% endif %}</span>
+    <span class="actions"><button title="Собрать запрос заново из отмеченных элементов: отправки или копирования без вашего действия не будет">Пересобрать</button></span>
+  </header>
+  <div class="panel-body">
+    <input type="hidden" name="shown" value="{{ shown }}">
+    <div class="pick-list">
+      {% for p in picks %}<label class="check"><input type="checkbox" name="include" value="{{ p.seq }}"{% if p.on %} checked{% endif %}> {{ p.role }} {{ p.seq }} <span class="muted">— {{ p.chars }} знаков</span></label>{% endfor %}
+    </div>
+    <small class="hint">Уберите то, что модели для ответа не нужно: замены не скрывают того, что следует из остального текста (ТЗ, раздел 12). Правила чата и известные значения применяются ко всему, что остаётся.</small>
+    {% if excluded %}
+    <p class="muted">Исключено: {% for p in excluded %}{{ p.role }} {{ p.seq }} ({{ p.chars }} знаков){% if not loop.last %}; {% endif %}{% endfor %}.</p>
+    {% endif %}
+    {% if glued %}
+    <p class="flash warn">Без ответа модели {{ glued | join(", ") }} соседние вопросы уйдут одним сообщением.</p>
+    {% endif %}
+  </div>
+</form>
+{% endif %}
+{% if refused %}<p class="flash bad">{{ refused }}.</p>{% endif %}

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_ui.html" import icon %}
+{% from "_ui.html" import icon, readiness %}
 {% block title %}{{ chat.title }} — Cleaner{% endblock %}
 {% block main_class %}split{% endblock %}
 {% block main %}
@@ -41,6 +41,16 @@
     </details>
   </header>
 
+  {# Маршрут чата (routes_chats.route): этапы, готовность текстов и основное действие следующего шага — подсказка. #}
+  <nav class="route" aria-label="Этапы чата">
+    <ol>
+      {% for name in stages %}<li{% if loop.index0 == route.stage %} class="on" aria-current="step"{% elif loop.index0 < route.stage %} class="done"{% endif %}>{% if loop.index0 < route.stage %}{{ icon("check") }}{% endif %}{{ name }}</li>{% endfor %}
+    </ol>
+    {{ readiness(route.state, whole=true) }}
+    {% if route.action %}<a class="btn primary" href="{{ route.action[1] }}">{{ route.action[0] }}</a>{% endif %}
+    {% if route.hint %}<span class="muted">{{ route.hint }}</span>{% endif %}
+  </nav>
+
   <div class="feed" data-scroll-end>
     {% for e in entries %}
     <article class="panel item" id="item-{{ e.id }}">
@@ -50,8 +60,12 @@
         <span class="title">{% if e.source == "file" %}Файл{% elif e.source == "instruction" %}Инструкция для модели{% else %}Текст{% endif %} {{ e.seq }}</span>
         {% if polling %}
         <span class="state">{% if e.status == "queued" %}В очереди{% else %}Обрабатывается{% endif %}… <span data-progress>{{ e.progress }}</span></span>
-        {% elif e.status == "done" and not e.deliverable %}
-        <span class="badge bad">{{ icon("warning") }}заблокирован</span>
+        {% elif e.status == "done" %}
+        {{ readiness(e.readiness) }}
+        <span class="badge" title="Слои распознавания, выполненные для этого текста">слои {{ e.layers }}</span>
+        {% endif %}
+        {% if e.status == "done" and e.ocr %}
+        <span class="badge warn" title="Распознавание ошибается в именах и числах — проверьте замены особенно внимательно">{{ icon("warning") }}распознано страниц — {{ e.ocr }}</span>
         {% endif %}
         {% if e.status == "done" and e.partial %}
         <span class="badge warn" title="Что пропало — на экране проверки">{{ icon("warning") }}извлечено частично: {{ e.partial }}</span>
@@ -144,6 +158,7 @@
       {% else %}
       <span class="muted">Подключений к облачным моделям нет: очищенный текст копируется вручную, ответ вставляется ниже.</span>
       {% endif %}
+      <a class="btn" href="/chats/{{ chat.id }}/manual" title="Весь очищенный диалог одним текстом с ролями и инструкцией о метках — для интерфейса облачной модели">Перенос вручную…</a>
       {% if local %}
       <form method="post" action="/chats/{{ chat.id }}/ask-local" class="ask-local">
         {% include "_csrf.html" %}

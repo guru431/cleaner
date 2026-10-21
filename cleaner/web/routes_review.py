@@ -16,7 +16,7 @@ from cleaner.service import UNDOABLE, ChatService, EditPreview, EditRefused
 from cleaner.storage.repo import Item
 from cleaner.web import render
 from cleaner.web.deps import Viewer, get_admin, get_form, get_viewer, own_chat, page, repo_of, service_of
-from cleaner.web.routes_chats import LAYER_LABELS, LAYER_NAMES, OCR_ALL, can_retry, input_view
+from cleaner.web.routes_chats import LAYER_LABELS, LAYER_NAMES, OCR_ALL, can_retry, input_view, layers_ran, shown_digest
 from cleaner.web.routes_settings import DUPLICATE, POLICY_NAMES
 
 router = APIRouter()
@@ -197,12 +197,6 @@ def _opened(text: str, state: ChatState) -> int:
     return len({value for _, _, value in find_forms(text, [(value, "letters", value) for value in values])})
 
 
-def _layers_ran(item: Item) -> str:
-    """Слои, выполненные для текста. Без отметки — текст очищен до слоёв 4 и 5 (этап 1), их не было (m-12)."""
-    ran = item.meta.get("layers") or []
-    return ", ".join(["1–3"] + [number for layer, number in (("ner", "4"), ("llm", "5")) if layer in ran])
-
-
 def _version(form: dict[str, str]) -> int | None:
     """Версия чата, для которой показан предпросмотр; без поля — правка напрямую, без сверки (прежние формы, тесты)."""
     raw = form.get("version", "")
@@ -284,7 +278,7 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
     return page(
         request, "review.html", viewer, chat=chat, item=item, deliverable=entry.deliverable,
         leaks=len(entry.leaks), blocked=len(entry.blocked), opened=_opened(sanitized, state),
-        layers_ran=_layers_ran(item),
+        layers_ran=layers_ran(item), readiness=entry.readiness, shown=shown_digest(item),
         original=render.highlight(item.original, original_marks + opened_marks[0]),
         sanitized=render.highlight(sanitized, sanitized_marks + opened_marks[1]),
         summary=render.summary(item, state), fragments=fragments, why=why, legend=legend, sources=sources,

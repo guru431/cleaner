@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_ui.html" import icon %}
+{% from "_ui.html" import icon, readiness as readiness_badge %}
 {% block title %}Проверка — {{ chat.title }} — Cleaner{% endblock %}
 {% block main %}
 <div class="bar">
@@ -44,6 +44,15 @@
     <span class="badge warn" title="Значения, с которых в этом чате снята замена: в очищенном тексте они открыты и уходят как есть">{{ icon("warning") }}открыто по решению пользователя — {{ opened }}</span>
     {% endif %}
     <span class="badge" title="Слои распознавания, выполненные для этого текста">слои {{ layers_ran }}</span>
+    {# Отметка «проверено» — подсказка маршрута чата, не разрешение; форма несёт отпечаток показанного текста. #}
+    {{ readiness_badge(readiness) if readiness in ("review", "reviewed") }}
+    {% if readiness == "review" %}
+    <form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/reviewed" class="mark-reviewed">
+      {% include "_csrf.html" %}
+      <input type="hidden" name="digest" value="{{ shown }}">
+      <button title="Вы сверили замены с оригиналом. Изменение очищенного текста снимет отметку">{{ icon("check") }}Отметить проверенным</button>
+    </form>
+    {% endif %}
   </div>
   {% if extraction %}<p class="muted">{{ extraction }}</p>{% endif %}
   {% for text in warnings %}<p class="flash warn">{{ text }}</p>{% endfor %}

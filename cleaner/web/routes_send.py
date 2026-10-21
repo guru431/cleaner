@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 
 from cleaner.core.restore import StreamRestorer
-from cleaner.service import EditRefused
+from cleaner.service import EditRefused, Preview
 from cleaner.web import render
 from cleaner.web.deps import Viewer, get_form, get_viewer, own_chat, page, repo_of, service_of
 
@@ -31,33 +31,100 @@ def choose(request: Request, chat_id: str, form: dict[str, str] = Depends(get_fo
     return RedirectResponse(f"/chats/{chat_id}", status_code=303)
 
 
-@router.get("/chats/{chat_id}/send")
-def confirm(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer)) -> Response:
-    """FR-8.4: экран подтверждения показывает ровно то, что уйдёт, и что в запрос не вошло."""
-    chat = own_chat(request, chat_id, viewer)
-    try:
-        preview = service_of(request).outgoing(chat_id)
-    except EditRefused as exc:
-        raise HTTPException(409, str(exc)) from None
+def _numbers(values: Iterable[str]) -> set[int]:
+    return {int(value) for value in values if value.isdigit() and len(value) < 10}
+
+
+def _exclude(request: Request) -> frozenset[int]:
+    """Исключённые пользователем элементы — номерами из адреса (номера не данные; GET «Пересобрать»): показанные на
+    странице выбора (shown) без отмеченных (include). Без shown — все включены, как при первом открытии."""
+    params = request.query_params
+    return frozenset(_numbers(params.get("shown", "").split(",")) - _numbers(params.getlist("include")))
+
+
+def _glued(preview: Preview) -> list[int]:
+    """Исключённые ответы модели, вокруг которых остались два вопроса: они склеятся в одно сообщение (раздел 10.1)."""
+    dialogue = [(seq, role) for seq, role, _ in preview.candidates if role != "system"]
+    glued = []
+    for index, (seq, role) in enumerate(dialogue):
+        if role != "assistant" or seq not in preview.excluded:
+            continue
+        before = [r for s, r in dialogue[:index] if s not in preview.excluded]
+        after = [r for s, r in dialogue[index + 1:] if s not in preview.excluded]
+        if before[-1:] == ["user"] and after[:1] == ["user"]:
+            glued.append(seq)
+    return glued
+
+
+def _request(preview: Preview) -> dict[str, object]:
+    """Общее экранам отправки и переноса вручную: выбор состава, исключённое, итоговый объём и сам запрос."""
+    picks = [
+        {"seq": seq, "role": render.ROLE_NAMES[role], "chars": chars, "on": seq not in preview.excluded}
+        for seq, role, chars in preview.candidates
+    ]
+    common = {
+        "picks": picks, "excluded": [p for p in picks if not p["on"]], "glued": _glued(preview),
+        "shown": ",".join(str(p["seq"]) for p in picks), "exclude": ",".join(map(str, preview.excluded)),
+        "skipped": preview.skipped, "refused": preview.refused,
+    }
     outgoing = preview.outgoing
+    if outgoing is None:
+        return common | {"outgoing": None, "sendable": False, "leaks": 0, "blocked": 0}
     context = outgoing.context
 
     def marked(number: int, text: str):
         return render.highlight(text, render.leak_marks([leak for index, leak in outgoing.leaks if index == number]))
 
-    messages = [(message.role, marked(number, message.text)) for number, message in enumerate(context.messages)]
+    return common | {
+        "outgoing": outgoing, "system": marked(-1, context.system),
+        "messages": [(message.role, marked(number, message.text)) for number, message in enumerate(context.messages)],
+        "sendable": outgoing.sendable, "leaks": len(outgoing.leaks), "blocked": outgoing.blocked,
+        "total": sum(len(text) for text in context.texts()), "count": len(context.messages),
+    }
+
+
+@router.get("/chats/{chat_id}/send")
+def confirm(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer)) -> Response:
+    """FR-8.4: экран подтверждения показывает ровно то, что уйдёт, и что в запрос не вошло. Состав можно сократить
+    (раздел 10.1): отправка — только кнопкой после пересборки, с отпечатком этого состава."""
+    chat = own_chat(request, chat_id, viewer)
+    try:
+        preview = service_of(request).outgoing(chat_id, _exclude(request))
+    except EditRefused as exc:
+        raise HTTPException(409, str(exc)) from None
+    shown = _request(preview)
+    outgoing = preview.outgoing
     return page(
-        request, "send.html", viewer, chat=chat, provider=preview.provider, model=context.model,
-        system=marked(-1, context.system), messages=messages, skipped=preview.skipped,
-        sendable=outgoing.sendable, leaks=len(outgoing.leaks), blocked=outgoing.blocked, digest=context.digest(),
+        request, "send.html", viewer, chat=chat, provider=preview.provider,
+        model=outgoing.context.model if outgoing else "", digest=outgoing.context.digest() if outgoing else "",
+        action=f"/chats/{chat_id}/send", **shown,
     )
+
+
+@router.get("/chats/{chat_id}/manual")
+def manual(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer)) -> Response:
+    """Перенос вручную (сценарий 5.1): весь очищенный диалог одним текстом с ролями и служебной инструкцией — тот же
+    запрос и та же проверка утечек, что у отправки по API (SEC-2). При находке или блокировке копирования нет."""
+    chat = own_chat(request, chat_id, viewer)
+    try:
+        preview = service_of(request).manual(chat_id, _exclude(request))
+    except EditRefused as exc:
+        raise HTTPException(409, str(exc)) from None
+    shown = _request(preview)
+    outgoing = preview.outgoing
+    text = None
+    if outgoing is not None:
+        context = outgoing.context
+        text = render.dialogue(context.system, [(m.role, m.text) for m in context.messages], outgoing.leaks)
+    return page(request, "manual.html", viewer, chat=chat, text=text, action=f"/chats/{chat_id}/manual", **shown)
 
 
 @router.post("/chats/{chat_id}/send")
 def send(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
     own_chat(request, chat_id, viewer)
+    exclude = frozenset(_numbers(form.get("exclude", "").split(",")))
     try:
-        item = service_of(request).send(chat_id, viewer.user.id, form.get("digest", ""))
+        item = service_of(request).send(chat_id, viewer.user.id, form.get("digest", ""), exclude)
     except EditRefused as exc:
         raise HTTPException(400, str(exc)) from None
     return RedirectResponse(f"/chats/{chat_id}#item-{item.id}", status_code=303)

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% from "_ui.html" import icon %}
+{% block title %}Перенос вручную — {{ chat.title }} — Cleaner{% endblock %}
+{% block main %}
+<div class="bar">
+  <nav class="crumbs"><a href="/chats/{{ chat.id }}" title="{{ chat.title }}">{{ chat.title }}</a><span class="sep">/</span><h1>Перенос вручную</h1></nav>
+</div>
+<p class="lead">Очищенный диалог одним текстом — как запрос облачной модели по API: служебная инструкция о метках, инструкции, вопросы и ответы модели с подписями ролей. Вставьте его в интерфейс облачной модели, а её ответ — в чат, во вкладку «Ответ вручную»: там он восстановится. Оригиналов здесь быть не должно — проверьте замены.</p>
+{% include "_request_pick.html" %}
+{% if skipped %}
+<p class="flash warn">Не войдут в текст: {% for seq, reason in skipped %}элемент {{ seq }} — {{ reason }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>
+{% endif %}
+{% if outgoing and not sendable %}
+<p class="flash bad">Копирование заблокировано:{% if leaks %} найдено оригиналов — {{ leaks }} (выделены);{% endif %}{% if blocked %} фрагментов запрещённого типа — {{ blocked }};{% endif %} уберите их на экранах проверки текстов.</p>
+{% endif %}
+{% if text %}
+<section class="panel">
+  <header class="panel-head">
+    <h2 class="title">Очищенный диалог</h2>
+    {% if sendable %}
+    <span class="actions"><button type="button" data-copy="manual-text">{{ icon("copy") }}<span>Скопировать диалог</span></button></span>
+    {% endif %}
+  </header>
+  <pre class="text" id="manual-text">
+{{ text }}</pre>
+</section>
+{% endif %}
+{% endblock %}

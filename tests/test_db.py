@@ -35,7 +35,7 @@ def test_newer_schema_is_refused(tmp_path):
 
 
 def test_schema_version_is_the_last_migration():
-    assert db.SCHEMA_VERSION == max(number for number, _ in db.migrations()) == 5
+    assert db.SCHEMA_VERSION == max(number for number, _ in db.migrations()) == 6
 
 
 def test_version_2_chat_gets_no_provider(tmp_path):
@@ -72,11 +72,11 @@ def test_version_1_database_upgrades_in_place(tmp_path):
     db.migrate(conn)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     rows = [tuple(row) for row in conn.execute(
-        "SELECT kind, source, status, meta, model_spans, risk_status, risk_enc, risk_job FROM items ORDER BY seq"
+        "SELECT kind, source, status, meta, model_spans, risk_status, risk_enc, risk_job, reviewed_at FROM items ORDER BY seq"
     )]
     assert rows == [
-        ("input", "paste", "done", "{}", "[]", "", None, None),
-        ("answer", "pasted_answer", "done", "{}", "[]", "", None, None),
+        ("input", "paste", "done", "{}", "[]", "", None, None, None),
+        ("answer", "pasted_answer", "done", "{}", "[]", "", None, None, None),
     ]
     assert conn.execute("SELECT layers FROM chats").fetchone()[0] == "{}"
     tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}

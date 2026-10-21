@@ -4,14 +4,16 @@
 <div class="bar">
   <nav class="crumbs"><a href="/chats/{{ chat.id }}" title="{{ chat.title }}">{{ chat.title }}</a><span class="sep">/</span><span class="here">Отправка</span></nav>
 </div>
-<h1>{{ provider.name }} — {{ model }}</h1>
+<h1>{{ provider.name }}{% if model %} — {{ model }}{% endif %}</h1>
 <p class="lead">Ниже ровно то, что уйдёт провайдеру. Оригиналов в нём быть не должно: проверьте замены. Ответ придёт в чат восстановленным.</p>
+{% include "_request_pick.html" %}
 {% if skipped %}
 <p class="flash warn">Не войдут в запрос: {% for seq, reason in skipped %}элемент {{ seq }} — {{ reason }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>
 {% endif %}
-{% if not sendable %}
+{% if outgoing and not sendable %}
 <p class="flash bad">Отправка заблокирована:{% if leaks %} найдено оригиналов — {{ leaks }} (выделены);{% endif %}{% if blocked %} фрагментов запрещённого типа — {{ blocked }};{% endif %} уберите их на экранах проверки текстов.</p>
 {% endif %}
+{% if outgoing %}
 <section class="panel">
   <header class="panel-head"><h2 class="title">Системная часть</h2></header>
   <pre class="text">
@@ -24,11 +26,13 @@
 {{ html }}</pre>
 </section>
 {% endfor %}
+{% endif %}
 {% if sendable %}
 <div class="sticky-bottom">
   <form method="post" action="/chats/{{ chat.id }}/send">
     {% include "_csrf.html" %}
     <input type="hidden" name="digest" value="{{ digest }}">
+    <input type="hidden" name="exclude" value="{{ exclude }}">
     <button class="primary">Отправить {{ provider.name }} — {{ model }}</button>
   </form>
 </div>
