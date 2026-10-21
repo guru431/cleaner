@@ -47,8 +47,8 @@
       {% for name in stages %}<li{% if loop.index0 == route.stage %} class="on" aria-current="step"{% elif loop.index0 < route.stage %} class="done"{% endif %}>{% if loop.index0 < route.stage %}{{ icon("check") }}{% endif %}{{ name }}</li>{% endfor %}
     </ol>
     {{ readiness(route.state, whole=true) }}
-    {% if route.hint %}<span class="muted">{{ route.hint }}</span>{% endif %}
     {% if route.action %}<a class="btn primary" href="{{ route.action[1] }}">{{ route.action[0] }}</a>{% endif %}
+    {% if route.hint %}<span class="muted">{{ route.hint }}</span>{% endif %}
   </nav>
 
   <div class="feed" data-scroll-end>
