@@ -523,6 +523,36 @@ def test_rule_off_whole_parts_keeps_the_stricter_policy_of_the_record(state, tex
     assert sanitize(state, text, lenient).sanitized == text.rsplit(" ", 1)[0] + " <TERM_1>"
 
 
+@pytest.mark.parametrize("value, record", [
+    ("+79161234567", T.PHONE), ("person@fabrikam.ru", T.EMAIL), ("10.1.2.5", T.IP),
+], ids=["phone", "email", "ip"])
+def test_secret_keeps_the_block_of_the_record_it_swallows(state, value, record):
+    """Аудит 2026-10-21, P2: пароль, который слой 1 или 3 нашёл и как телефон, адрес e-mail или IP, получал <SECRET_1> —
+    при политике «блокировать» у типа записи выдача не блокировалась. Фрагмент берёт тип со строже политикой (FR-3.3), и
+    то же значение в следующих текстах — та же сущность; при обычной политике записи — <SECRET_1>, как прежде."""
+    text = f"password={value}"
+    blocked = Settings(policies=default_policies() | {record: Policy.BLOCK})
+    result = sanitize(state, text, blocked)
+    assert value not in result.sanitized and not result.deliverable
+    assert [state.entities[s.entity_id].type for s in result.blocked] == [record]
+    again = sanitize(state, f"{text}; повтор: {value}", blocked)
+    assert {s.entity_id for s in again.spans} == {result.blocked[0].entity_id} and not again.deliverable
+    # Политика записи снова обычная: та же строка — снова секрет, выдача разрешена, и метка не восстанавливается.
+    masked = sanitize(state, text, Settings())
+    assert masked.sanitized == "password=<SECRET_1>" and masked.deliverable
+    assert restore(state, masked.sanitized, Settings()).text == masked.sanitized
+    # Блокировка — по текущей политике: известный теперь и как секрет пароль снова блокирует выдачу.
+    assert not sanitize(state, text, blocked).deliverable
+
+
+def test_infrastructure_value_keeps_the_block_of_a_name_found_by_layer_4(state):
+    """Та же находка у других старшинств: домен слоя 3 поглощал организацию слоя 4, и ORG=BLOCK терялся."""
+    settings = Settings(policies=default_policies() | {T.ORG: Policy.BLOCK})
+    result = sanitize(state, "клиент contoso.ru", settings, Layers(cached=(Span(7, 17, T.ORG, "ner"),)))
+    assert result.sanitized == "клиент <ORG_1>" and not result.deliverable
+    assert sanitize(state, "клиент contoso.ru", Settings(), Layers(cached=(Span(7, 17, T.ORG, "ner"),))).deliverable
+
+
 @pytest.mark.parametrize("email", [Policy.MASK, Policy.BLOCK])
 def test_rule_parts_of_a_split_record_keep_their_own_types(state, email):
     """Рядом с выданной заменой поглощённая запись делится (5.10), и каждая часть, задетая правилом, получает тип своего
