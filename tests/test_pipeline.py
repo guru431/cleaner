@@ -586,6 +586,23 @@ def test_email_with_a_known_domain_of_a_stricter_policy_is_split(state, policy):
     assert sanitize(state, "почта ivanov@fabrikam.ru", Settings()).sanitized == "почта <EMAIL_1>"
 
 
+def test_opened_part_of_an_email_does_not_split_it(state):
+    """Ревью 2026-10-21: домен из словаря «всегда скрывать» при DOMAIN «блокировать», открытый пользователем во всём
+    чате, снова делил ivanov@fabrikam.ru и получал подмену — открытое значение скрыто, выдача невозможна. Открытая часть
+    адрес не делит: он — по своим правилам, как без неё."""
+    settings = Settings(
+        always=(DictEntry(T.DOMAIN, "fabrikam.ru"),), policies=default_policies() | {T.DOMAIN: Policy.BLOCK},
+    )
+    assert sanitize(state, "почта ivanov@fabrikam.ru", settings).sanitized == "почта <ACCOUNT_1>@domain-1.example"
+    ops.unmask(state, "fabrikam.ru")
+    result = sanitize(state, "почта ivanov@fabrikam.ru", settings)
+    assert result.sanitized == "почта <EMAIL_1>" and result.deliverable
+    never = Settings(
+        always=settings.always, never=frozenset({"fabrikam.ru"}), policies=settings.policies,
+    )
+    assert sanitize(state, "почта petrov@fabrikam.ru", never).sanitized == "почта <EMAIL_2>"
+
+
 def test_known_person_in_an_email_login_keeps_the_stricter_person_policy(state):
     """Так же — известный чату человек в имени входа: часть получает тип своей находки (5.10)."""
     settings = Settings(policies=default_policies() | {T.PERSON: Policy.BLOCK})
