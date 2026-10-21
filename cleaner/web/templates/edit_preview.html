@@ -35,7 +35,7 @@
     <tbody>
     {% for t in preview.texts %}
     <tr>
-      <td class="nowrap"><a href="/chats/{{ chat.id }}/items/{{ t.item_id }}">Текст {{ t.seq }}</a>{% if t.sent %}<div class="sub">уже ушёл облаку</div>{% endif %}</td>
+      <td class="nowrap"><a href="/chats/{{ chat.id }}/items/{{ t.item_id }}">{% if t.source == "file" %}Файл{% elif t.source == "instruction" %}Инструкция для модели{% else %}Текст{% endif %} {{ t.seq }}</a>{% if t.sent %}<div class="sub">уже ушёл облаку</div>{% endif %}</td>
       <td class="num">{{ t.hidden }}</td><td class="num">{{ t.opened }}</td><td class="num">{{ t.relabeled }}</td>
       {% if t.before or t.after %}
       <td class="mono example">{{ t.before }}</td><td class="mono example">{{ t.after }}</td>

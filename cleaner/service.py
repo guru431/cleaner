@@ -214,6 +214,7 @@ class TextChange:
     relabeled: int                      # вхождений получит другую замену (объединение, смена типа)
     exposed: int                        # значений, открытых в прежнем варианте, а теперь скрываемых (FR-6.8)
     sent: bool                          # после текста в чате есть ответ облака: прежний вариант уже ушёл
+    source: str = "paste"               # вид текста — подпись, как в ленте: «Текст», «Файл», «Инструкция для модели»
     before: str = ""                    # пример: очищенный текст вокруг первого различия — только для страницы
     after: str = ""
 
@@ -275,7 +276,7 @@ def _changes(pairs: list[tuple[Item, Item]], items: list[Item]) -> list[TextChan
         change = TextChange(
             old.id, old.seq, hidden=len(now.keys() - was.keys()), opened=len(was.keys() - now.keys()),
             relabeled=sum(1 for key in now.keys() & was.keys() if now[key] != was[key]),
-            exposed=len(set(fresh.exposed) - set(old.exposed)), sent=old.id in sent,
+            exposed=len(set(fresh.exposed) - set(old.exposed)), sent=old.id in sent, source=old.source,
         )
         if len(changes) < _EXAMPLES:
             change.before, change.after = _example(old.sanitized or "", fresh.sanitized or "")
