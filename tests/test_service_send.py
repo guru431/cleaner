@@ -4,6 +4,7 @@ import pytest
 from cleaner.core.types import EntityType as T
 from cleaner.egress import ProviderError, cloud
 from cleaner.service import AnswerView, ChatService, SendRefused
+from cleaner.storage.codec import state_to_json
 from cleaner.storage.repo import Item, Provider
 
 KEY = "sk-test-0123456789abcd"
@@ -436,15 +437,23 @@ def test_manual_transfer_is_the_api_request_without_a_connection(repo, chat, pro
     assert repo.load_state(chat_id)[1] == version and repo.audit_events("cloud_send") == []
 
 
-def test_manual_transfer_keeps_the_replacements_it_issues(repo, chat):
-    """Словарь пополнен после очистки: сборка выдаёт новую замену, и состояние записывается — иначе метку
-    скопированного текста во вставленном ответе было бы нечем восстановить."""
+def test_manual_transfer_with_new_replacements_writes_nothing_and_asks_to_clean_again(repo, chat):
+    """Словарь пополнен после очистки: сборка выдала бы новую замену. Прежде страница по GET записывала состояние —
+    росла версия чата, гас снимок отмены, открытый предпросмотр правки отказывал (ревью 2026-10-21). Теперь — stale:
+    ничего не пишется, копировать нечего, пока тексты не очищены заново; после этого метка восстанавливается."""
     user, chat_id = chat
     service = service_with(repo, FakeCloud("x"))
-    service.add_input(chat_id, user, "клиент Ромашка")
+    item = service.add_input(chat_id, user, "клиент Ромашка, проект Заря")
+    service.mask_value(chat_id, user, item.id, "Заря", T.TERM)
     repo.add_dictionary("always", "Ромашка", T.ORG)
-    [message] = service.manual(chat_id).outgoing.context.messages
-    assert message.text == "клиент <ORG_1>"
+    before = repo.load_state(chat_id)
+    assert service.manual(chat_id).stale
+    after = repo.load_state(chat_id)
+    assert (state_to_json(after[0]), after[1]) == (state_to_json(before[0]), before[1])
+    assert repo.undo_action(chat_id) is not None
+    service.refresh(chat_id, user)
+    manual = service.manual(chat_id)
+    assert not manual.stale and [m.text for m in manual.outgoing.context.messages] == ["клиент <ORG_1>, проект <TERM_1>"]
     service.add_answer(chat_id, user, "Ответ для <ORG_1>")
     assert service.view(chat_id).items[-1].result.text == "Ответ для Ромашка"
 

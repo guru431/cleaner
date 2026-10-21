@@ -48,11 +48,14 @@ def _entities_query(type_: str, number: int) -> str:
 
 
 def _back(chat_id: str, form: dict[str, str]) -> str:
-    """Возврат после правки: к экрану проверки текста, иначе в таблицу замен — на ту же страницу с тем же фильтром.
-    Адрес собирается здесь, не из формы: из поля back берутся только известный код типа и число."""
+    """Возврат после правки: к экрану проверки текста, на страницу переноса вручную (back=manual — её «Очистить тексты
+    чата заново»), иначе в таблицу замен — на ту же страницу с тем же фильтром. Адрес собирается здесь, не из формы:
+    из поля back берутся только известные слово, код типа и число."""
     item_id = form.get("item_id", "")
     if _ITEM_ID.fullmatch(item_id):
         return f"/chats/{chat_id}/items/{item_id}"
+    if form.get("back") == "manual":
+        return f"/chats/{chat_id}/manual"
     back = parse_qs(form.get("back", ""))
     type_ = back.get("type", [""])[0]
     number = back.get("page", [""])[0]

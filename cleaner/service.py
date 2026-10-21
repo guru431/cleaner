@@ -223,6 +223,9 @@ class Preview:
     candidates: list[tuple[int, str, int]] = field(default_factory=list)
     excluded: list[int] = field(default_factory=list)
     refused: str = ""
+    # Перенос вручную: сборка выдала бы значениям новые замены (словарь или правила изменились после очистки) —
+    # копировать нечего, пока тексты чата не очищены заново (ChatService.manual).
+    stale: bool = False
 
 
 @dataclass
@@ -799,22 +802,17 @@ class ChatService:
 
     def manual(self, chat_id: str, exclude: frozenset[int] = frozenset()) -> Preview:
         """Перенос вручную (сценарий 5.1): тот же запрос, что ушёл бы по API, — та же сборка и проверка утечек (SEC-2), —
-        но без подключения; provider_id и model в OutgoingContext пусты (они нужны только отпечатку). Сборка может выдать
-        замены значениям, которых состояние чата ещё не знало (словарь, пополненный после очистки): тогда состояние
-        записывается — иначе метки скопированного текста не восстановились бы во вставленном ответе. Без новых замен
-        ничего не пишется. В журнал — ничего: скопирован ли текст, серверу неизвестно."""
-        for _ in range(_ATTEMPTS):
-            state, version = self.repo.load_state(chat_id)
-            before = state_to_json(state)
-            preview = self._build(chat_id, state, self.repo.items(chat_id), self.repo.settings(), None, "", exclude)
-            if state_to_json(state) == before:
-                return preview
-            try:
-                self.repo.commit_chat(chat_id, state, version)
-            except StaleState:
-                continue
-            return preview
-        raise StaleState(chat_id)
+        но без подключения; provider_id и model в OutgoingContext пусты (они нужны только отпечатку). Страница по GET
+        состояние не пишет: запись подняла бы версию чата — гас бы снимок отмены последней правки, а открытый
+        предпросмотр правки отказывал бы «чат изменился», хотя пользователь лишь смотрел. Если сборка выдала бы
+        значениям новые замены (словарь, пополненный после очистки), — stale: метки такого текста не восстановились бы
+        во вставленном ответе, и копировать его нельзя, пока тексты чата не очищены заново. В журнал — ничего: скопирован
+        ли текст, серверу неизвестно."""
+        state, _ = self.repo.load_state(chat_id)
+        before = state_to_json(state)
+        preview = self._build(chat_id, state, self.repo.items(chat_id), self.repo.settings(), None, "", exclude)
+        preview.stale = state_to_json(state) != before
+        return preview
 
     def send(self, chat_id: str, user_id: str, digest: str, exclude: frozenset[int] = frozenset()) -> Item:
         """FR-8.4: запрос собирается заново и уходит, только если он совпал с показанным на экране подтверждения.

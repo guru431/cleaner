@@ -10,7 +10,15 @@
 {% if skipped %}
 <p class="flash warn">Не войдут в текст: {% for seq, reason in skipped %}элемент {{ seq }} — {{ reason }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>
 {% endif %}
-{% if outgoing and not sendable %}
+{% if stale %}
+<div class="flash warn">
+  <p>В чате появились значения, которые нужно скрыть заново (изменились словарь или правила): нажмите «Очистить тексты чата заново», затем копируйте.</p>
+  <form method="post" action="/chats/{{ chat.id }}/refresh">
+    {% include "_csrf.html" %}<input type="hidden" name="back" value="manual">
+    <button>Очистить тексты чата заново</button>
+  </form>
+</div>
+{% elif outgoing and not sendable %}
 <p class="flash bad">Копирование заблокировано:{% if leaks %} найдено оригиналов — {{ leaks }} (выделены);{% endif %}{% if blocked %} фрагментов запрещённого типа — {{ blocked }};{% endif %} уберите их на экранах проверки текстов.</p>
 {% endif %}
 {% if text %}

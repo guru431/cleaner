@@ -104,7 +104,8 @@ def confirm(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer)
 @router.get("/chats/{chat_id}/manual")
 def manual(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer)) -> Response:
     """Перенос вручную (сценарий 5.1): весь очищенный диалог одним текстом с ролями и служебной инструкцией — тот же
-    запрос и та же проверка утечек, что у отправки по API (SEC-2). При находке или блокировке копирования нет."""
+    запрос и та же проверка утечек, что у отправки по API (SEC-2). При находке или блокировке копирования нет; нет его
+    и когда сборка выдала бы новые замены (stale): страница предлагает очистить тексты чата заново."""
     chat = own_chat(request, chat_id, viewer)
     try:
         preview = service_of(request).manual(chat_id, _exclude(request))
@@ -113,10 +114,12 @@ def manual(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer))
     shown = _request(preview)
     outgoing = preview.outgoing
     text = None
-    if outgoing is not None:
+    if outgoing is not None and not preview.stale:
         context = outgoing.context
         text = render.dialogue(context.system, [(m.role, m.text) for m in context.messages], outgoing.leaks)
-    return page(request, "manual.html", viewer, chat=chat, text=text, action=f"/chats/{chat_id}/manual", **shown)
+    return page(
+        request, "manual.html", viewer, chat=chat, text=text, stale=preview.stale, action=f"/chats/{chat_id}/manual", **shown,
+    )
 
 
 @router.post("/chats/{chat_id}/send")
