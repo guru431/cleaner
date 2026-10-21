@@ -65,10 +65,11 @@ def test_theme_toggle_names_three_modes_on_login_and_in_the_top_bar(browser, iva
 
 def test_browser_storage_keeps_only_the_theme_and_the_tab():
     """Хранилища браузера — только оформление и выбор вкладки (раздел 6 спецификации вида): ни текстов форм, ни данных
-    чатов. Запись — только по этим двум ключам."""
+    чатов. Запись — только по этим ключам: тема, синхронная прокрутка панелей проверки, вкладка страницы."""
     script = (WEB / "static" / "app.js").read_text(encoding="utf-8")
     keys = re.findall(r"(?:local|session)Storage\.setItem\(([^,]+),", script)
-    assert sorted(set(keys)) == ['"cleaner-theme"', "key"] and 'const key = `tab:${window.location.pathname}`' in script
+    assert sorted(set(keys)) == ['"cleaner-sync-scroll"', '"cleaner-theme"', "key"]
+    assert 'const key = `tab:${window.location.pathname}`' in script
 
 
 def test_every_icon_used_in_the_templates_is_in_the_sprite(browser):

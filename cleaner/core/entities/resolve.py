@@ -37,6 +37,7 @@ class ResolvedSpan:
     entity_id: str
     surrogate: str
     sources: tuple[str, ...]
+    validated: bool = False             # MergedSpan.validated
 
 
 def canonical_key(type_: EntityType, value: str) -> str:
@@ -160,7 +161,7 @@ class Resolver:
         # первой записи в состояние: исключение посреди подмены оставило бы сущность без замены и номер.
         resolved = special(value, span.type, origin) if special else None
         entity, surrogate = resolved or self._labelled(span.type, value, origin, span.searchable, span.forms)
-        return ResolvedSpan(span.start, span.end, entity.id, surrogate, span.sources)
+        return ResolvedSpan(span.start, span.end, entity.id, surrogate, span.sources, span.validated)
 
     # --- сущности ---------------------------------------------------------
 
