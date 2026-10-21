@@ -167,21 +167,49 @@ document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
 });
 
 // Вкладки: кнопки [data-tab], панели [data-tab-panel]; без JS видны все панели. data-tabs-remember — выбор
-// этой страницы в sessionStorage.
-document.querySelectorAll("[data-tabs]").forEach((container) => {
+// этой страницы в sessionStorage. Клавиатура — по образцу WAI-ARIA Tabs (аудит 21.10.2026): в ряду вкладок одна остановка
+// Tab — выбранная (roving tabindex), ←/→ — соседняя по кругу, Home/End — первая и последняя; вкладка и её панель
+// связаны aria-controls / aria-labelledby. Связи ставит скрипт: без него вкладок нет, и связывать нечего.
+document.querySelectorAll("[data-tabs]").forEach((container, number) => {
   const key = `tab:${window.location.pathname}`;
   const remember = "tabsRemember" in container.dataset;
   const tabs = [...container.querySelectorAll("[data-tab]")];
+  const panels = [...container.querySelectorAll("[data-tab-panel]")];
+  tabs.forEach((tab) => {
+    const panel = panels.find((candidate) => candidate.dataset.tabPanel === tab.dataset.tab);
+    tab.id = tab.id || `tab-${number}-${tab.dataset.tab}`;
+    if (panel) {
+      panel.id = panel.id || `tab-panel-${number}-${tab.dataset.tab}`;
+      tab.setAttribute("aria-controls", panel.id);
+      panel.setAttribute("aria-labelledby", tab.id);
+    }
+  });
   const show = (name) => {
-    tabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.tab === name)));
-    container.querySelectorAll("[data-tab-panel]").forEach((panel) => panel.classList.toggle("on", panel.dataset.tabPanel === name));
+    tabs.forEach((tab) => {
+      tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
+      tab.tabIndex = tab.dataset.tab === name ? 0 : -1;
+    });
+    panels.forEach((panel) => panel.classList.toggle("on", panel.dataset.tabPanel === name));
   };
-  tabs.forEach((tab) => tab.addEventListener("click", () => {
+  const choose = (tab) => {
     show(tab.dataset.tab);
     if (remember) {
       try { sessionStorage.setItem(key, tab.dataset.tab); } catch (error) { /* не запомнится */ }
     }
-  }));
+  };
+  tabs.forEach((tab) => tab.addEventListener("click", () => choose(tab)));
+  container.querySelector('[role="tablist"]')?.addEventListener("keydown", (event) => {
+    const at = tabs.indexOf(document.activeElement);
+    if (at < 0) return;
+    const next = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    const tab = tabs[(next + tabs.length) % tabs.length];
+    choose(tab);
+    tab.focus();
+  });
+  const initial = tabs.find((tab) => tab.getAttribute("aria-selected") === "true") || tabs[0];
+  if (initial) show(initial.dataset.tab);
   if (remember) {
     let saved = null;
     try { saved = sessionStorage.getItem(key); } catch (error) { /* как по умолчанию */ }
