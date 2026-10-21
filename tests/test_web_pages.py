@@ -48,6 +48,29 @@ def test_dark_palette_is_the_same_by_the_system_and_by_the_switch():
     assert system["--bg"] == "#0d1117" and system == css_block(css, r':root\[data-theme="dark"\]')
 
 
+def theme_modes(page: str) -> list[str]:
+    toggle = re.search(r"<button[^>]*data-theme-toggle[^>]*>(.*?)</button>", page, re.S).group(1)
+    return re.findall(r'<span class="mode m-([a-z]+)">.*?</svg>([^<]+)</span>', toggle)
+
+
+def test_theme_toggle_names_three_modes_on_login_and_in_the_top_bar(browser, ivan):
+    """Аудит 21.10.2026: после первого переключения вернуть «как в системе» было нельзя, а на входе темы не было вовсе.
+    Режим кнопки виден словом (какой — выбирает CSS по data-theme)."""
+    modes = [("system", "как в системе"), ("light", "светлая"), ("dark", "тёмная")]
+    assert theme_modes(browser().get("/login").text) == modes
+    assert theme_modes(ivan.get("/chats").text) == modes
+    css = (WEB / "static" / "app.css").read_text(encoding="utf-8")
+    assert ':root:not([data-theme]) .theme .m-system' in css
+
+
+def test_browser_storage_keeps_only_the_theme_and_the_tab():
+    """Хранилища браузера — только оформление и выбор вкладки (раздел 6 спецификации вида): ни текстов форм, ни данных
+    чатов. Запись — только по этим двум ключам."""
+    script = (WEB / "static" / "app.js").read_text(encoding="utf-8")
+    keys = re.findall(r"(?:local|session)Storage\.setItem\(([^,]+),", script)
+    assert sorted(set(keys)) == ['"cleaner-theme"', "key"] and 'const key = `tab:${window.location.pathname}`' in script
+
+
 def test_every_icon_used_in_the_templates_is_in_the_sprite(browser):
     sprite = browser().get("/static/icons.svg")
     assert sprite.headers["content-type"].startswith("image/svg+xml")
@@ -95,6 +118,13 @@ def test_a_cut_chat_title_is_whole_in_its_tooltip(ivan, repo):
     assert f'<span class="name" title="{LONG_TITLE}">{LONG_TITLE}</span>' in page
     for path in (f"/chats/{chat_id}/items/{item_id}", f"/chats/{chat_id}/entities", f"/chats/{chat_id}/send"):
         assert f'<a href="/chats/{chat_id}" title="{LONG_TITLE}">{LONG_TITLE}</a>' in ivan.get(path).text, path
+
+
+def test_chat_composer_tab_is_remembered(ivan):
+    """Аудит 21.10.2026: перезагрузка по концу задания возвращала редактор на «Текст», даже если писали ответ вручную."""
+    page = ivan.get(f"/chats/{ivan.chat()}").text
+    assert re.search(r'<div class="tabs" data-tabs data-tabs-remember>\s*<div class="tab-list" role="tablist">\s*'
+                     r'<button type="button" role="tab" data-tab="text"', page)
 
 
 def test_layer_switch_states_its_layer_and_state(ivan):
