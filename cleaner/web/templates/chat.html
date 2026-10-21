@@ -23,7 +23,7 @@
         {% include "_csrf.html" %}
         <input type="hidden" name="layer" value="{{ name }}">
         <input type="hidden" name="enabled" value="{{ 'no' if layers[name] else 'yes' }}">
-        <button class="toggle" aria-pressed="{{ 'true' if layers[name] else 'false' }}" title="{{ label }}: {% if layers[name] %}включён{% else %}выключен{% endif %}"><span class="switch"></span>{{ label.split(" — ")[0] }}</button>
+        <button class="toggle" aria-pressed="{{ 'true' if layers[name] else 'false' }}" title="{{ label }}: {% if layers[name] %}включён{% else %}выключен{% endif %}"><span class="switch"></span>{{ layer_labels[name] }}</button>
       </form>
       {% endfor %}
     </div>
@@ -162,6 +162,9 @@
         <button type="button" role="tab" data-tab="instruction" aria-selected="false">Инструкция</button>
         <button type="button" role="tab" data-tab="answer" aria-selected="false">Ответ вручную</button>
       </div>
+      {# Свёрнутый редактор — одна строка вкладок (меню «Вид»); вкладка или эта кнопка разворачивают его. Кнопка — вне
+         tablist (там только вкладки), на строку вкладок её ставит app.css. #}
+      <button type="button" class="tab-fold" data-view-fold="composer-folded" aria-expanded="true" title="Свернуть редактор до строки вкладок или развернуть его"><span class="when-open">Свернуть</span><span class="when-folded">Развернуть</span></button>
       <div class="tab-panel on" role="tabpanel" data-tab-panel="text">
         <form method="post" action="/chats/{{ chat.id }}/input" class="compose">
           {% include "_csrf.html" %}

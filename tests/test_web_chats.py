@@ -161,6 +161,7 @@ def test_layer_is_switched_off_for_a_chat_shown_on_the_review_and_logged(ivan, r
     ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
     item_id = repo.items(chat_id)[0].id
     page = flat(ivan.get(f"/chats/{chat_id}/items/{item_id}").text)
-    assert "Слой 4 — модели распознавания имён для этого текста не выполнялся" in page
+    assert ("Переключатель «Имена и организации» (слой 4 — модели распознавания имён) был выключен: для этого текста "
+            "слой не выполнялся") in page
     assert [e.details for e in repo.audit_events("layer_changed")] == [{"layer": "ner", "enabled": False}]
     assert ivan.post(f"/chats/{chat_id}/layers", layer="rules", enabled="no").status_code == 400

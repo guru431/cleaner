@@ -2,7 +2,7 @@
 {% block title %}Локальная модель — Cleaner{% endblock %}
 {% block content %}
 <h1>Локальная модель</h1>
-<p class="lead">Через шлюз сервера идут слой 5, проверка остаточного риска и распознавание сканов. Адрес — только петлевой, частной сети или из списка доверенных.</p>
+<p class="lead">Через шлюз сервера идут допроверка локальной моделью (слой 5), проверка остаточного риска и распознавание сканов. Адрес — только петлевой, частной сети или из списка доверенных.</p>
 {% if result %}<p class="flash {{ 'bad' if failed else 'good' }}">{{ result }}</p>{% endif %}
 <section class="panel">
   <header class="panel-head">
@@ -32,7 +32,7 @@
       </span></label>
       <div class="buttons">
         <button class="primary">Сохранить</button>
-        <button form="local-check">Проверить сохранённую настройку</button>
+        <button form="local-check" title="Короткий запрос к локальной модели по сохранённой настройке, без данных пользователя">Проверить соединение</button>
       </div>
     </form>
     <form method="post" action="/settings/local-llm/check" id="local-check" hidden>{% include "_csrf.html" %}</form>
@@ -43,8 +43,9 @@
   <div class="panel-body">
     <form method="post" action="/settings/layers" class="form">
       {% include "_csrf.html" %}
-      <label class="check"><input type="checkbox" name="ner" value="yes"{% if defaults.ner %} checked{% endif %}> Слой 4 — модели распознавания имён</label>
-      <label class="check"><input type="checkbox" name="llm" value="yes"{% if defaults.llm %} checked{% endif %}> Слой 5 — локальная модель</label>
+      {% for name, label in layer_labels.items() %}
+      <label class="check"><input type="checkbox" name="{{ name }}" value="yes"{% if defaults[name] %} checked{% endif %}> {{ label }} <span class="hint">{{ layer_names[name][0] | lower }}{{ layer_names[name][1:] }}</span></label>
+      {% endfor %}
       <div><button class="primary">Сохранить умолчания</button></div>
     </form>
   </div>

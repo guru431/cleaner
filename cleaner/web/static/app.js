@@ -166,6 +166,35 @@ document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
   });
 });
 
+// Вид рабочего места (меню «Вид» в шапке, кнопки свёртки списка чатов и редактора): отметка — класс view-{имя} на
+// <html>, все отметки — именами через пробел в localStorage["cleaner-view"] (только оформление; theme.js ставит их до
+// отрисовки). Состояние кнопок — по классам: aria-pressed у переключателей меню, aria-expanded у кнопок свёртки.
+function syncView() {
+  document.querySelectorAll("[data-view-toggle]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(root.classList.contains(`view-${button.dataset.viewToggle}`)));
+  });
+  document.querySelectorAll("[data-view-fold]").forEach((button) => {
+    button.setAttribute("aria-expanded", String(!root.classList.contains(`view-${button.dataset.viewFold}`)));
+  });
+}
+function setView(name, on) {
+  root.classList.toggle(`view-${name}`, on);
+  syncView();
+  const marks = [...root.classList].filter((cls) => cls.startsWith("view-")).map((cls) => cls.slice(5));
+  try {
+    if (marks.length) localStorage.setItem("cleaner-view", marks.join(" "));
+    else localStorage.removeItem("cleaner-view");
+  } catch (error) { /* выбор — до перезагрузки */ }
+}
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-view-toggle], [data-view-fold]");
+  const name = button && (button.dataset.viewToggle || button.dataset.viewFold);
+  if (name) { setView(name, !root.classList.contains(`view-${name}`)); return; }
+  // Вкладка свёрнутого редактора разворачивает его: свёрнутым он показывает только их строку.
+  if (event.target.closest(".composer [data-tab]") && root.classList.contains("view-composer-folded")) setView("composer-folded", false);
+});
+syncView();
+
 // Вкладки: кнопки [data-tab], панели [data-tab-panel]; без JS видны все панели. data-tabs-remember — выбор
 // этой страницы в sessionStorage. Клавиатура — по образцу WAI-ARIA Tabs (аудит 21.10.2026): в ряду вкладок одна остановка
 // Tab — выбранная (roving tabindex), ←/→ — соседняя по кругу, Home/End — первая и последняя; вкладка и её панель

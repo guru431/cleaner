@@ -10,7 +10,7 @@
 <script src="/static/app.js" defer></script>
 </head>
 <body>
-{% from "_ui.html" import theme_toggle %}
+{% from "_ui.html" import theme_toggle, view_menu %}
 {% if viewer %}
 {% set section = "settings" if request.url.path.startswith("/settings") else "chats" %}
 <header class="top">
@@ -20,6 +20,7 @@
     {% if viewer.is_admin %}<a href="/settings"{% if section == "settings" %} class="on" aria-current="true"{% endif %}>Настройки</a>{% endif %}
   </nav>
   <span class="who">{{ viewer.user.login }}</span>
+  {{ view_menu() }}
   {{ theme_toggle() }}
   <form method="post" action="/logout">{% include "_csrf.html" %}<button>Выйти</button></form>
 </header>

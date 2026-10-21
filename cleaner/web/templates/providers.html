@@ -50,7 +50,7 @@
         <form method="post" action="/settings/providers/{{ p.id }}/check">
           {% include "_csrf.html" %}
           <select name="model" aria-label="Модель">{% for m in p.models %}<option>{{ m }}</option>{% endfor %}</select>
-          <button>Проверить</button>
+          <button title="Короткий запрос к выбранной модели, без данных пользователя">Проверить соединение</button>
         </form>
         <details class="inline" name="edit">
           <summary class="btn">Изменить</summary>
