@@ -15,7 +15,7 @@ from typing import Any
 from cleaner.core import leakcheck, risk
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.llm import CompletionError
-from cleaner.core.entities import hostmap, labels, ops
+from cleaner.core.entities import hostmap, labels, ops, resolve
 from cleaner.core.leakcheck import Leak
 from cleaner.core.match import normalize
 from cleaner.core.pipeline import (
@@ -143,15 +143,16 @@ def _stricter(settings: Settings, found: EntityType, wanted: EntityType) -> bool
 _DOTTED_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
 
 
-def _name_parts(value: str, added: dict[str, EntityType]) -> list[tuple[str, EntityType]]:
-    """Новые правила на целой части имени с точками (часть или хвост из двух частей и больше — домен) и их типы. Имя
-    длиннее имени DNS целиком не записывается (resolve) — его хвосты не перебираются."""
+def _name_parts(value: str, added: dict[str, EntityType]) -> list[tuple[str, EntityType, EntityType]]:
+    """Новые правила на целой части имени с точками, свой тип части и тип правила. Части — те же, что подменяет
+    resolve._name: слева от домена (HOST) и сам регистрируемый домен (DOMAIN); правило на другом хвосте или на
+    нескольких частях имя поглощает (merge._name_kept). Имя длиннее имени DNS целиком не записывается (resolve)."""
     name = hostmap.dotted(value)
     if len(name) > hostmap.MAX_NAME or not _DOTTED_NAME.fullmatch(name):
         return []
-    parts = name.split(".")
-    candidates = [*parts, *(".".join(parts[i:]) for i in range(1, len(parts) - 1))]
-    return [(part, added[normalize(part)]) for part in candidates if normalize(part) in added]
+    left, registrable = resolve.name_parts(name, False)
+    candidates = [*((part, EntityType.HOST) for part in left), *(((registrable, EntityType.DOMAIN),) if registrable else ())]
+    return [(part, own, added[normalize(part)]) for part, own in candidates if normalize(part) in added]
 
 
 def _labelled(state: ChatState, surrogate: str, type_: EntityType) -> bool:
@@ -1032,12 +1033,20 @@ class ChatService:
                     if wanted is None:
                         # Правило на целой части имени с точками (исключение владельца 15.10.2026): легло, если часть
                         # получила метку его типа; нет — её держит политика HOST или DOMAIN (resolve._manual).
-                        for part, wanted in _name_parts(value, added):
+                        parts = _name_parts(value, added)
+                        for _, own, wanted in parts:
                             if _labelled(state, span.surrogate, wanted):
                                 applied = True
-                            elif _stricter(settings, own := EntityType.DOMAIN if "." in part else EntityType.HOST, wanted):
+                            elif _stricter(settings, own, wanted):
                                 held = own
-                        continue
+                        # Правило внутри фрагмента не на целой части поглощено им (или поглотило его): тип фрагмента —
+                        # записи, если её политика строже (5.7, шаг 4), а задетая правилом часть — с меткой правила.
+                        wanted = None if parts else next((t for v, t in added.items() if v in normalize(value)), None)
+                        if wanted is None:
+                            continue
+                        if _labelled(state, span.surrogate, wanted):
+                            applied = True
+                            continue
                     found = state.entities[span.entity_id].type
                     if found is not wanted and _stricter(settings, found, wanted):
                         held = found
