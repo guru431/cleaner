@@ -545,6 +545,14 @@ def test_secret_keeps_the_block_of_the_record_it_swallows(state, value, record):
     assert not sanitize(state, text, blocked).deliverable
 
 
+@pytest.mark.parametrize("text", ["пароль: Abc+7 916 123-45-67xyz", "пароль: Abc+7 916 123-45-67"])
+def test_phone_that_a_password_runs_into_is_hidden_whole(state, settings, text):
+    """Аудит 2026-10-21: секрет слоя 2 кончался на «+7», а телефон после буквы слой 1 не искал — «<SECRET_1> 916
+    123-45-67xyz», десять цифр номера открыты. Теперь номер найден, и пересечение с секретом — один фрагмент."""
+    result = sanitize(state, text, settings)
+    assert "916" not in result.sanitized and "45-67" not in result.sanitized
+
+
 def test_infrastructure_value_keeps_the_block_of_a_name_found_by_layer_4(state):
     """Та же находка у других старшинств: домен слоя 3 поглощал организацию слоя 4, и ORG=BLOCK терялся."""
     settings = Settings(policies=default_policies() | {T.ORG: Policy.BLOCK})
