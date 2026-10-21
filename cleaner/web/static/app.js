@@ -9,12 +9,9 @@ document.addEventListener("click", (event) => {
     navigator.clipboard.writeText(source.textContent).then(() => { (button.querySelector("span") || button).textContent = "Скопировано"; });
     return;
   }
-  document.querySelectorAll("mark.active").forEach((mark) => mark.classList.remove("active"));
-  const mark = event.target.closest("mark[data-entity]");
-  if (mark) {
-    const selector = `mark[data-entity="${CSS.escape(mark.dataset.entity)}"]`;
-    document.querySelectorAll(selector).forEach((pair) => pair.classList.add("active"));
-  }
+  // Кнопки рабочего места проверки и карточка «Почему скрыто» выбор не снимают (select — ниже).
+  if (event.target.closest("[data-review-tools], #why")) return;
+  select(event.target.closest("mark"));
 });
 
 document.addEventListener("selectionchange", () => {
@@ -142,3 +139,236 @@ document.querySelectorAll("main").forEach((main) => {
   });
   history.replaceState(rest, "");
 })();
+
+// Рабочее место проверки (review.html): выбор замены (щелчок, кнопки, N / P, Enter — пара в соседней панели, Esc —
+// снять выбор), легенда-фильтр, поиск по обеим панелям, синхронная прокрутка, карточка «Почему скрыто», фильтры
+// таблицы фрагментов. Всё — на странице, без запросов; в карточку копируется готовая запись из <template id="why-data">.
+const reviewPanes = ["original", "sanitized"].map((id) => document.getElementById(id)).filter(Boolean);
+const whyBody = document.querySelector("#why [data-why-body]");
+const whyEmpty = whyBody ? [...whyBody.childNodes].map((node) => node.cloneNode(true)) : [];
+let picked = null;                      // выбранная замена: от неё считают N / P и Enter
+let lastPane = reviewPanes[0];
+
+const paneOf = (node) => reviewPanes.find((pane) => pane.contains(node));
+
+// Видимая часть панели: прокручивается сама панель, а не страница.
+function reveal(pane, rect) {
+  const box = pane.getBoundingClientRect();
+  if (rect.top < box.top || rect.bottom > box.bottom) pane.scrollTop += rect.top - box.top - pane.clientHeight / 3;
+}
+
+// Замены панели, по которым ходят N / P: при включённой легенде — только отобранные ею.
+function marksOf(pane) {
+  const marks = [...pane.querySelectorAll("mark")];
+  return pane.classList.contains("only") ? marks.filter((mark) => mark.classList.contains("pick")) : marks;
+}
+
+function showWhy(mark) {
+  if (!whyBody) return;
+  const place = document.querySelector("#why [data-why-place]");
+  const key = mark && (mark.dataset.entity || ["leak", "opened"].find((name) => mark.classList.contains(name)));
+  const entry = key && document.getElementById("why-data").content.querySelector(`[data-why="${CSS.escape(key)}"]`);
+  const pane = mark && paneOf(mark);
+  if (!entry || !pane) {
+    whyBody.replaceChildren(...whyEmpty.map((node) => node.cloneNode(true)));
+    place.textContent = "";
+    return;
+  }
+  whyBody.replaceChildren(entry.cloneNode(true));
+  const marks = [...pane.querySelectorAll("mark")];
+  place.textContent = `${pane.getAttribute("aria-label")}: ${marks.indexOf(mark) + 1} из ${marks.length}`;
+}
+
+// Выбор замены: у сущности подсвечивается пара во всех панелях (FR-6.1); в панелях проверки выбираются и метки без
+// сущности (утечка, открытое значение). focus — для клавиатуры и кнопок: фокус на метке, панель докручивается до неё.
+function select(mark, focus = false) {
+  document.querySelectorAll("mark.active").forEach((active) => active.classList.remove("active"));
+  picked = mark && (mark.dataset.entity || paneOf(mark)) ? mark : null;
+  if (picked && picked.dataset.entity) {
+    document.querySelectorAll(`mark[data-entity="${CSS.escape(picked.dataset.entity)}"]`).forEach((pair) => pair.classList.add("active"));
+  } else if (picked) picked.classList.add("active");
+  showWhy(picked);
+  if (picked && focus) {
+    picked.tabIndex = -1;
+    picked.focus({ preventScroll: true });
+    reveal(paneOf(picked), picked.getBoundingClientRect());
+  }
+}
+
+function step(direction) {
+  const pane = (picked && paneOf(picked)) || lastPane;
+  const marks = pane ? marksOf(pane) : [];
+  if (!marks.length) return;
+  const at = marks.indexOf(picked);
+  let next;
+  if (at >= 0) next = (at + direction + marks.length) % marks.length;
+  else {
+    // Выбранная скрыта легендой (или выбора нет) — ближайшая отобранная по направлению.
+    const after = picked ? marks.findIndex((mark) => picked.compareDocumentPosition(mark) & Node.DOCUMENT_POSITION_FOLLOWING) : -1;
+    next = direction > 0 ? Math.max(after, 0) : (after > 0 ? after : marks.length) - 1;
+  }
+  select(marks[next], true);
+}
+
+// Пара выбранной замены в соседней панели: то же по счёту вхождение той же сущности (порядок замен в панелях общий).
+function pair() {
+  const pane = picked && picked.dataset.entity && paneOf(picked);
+  const other = pane && reviewPanes.find((candidate) => candidate !== pane);
+  if (!other) return;
+  const selector = `mark[data-entity="${CSS.escape(picked.dataset.entity)}"]`;
+  const twins = [...other.querySelectorAll(selector)];
+  if (twins.length) select(twins[Math.min([...pane.querySelectorAll(selector)].indexOf(picked), twins.length - 1)], true);
+}
+
+reviewPanes.forEach((pane) => {
+  pane.addEventListener("focusin", () => { lastPane = pane; });
+  pane.addEventListener("keydown", (event) => {
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    // По коду клавиши: N / P работают и в русской раскладке.
+    if (event.code === "KeyN" || event.code === "KeyP") {
+      event.preventDefault();
+      step(event.code === "KeyN" ? 1 : -1);
+    } else if (event.key === "Enter" && picked && pane.contains(picked)) {
+      event.preventDefault();
+      pair();
+    } else if (event.key === "Escape" && picked) {
+      select(null);
+      pane.focus();
+    }
+  });
+});
+
+document.querySelectorAll("[data-step]").forEach((button) => button.addEventListener("click", () => step(Number(button.dataset.step))));
+
+// Легенда: нажатые кнопки оставляют выделенными только свои метки (тип, блокировка, утечка, открытое); N / P ходят по ним.
+const legendChips = [...document.querySelectorAll("[data-legend]")];
+legendChips.forEach((chip) => chip.addEventListener("click", () => {
+  chip.setAttribute("aria-pressed", String(chip.getAttribute("aria-pressed") !== "true"));
+  const on = legendChips.filter((item) => item.getAttribute("aria-pressed") === "true").map((item) => item.dataset.legend);
+  reviewPanes.forEach((pane) => {
+    pane.classList.toggle("only", on.length > 0);
+    pane.querySelectorAll("mark").forEach((mark) => mark.classList.toggle("pick", on.some((name) => mark.classList.contains(name))));
+  });
+}));
+
+// Синхронная прокрутка — по доле высоты (тексты разной длины). echo — панель, которую прокрутил этот обработчик: её
+// событие обратно не отражается. Включённая — запоминается в этом браузере.
+document.querySelectorAll("[data-sync-scroll]").forEach((button) => {
+  let on = false;
+  let echo = null;
+  try { on = localStorage.getItem("cleaner-sync-scroll") === "1"; } catch (error) { /* выключена */ }
+  button.setAttribute("aria-pressed", String(on));
+  button.addEventListener("click", () => {
+    on = !on;
+    button.setAttribute("aria-pressed", String(on));
+    try { localStorage.setItem("cleaner-sync-scroll", on ? "1" : "0"); } catch (error) { /* до перезагрузки */ }
+  });
+  reviewPanes.forEach((pane) => pane.addEventListener("scroll", () => {
+    if (echo === pane) { echo = null; return; }
+    const other = reviewPanes.find((candidate) => candidate !== pane);
+    if (!on || !other) return;
+    const range = pane.scrollHeight - pane.clientHeight;
+    const target = range > 0 ? (pane.scrollTop / range) * (other.scrollHeight - other.clientHeight) : 0;
+    if (Math.abs(other.scrollTop - target) < 1) return;
+    echo = other;
+    other.scrollTop = target;
+  }, { passive: true }));
+});
+
+// Поиск по обеим панелям: совпадения — CSS Custom Highlight API (разметку текста не трогает), без него — счётчик и
+// переходы. Без учёта регистра, если строчные буквы той же длины. Не больше FIND_LIMIT совпадений — DOM и подсветка
+// ограничены и на длинном тексте.
+const FIND_LIMIT = 1000;
+document.querySelectorAll("#review-find").forEach((field) => {
+  const found = document.getElementById("review-found");
+  const highlights = window.CSS && CSS.highlights;
+  // Текст панели неизменен — текстовые узлы и их начала считаются один раз.
+  const indexes = new Map(reviewPanes.map((pane) => {
+    const walker = document.createTreeWalker(pane, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    const starts = [];
+    let length = 0;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      nodes.push(node);
+      starts.push(length);
+      length += node.data.length;
+    }
+    return [pane, { nodes, starts, text: nodes.map((node) => node.data).join("") }];
+  }));
+  const point = ({ nodes, starts }, offset, end) => {
+    let low = 0;
+    let high = starts.length - 1;
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if (end ? starts[mid] < offset : starts[mid] <= offset) low = mid;
+      else high = mid - 1;
+    }
+    return [nodes[low], offset - starts[low]];
+  };
+  let hits = [];
+  let current = -1;
+  const paint = () => {
+    if (highlights) {
+      highlights.set("review-find", new Highlight(...hits.map((hit) => hit.range)));
+      highlights.set("review-find-current", new Highlight(...(current >= 0 ? [hits[current].range] : [])));
+    }
+    const counts = reviewPanes.map((pane) => `${pane.getAttribute("aria-label").toLowerCase()} ${hits.filter((hit) => hit.pane === pane).length}`);
+    const more = hits.length >= FIND_LIMIT ? " (показаны первые — уточните запрос)" : "";
+    found.textContent = !field.value ? "" : hits.length ? `${current + 1} из ${hits.length}${more} · ${counts.join(", ")}` : "Не найдено";
+    if (current >= 0) reveal(hits[current].pane, hits[current].range.getBoundingClientRect());
+  };
+  let timer = null;
+  let searched = "";                    // запрос, по которому собраны hits
+  const search = () => {
+    clearTimeout(timer);
+    searched = field.value;
+    hits = [];
+    for (const pane of reviewPanes) {
+      const index = indexes.get(pane);
+      if (!field.value || !index.nodes.length) continue;
+      const lower = index.text.toLowerCase();
+      const fold = lower.length === index.text.length;
+      const text = fold ? lower : index.text;
+      const needle = fold ? field.value.toLowerCase() : field.value;
+      for (let at = text.indexOf(needle); at >= 0 && hits.length < FIND_LIMIT; at = text.indexOf(needle, at + needle.length)) {
+        const range = document.createRange();
+        range.setStart(...point(index, at, false));
+        range.setEnd(...point(index, at + needle.length, true));
+        hits.push({ pane, range });
+      }
+    }
+    current = hits.length ? 0 : -1;
+    paint();
+  };
+  // Запрос ещё не искали (Enter или кнопка до конца паузы ввода) — искать и встать на первое, иначе — соседнее.
+  const go = (direction) => {
+    if (field.value !== searched) { search(); return; }
+    if (!hits.length) return;
+    current = (current + direction + hits.length) % hits.length;
+    paint();
+  };
+  field.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 150); });
+  field.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    go(event.shiftKey ? -1 : 1);
+  });
+  document.querySelectorAll("[data-find]").forEach((button) => button.addEventListener("click", () => go(Number(button.dataset.find))));
+});
+
+// Фильтры таблицы по кодам в data-атрибутах строк (тип, кто нашёл); строки только скрываются.
+document.querySelectorAll("[data-filter-table]").forEach((bar) => {
+  const rows = [...document.getElementById(bar.dataset.filterTable).querySelectorAll("tbody tr[data-type]")];
+  const count = bar.querySelector("[data-filter-count]");
+  const apply = () => {
+    const chosen = Object.fromEntries([...bar.querySelectorAll("[data-filter]")].map((control) => [control.dataset.filter, control.value]));
+    let shown = 0;
+    rows.forEach((row) => {
+      row.hidden = Boolean((chosen.type && row.dataset.type !== chosen.type) || (chosen.source && !row.dataset.sources.split(" ").includes(chosen.source)));
+      if (!row.hidden) shown += 1;
+    });
+    count.textContent = chosen.type || chosen.source ? `Показаны ${shown} из ${rows.length}` : "";
+  };
+  bar.addEventListener("change", apply);
+  apply();
+});
