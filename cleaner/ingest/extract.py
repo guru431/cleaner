@@ -430,10 +430,10 @@ def _layer_inside(textpage, boxes: list[_Box]) -> int:
     return inside
 
 
-def _page_kinds(data: bytes) -> list[str]:
-    """scan — в слое текста почти нет знаков, а изображение есть: только распознавание; mixed — слой текста есть, но
-    изображения покрывают заметную долю страницы, а слой их не покрывает (_LAYER_AREA): и слой, и распознавание;
-    text — только слой текста."""
+def _page_kinds(data: bytes) -> list[tuple[str, bool]]:
+    """Вид страницы и есть ли на ней изображения. scan — в слое текста почти нет знаков, а изображение есть: только
+    распознавание; mixed — слой текста есть, но изображения покрывают заметную долю страницы, а слой их не покрывает
+    (_LAYER_AREA): и слой, и распознавание; text — только слой текста."""
     pdf = _open_pdf(data)
     try:
         result = []
@@ -448,11 +448,12 @@ def _page_kinds(data: bytes) -> list[str]:
             # MRC кладёт под слой распознавания два растра на всю страницу (фон и маску букв).
             covered = min(sum((box[2] - box[0]) * (box[3] - box[1]) for box in boxes), max(area, 0))
             if chars < _SCANNED_BELOW:
-                result.append("scan" if found else "text")
+                kind = "scan" if found else "text"
             elif area <= 0 or covered < _IMAGE_SHARE * area:
-                result.append("text")
+                kind = "text"
             else:
-                result.append("text" if _layer_inside(textpage, boxes) * _LAYER_AREA >= covered else "mixed")
+                kind = "text" if _layer_inside(textpage, boxes) * _LAYER_AREA >= covered else "mixed"
+            result.append((kind, bool(found)))
         return result
     finally:
         pdf.close()
@@ -547,7 +548,8 @@ class Extractor:
             return None, True
 
     def _pdf(self, data: bytes, progress: Progress, ocr_all: bool = False) -> Extracted:
-        kinds = _page_kinds(data)
+        found = _page_kinds(data)
+        kinds = [kind for kind, _ in found]
         if ocr_all:
             kinds = ["scan" if kind == "scan" else "mixed" for kind in kinds]
         text_pages = [number for number, kind in enumerate(kinds, 1) if kind != "scan"]
@@ -555,6 +557,8 @@ class Extractor:
         texts = self.documents.pdf_pages(data, text_pages) if text_pages else {}
         unread: list[int] = []
         doubtful: list[int] = []
+        blank: list[int] = []           # распознавание не дало текста: страница не из распознанных
+
         down = False            # недоступно целиком — у остальных страниц со слоем его не ждать (тайм-аут на каждой)
         for done, number in enumerate(ocr_pages):
             progress(done, len(ocr_pages))
@@ -564,7 +568,11 @@ class Extractor:
                 continue
             recognised, down = (None, True) if down else self._over_layer(data, number)
             if recognised is None or not recognised.strip():
-                doubtful.append(number)
+                # Сомнительна только страница с изображением: без него (отметка «на всех страницах») пустой итог —
+                # пустая страница, а отказ оставляет слой, как и без отметки.
+                blank.append(number)
+                if found[number - 1][1]:
+                    doubtful.append(number)
             else:
                 texts[number] = _merge(recognised, texts.get(number, ""))
         if ocr_pages:
@@ -572,5 +580,5 @@ class Extractor:
         pages = [texts.get(number, "").strip() for number in range(1, len(kinds) + 1)]
         return Extracted(
             "\n\n".join(page for page in pages if page), "pdf", len(kinds),
-            tuple(number for number in ocr_pages if number not in doubtful), tuple(unread), doubtful_pages=tuple(doubtful),
+            tuple(number for number in ocr_pages if number not in blank), tuple(unread), doubtful_pages=tuple(doubtful),
         )

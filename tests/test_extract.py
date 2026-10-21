@@ -231,6 +231,30 @@ def test_user_can_ask_to_recognise_every_page():
     assert result.ocr_pages == (1, 2)
 
 
+@pytest.mark.parametrize("empty", ["", CompletionError("ocr_empty", "на странице не распознано ни одного знака")])
+def test_blank_page_recognised_on_request_is_not_doubtful(empty):
+    """Ревью 2026-10-21: при отметке «на всех страницах» пустой разделитель (ни слоя текста, ни изображений) с пустым
+    итогом распознавания становился «сомнительным»: «изображение занимает большую часть страницы» — а изображения нет.
+    Это пустая страница; распознаётся она всё равно — текст, переведённый в кривые, изображением не является."""
+    class Blank(Ocr):
+        def __call__(self, image, mime):
+            self.calls.append(mime)
+            if len(self.calls) == 2:
+                if isinstance(empty, Exception):
+                    raise empty
+                return empty
+            return "Balance"
+
+    ocr = Blank()
+    result = Extractor(LayerDocuments(), ocr).extract("report.pdf", make_pdf([TEXT_PAGE, "", (HEADER, 600)]), ocr_all=True)
+    assert len(ocr.calls) == 3
+    assert (result.ocr_pages, result.unread_pages, result.doubtful_pages) == ((1, 3), (), ())
+    # Страница с изображением и пустым итогом по-прежнему сомнительна.
+    ocr = Blank()
+    result = Extractor(LayerDocuments(), ocr).extract("report.pdf", make_pdf([TEXT_PAGE, (HEADER, 600)]), ocr_all=True)
+    assert (result.ocr_pages, result.doubtful_pages) == ((1,), (2,))
+
+
 def test_pictures_of_office_files_are_counted():
     """Идея аудита 2026-10-21: рисунки DOCX, XLSX и PPTX Docling не распознаёт — их число идёт в предупреждение."""
     extract = Extractor(Documents(), Ocr()).extract
