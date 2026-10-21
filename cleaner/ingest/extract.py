@@ -14,11 +14,18 @@ from pathlib import PurePath
 from typing import Protocol
 from xml.parsers import expat
 
+from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.llm import CompletionError
 from cleaner.ingest import textfiles
 
 OCR_DPI = 200                       # страница A4 — около 1650×2340 точек, в пределах ocr-ru
 _SCANNED_BELOW = 20                 # меньше стольких знаков в слое текста — страница считается сканом
+# Изображения покрывают не меньше этой доли страницы — на них может быть основное содержимое: скан с цифровым
+# заголовком, частичный слой распознавания сканера. Такая страница распознаётся и при слое текста. Логотип, подпись,
+# печать и фото в тексте занимают заметно меньше; лишнее распознавание дороже по времени, но не теряет текст.
+_IMAGE_SHARE = 0.3
+_WORDS = re.compile(r"\w+")
+_OCR_DOWN = frozenset({"unavailable", "auth"})   # распознавание недоступно целиком, а не отказало на одной странице
 _OCR_LIMIT = 20 * 1024 * 1024       # предел ocr-ru на одно изображение
 _OCR_SIDE = 12_000                  # предел ocr-ru по стороне изображения, точек
 _OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"      # контейнер OLE: MSG, старый Office и зашифрованный OOXML
@@ -55,6 +62,8 @@ _TEXT_PATHS = {
     "pptx": ("sld", re.compile(r"sld/cSld/spTree(/grpSp)*/sp/txBody/p/(r|fld)/t")),
 }
 _SLIDE_CHROME = frozenset({"ftr", "dt", "sldNum"})     # колонтитул, дата и номер слайда Docling кладёт в FURNITURE
+# Рисунки в каталогах media пакета Office: Docling их не распознаёт (do_ocr=False, заглушки картинок не выводятся).
+_PICTURES = frozenset({"png", "jpg", "jpeg", "jfif", "gif", "bmp", "tif", "tiff", "webp", "emf", "wmf"})
 
 
 class ExtractError(Exception):
@@ -69,6 +78,8 @@ class Extracted:
     ocr_pages: tuple[int, ...] = ()        # страницы, текст которых получен распознаванием (FR-2.5)
     unread_pages: tuple[int, ...] = ()     # на них распознавание не нашло ни одного знака
     hidden_sheets: int = 0                 # скрытые листы книги: Docling кладёт их в невидимый слой, их текста нет
+    doubtful_pages: tuple[int, ...] = ()   # крупное изображение не распознано: взят только слой текста страницы
+    images: int = 0                        # встроенные изображения DOCX, XLSX и PPTX: их текст не распознаётся
 
 
 class Documents(Protocol):
@@ -307,19 +318,23 @@ def _is_markup(package: zipfile.ZipFile, part: zipfile.ZipInfo) -> bool:
     return head.replace(b"\x00", b"").lstrip(b"\xef\xbb\xbf\xff\xfe \t\r\n").startswith(b"<")
 
 
-def _check_package(data: bytes, kind: str, max_chars: int) -> int:
+def _check_package(data: bytes, kind: str, max_chars: int) -> tuple[int, int]:
     """Отказ до Docling, когда разбор не уместится в память службы (MemoryMax) или его текст всё равно будет
     отклонён: ZIP-бомба, слишком много XML, таблица с заведомо длинным текстом или огромной областью листов,
     документ или презентация с заведомо длинным текстом.
     ZIP, который не читается, остаётся Docling: он откажет с причиной «повреждён». Ответ — число скрытых
-    листов книги (у DOCX и PPTX — 0)."""
+    листов книги (у DOCX и PPTX — 0) и число рисунков пакета, текст которых не распознаётся."""
     cells = _Cells(max_chars)
     try:
         package = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
-        return 0
+        return 0, 0
     with package:
         parts = package.infolist()
+        images = sum(
+            1 for part in parts
+            if "/media/" in f"/{part.filename}" and PurePath(part.filename).suffix.lower().lstrip(".") in _PICTURES
+        )
         # Размеры — из каталога, без распаковки: больше заявленного zipfile не отдаст ни Docling, ни openpyxl (CRC).
         if sum(part.file_size for part in parts) > _UNPACKED:
             raise ExtractError(f"Документ слишком большой для разбора: без сжатия больше {_UNPACKED // 2**20} МБ")
@@ -348,7 +363,7 @@ def _check_package(data: bytes, kind: str, max_chars: int) -> int:
                     raise ExtractError(
                         f"Документ слишком большой: его текст заведомо длиннее {max_chars} знаков. Разделите его на части"
                     )
-    return cells.hidden
+    return cells.hidden, images
 
 
 def _open_pdf(data: bytes):
@@ -363,21 +378,61 @@ def _open_pdf(data: bytes):
         raise ExtractError("PDF повреждён или не разбирается") from None
 
 
-def _scanned_pages(data: bytes) -> list[bool]:
-    """Страница — скан, если в её слое текста почти нет знаков, а изображение есть."""
+def _images(page) -> tuple[bool, float]:
+    """Есть ли на странице изображения и какую долю её площади (CropBox) они покрывают. Границы объекта внутри
+    Form XObject pdfium даёт в координатах формы — они переводятся в координаты страницы матрицами форм-родителей.
+    Перекрытия не вычитаются: доля — оценка сверху, лишнее распознавание дешевле пропущенного скана."""
+    import pypdfium2 as pdfium
     import pypdfium2.raw as pdfium_c
 
+    left, bottom, right, top = page.get_cropbox()
+    found, covered = False, 0.0
+    for image in page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE], max_depth=2):
+        found = True
+        try:
+            box = image.get_bounds()
+        except pdfium.PdfiumError:
+            continue
+        form = image.container
+        while form is not None:
+            box = form.get_matrix().on_rect(*box)
+            form = form.container
+        width, height = min(box[2], right) - max(box[0], left), min(box[3], top) - max(box[1], bottom)
+        covered += max(width, 0) * max(height, 0)
+    area = (right - left) * (top - bottom)
+    return found, covered / area if area > 0 else 0.0
+
+
+def _page_kinds(data: bytes) -> list[str]:
+    """scan — в слое текста почти нет знаков, а изображение есть: только распознавание; mixed — слой текста есть, но
+    изображения покрывают заметную долю страницы: и слой, и распознавание; text — только слой текста."""
     pdf = _open_pdf(data)
     try:
         result = []
         for index in range(len(pdf)):
             page = pdf[index]
-            text = page.get_textpage().get_text_range()
-            has_image = any(True for _ in page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE], max_depth=2))
-            result.append(len("".join(text.split())) < _SCANNED_BELOW and has_image)
+            chars = len("".join(page.get_textpage().get_text_range().split()))
+            found, share = _images(page)
+            if chars < _SCANNED_BELOW:
+                result.append("scan" if found else "text")
+            else:
+                result.append("mixed" if share >= _IMAGE_SHARE else "text")
         return result
     finally:
         pdf.close()
+
+
+def _key(text: str) -> str:
+    return "".join(_WORDS.findall(text.casefold()))
+
+
+def _merge(recognised: str, layer: str) -> str:
+    """Распознанный текст страницы и строки слоя, которых в нём нет. Распознавание видит всю страницу, слой — только
+    цифровой текст: строка слоя, уже найденная распознаванием (буквы и цифры без регистра — разметка Markdown и
+    пробелы не мешают), не повторяется; остальные идут после распознанного — ошибка распознавания не стоит знаков слоя."""
+    seen = _key(recognised)
+    extra = [line for line in layer.splitlines() if (key := _key(line)) and key not in seen]
+    return "\n\n".join(part for part in (recognised.strip(), "\n".join(extra).strip()) if part)
 
 
 def _scale(width: float, height: float) -> float:
@@ -405,10 +460,13 @@ class Extractor:
         self.ocr = ocr
         self.max_chars = max_chars          # предел текста элемента (max_text_chars): длиннее служба не очистит
 
-    def extract(self, filename: str, data: bytes, progress: Progress = lambda done, total: None) -> Extracted:
+    def extract(
+        self, filename: str, data: bytes, progress: Progress = lambda done, total: None, ocr_all: bool = False,
+    ) -> Extracted:
+        """ocr_all — распознать каждую страницу PDF, и со слоем текста тоже (выбор пользователя при загрузке)."""
         kind = detect_kind(filename, data)
         if kind == "pdf":
-            result = self._pdf(data, progress)
+            result = self._pdf(data, progress, ocr_all)
         elif kind == "image":
             result = self._image(data, progress)
         elif kind == "text":
@@ -417,8 +475,8 @@ class Extractor:
             except textfiles.NotText as exc:
                 raise ExtractError(f"Формат файла не поддерживается: {exc}") from None
         else:
-            hidden = _check_package(data, kind, self.max_chars) if kind in _OFFICE else 0
-            result = Extracted(self.documents.convert(data, kind), kind, hidden_sheets=hidden)
+            hidden, images = _check_package(data, kind, self.max_chars) if kind in _OFFICE else (0, 0)
+            result = Extracted(self.documents.convert(data, kind), kind, hidden_sheets=hidden, images=images)
         if not result.text.strip():
             raise ExtractError("В файле не найден текст" + (_HIDDEN_ONLY if result.hidden_sheets else ""))
         return result
@@ -439,20 +497,44 @@ class Extractor:
         progress(1, 1)
         return Extracted(text, "image", 1, (1,), unread)
 
-    def _pdf(self, data: bytes, progress: Progress) -> Extracted:
-        scanned = _scanned_pages(data)
-        text_pages = [number for number, scan in enumerate(scanned, 1) if not scan]
-        ocr_pages = [number for number, scan in enumerate(scanned, 1) if scan]
+    def _over_layer(self, data: bytes, number: int) -> tuple[str | None, bool]:
+        """Распознавание страницы, у которой есть и слой текста. Отказ не прерывает разбор: слой остаётся, страница —
+        сомнительной полноты. Ответ — текст (None — не распознано) и признак, что распознавание недоступно целиком."""
+        image = _render(data, number)
+        if len(image) > _OCR_LIMIT:
+            return None, False
+        try:
+            return self.ocr(image, "image/png"), False
+        except CompletionError as exc:
+            return None, exc.code in _OCR_DOWN
+        except DetectorError:           # ключ шлюза не задан или адрес отклонён (engines.client)
+            return None, True
+
+    def _pdf(self, data: bytes, progress: Progress, ocr_all: bool = False) -> Extracted:
+        kinds = _page_kinds(data)
+        if ocr_all:
+            kinds = ["scan" if kind == "scan" else "mixed" for kind in kinds]
+        text_pages = [number for number, kind in enumerate(kinds, 1) if kind != "scan"]
+        ocr_pages = [number for number, kind in enumerate(kinds, 1) if kind != "text"]
         texts = self.documents.pdf_pages(data, text_pages) if text_pages else {}
         unread: list[int] = []
+        doubtful: list[int] = []
+        down = False            # недоступно целиком — у остальных страниц со слоем его не ждать (тайм-аут на каждой)
         for done, number in enumerate(ocr_pages):
             progress(done, len(ocr_pages))
-            text, missed = self._page(_render(data, number), "image/png", number)
-            texts[number] = text
-            unread += missed
+            if kinds[number - 1] == "scan":
+                texts[number], missed = self._page(_render(data, number), "image/png", number)
+                unread += missed
+                continue
+            recognised, down = (None, True) if down else self._over_layer(data, number)
+            if recognised is None or not recognised.strip():
+                doubtful.append(number)
+            else:
+                texts[number] = _merge(recognised, texts.get(number, ""))
         if ocr_pages:
             progress(len(ocr_pages), len(ocr_pages))
-        pages = [texts.get(number, "").strip() for number in range(1, len(scanned) + 1)]
+        pages = [texts.get(number, "").strip() for number in range(1, len(kinds) + 1)]
         return Extracted(
-            "\n\n".join(page for page in pages if page), "pdf", len(scanned), tuple(ocr_pages), tuple(unread),
+            "\n\n".join(page for page in pages if page), "pdf", len(kinds),
+            tuple(number for number in ocr_pages if number not in doubtful), tuple(unread), doubtful_pages=tuple(doubtful),
         )

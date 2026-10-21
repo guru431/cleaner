@@ -14,7 +14,7 @@ from cleaner.service import ChatService, EditRefused
 from cleaner.storage.repo import Item
 from cleaner.web import render
 from cleaner.web.deps import Viewer, get_admin, get_form, get_viewer, own_chat, page, repo_of, service_of
-from cleaner.web.routes_chats import LAYER_NAMES, can_retry, input_view
+from cleaner.web.routes_chats import LAYER_NAMES, OCR_ALL, can_retry, input_view
 from cleaner.web.routes_settings import DUPLICATE
 
 router = APIRouter()
@@ -39,11 +39,37 @@ def _back(chat_id: str, form: dict[str, str]) -> str:
 
 
 def _pages(numbers: list[int]) -> str:
-    return ", ".join(str(number) for number in numbers)
+    """«1–4, 7, 9»: у PDF на сотни страниц список номеров подряд иначе занял бы экран."""
+    runs: list[list[int]] = []
+    for number in numbers:
+        if runs and number == runs[-1][-1] + 1:
+            runs[-1].append(number)
+        else:
+            runs.append([number])
+    return ", ".join(f"{run[0]}–{run[-1]}" if len(run) > 2 else ", ".join(map(str, run)) for run in runs)
+
+
+def _extraction(item: Item) -> str:
+    """Как получен текст PDF по страницам. Файл не хранится (FR-2.7): перераспознать страницу можно, только
+    загрузив файл ещё раз — с отметкой распознавания всех страниц."""
+    meta = item.meta
+    if meta.get("kind") != "pdf" or not meta.get("pages"):
+        return ""
+    ocr = set(meta.get("ocr_pages", []))
+    layer = [number for number in range(1, meta["pages"] + 1) if number not in ocr]
+    parts = [f"распознаванием — {_pages(sorted(ocr))}"] if ocr else []
+    if layer:
+        parts.append(f"из слоя текста файла — {_pages(layer)}")
+    text = f"PDF, страниц — {meta['pages']}: {'; '.join(parts)}."
+    if layer and not meta.get("ocr_all"):
+        text += (" Если в оригинале не хватает текста с картинок или слой текста нечитаем — загрузите файл ещё раз "
+                 f"с отметкой «{OCR_ALL}».")
+    return text
 
 
 def _warnings(item: Item) -> list[str]:
-    """Предупреждения экрана проверки о происхождении текста и о слоях (FR-2.5, FR-6.7)."""
+    """Предупреждения экрана проверки о происхождении текста и о слоях (FR-2.5, FR-6.7). «Извлечено частично» —
+    содержимое файла, которое не попало в текст или могло не попасть."""
     warnings = []
     if item.meta.get("ocr_pages"):
         warnings.append(
@@ -52,13 +78,24 @@ def _warnings(item: Item) -> list[str]:
         )
     if item.meta.get("unread_pages"):
         warnings.append(
-            f"На страницах {_pages(item.meta['unread_pages'])} распознавание не нашло текста: "
+            f"Извлечено частично. На страницах {_pages(item.meta['unread_pages'])} распознавание не нашло текста: "
             "их содержимое в очищенный текст не попало."
+        )
+    if item.meta.get("doubtful_pages"):
+        warnings.append(
+            f"Извлечено частично. На страницах {_pages(item.meta['doubtful_pages'])} изображение занимает большую часть "
+            "страницы, но распознать его не удалось: взят только слой текста, содержимое изображения могло не попасть "
+            "в очищенный текст. Загрузите файл ещё раз, когда распознавание будет доступно, или сверьте эти страницы с файлом."
         )
     if item.meta.get("hidden_sheets"):          # только число: имена листов — данные пользователя, а meta не шифруется
         warnings.append(
-            f"Скрытые листы книги ({item.meta['hidden_sheets']}) не извлечены: их содержимое в очищенный текст "
-            "не попало. Если оно нужно — покажите листы в Excel и загрузите файл снова."
+            f"Извлечено частично. Скрытые листы книги ({item.meta['hidden_sheets']}) не извлечены: их содержимое в "
+            "очищенный текст не попало. Если оно нужно — покажите листы в Excel и загрузите файл снова."
+        )
+    if item.meta.get("images"):
+        warnings.append(
+            f"Встроенных изображений в документе — {item.meta['images']}: текст на них не распознаётся и в очищенный "
+            f"текст не попал. Если на них есть нужный текст — сохраните документ как PDF и загрузите его с отметкой «{OCR_ALL}»."
         )
     ran = item.meta.get("layers")
     if ran is None:             # текст очищен до появления слоёв 4 и 5 (этап 1): выключенными они не были (m-12)
@@ -112,7 +149,7 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
         summary=render.summary(item, state), fragments=fragments,
         notices=[(_NOTICES.get(code, code), count) for code, count in notices.items()],
         exposed=[", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],
-        types=render.TYPE_NAMES, pending=False, retry=can_retry(item), warnings=_warnings(item),
+        types=render.TYPE_NAMES, pending=False, retry=can_retry(item), warnings=_warnings(item), extraction=_extraction(item),
         risk=repo_of(request).item_risk(chat_id, item_id) if item.risk_status == "done" else None, risk_kinds=KINDS,
     )
 

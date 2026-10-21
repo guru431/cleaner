@@ -32,6 +32,7 @@
     <span class="badge good">{{ icon("check") }}оригиналов в очищенном тексте нет</span>
     {% endif %}
   </div>
+  {% if extraction %}<p class="muted">{{ extraction }}</p>{% endif %}
   {% for text in warnings %}<p class="flash warn">{{ text }}</p>{% endfor %}
   {% for text, count in notices %}<p class="flash warn">{{ text }} ({{ count }})</p>{% endfor %}
   {% if exposed %}

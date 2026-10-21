@@ -99,6 +99,7 @@ _UPLOAD_OVERHEAD = 64 * 1024        # поля формы и заголовки 
 class Upload:
     filename: str        # только для расширения: нигде не сохраняется
     data: bytes
+    ocr_all: bool = False       # отметка «Распознать текст на всех страницах PDF»
 
 
 async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)) -> Upload:
@@ -117,7 +118,7 @@ async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)) -> 
     await upload.close()
     if len(data) > limit:
         raise HTTPException(413, too_large)
-    return Upload(upload.filename, data)
+    return Upload(upload.filename, data, form.get("ocr") == "all")
 
 
 def page(request: Request, name: str, viewer: Viewer | None, status_code: int = 200, **context: object) -> HTMLResponse:

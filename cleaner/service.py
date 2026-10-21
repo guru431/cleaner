@@ -301,13 +301,16 @@ class ChatService:
         self.submit(self.process, chat_id, item.id, user_id)
         return self.repo.item(chat_id, item.id) or item
 
-    def add_file(self, chat_id: str, user_id: str, filename: str, data: bytes) -> Item:
-        """Файл — в очередь. Его байты живут только в памяти задания; имя нужно лишь для расширения (FR-2.7)."""
+    def add_file(self, chat_id: str, user_id: str, filename: str, data: bytes, ocr_all: bool = False) -> Item:
+        """Файл — в очередь. Его байты живут только в памяти задания; имя нужно лишь для расширения (FR-2.7).
+        ocr_all — распознать каждую страницу PDF: выбор пользователя, когда слой текста неполон или нечитаем."""
         item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="queued"))
-        self.file_submit(self.process, chat_id, item.id, user_id, data, filename)
+        self.file_submit(self.process, chat_id, item.id, user_id, data, filename, ocr_all)
         return self.repo.item(chat_id, item.id) or item
 
-    def process(self, chat_id: str, item_id: str, user_id: str, data: bytes | None = None, filename: str = "") -> None:
+    def process(
+        self, chat_id: str, item_id: str, user_id: str, data: bytes | None = None, filename: str = "", ocr_all: bool = False,
+    ) -> None:
         """Задание: извлечь текст файла, очистить всеми включёнными слоями, записать. Отказ — элемент failed."""
         try:
             item = self.repo.item(chat_id, item_id)
@@ -315,7 +318,7 @@ class ChatService:
                 return                                  # чат удалили, пока задание ждало очереди
             self.repo.set_item_status(chat_id, item_id, "running")
             if data is not None:
-                item = self._extract(chat_id, item, data, filename)
+                item = self._extract(chat_id, item, data, filename, ocr_all)
             self._check_length(item.original)
             layers, ran = self._live_layers(chat_id)
             report = self._sanitize_item(chat_id, item, layers, ran)
@@ -330,7 +333,7 @@ class ChatService:
         if report["leaks"]:
             self.repo.audit("leak", user_id, chat_id, count=report["leaks"])
 
-    def _extract(self, chat_id: str, item: Item, data: bytes, filename: str) -> Item:
+    def _extract(self, chat_id: str, item: Item, data: bytes, filename: str, ocr_all: bool = False) -> Item:
         """Текст из файла записывается сразу: если очистка не удастся, его можно очистить заново без файла."""
         from cleaner.ingest.extract import ExtractError, detect_kind
 
@@ -340,6 +343,7 @@ class ChatService:
             self._check_length(" " * (self.max_text_chars + 1))    # знак UTF-8 — не больше 4 байт: заведомо длиннее
         extracted = self.engines.extractor().extract(
             filename, data, lambda done, total: self.repo.set_item_progress(chat_id, item.id, f"{done}/{total}"),
+            ocr_all=ocr_all,
         )
         # До записи: текст, который всё равно не очистить, не хранится, и повторить нечего (файл не хранится).
         self._check_length(extracted.text)
@@ -352,6 +356,12 @@ class ChatService:
             meta["unread_pages"] = list(extracted.unread_pages)
         if extracted.hidden_sheets:
             meta["hidden_sheets"] = extracted.hidden_sheets      # только число: имена листов — данные пользователя
+        if extracted.doubtful_pages:
+            meta["doubtful_pages"] = list(extracted.doubtful_pages)
+        if extracted.images:
+            meta["images"] = extracted.images
+        if ocr_all:
+            meta["ocr_all"] = True
         self.repo.set_item_original(chat_id, item.id, extracted.text, meta)
         return replace(item, original=extracted.text, meta=meta)
 
