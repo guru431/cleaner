@@ -1,9 +1,12 @@
+import contextlib
 import ipaddress
 import re
+import shutil
 import socket
 from concurrent.futures import Executor, Future
 from datetime import datetime, timedelta, timezone
 
+import anyio.from_thread
 import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
@@ -216,10 +219,24 @@ def clock() -> FakeClock:
     return FakeClock()
 
 
-@pytest.fixture
-def repo(tmp_path, clock):
-    conn = db.connect(tmp_path / "cleaner.db")
+@pytest.fixture(scope="session")
+def migrated(tmp_path_factory):
+    """База со схемой и всеми миграциями — один раз на прогон: схема и миграции, каждая своей транзакцией с записью
+    на диск, стоили каждому тесту с базой около 35 мс из 60 (замер 21.10.2026). Миграции проверяет test_db."""
+    path = tmp_path_factory.mktemp("schema") / "cleaner.db"
+    conn = db.connect(path)
     db.migrate(conn)
+    conn.close()                    # последнее соединение переносит журнал WAL в файл базы
+    return path
+
+
+@pytest.fixture
+def repo(tmp_path, clock, migrated):
+    shutil.copyfile(migrated, tmp_path / "cleaner.db")
+    conn = db.connect(tmp_path / "cleaner.db")
+    # Без сброса на диск после каждой транзакции: на Windows он стоил тестам секунды, а сохранность при отключении
+    # питания тестам не нужна. Служба работает с умолчанием SQLite.
+    conn.execute("PRAGMA synchronous = OFF")
     yield Repository(conn, bytes(range(32)), clock)
     conn.close()
 
@@ -285,15 +302,20 @@ def app(repo, clock, monkeypatch, engines, jobs):
 @pytest.fixture
 def browser(app, repo):
     clients: list[TestClient] = []
+    portals = contextlib.ExitStack()
 
     def make() -> Browser:
         client = TestClient(app, follow_redirects=False)
+        # Один цикл событий на клиента, как у службы, — без запуска lifespan (with TestClient): без него клиент
+        # заводил поток с новым циклом на каждый запрос, и на Windows это стоило около 50 мс запроса (замер 21.10.2026).
+        client.portal = portals.enter_context(anyio.from_thread.start_blocking_portal(**client.async_backend))
         clients.append(client)
         return Browser(client, repo)
 
-    yield make
-    for client in clients:
-        client.close()
+    with portals:
+        yield make
+        for client in clients:
+            client.close()
 
 
 @pytest.fixture
