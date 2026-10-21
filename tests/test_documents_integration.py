@@ -184,6 +184,21 @@ def test_scan_with_a_digital_header_keeps_both_the_header_and_the_recognised_pag
     assert (result.ocr_pages, result.unread_pages, result.doubtful_pages) == ((1,), (), ())
 
 
+def test_scan_already_recognised_by_the_scanner_is_read_from_its_invisible_layer(docling, no_network):
+    """Распознанный сканером PDF: растр на всю страницу и невидимый слой (3 Tr) поверх него. Его текст даёт Docling
+    за секунды, распознавание (72 с на страницу) не вызывается."""
+    body = "\n".join(f"Scanned line {n}: contact {CANARY}, invoice 2026-{n:03d}, total {n * 100} rub" for n in range(8))
+    calls = []
+
+    def ocr(image, mime):
+        calls.append(mime)
+        return "recognised again"
+
+    result = Extractor(docling, ocr).extract("scan.pdf", make_pdf([("", 600, body)], invisible=True))
+    assert calls == [] and (result.ocr_pages, result.doubtful_pages) == ((), ())
+    assert result.text.count(CANARY) == 8 and "Scanned line 7" in result.text
+
+
 def test_damaged_office_file_is_refused(docling, no_network):
     with pytest.raises(ExtractError):
         docling.convert(b"PK\x03\x04broken", "docx")
