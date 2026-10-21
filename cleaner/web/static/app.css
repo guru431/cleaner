@@ -9,6 +9,7 @@
   --mark: #e8eaf6; --t-person: #ffe0b2; --t-org: #dcedc8; --t-address: #f0f4c3; --t-email: #b3e5fc; --t-phone: #b2dfdb;
   --t-secret: #ffcdd2; --t-account: #e1bee7; --t-ip: #c5cae9; --t-host: #d1c4e9; --t-sid: #cfd8dc; --t-term: #fff9c4;
   --r-restored: #c8e6c9; --r-altered: #fff59d; --r-derived: #b3e5fc; --r-kept: #e0e0e0;
+  --opened: #8250df;
   --theme-moon: inline-block; --theme-sun: none;
   --font: "Segoe UI", system-ui, sans-serif;
   --mono: Consolas, "Cascadia Mono", monospace;
@@ -25,6 +26,7 @@
     --mark: #2b2f45; --t-person: #5a3a12; --t-org: #2f4a1e; --t-address: #45481a; --t-email: #123f57; --t-phone: #11433f;
     --t-secret: #5c1f24; --t-account: #4a2352; --t-ip: #2b3263; --t-host: #3a2d5c; --t-sid: #33404a; --t-term: #4d4614;
     --r-restored: #1f4a2a; --r-altered: #4d4614; --r-derived: #123f57; --r-kept: #3a3f45;
+    --opened: #a371f7;
     --theme-moon: none; --theme-sun: inline-block;
   }
 }
@@ -38,6 +40,7 @@
   --mark: #2b2f45; --t-person: #5a3a12; --t-org: #2f4a1e; --t-address: #45481a; --t-email: #123f57; --t-phone: #11433f;
   --t-secret: #5c1f24; --t-account: #4a2352; --t-ip: #2b3263; --t-host: #3a2d5c; --t-sid: #33404a; --t-term: #4d4614;
   --r-restored: #1f4a2a; --r-altered: #4d4614; --r-derived: #123f57; --r-kept: #3a3f45;
+  --opened: #a371f7;
   --theme-moon: none; --theme-sun: inline-block;
 }
 

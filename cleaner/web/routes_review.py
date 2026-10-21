@@ -210,18 +210,24 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
         })
     blocked = frozenset(span["entity_id"] for span in entry.blocked)
     notices = Counter(notice["code"] for notice in item.notices)
+    sanitized = item.sanitized or ""
+    original_marks = render.original_marks(item, state)
+    sanitized_marks = render.sanitized_marks(item, state, entry.leaks, blocked)
+    opened = render.opened_marks(item.original, state, original_marks), render.opened_marks(sanitized, state, sanitized_marks)
     # Легенда над панелями — типы этого текста словами (кнопки-фильтры), затем состояния, которые тоже выделены цветом.
     legend = list(dict.fromkeys((f"t-{w['code']}", w["type"]) for w in sorted(why.values(), key=lambda w: w["code"])))
     if blocked:
         legend.append(("blocked", "блокировка по политике"))
     if entry.leaks:
         legend.append(("leak", "оригинал в очищенном"))
+    if any(opened):
+        legend.append(("opened", render.OPENED.lower()))
     sources = [(code, label) for code, label in render.SOURCE_NAMES.items() if any(code in w["sources"] for w in why.values())]
     return page(
         request, "review.html", viewer, chat=chat, item=item, deliverable=entry.deliverable,
         leaks=len(entry.leaks), blocked=len(entry.blocked),
-        original=render.highlight(item.original, render.original_marks(item, state)),
-        sanitized=render.highlight(item.sanitized or "", render.sanitized_marks(item, state, entry.leaks, blocked)),
+        original=render.highlight(item.original, original_marks + opened[0]),
+        sanitized=render.highlight(sanitized, sanitized_marks + opened[1]),
         summary=render.summary(item, state), fragments=fragments, why=why, legend=legend, sources=sources,
         notices=[(_NOTICES.get(code, code), count) for code, count in notices.items()],
         exposed=[", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],

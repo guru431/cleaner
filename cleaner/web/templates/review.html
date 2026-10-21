@@ -46,10 +46,29 @@
   {% endif %}
 </section>
 
+{# Рабочее место проверки (app.js): поиск, переходы и легенда работают на странице, без запросов; без JS строки скрыты. #}
+<div class="review-tools" data-review-tools>
+  <span class="search">{{ icon("search") }}<input type="search" id="review-find" autocomplete="off" placeholder="Найти в обеих панелях" aria-label="Найти в оригинале и в очищенном тексте"></span>
+  <button type="button" data-find="-1" title="Shift+Enter в поле поиска">Предыдущее</button>
+  <button type="button" data-find="1" title="Enter в поле поиска">Следующее</button>
+  <span class="muted" id="review-found" aria-live="polite"></span>
+  <span class="spacer"></span>
+  <button type="button" class="toggle" data-sync-scroll aria-pressed="false" title="Панели прокручиваются вместе — по доле высоты"><span class="switch"></span>Синхронная прокрутка</button>
+</div>
+<div class="review-tools" data-review-tools>
+  <span class="muted">Замены:</span>
+  <button type="button" data-step="-1" title="Клавиша P в панели текста">Предыдущая</button>
+  <button type="button" data-step="1" title="Клавиша N в панели текста">Следующая</button>
+  <span class="legend" role="group" aria-label="Показать только">
+    {% for class_, name in legend %}<button type="button" class="chip" data-legend="{{ class_ }}" aria-pressed="false"><span class="swatch {{ class_ }}"></span>{{ name }}</button>{% endfor %}
+  </span>
+  <span class="hint" id="review-keys">В панели текста: N / P — следующая / предыдущая замена, Enter — её пара в соседней панели, Esc — снять выбор.</span>
+</div>
+
 <div class="compare">
   <section class="panel">
     <header class="panel-head"><h2 class="title">Оригинал</h2><span class="state">выделите фрагмент, чтобы скрыть его</span></header>
-    <pre class="text" id="original">
+    <pre class="text" id="original" tabindex="0" role="region" aria-label="Оригинал" aria-describedby="review-keys">
 {{ original }}</pre>
   </section>
   <section class="panel">
@@ -62,10 +81,39 @@
       </span>
       {% endif %}
     </header>
-    <pre class="text" id="sanitized">
+    <pre class="text" id="sanitized" tabindex="0" role="region" aria-label="Очищенный" aria-describedby="review-keys">
 {{ sanitized }}</pre>
   </section>
 </div>
+
+{# «Почему скрыто» по выбранной замене: app.js копирует сюда запись из why-data. В записях — коды и слова интерфейса,
+   без значений и оригиналов. #}
+<section class="panel why" id="why" aria-live="polite">
+  <header class="panel-head"><h2 class="title">Почему скрыто</h2><span class="state" data-why-place></span></header>
+  <div class="panel-body" data-why-body><p class="muted">Выберите замену в тексте — щелчком или клавишами N / P в панели.</p></div>
+</section>
+<template id="why-data">
+  {% for entity_id, w in why.items() %}
+  <div data-why="{{ entity_id }}">
+    <p><span class="mono">{{ w.surrogate }}</span> — {{ w.type }}</p>
+    <dl class="why-list">
+      <dt>Нашли</dt><dd>{{ w.names | join("; ") or "—" }}</dd>
+      {% if w.validated %}<dt>Формат</dt><dd>подтверждён контрольной суммой или строгим форматом</dd>{% endif %}
+      <dt>Политика типа</dt><dd>{{ w.policy }}</dd>
+    </dl>
+    <p class="muted">{{ w.advice }}</p>
+    {% if w.seniority %}<details class="raw"><summary>Как выбран тип</summary><p>{{ w.seniority }}</p></details>{% endif %}
+  </div>
+  {% endfor %}
+  <div data-why="leak">
+    <p>Оригинал в очищенном тексте</p>
+    <p class="muted">Проверка утечек нашла здесь значение, которое в этом чате скрывается. Выдача заблокирована, пока оно не скрыто: выделите его в оригинале и нажмите «Скрывать во всём чате» или очистите текст заново.</p>
+  </div>
+  <div data-why="opened">
+    <p>Открыто по решению пользователя</p>
+    <p class="muted">С этого значения в чате снята замена, и оно уходит открытым. Вернуть замену — выделите его в оригинале и нажмите «Скрывать во всём чате».</p>
+  </div>
+</template>
 
 <form method="post" action="/chats/{{ chat.id }}/mask" class="panel mask-row">
   {% include "_csrf.html" %}
@@ -89,12 +137,19 @@
     <button type="button" role="tab" data-tab="gold" aria-selected="false">Эталон</button>
   </div>
   <div class="tab-panel on" role="tabpanel" data-tab-panel="fragments">
-    <table class="grid">
-      <thead><tr><th>Фрагмент</th><th>Замена</th><th>Тип</th><th></th></tr></thead>
+    {# Фильтры — на странице (app.js), по кодам в data-атрибутах строк; без JS строка скрыта, таблица видна вся. #}
+    <div class="table-filter" data-filter-table="fragments-table">
+      <select data-filter="type" aria-label="Тип"><option value="">Все типы</option>{% for class_, name in legend if class_.startswith("t-") %}<option value="{{ class_[2:] }}">{{ name }}</option>{% endfor %}</select>
+      <select data-filter="source" aria-label="Кто нашёл"><option value="">Все источники</option>{% for code, name in sources %}<option value="{{ code }}">{{ name }}</option>{% endfor %}</select>
+      <span class="muted" data-filter-count aria-live="polite"></span>
+    </div>
+    <table class="grid" id="fragments-table">
+      <thead><tr><th>Фрагмент</th><th>Замена</th><th>Тип</th><th>Нашли</th><th></th></tr></thead>
       <tbody>
       {% for f in fragments %}
-      <tr>
+      <tr data-type="{{ f.why.code }}" data-sources="{{ f.why.sources | join(' ') }}">
         <td class="mono">{{ f.value }}</td><td class="mono nowrap">{{ f.surrogate }}</td><td class="nowrap">{{ f.type }}</td>
+        <td class="sub">{{ f.why.names | join("; ") }}{% if f.why.validated %}; формат подтверждён{% endif %}</td>
         <td class="actions">
           <form method="post" action="/chats/{{ chat.id }}/unmask">
             {% include "_csrf.html" %}
@@ -105,7 +160,7 @@
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="4" class="empty">Замен в этом тексте нет</td></tr>
+      <tr><td colspan="5" class="empty">Замен в этом тексте нет</td></tr>
       {% endfor %}
       </tbody>
     </table>
