@@ -3,6 +3,7 @@ import re
 import uuid
 
 from cleaner.core.types import EntityType as T
+from cleaner.core.types import Policy
 from cleaner.storage.repo import Item
 from cleaner.web.app import create_app
 from cleaner.web.routes_review import _back
@@ -41,6 +42,24 @@ def test_summary_names_what_the_leak_check_skips(ivan, repo):
     assert "demo@example.org, копия demo@example.org" in repo.items(chat_id)[0].sanitized
     assert "известных скрываемых оригиналов не найдено" in page and "оригиналов в очищенном тексте нет" not in page
     assert "открыто по решению пользователя — 1</span>" in page
+
+
+def test_review_marks_a_hidden_blocked_finding_and_a_pasted_blocked_surrogate(ivan, repo):
+    """Фрагмент со скрытой в нём находкой «блокировать» и вставленная замена заблокированной сущности подсвечены и
+    названы в сообщении о блокировке — по нынешней политике, без повторной очистки."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="домен fabrikam.ru")
+    ivan.post(f"/chats/{chat_id}/input", text="token=+79161234567abcdef, снова token=+79161234567abcdef и domain-1.example")
+    repo.set_policy(T.PHONE, Policy.BLOCK)
+    repo.set_policy(T.DOMAIN, Policy.BLOCK)
+    item = repo.items(chat_id)[1]
+    page = ivan.get(f"/chats/{chat_id}/items/{item.id}").text
+    assert "Фрагментов типа с политикой «блокировать» — 3." in page
+    assert page.count('class="t-SECRET blocked"') == 2
+    assert "Внутри фрагмента найдено значение типа «Телефон»" in page        # карточка «Почему скрыто»
+    assert '<mark class="blocked" title="Замена сущности с политикой «блокировать»">domain-1.example</mark>' in page
+    repo.set_policy(T.DOMAIN, Policy.MASK)
+    assert "Фрагментов типа с политикой «блокировать» — 2." in ivan.get(f"/chats/{chat_id}/items/{item.id}").text
 
 
 def test_multiline_fragment_with_crlf_is_masked_whole(ivan, repo):

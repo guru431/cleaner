@@ -90,17 +90,29 @@ def _why(item: Item, state: ChatState, policies: Mapping[EntityType, Policy]) ->
         entity = state.entities.get(span["entity_id"])
         if entity is None:
             continue
-        entry = found.setdefault(entity.id, {"surrogate": span["surrogate"], "type": entity.type, "codes": set(), "validated": False})
+        entry = found.setdefault(
+            entity.id, {"surrogate": span["surrogate"], "type": entity.type, "codes": set(), "validated": False, "held": set()},
+        )
         entry["codes"].update(span.get("sources", ()))
         entry["validated"] |= bool(span.get("validated"))
+        entry["held"].update(EntityType(type_) for type_ in span.get("held", ()))
     why = {}
     for entity_id, entry in found.items():
         codes = [code for code in render.SOURCE_NAMES if code in entry["codes"]]
         policy, name = policies.get(entry["type"], Policy.MASK), render.TYPE_NAMES[entry["type"]]
+        advice = _advice(name, policy, codes)
+        # Находка «блокировать», скрытая во фрагменте под этой меткой (pipeline._held), держит выдачу и при другой
+        # политике метки — карточка говорит, чья политика.
+        held = sorted(render.TYPE_NAMES[t] for t in entry["held"] if policies.get(t) is Policy.BLOCK)
+        if held and policy is not Policy.BLOCK:
+            advice = (
+                f"Внутри фрагмента найдено значение типа «{'», «'.join(held)}», который администратор велел блокировать: "
+                "текст не выдаётся, пока фрагмент в нём; политику меняет администратор."
+            )
         why[entity_id] = {
             "surrogate": entry["surrogate"], "type": name, "code": entry["type"].value, "sources": codes,
             "names": [render.SOURCE_NAMES[code] for code in codes], "validated": entry["validated"],
-            "policy": POLICY_NAMES[policy], "advice": _advice(name, policy, codes), "seniority": _SENIORITY if len(codes) > 1 else "",
+            "policy": POLICY_NAMES[policy], "advice": advice, "seniority": _SENIORITY if len(codes) > 1 else "",
         }
     return why
 
@@ -254,7 +266,7 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
         fragments.append({
             "value": value, "surrogate": span["surrogate"], "type": render.TYPE_NAMES[entity.type], "why": why[entity.id],
         })
-    blocked = frozenset(span["entity_id"] for span in entry.blocked)
+    blocked = render.blocked_at(entry.blocked)
     notices = Counter(notice["code"] for notice in item.notices)
     sanitized = item.sanitized or ""
     original_marks = render.original_marks(item, state)

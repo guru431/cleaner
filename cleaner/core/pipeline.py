@@ -15,7 +15,7 @@ from cleaner.core import leakcheck, restore, surrogates
 from cleaner.core.detect import dictionary, infra, ner, orgs, rules, secrets
 from cleaner.core.detect.base import DetectContext, Detector
 from cleaner.core.detect.merge import MergedSpan, merge
-from cleaner.core.entities import hostmap, labels
+from cleaner.core.entities import hostmap, labels, netmap
 from cleaner.core.entities.resolve import ResolvedSpan, Resolver, name_parts
 from cleaner.core.leakcheck import Leak
 from cleaner.core.match import normalize
@@ -76,7 +76,8 @@ def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext
 
 def _types(text: str, piece: MergedSpan, ctx: DetectContext) -> list[EntityType]:
     """Типы, которые часть записи получит при подмене (resolve._name): часть имени узла — HOST у частей слева от домена и
-    DOMAIN у домена в ней, а часть, которой пользователь дал другой тип (правило чата), — тип правила (resolve._manual)."""
+    DOMAIN у домена в ней, а часть, которой пользователь дал другой тип (правило чата), — тип правила, если его политика
+    не мягче (resolve._manual)."""
     if piece.type is not EntityType.HOST:
         return [piece.type]
     left, registrable = name_parts(hostmap.dotted(text[piece.start:piece.end]), piece.precedes)
@@ -84,8 +85,15 @@ def _types(text: str, piece: MergedSpan, ctx: DetectContext) -> list[EntityType]
         normalize(value): type_ for value, type_, _ in ctx.manual
         if type_ is not None and type_ not in (EntityType.HOST, EntityType.DOMAIN)
     }
-    return [retyped.get(normalize(part), EntityType.HOST) for part in left] + (
-        [retyped.get(normalize(registrable), EntityType.DOMAIN)] if registrable else []
+    policies = ctx.settings.policies
+
+    def typed(part: str, own: EntityType) -> EntityType:
+        """Тип правила мягче своего часть не получает (resolve._manual)."""
+        rule = retyped.get(normalize(part))
+        return rule if rule and STRICTNESS.get(policies.get(rule), 0) >= STRICTNESS.get(policies.get(own), 0) else own
+
+    return [typed(part, EntityType.HOST) for part in left] + (
+        [typed(registrable, EntityType.DOMAIN)] if registrable else []
     )
 
 
@@ -184,6 +192,7 @@ class Notice:
     code: str       # surrogate_in_input | foreign_label
     start: int
     end: int
+    held: tuple[EntityType, ...] = ()       # у выданной замены — типы её сущностей (_pasted)
 
 
 @dataclass
@@ -194,11 +203,12 @@ class SanitizeResult:
     leaks: list[Leak] = field(default_factory=list)
     blocked: list[ResolvedSpan] = field(default_factory=list)
     model_spans: list[Span] = field(default_factory=list)   # находки слоёв 4–5 для повторной очистки без моделей
+    blocked_surrogates: list[Notice] = field(default_factory=list)  # вставленные замены сущностей с «блокировать»
 
     @property
     def deliverable(self) -> bool:
         """Можно ли выдавать очищенный текст пользователю и отправлять его дальше."""
-        return not self.leaks and not self.blocked
+        return not self.leaks and not self.blocked and not self.blocked_surrogates
 
 
 def _context(state: ChatState, settings: Settings) -> DetectContext:
@@ -229,9 +239,11 @@ def _apply(text: str, spans: list[ResolvedSpan]) -> str:
 def _passes(
     state: ChatState, text: str, settings: Settings,
     protected: list[tuple[int, int]], starts: list[int], extra: list[Span], detectors: tuple[ModuleType, ...],
-) -> list[ResolvedSpan]:
-    """Шаги 5.2–5.8 до трёх раз (раздел 5.10); находки слоёв 4–5 добавляются к каждому проходу."""
+) -> tuple[list[ResolvedSpan], list[Span]]:
+    """Шаги 5.2–5.8 до трёх раз (раздел 5.10); находки слоёв 4–5 добавляются к каждому проходу. Возвращает и находки
+    последнего прохода — по ним _held."""
     resolved: list[ResolvedSpan] = []
+    found: list[Span] = []
     originals = restore.originals(state, settings)
     for _ in range(_MAX_PASSES):
         before = _forms(state)
@@ -243,7 +255,93 @@ def _passes(
         resolved = Resolver(state, settings, text, ctx.builtin.generic_labels).run(text, merged)
         if _forms(state) == before:
             break
-    return resolved
+    return resolved, found
+
+
+def _open_values(state: ChatState, settings: Settings) -> frozenset[str]:
+    return settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
+
+
+def _held(
+    text: str, resolved: list[ResolvedSpan], found: list[Span], state: ChatState, settings: Settings,
+) -> list[ResolvedSpan]:
+    """Типы автоматических находок, которые фрагмент скрыл под меткой другого типа: телефон внутри более длинного пароля,
+    выделение «+79161234567 доб» с типом TERM, известный домен внутри адреса e-mail. Тип фрагмента они не меняют —
+    находка покрывает лишь часть значения, и её тип был бы неверен для всего (5.7, шаг 4), — но их «блокировать» держит
+    выдачу, пока значение скрыто в тексте (FR-4.2). Записываются типы, а не решение: блокировка — по политике на момент
+    проверки (очистка, экран чата, сборка запроса), и смена политики повторной очистки не требует. Открытое значение
+    (FR-3.6, FR-6.2) не держит ничего, как и вне фрагмента; правило пользователя — не находка. Находки одного типа
+    сливаются, и каждый фрагмент проходится один раз на интервал слияния: время линейно."""
+    policies = settings.policies
+    opened = _open_values(state, settings)
+    longest = max(map(len, opened), default=0)
+    addresses: set[str] | None = None
+    intervals: dict[EntityType, list[tuple[int, int]]] = {}
+    for span in found:
+        if span.source == "manual" or span.end <= span.start or policies.get(span.type, Policy.MASK) is Policy.OFF:
+            continue
+        # Как в merge: имя через «\.» — то же имя, адрес — в любой записи. Длиннее открытых значений — не открытое
+        # (написание длиной в текст не сравнивается).
+        if span.type is EntityType.IP and opened:
+            if addresses is None:
+                addresses = netmap.addresses(opened)
+            if netmap.canonical_forms(text[span.start:span.end].lower()) & addresses:
+                continue
+        elif span.end - span.start <= longest:
+            value = text[span.start:span.end].lower()
+            if (hostmap.dotted(value) if span.type in (EntityType.HOST, EntityType.DOMAIN) else value) in opened:
+                continue
+        intervals.setdefault(span.type, []).append((span.start, span.end))
+    if not intervals or not resolved:
+        return resolved
+    ends = [span.end for span in resolved]
+    held: list[list[EntityType]] = [[] for _ in resolved]
+    for type_, pieces in intervals.items():
+        pieces.sort()
+        start, end = pieces[0]
+        for next_start, next_end in [*pieces[1:], (len(text) + 1, len(text) + 1)]:
+            if next_start < end:
+                end = max(end, next_end)
+                continue
+            i = bisect.bisect_right(ends, start)
+            while i < len(resolved) and resolved[i].start < end:
+                if not held[i] or held[i][-1] is not type_:
+                    held[i].append(type_)
+                i += 1
+            start, end = next_start, next_end
+    out = []
+    for span, types in zip(resolved, held):
+        own = state.entities[span.entity_id].type
+        types = [type_ for type_ in types if type_ is not own]
+        out.append(replace(span, held=tuple(types)) if types else span)
+    return out
+
+
+def _pasted(state: ChatState, settings: Settings, hits: list[surrogates.Hit]) -> list[tuple[EntityType, ...]]:
+    """Типы сущностей выданных замен этого чата, вставленных в текст (FR-5.9): замена сущности с политикой «блокировать»
+    блокирует выдачу, как её оригинал (FR-4.2), — по политике на момент проверки; у имени узла — и замены его частей.
+    Сущность, значение которой открыто (правило «открыть», список «никогда не скрывать»), — нет: открытый оригинал выдачу
+    тоже не блокирует, и иначе вставленную замену было бы нечем снять."""
+    if not hits:
+        return []
+    opened = _open_values(state, settings)
+    by_entity: dict[str, EntityType | None] = {}
+    by_key: dict[str, tuple[EntityType, ...]] = {}
+
+    def own(entity_id: str) -> EntityType | None:
+        if entity_id not in by_entity:
+            entity = state.entities.get(entity_id)
+            by_entity[entity_id] = None if entity is None or entity.restore_value.lower() in opened or any(
+                form.lower() in opened for form in entity.forms
+            ) else entity.type
+        return by_entity[entity_id]
+
+    for hit in hits:
+        if hit.key not in by_key:
+            by_key[hit.key] = tuple(dict.fromkeys(
+                type_ for type_ in map(own, surrogates.owners(state, hit.key)) if type_ is not None
+            ))
+    return [by_key[hit.key] for hit in hits]
 
 
 def sanitize(
@@ -252,8 +350,11 @@ def sanitize(
 ) -> SanitizeResult:
     """Заменяет чувствительные фрагменты и обновляет state. Исключения слоёв не перехватываются (FR-3.7).
     detectors — слои 1–3; у ответа модели в исходящем запросе — только известные значения (FR-8.11)."""
-    protected = surrogates.find(state, text)
-    notices = [Notice("surrogate_in_input", start, end) for start, end in protected]
+    hits = surrogates.Finder(state, loose=True).finditer(text)
+    protected = [hit.span() for hit in hits]
+    notices = [
+        Notice("surrogate_in_input", hit.start(), hit.end(), held) for hit, held in zip(hits, _pasted(state, settings, hits))
+    ]
     for m in labels.SHAPE.finditer(text):
         if m.group() not in state.surrogates:
             state.foreign_labels.add(m.group())
@@ -270,20 +371,23 @@ def sanitize(
             # уже очищенный слоями 1–4, и иначе не может дать ему тип SECRET. Без слоя 5 находка остаётся: отбросить её —
             # открыть сам пароль (на pii_benchmark так открылись бы почта и номер полиса, записанные с пробелами и словами).
             extra = [span for span in extra if not ner.identifier(text, span)]
-    resolved = _passes(state, text, settings, protected, starts, extra, detectors)
+    resolved, found = _passes(state, text, settings, protected, starts, extra, detectors)
     if layers.cached is None and layers.llm is not None:
         # Слой 5 — один раз, по тексту, который уже очистили слои 1–4; затем проходы повторяются с его находками.
-        found = layers.llm.find(text, _apply(text, resolved), state)
-        if found:
-            extra = extra + found
-            resolved = _passes(state, text, settings, protected, starts, extra, detectors)
+        second = layers.llm.find(text, _apply(text, resolved), state)
+        if second:
+            extra = extra + second
+            resolved, found = _passes(state, text, settings, protected, starts, extra, detectors)
+    resolved = _held(text, resolved, found, state, settings)
     sanitized = _apply(text, resolved)
+    policies = settings.policies
     blocked = [
         span for span in resolved
-        if settings.policies.get(state.entities[span.entity_id].type) is Policy.BLOCK
+        if Policy.BLOCK in (policies.get(state.entities[span.entity_id].type), *map(policies.get, span.held))
     ]
+    blocked_surrogates = [notice for notice in notices if Policy.BLOCK in map(policies.get, notice.held)]
     return SanitizeResult(
-        sanitized, resolved, notices, leakcheck.check(sanitized, state, settings), blocked, extra,
+        sanitized, resolved, notices, leakcheck.check(sanitized, state, settings), blocked, extra, blocked_surrogates,
     )
 
 
@@ -377,6 +481,11 @@ def build_outgoing(
             result = sanitize(state, turn.text, settings, detectors=(dictionary,))
         else:
             result = sanitize(state, turn.text, settings, Layers(cached=turn.cached))
+            # Замена заблокированной сущности, вставленная пользователем, держит отправку, как оригинал (FR-4.2). В ответе
+            # модели — нет, последовательно с тем, что в нём ищется (FR-8.11): только оригиналы, в том числе скрытые внутри
+            # другой метки (_held). Замена в ответе — эхо того, что облаку уже отправили; сущность замены пришла из
+            # входного текста этого чата, и он, пока значение в нём не открыто, блокирует отправку сам.
+            blocked += len(result.blocked_surrogates)
         blocked += len(result.blocked)
         if turn.role == "system":
             system.append(result.sanitized)

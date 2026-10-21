@@ -179,6 +179,22 @@ class Finder:
         return hits
 
 
+def owners(state: ChatState, key: str) -> list[str]:
+    """Сущности замены: у имени узла, составленного из замен частей, — и сущности частей (как их разбирает
+    restore._parts): политика любой части держит имя целиком (5.10), а сущность имени — та, что была строже при выдаче."""
+    table = state.surrogates
+    surrogate = table[key]
+    ids = [surrogate.entity_id]
+    if surrogate.kind == "host" and "." in key:
+        fakes = key.split(".")
+        left = max(0, len(fakes) - (1 if _LABEL.fullmatch(fakes[-1]) else 2))      # части слева от домена
+        for fake in [*fakes[:left], ".".join(fakes[left:])]:
+            part = table.get(fake) or table.get(fake.lower())      # метка части — в своём регистре, подмена — в нижнем
+            if part is not None:
+                ids.append(part.entity_id)
+    return list(dict.fromkeys(ids))
+
+
 def find(state: ChatState, text: str) -> list[tuple[int, int]]:
     """Где в тексте стоят замены этого чата, в том числе в другом виде записи."""
     return [hit.span() for hit in Finder(state, loose=True).finditer(text)]
