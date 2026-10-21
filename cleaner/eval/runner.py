@@ -76,7 +76,8 @@ def run(examples: Sequence[Example], settings: Settings, layer_sets: Sequence[st
     return {name: evaluate(examples, predictor(settings, layers_for(name, engines))) for name in layer_sets}
 
 
-def _share(part: int, whole: int) -> str:
+def share(part: int, whole: int) -> str:
+    """Доля с числителем и знаменателем — для отчёта и страницы замера."""
     return f"{part / whole:.3f} ({part}/{whole})" if whole else "—"
 
 
@@ -95,9 +96,9 @@ def format_results(results: dict[str, Report], count: int) -> str:
         ]
         for type_ in sorted(set(report.entities) | set(report.found), key=lambda t: t.value):
             lines.append(" | ".join((
-                type_.value, _share(report.protected[type_], report.entities[type_]),
-                _share(report.mentions_hidden[type_], report.mentions[type_]),
-                _share(report.correct[type_], report.found[type_]), _share(report.typed[type_], report.correct[type_]),
+                type_.value, share(report.protected[type_], report.entities[type_]),
+                share(report.mentions_hidden[type_], report.mentions[type_]),
+                share(report.correct[type_], report.found[type_]), share(report.typed[type_], report.correct[type_]),
             )))
         lines.append("Класс QA-3 | полнота (скрыто/всего) | цель")
         recalls = recall_by_class(report)
@@ -106,14 +107,14 @@ def format_results(results: dict[str, Report], count: int) -> str:
                 verdict = "цель не задана" if target is None else (
                     f"{target:.2f} — достигнута" if recalls[title] >= target else f"{target:.2f} — не достигнута"
                 )
-                lines.append(f"{title} | {_share(*report.classes[title])} | {verdict}")
+                lines.append(f"{title} | {share(*report.classes[title])} | {verdict}")
         lines.append(
-            f"Скрыто знаков вне эталона: {_share(report.chars_outside, report.chars_masked)} от скрытых, "
-            f"{_share(report.chars_outside, report.chars_free)} от текста вне эталона"
+            f"Скрыто знаков вне эталона: {share(report.chars_outside, report.chars_masked)} от скрытых, "
+            f"{share(report.chars_outside, report.chars_free)} от текста вне эталона"
         )
         lines.append(
             "Лишние замены среди версий, кодов ошибок и общеизвестных доменов: "
-            f"{_share(report.overmasked, report.candidates)}"
+            f"{share(report.overmasked, report.candidates)}"
         )
     return "\n".join(lines)
 
