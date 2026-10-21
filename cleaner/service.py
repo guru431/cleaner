@@ -21,7 +21,7 @@ from cleaner.core.pipeline import (
     Layers, NotSendable, Outgoing, OutgoingContext, SanitizeResult, Turn, build_outgoing, probe_context, sanitize,
 )
 from cleaner.core.restore import RestoreResult, restore
-from cleaner.core.types import ChatState, EntityType, Policy, Settings, Span
+from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
 from cleaner.egress import ProviderError, cloud
 from cleaner.storage.codec import state_to_json
 from cleaner.storage.repo import Item, Provider, Repository, StaleState
@@ -42,6 +42,9 @@ _SERVICE_STOPPED = "Служба остановлена во время отве
 # Итоги проверки утечек для вида чата в памяти процесса: не больше стольких итогов и находок в них всех вместе
 # (находка — около 200 байт, 50 000 — около 10 МБ; один итог с тысячами находок иначе раздувал бы память).
 _VIEW_RESULTS, _VIEW_FOUND = 1024, 50_000
+
+# Политики, которые строже другой (STRICTNESS), — для отказа в правке, которую держит политика найденного значения.
+_STRICT_POLICIES = {Policy.HIDE: "скрывать без восстановления", Policy.BLOCK: "блокировать"}
 
 Work = Callable[[ChatState, list[Item], Settings], tuple[list[Item], list[Item]]]
 Submit = Callable[..., None]
@@ -764,7 +767,12 @@ class ChatService:
         on = self._enabled(chat_id)
 
         def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
+            before = set(state.rules)
             change(state, items)
+            # Новые правила «скрывать» (выделение, смена типа) и что с ними стало: тип находки, политика которой строже
+            # типа правила, остаётся (5.7, шаг 4), и правка, которая нигде не легла, — отказ с причиной, а не тишина.
+            added = {normalize(r.value): r.type for r in state.rules if r.action == "mask" and r not in before}
+            held, applied = None, False
             leaks.clear()                       # при повторе на свежем состоянии считаем заново
             pairs = []
             for item in items:
@@ -773,6 +781,16 @@ class ChatService:
                 layers, ran = _cached_layers(item, on)
                 result = sanitize(state, item.original, settings, layers)
                 leaks["count"] += len(result.leaks)
+                for span in result.spans if added else ():
+                    wanted = added.get(normalize(item.original[span.start:span.end]))
+                    if wanted is None:
+                        continue
+                    found = state.entities[span.entity_id].type
+                    strict = STRICTNESS.get(settings.policies.get(found), 0) > STRICTNESS.get(settings.policies.get(wanted), 0)
+                    if found is not wanted and strict:
+                        held = found
+                    else:
+                        applied = True
                 # Текст, очищенный до слоёв 4 и 5 (этап 1), отметки о них не получает: выключенными они не были (m-12).
                 meta = (item.meta | {"layers": ran}) if "layers" in item.meta else item.meta
                 if result.sanitized != item.sanitized or meta != item.meta:
@@ -780,6 +798,12 @@ class ChatService:
                         item, sanitized=result.sanitized, spans=_spans(result), notices=_notices(result), meta=meta,
                     )
                     pairs.append((item, fresh))
+            if held is not None and not applied:
+                raise EditRefused(
+                    f"Тип не изменён: значение найдено как {held.value}, и политика этого типа "
+                    f"(«{_STRICT_POLICIES[settings.policies[held]]}») строже выбранного. "
+                    "Открыть значение можно, сняв с него замену"
+                )
             for old, fresh in pairs:
                 opened = {leak.entity_id for leak in leakcheck.check(old.sanitized or "", state, settings) if leak.entity_id}
                 fresh.exposed = sorted(set(old.exposed) | opened)
