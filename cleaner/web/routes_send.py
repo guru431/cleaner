@@ -108,7 +108,8 @@ def stop(request: Request, chat_id: str, item_id: str, form: dict[str, str] = De
 
 @router.post("/chats/{chat_id}/ask-local")
 def ask_local(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    """FR-9.4: вопрос локальной модели вместо облачной — без очистки, текст не покидает сервер."""
+    """FR-9.4: вопрос локальной модели вместо облачной — без очистки: оригиналы уходят только по адресу локальной модели
+    (петлевой, частный или доверенный, SEC-12), не облаку."""
     own_chat(request, chat_id, viewer)
     try:
         item = service_of(request).ask_local(chat_id, viewer.user.id)

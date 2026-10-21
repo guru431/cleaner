@@ -147,7 +147,7 @@
         {% if local_pending %}
         <button disabled title="{{ local_pending }}">Спросить локальную модель</button>
         {% else %}
-        <button title="Без очистки: текст не покидает сервер">Спросить локальную модель</button>
+        <button title="{{ local_hint }}">Спросить локальную модель</button>
         {% endif %}
       </form>
       {% endif %}

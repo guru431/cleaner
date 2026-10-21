@@ -1,11 +1,14 @@
 """Чаты: список с поиском, лента, ввод текста и ответа модели, состояние обработки, скачивание."""
 from __future__ import annotations
 
+import ipaddress
 import logging
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from cleaner.engines import local_settings
 from cleaner.service import LOCAL_PENDING, ChatView, EditRefused, InputView, TextTooLong, local_pending
 from cleaner.storage.repo import Chat, CheckpointBusy, Item
 from cleaner.web import render
@@ -65,6 +68,25 @@ def _entries(view: ChatView) -> list[dict[str, object]]:
     return entries
 
 
+def _local_hint(request: Request) -> str:
+    """Куда уходят оригиналы с вопросом локальной модели (FR-9.4). Адрес бывает и частным, и доверенным (FR-9.1, SEC-12),
+    и тогда это уже другой сервер. Показываются только узел и порт: учётные данные в адресе — не для подсказки."""
+    parts = urlsplit(local_settings(repo_of(request)).url)
+    host = parts.hostname or ""
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    node = (f"[{host}]" if ":" in host else host) + (f":{port}" if port else "")
+    try:
+        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if loopback:
+        return f"Без очистки: оригиналы остаются на этом сервере (локальная модель по адресу {node})"
+    return f"Без очистки: оригиналы уходят локальной модели на узел {node}"
+
+
 def _choices(request: Request) -> list[tuple[str, str]]:
     """Подключения и модели для выбора в чате (FR-8.3): значение «id|модель» и подпись."""
     return [
@@ -98,6 +120,7 @@ def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depe
         layers=service_of(request).layers(chat_id), layer_names=LAYER_NAMES,
         choices=_choices(request), chosen=f"{provider_id}|{model}" if provider_id else "",
         local=request.app.state.engines is not None,
+        local_hint=_local_hint(request) if request.app.state.engines is not None else "",
         local_pending=LOCAL_PENDING if local_pending(entry.item for entry in view.items) else "",
     )
 

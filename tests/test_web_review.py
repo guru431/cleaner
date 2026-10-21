@@ -21,7 +21,25 @@ def test_new_text_opens_the_review_with_paired_fragments(ivan, repo):
     assert len(entities) == 2 and entities[0] == entities[1]          # одна сущность в обеих панелях (FR-6.1)
     assert "a@x.example</mark>" in page and "&lt;EMAIL_1&gt;</mark>" in page
     assert "Почта — 1" in page and 'data-copy="sanitized"' in page
-    assert "оригиналов в очищенном тексте нет" in page
+    assert "известных скрываемых оригиналов не найдено" in page
+
+
+def test_summary_names_what_the_leak_check_skips(ivan, repo):
+    """Аудит 21.10.2026: после «Снять замену во всём чате» адрес открыт в очищенном тексте, а зелёный итог проверки
+    утверждал, что оригиналов в нём нет. Итог говорит только об известных скрываемых значениях; открытые решением
+    пользователя и выполненные слои — отдельными значками."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/layers", layer="llm", enabled="no")
+    ivan.post(f"/chats/{chat_id}/input", text="почта demo@example.org, копия demo@example.org")
+    item_id = first_item(repo, chat_id)
+    path = f"/chats/{chat_id}/items/{item_id}"
+    page = ivan.get(path).text
+    assert "открыто по решению пользователя" not in page and "слои 1–3, 4</span>" in page
+    ivan.post(f"/chats/{chat_id}/unmask", item_id=item_id, value="demo@example.org")
+    page = ivan.get(path).text
+    assert "demo@example.org, копия demo@example.org" in repo.items(chat_id)[0].sanitized
+    assert "известных скрываемых оригиналов не найдено" in page and "оригиналов в очищенном тексте нет" not in page
+    assert "открыто по решению пользователя — 1</span>" in page
 
 
 def test_multiline_fragment_with_crlf_is_masked_whole(ivan, repo):

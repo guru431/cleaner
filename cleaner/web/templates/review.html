@@ -29,8 +29,14 @@
     {% if leaks %}
     <span class="badge bad">{{ icon("warning") }}найдено оригиналов — {{ leaks }}</span>
     {% else %}
-    <span class="badge good">{{ icon("check") }}оригиналов в очищенном тексте нет</span>
+    {# Проверка знает только найденные слоями, скрытые вручную и словарь «всегда скрывать», а снятые замены пропускает:
+       итог — не «оригиналов нет» (аудит 21.10.2026). #}
+    <span class="badge good" title="Проверка ищет значения, которые нашли слои или скрыли вручную, и словарь «всегда скрывать»; значение, которого не нашёл ни один слой, ей неизвестно">{{ icon("check") }}известных скрываемых оригиналов не найдено</span>
     {% endif %}
+    {% if opened %}
+    <span class="badge warn" title="Значения, с которых в этом чате снята замена: в очищенном тексте они открыты и уходят как есть">{{ icon("warning") }}открыто по решению пользователя — {{ opened }}</span>
+    {% endif %}
+    <span class="badge" title="Слои распознавания, выполненные для этого текста">слои {{ layers_ran }}</span>
   </div>
   {% for text in warnings %}<p class="flash warn">{{ text }}</p>{% endfor %}
   {% for text, count in notices %}<p class="flash warn">{{ text }} ({{ count }})</p>{% endfor %}
