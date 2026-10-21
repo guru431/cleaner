@@ -4,17 +4,18 @@ from __future__ import annotations
 import hashlib
 import logging
 import pickle
+import re
 import threading
 import uuid
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
 from cleaner.core import leakcheck, risk
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.llm import CompletionError
-from cleaner.core.entities import ops
+from cleaner.core.entities import hostmap, labels, ops
 from cleaner.core.leakcheck import Leak
 from cleaner.core.match import normalize
 from cleaner.core.pipeline import (
@@ -67,7 +68,7 @@ class EditRefused(ValueError):
 class InputView:
     item: Item
     leaks: list[Leak]
-    blocked: list[dict]                 # фрагменты типов с политикой «блокировать»
+    blocked: list[dict]                 # фрагменты (spans) и вставленные замены (notices) с политикой «блокировать»
 
     @property
     def deliverable(self) -> bool:
@@ -87,17 +88,53 @@ class ChatView:
     items: list[InputView | AnswerView]
 
 
+def _held(held: tuple[EntityType, ...]) -> dict:
+    """Типы, политика которых держит фрагмент или вставленную замену (pipeline._held, _pasted): только типы, без значений,
+    — экран чата судит о блокировке по ним и нынешним политикам. Пусто — поля нет, как у элементов, записанных раньше."""
+    return {"held": [type_.value for type_ in held]} if held else {}
+
+
 def _spans(result: SanitizeResult) -> list[dict]:
     # Признак подтверждённого формата — только там, где он есть: spans хранятся открыто и на каждый фрагмент.
     return [
         {"start": s.start, "end": s.end, "entity_id": s.entity_id, "surrogate": s.surrogate, "sources": list(s.sources)}
-        | ({"validated": True} if s.validated else {})
+        | ({"validated": True} if s.validated else {}) | _held(s.held)
         for s in result.spans
     ]
 
 
 def _notices(result: SanitizeResult) -> list[dict]:
-    return [{"code": n.code, "start": n.start, "end": n.end} for n in result.notices]
+    return [{"code": n.code, "start": n.start, "end": n.end} | _held(n.held) for n in result.notices]
+
+
+def _blocks(policies: Mapping[EntityType, Policy], types: Iterable[str]) -> bool:
+    return any(policies.get(EntityType(type_)) is Policy.BLOCK for type_ in types)
+
+
+def _stricter(settings: Settings, found: EntityType, wanted: EntityType) -> bool:
+    return STRICTNESS.get(settings.policies.get(found), 0) > STRICTNESS.get(settings.policies.get(wanted), 0)
+
+
+_DOTTED_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
+
+
+def _name_parts(value: str, added: dict[str, EntityType]) -> list[tuple[str, EntityType]]:
+    """Новые правила на целой части имени с точками (часть или хвост из двух частей и больше — домен) и их типы. Имя
+    длиннее имени DNS целиком не записывается (resolve) — его хвосты не перебираются."""
+    name = hostmap.dotted(value)
+    if len(name) > hostmap.MAX_NAME or not _DOTTED_NAME.fullmatch(name):
+        return []
+    parts = name.split(".")
+    candidates = [*parts, *(".".join(parts[i:]) for i in range(1, len(parts) - 1))]
+    return [(part, added[normalize(part)]) for part in candidates if normalize(part) in added]
+
+
+def _labelled(state: ChatState, surrogate: str, type_: EntityType) -> bool:
+    """В замене имени стоит метка этого типа: часть получила тип правила."""
+    return any(
+        (owner := state.surrogates.get(label)) is not None and state.entities[owner.entity_id].type is type_
+        for label in labels.SHAPE.findall(surrogate)
+    )
 
 
 def _model_spans(result: SanitizeResult) -> list[dict]:
@@ -382,7 +419,8 @@ class ChatService:
             report.clear()
             report.update(
                 replaced=dict(Counter(state.entities[s.entity_id].type.value for s in result.spans)),
-                notices=len(result.notices), leaks=len(result.leaks), blocked=len(result.blocked),
+                notices=len(result.notices), leaks=len(result.leaks),
+                blocked=len(result.blocked) + len(result.blocked_surrogates),
                 source=item.source, layers=ran,
             )
             if item.meta.get("kind"):
@@ -521,11 +559,14 @@ class ChatService:
                     views.append(InputView(item, [], []))
                     continue
                 leaks = self._view_leak_check(item.sanitized or "", state, settings, inputs)
+                # По сохранённым данным элемента и нынешним политикам: тип сущности фрагмента, типы находок, скрытых в нём
+                # под другой меткой, и сущности вставленных замен (FR-4.2).
+                policies = settings.policies
                 blocked = [
                     span for span in item.spans
                     if span["entity_id"] in state.entities
-                    and settings.policies.get(state.entities[span["entity_id"]].type) is Policy.BLOCK
-                ]
+                    and _blocks(policies, (state.entities[span["entity_id"]].type, *span.get("held", ())))
+                ] + [notice for notice in item.notices if _blocks(policies, notice.get("held", ()))]
                 views.append(InputView(item, leaks, blocked))
             elif item.source == "local":
                 # Локальная модель видела оригиналы: в её ответе нет замен, и «восстанавливать» в нём нечего —
@@ -795,21 +836,29 @@ class ChatService:
                 result = sanitize(state, item.original, settings, layers)
                 leaks["count"] += len(result.leaks)
                 for span in result.spans if added else ():
-                    wanted = added.get(normalize(item.original[span.start:span.end]))
+                    value = item.original[span.start:span.end]
+                    wanted = added.get(normalize(value))
                     if wanted is None:
+                        # Правило на целой части имени с точками (исключение владельца 15.10.2026): легло, если часть
+                        # получила метку его типа; нет — её держит политика HOST или DOMAIN (resolve._manual).
+                        for part, wanted in _name_parts(value, added):
+                            if _labelled(state, span.surrogate, wanted):
+                                applied = True
+                            elif _stricter(settings, own := EntityType.DOMAIN if "." in part else EntityType.HOST, wanted):
+                                held = own
                         continue
                     found = state.entities[span.entity_id].type
-                    strict = STRICTNESS.get(settings.policies.get(found), 0) > STRICTNESS.get(settings.policies.get(wanted), 0)
-                    if found is not wanted and strict:
+                    if found is not wanted and _stricter(settings, found, wanted):
                         held = found
                     else:
                         applied = True
                 # Текст, очищенный до слоёв 4 и 5 (этап 1), отметки о них не получает: выключенными они не были (m-12).
                 meta = (item.meta | {"layers": ran}) if "layers" in item.meta else item.meta
-                if result.sanitized != item.sanitized or meta != item.meta:
-                    fresh = replace(
-                        item, sanitized=result.sanitized, spans=_spans(result), notices=_notices(result), meta=meta,
-                    )
+                spans, notices = _spans(result), _notices(result)
+                # Тот же текст с другой разметкой — тоже запись: типы, которые держат блокировку (held), у текстов,
+                # очищенных раньше, появляются при обновлении чата.
+                if result.sanitized != item.sanitized or meta != item.meta or (spans, notices) != (item.spans, item.notices):
+                    fresh = replace(item, sanitized=result.sanitized, spans=spans, notices=notices, meta=meta)
                     pairs.append((item, fresh))
             if held is not None and not applied:
                 raise EditRefused(
