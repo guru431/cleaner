@@ -60,15 +60,21 @@ def _account(request: Request, name: str) -> tuple[float, User | None]:
 
 
 def _logged_in(request: Request, expected: str, name: str, user: User | None, password_ok: bool) -> Response:
-    """Итог проверки: неудача идёт в счёт паузы и в журнал, успех открывает сессию."""
+    """Итог проверки: неудача идёт в счёт паузы и в журнал, успех открывает сессию.
+
+    user — снимок до проверки пароля: пока она шла, пароль могли сменить, а учётную запись — отключить. Сессия
+    открывается, только если проверенный хэш всё ещё действует (create_session); нет — проверенный пароль
+    уже не тот, и это та же неудача."""
     repo, throttle = repo_of(request), request.app.state.throttle
-    if not password_ok or user.disabled:
+    token, csrf = auth.new_token(), auth.new_token()
+    if (
+        not password_ok or user.disabled
+        or not repo.create_session(auth.token_hash(token), user.id, csrf, user.password_hash)
+    ):
         throttle.failed(name)
         repo.audit("login_failed", user.id if user else None)
         return _login_page(request, expected, 401, "Неверный логин или пароль")
     throttle.succeeded(name)
-    token, csrf = auth.new_token(), auth.new_token()
-    repo.create_session(auth.token_hash(token), user.id, csrf)
     repo.audit("login", user.id)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(

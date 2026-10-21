@@ -2,7 +2,9 @@
 
   python scripts/fetch_open_sets.py data/open-sets
   python -m cleaner eval --jsonl data/open-sets/pii_benchmark.jsonl --layers 1-3 1-4
-Каталог data/ — в .gitignore: наборы в репозиторий не попадают.
+Каталог data/ — в .gitignore: наборы в репозиторий не попадают. Рядом с каждым набором — манифест (источник, ревизия,
+sha256, версия конвертера, число примеров); eval --jsonl сверяет с ним файл. Изменившийся снимок записывается рядом
+под именем с началом sha256, прежний не перезаписывается.
 """
 from __future__ import annotations
 
@@ -18,13 +20,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cleaner.eval.datasets import bio_to_spans, convert  # noqa: E402
+from cleaner.eval.datasets import bio_to_spans, convert, write_snapshot  # noqa: E402
 
-PII_BENCHMARK = (
-    "https://huggingface.co/datasets/redmadrobot-rnd/pii_benchmark/resolve/"
-    "f77ea831274daf980cc45c61a93c226be9d978d6/test.csv"
-)
+PII_BENCHMARK_REPO = "redmadrobot-rnd/pii_benchmark"
+PII_BENCHMARK_REVISION = "f77ea831274daf980cc45c61a93c226be9d978d6"
+PII_BENCHMARK = f"https://huggingface.co/datasets/{PII_BENCHMARK_REPO}/resolve/{PII_BENCHMARK_REVISION}/test.csv"
 ROWS = "https://datasets-server.huggingface.co/rows"
+API = "https://huggingface.co/api/datasets/"
 
 
 def rows(dataset: str, split: str) -> Iterator[dict]:
@@ -40,11 +42,11 @@ def rows(dataset: str, split: str) -> Iterator[dict]:
         offset += len(page)
 
 
-def write(path: Path, records: list[dict]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        for record in records:
-            if record["spans"]:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+def revision(dataset: str) -> str:
+    """Ревизия набора на момент загрузки: datasets-server отдаёт последнюю и закрепить её не даёт —
+    воспроизводимость держит sha256 снимка в манифесте."""
+    with urllib.request.urlopen(API + dataset, timeout=60) as response:
+        return str(json.load(response).get("sha", ""))
 
 
 def main(out: Path) -> None:
@@ -59,15 +61,18 @@ def main(out: Path) -> None:
             skipped += 1
             continue
         benchmark.append(convert(*parsed, unmapped))
-    write(out / "pii_benchmark.jsonl", benchmark)
+    written = [write_snapshot(out, "pii_benchmark", benchmark, PII_BENCHMARK_REPO, PII_BENCHMARK_REVISION, True)]
+    hivetrace_revision = revision("hivetrace/pii-bench")
     hivetrace = [
         convert(row["text"], [(e["start"], e["end"], e["type"]) for e in row["entities"]], unmapped)
         for split in ("entity", "domain") for row in rows("hivetrace/pii-bench", split)
     ]
-    write(out / "hivetrace.jsonl", hivetrace)
+    written.append(write_snapshot(out, "hivetrace", hivetrace, "hivetrace/pii-bench", hivetrace_revision, False))
+    jayguard_revision = revision("just-ai/jayguard-ner-benchmark")
     jayguard = [convert(*bio_to_spans(row["tokens"], row["ner_tags"]), unmapped) for row in rows("just-ai/jayguard-ner-benchmark", "train")]
-    write(out / "jayguard.jsonl", jayguard)
+    written.append(write_snapshot(out, "jayguard", jayguard, "just-ai/jayguard-ner-benchmark", jayguard_revision, False))
     print(f"pii_benchmark: {len(benchmark)} примеров (пропущено {skipped}), hivetrace: {len(hivetrace)}, jayguard: {len(jayguard)}")
+    print("Записано:", ", ".join(path.name for path in written))
     print("Метки, не вошедшие в измерение:", ", ".join(f"{label} ({count})" for label, count in unmapped.most_common()) or "нет")
 
 

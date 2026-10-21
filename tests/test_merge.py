@@ -106,6 +106,29 @@ def test_overlapping_user_rules_keep_the_strictest_policy():
         assert merged.type is expected, changed
 
 
+def test_senior_type_does_not_soften_the_policy_of_a_finding_it_swallows():
+    """Аудит 2026-10-21, P2: старшинство отдавало фрагмент старшему типу, и политика поглощённой находки терялась —
+    «password=+79161234567» при PHONE=BLOCK давал <SECRET_1>, и выдача не блокировалась. Старшинство выбирает тип, пока
+    у поглощённых находок политика не строже; иначе фрагмент берёт тип находки со строже политикой (FR-3.3)."""
+    for text, spans in (
+        ("password=+79161234567", [Span(9, 21, T.SECRET, "secrets"), Span(9, 21, T.PHONE, "rules")]),
+        ("ИНН 7707083893", [Span(4, 14, T.INN, "rules", validated=True), Span(4, 14, T.PHONE, "dict")]),
+        ("Contoso.ru", [Span(0, 10, T.DOMAIN, "infra"), Span(0, 10, T.PHONE, "ner")]),
+        ("Иван Петрович", [Span(0, 13, T.ORG, "ner"), Span(0, 13, T.PHONE, "llm")]),
+    ):
+        senior = spans[0].type
+        for changed, expected in (
+            ({}, senior), ({T.PHONE: Policy.BLOCK}, T.PHONE), ({T.PHONE: Policy.HIDE, senior: Policy.MASK}, T.PHONE),
+            ({T.PHONE: Policy.HIDE, senior: Policy.HIDE}, senior), ({T.PHONE: Policy.BLOCK, senior: Policy.BLOCK}, senior),
+        ):
+            [merged] = merge(text, spans, DetectContext(Settings(policies=default_policies() | changed)))
+            assert merged.type is expected, (text, changed)
+    # Находка внутри фрагмента — его часть, а не другое прочтение значения: тип она не меняет.
+    spans = [Span(0, 18, T.EMAIL, "rules", validated=True), Span(7, 18, T.DOMAIN, "dict")]
+    blocked = DetectContext(Settings(policies=default_policies() | {T.DOMAIN: Policy.BLOCK}))
+    assert merge("ivanov@fabrikam.ru", spans, blocked)[0].type is T.EMAIL
+
+
 def test_partial_overlap_covers_the_union():
     spans = [Span(0, 10, T.PHONE, "rules"), Span(5, 16, T.CARD, "rules", validated=True)]
     assert merge("0123456789abcdef", spans, CTX) == [

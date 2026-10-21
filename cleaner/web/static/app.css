@@ -111,6 +111,7 @@ button.primary, .btn.primary { background: var(--primary); border-color: var(--p
 button.primary:hover, .btn.primary:hover { background: var(--primary); filter: brightness(1.1); }
 button.danger { color: var(--bad); }
 button.danger:hover { background: var(--bad-bg); border-color: var(--bad); }
+button:disabled, button:disabled:hover { background: var(--bg-sub); color: var(--muted); cursor: not-allowed; }
 .wide { width: 100%; }
 input, select, textarea {
   min-height: 28px; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg);

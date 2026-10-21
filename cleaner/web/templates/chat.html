@@ -53,6 +53,9 @@
         {% elif e.status == "done" and not e.deliverable %}
         <span class="badge bad">{{ icon("warning") }}заблокирован</span>
         {% endif %}
+        {% if e.status == "done" and e.partial %}
+        <span class="badge warn" title="Что пропало — на экране проверки">{{ icon("warning") }}извлечено частично: {{ e.partial }}</span>
+        {% endif %}
         {% if e.status == "done" %}
         <span class="actions">
           <a class="btn" href="/chats/{{ chat.id }}/items/{{ e.id }}">Проверка</a>
@@ -144,7 +147,11 @@
       {% if local %}
       <form method="post" action="/chats/{{ chat.id }}/ask-local" class="ask-local">
         {% include "_csrf.html" %}
+        {% if local_pending %}
+        <button disabled title="{{ local_pending }}">Спросить локальную модель</button>
+        {% else %}
         <button title="Без очистки: текст не покидает сервер">Спросить локальную модель</button>
+        {% endif %}
       </form>
       {% endif %}
     </div>
@@ -167,7 +174,8 @@
           {% include "_csrf.html" %}
           <input type="file" name="file" required aria-label="Файл">
           <button class="primary">Загрузить и очистить</button>
-          <small class="hint">Файл до {{ max_file_mb }} МБ: DOCX, XLSX, PPTX, PDF (и скан), EML, MSG, HTML, CSV, текст, PNG, JPEG</small>
+          <label class="check"><input type="checkbox" name="ocr" value="all"> {{ ocr_all }}</label>
+          <small class="hint">Файл до {{ max_file_mb }} МБ: DOCX, XLSX, PPTX, PDF (и скан), EML, MSG, HTML, CSV, текст, PNG, JPEG. Отметка — для PDF с текстом на картинках или неполным слоем текста: каждая страница идёт в распознавание, это дольше</small>
         </form>
       </div>
       <div class="tab-panel" role="tabpanel" data-tab-panel="instruction">

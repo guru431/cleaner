@@ -124,3 +124,16 @@ def test_ask_local_answers_with_originals(ivan, engines):
     assert engines.completer.requests[-1]["messages"][-1]["content"] == "Вопрос: почта a@x.example"
     page = ivan.get(f"/chats/{chat_id}").text
     assert "Ответ локальной модели" in page and "Локально: пишите на a@x.example" in page
+    assert '<button title="Без очистки: текст не покидает сервер">Спросить локальную модель</button>' in page
+
+
+def test_ask_local_is_off_while_a_local_answer_is_pending(ivan, repo):
+    """Аудит 21.10.2026: пока ответ локальной модели в очереди, кнопка неактивна, а повтор формы — отказ с причиной."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="Вопрос: почта a@x.example")
+    repo.add_item(chat_id, Item("l" * 32, 0, "answer", "", None, source="local", status="queued"))
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert re.search(r'<button disabled title="[^"]*ещё идёт[^"]*">Спросить локальную модель</button>', page)
+    response = ivan.post(f"/chats/{chat_id}/ask-local")
+    assert response.status_code == 400 and "ещё идёт" in response.text
+    assert [i.id for i in repo.items(chat_id) if i.source == "local"] == ["l" * 32]

@@ -3,6 +3,8 @@
 .claude/.env
 .claude/settings.local.json
 .claude/settings.local.json.bak
+# git worktrees of Claude Code subagents
+.claude/worktrees/
 
 # python
 .venv/

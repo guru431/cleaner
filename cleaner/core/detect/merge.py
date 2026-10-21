@@ -194,6 +194,14 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
                     continue
         kept = senior.source == "manual" and _name_kept(text, group, start, end, policies)
         type_ = kept or senior.type
+        if senior.source != "manual":
+            # Старшинство выбирает тип, но политика фрагмента не мягче строжайшей из находок того же значения (FR-3.3):
+            # иначе «password=+79161234567» при PHONE «блокировать» давал <SECRET_1>, и выдача не блокировалась. Тип —
+            # находки со строже политикой, при равных — старшей. Тип и есть решение: то же значение в следующих текстах
+            # найдётся написанием этой сущности, а блокировка проверяется по текущей политике её типа. Находка внутри
+            # фрагмента — его часть (домен адреса e-mail), а не другое прочтение: тип её значения он не получает (5.10).
+            whole = [senior, *(s for s in group if (s.start, s.end) == (start, end))]
+            type_ = min(whole, key=lambda s: (-STRICTNESS.get(policies.get(s.type), 0), _rank(s))).type
         ruled, mail = (), False
         records = [s.type for s in group if s.source != "manual" and s.type in (*_NAME_TYPES, EntityType.EMAIL)]
         if senior.source == "manual" and not kept and records:

@@ -119,6 +119,14 @@ def _in_request(items: list[Item]) -> list[int]:
     return [*counts, count]
 
 
+LOCAL_PENDING = "Предыдущий ответ локальной модели ещё идёт: дождитесь его"
+
+
+def local_pending(items: Iterable[Item]) -> bool:
+    """Ответ локальной модели в очереди или в работе: новый вопрос ей не задаётся (кнопка в чате и ask_local)."""
+    return any(i.kind == "answer" and i.source == "local" and i.status in ("queued", "running") for i in items)
+
+
 def _cached_layers(item: Item, on: dict[str, bool]) -> tuple[Layers, list[str]]:
     """Для повторной очистки после правки: находки слоёв, которые работали и всё ещё включены, — без моделей."""
     ran = [name for name in item.meta.get("layers", []) if on.get(name)]
@@ -295,13 +303,16 @@ class ChatService:
         self.submit(self.process, chat_id, item.id, user_id)
         return self.repo.item(chat_id, item.id) or item
 
-    def add_file(self, chat_id: str, user_id: str, filename: str, data: bytes) -> Item:
-        """Файл — в очередь. Его байты живут только в памяти задания; имя нужно лишь для расширения (FR-2.7)."""
+    def add_file(self, chat_id: str, user_id: str, filename: str, data: bytes, ocr_all: bool = False) -> Item:
+        """Файл — в очередь. Его байты живут только в памяти задания; имя нужно лишь для расширения (FR-2.7).
+        ocr_all — распознать каждую страницу PDF: выбор пользователя, когда слой текста неполон или нечитаем."""
         item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="queued"))
-        self.file_submit(self.process, chat_id, item.id, user_id, data, filename)
+        self.file_submit(self.process, chat_id, item.id, user_id, data, filename, ocr_all)
         return self.repo.item(chat_id, item.id) or item
 
-    def process(self, chat_id: str, item_id: str, user_id: str, data: bytes | None = None, filename: str = "") -> None:
+    def process(
+        self, chat_id: str, item_id: str, user_id: str, data: bytes | None = None, filename: str = "", ocr_all: bool = False,
+    ) -> None:
         """Задание: извлечь текст файла, очистить всеми включёнными слоями, записать. Отказ — элемент failed."""
         try:
             item = self.repo.item(chat_id, item_id)
@@ -309,7 +320,7 @@ class ChatService:
                 return                                  # чат удалили, пока задание ждало очереди
             self.repo.set_item_status(chat_id, item_id, "running")
             if data is not None:
-                item = self._extract(chat_id, item, data, filename)
+                item = self._extract(chat_id, item, data, filename, ocr_all)
             self._check_length(item.original)
             layers, ran = self._live_layers(chat_id)
             report = self._sanitize_item(chat_id, item, layers, ran)
@@ -324,7 +335,7 @@ class ChatService:
         if report["leaks"]:
             self.repo.audit("leak", user_id, chat_id, count=report["leaks"])
 
-    def _extract(self, chat_id: str, item: Item, data: bytes, filename: str) -> Item:
+    def _extract(self, chat_id: str, item: Item, data: bytes, filename: str, ocr_all: bool = False) -> Item:
         """Текст из файла записывается сразу: если очистка не удастся, его можно очистить заново без файла."""
         from cleaner.ingest.extract import ExtractError, detect_kind
 
@@ -334,6 +345,7 @@ class ChatService:
             self._check_length(" " * (self.max_text_chars + 1))    # знак UTF-8 — не больше 4 байт: заведомо длиннее
         extracted = self.engines.extractor().extract(
             filename, data, lambda done, total: self.repo.set_item_progress(chat_id, item.id, f"{done}/{total}"),
+            ocr_all=ocr_all,
         )
         # До записи: текст, который всё равно не очистить, не хранится, и повторить нечего (файл не хранится).
         self._check_length(extracted.text)
@@ -346,6 +358,12 @@ class ChatService:
             meta["unread_pages"] = list(extracted.unread_pages)
         if extracted.hidden_sheets:
             meta["hidden_sheets"] = extracted.hidden_sheets      # только число: имена листов — данные пользователя
+        if extracted.doubtful_pages:
+            meta["doubtful_pages"] = list(extracted.doubtful_pages)
+        if extracted.images:
+            meta["images"] = extracted.images
+        if ocr_all:
+            meta["ocr_all"] = True
         self.repo.set_item_original(chat_id, item.id, extracted.text, meta)
         return replace(item, original=extracted.text, meta=meta)
 
@@ -416,28 +434,30 @@ class ChatService:
             raise EditRefused("текст ещё не очищен")
         if self.engines is None:
             raise EditRefused("локальная модель не подключена")
-        if not self.repo.set_item_risk_status(chat_id, item_id, "queued", _RISK_IDLE):     # одним UPDATE (m-10)
+        job = self.repo.queue_risk(chat_id, item_id, _RISK_IDLE)       # одним UPDATE (m-10)
+        if job is None:
             raise EditRefused("проверка уже идёт")
-        self.submit(self.run_risk, chat_id, item_id, user_id)
+        self.submit(self.run_risk, chat_id, item_id, user_id, job)
 
-    def run_risk(self, chat_id: str, item_id: str, user_id: str) -> None:
+    def run_risk(self, chat_id: str, item_id: str, user_id: str, job: str) -> None:
         """Задание: только очищенный текст и только локальной модели (FR-9.5).
 
         Сначала проверка переходит в работу, потом читается текст: если его изменят после этого, догадки
-        не запишутся (set_item_risk), а не окажутся у нового текста."""
+        не запишутся (set_item_risk), а не окажутся у нового текста. Каждый переход сверяет задание job:
+        смена текста стирает его, и конец прежней проверки — догадки или отказ — не ложится на новую."""
         try:
-            if not self.repo.set_item_risk_status(chat_id, item_id, "running", ("queued",)):
+            if not self.repo.set_item_risk_status(chat_id, item_id, job, "running", ("queued",)):
                 return                                    # проверку отменила смена текста или чат удалён
             item = self.repo.item(chat_id, item_id)
             if item is None:
                 return
             guesses = self.engines.risk()(item.sanitized or "")
-            stored = self.repo.set_item_risk(chat_id, item_id, risk.to_dict(guesses))
+            stored = self.repo.set_item_risk(chat_id, item_id, job, item.sanitized, risk.to_dict(guesses))
         except Exception as exc:
             if isinstance(exc, KeyError) and self.repo.chat(chat_id) is None:
                 return                                    # чат удалили, пока шла проверка
             log.error("проверка риска: %s", type(exc).__name__)
-            self.repo.set_item_risk_status(chat_id, item_id, "failed", ("running",))
+            self.repo.set_item_risk_status(chat_id, item_id, job, "failed", ("running",))
             self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="risk")
             return
         if stored:
@@ -682,10 +702,9 @@ class ChatService:
         context = probe_context(provider.id, model)
         return "".join(self.cloud_send(context, link(provider), None, None))[:500]
 
-    def _local_messages(self, chat_id: str, items: list[Item]) -> list[dict[str, str]]:
+    @staticmethod
+    def _local_messages(state: ChatState, settings: Settings, items: list[Item]) -> list[dict[str, str]]:
         """FR-9.4: локальной модели — оригиналы; ответы облака — восстановленными, локальные — как есть."""
-        state, _ = self.repo.load_state(chat_id)
-        settings = self.repo.settings()
         system, messages = [], []
         for item in items:
             if item.kind == "input":
@@ -709,11 +728,23 @@ class ChatService:
         return ([{"role": "system", "content": "\n\n".join(system)}] if system else []) + messages
 
     def ask_local(self, chat_id: str, user_id: str) -> Item:
-        """FR-9.4: вопрос локальной модели вместо облачной. Текст не очищается: он не покидает сервер."""
+        """FR-9.4: вопрос локальной модели вместо облачной. Текст не очищается: он не покидает сервер.
+
+        Проверка идущего ответа и запись нового — в одной работе над состоянием (_apply), как у отправки облаку:
+        вторая вкладка, записавшая свой ответ между чтением и записью, меняет версию чата, и повтор его видит."""
         if self.engines is None:
             raise SendRefused("Локальная модель не подключена")
-        messages = self._local_messages(chat_id, self.repo.items(chat_id))
-        item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "answer", "", None, source="local", status="queued"))
+        built: dict[str, list[dict[str, str]]] = {}
+
+        def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
+            if local_pending(items):
+                # Двойная отправка формы заняла бы оба потока общего пула одной генерацией, а очистка ждала бы.
+                raise SendRefused(LOCAL_PENDING)
+            built["messages"] = self._local_messages(state, settings, items)
+            return [Item(uuid.uuid4().hex, 0, "answer", "", None, source="local", status="queued")], []
+
+        [item] = self._apply(chat_id, work)
+        messages = built["messages"]
         self.repo.audit("local_answer", user_id, chat_id, messages=len(messages))
         self.submit(self.run_local, chat_id, item.id, user_id, messages)
         return item

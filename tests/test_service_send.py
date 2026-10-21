@@ -320,6 +320,36 @@ def test_ask_local_sends_originals_only_to_the_local_model(repo, chat, engines):
     assert repo.audit_events("local_answer")[0].details == {"messages": 2}
 
 
+def test_second_local_question_waits_for_the_first_answer(repo, chat, engines, monkeypatch):
+    """Аудит 21.10.2026: второй вопрос до начала первого ответа (двойная отправка формы, две вкладки) — та же
+    генерация ещё раз в общем пуле из двух потоков. Пока ответ локальной модели в очереди или в работе,
+    новый вопрос отклоняется — и тогда, когда вторая вкладка успела записать свой между чтением и записью."""
+    user, chat_id = chat
+    jobs = []
+    service = ChatService(repo, engines=engines, submit=lambda fn, *args: jobs.append((fn, args)))
+    repo.add_item(chat_id, Item("q" * 32, 0, "input", "Вопрос", "Вопрос"))
+    first = service.ask_local(chat_id, user)
+    with pytest.raises(SendRefused, match="ещё идёт"):
+        service.ask_local(chat_id, user)
+    [(fn, args)] = jobs
+    fn(*args)
+    assert repo.item(chat_id, first.id).status == "done"
+    repo.add_item(chat_id, Item("r" * 32, 0, "input", "Ещё вопрос", "Ещё вопрос"))
+    commit = repo.commit_chat
+
+    def other_tab_first(*args, **kwargs):
+        monkeypatch.setattr(repo, "commit_chat", commit)
+        service.ask_local(chat_id, user)
+        return commit(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "commit_chat", other_tab_first)
+    with pytest.raises(SendRefused, match="ещё идёт"):
+        service.ask_local(chat_id, user)
+    assert len(jobs) == 2
+    assert [i.status for i in repo.items(chat_id) if i.source == "local"] == ["done", "queued"]
+    assert len(repo.audit_events("local_answer")) == 2
+
+
 def test_local_answer_failure_has_a_reason(repo, chat, engines):
     user, chat_id = chat
     engines.unavailable = "Локальная модель недоступна: нет ключа"

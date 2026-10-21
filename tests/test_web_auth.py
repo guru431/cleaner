@@ -78,6 +78,29 @@ def test_disabled_user_loses_the_session(browser, repo):
     assert b.login("ivan").status_code == 401
 
 
+@pytest.mark.parametrize("change", ["password", "disabled"])
+def test_account_changed_during_the_password_check_gets_no_session(browser, repo, monkeypatch, change):
+    """Аудит 21.10.2026: пока Argon2 проверял старый пароль, его сменили или учётную запись отключили. Смена уже
+    закрыла сессии — вход по проверенному, но отозванному паролю новую не открывает."""
+    b = browser()
+    user = b.user("ivan")
+    real = auth.check_password
+
+    async def changed_meanwhile(password_hash, password):
+        ok = await real(password_hash, password)
+        if change == "password":
+            repo.set_password(user, "$argon2id$другой-хэш")
+        else:
+            repo.set_disabled(user, True)
+        return ok
+
+    monkeypatch.setattr(auth, "check_password", changed_meanwhile)
+    response = b.login("ivan")
+    assert response.status_code == 401 and "Неверный логин или пароль" in response.text
+    assert repo.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+    assert [e.event for e in repo.audit_events()] == ["login_failed"]
+
+
 def test_form_without_the_session_token_is_refused(browser):
     b = browser()
     b.user("ivan")
@@ -214,6 +237,9 @@ def test_logins_waiting_for_a_password_slot_hold_no_shared_threads(browser, monk
 
     b = browser()
     b.user("ivan")
+    # Пауза после пяти неудач здесь ни при чём: шесть неверных паролей разом, и под нагрузкой машины последний вход
+    # доходил до проверки паузы после пяти записанных неудач — 429 вместо 401 (аудит 21.10.2026).
+    monkeypatch.setattr(auth.Throttle, "FREE", auth.HASH_SLOTS + 3)
     with b.client as client:                    # один цикл событий на все запросы, как у uvicorn
         monkeypatch.setattr(auth, "_hasher", Held(time_cost=1, memory_cost=1024, parallelism=1))
         client.portal.call(_shared_threads, auth.HASH_SLOTS)     # общий пул — четыре потока вместо сорока

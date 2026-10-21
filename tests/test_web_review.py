@@ -152,7 +152,8 @@ def test_check_interrupted_by_a_restart_says_so_and_can_be_run_again(ivan, repo,
     chat_id = ivan.chat()
     ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
     item_id = first_item(repo, chat_id)
-    repo.set_item_risk_status(chat_id, item_id, "running", ("",))
+    job = repo.queue_risk(chat_id, item_id, ("",))
+    repo.set_item_risk_status(chat_id, item_id, job, "running", ("queued",))
     create_app(repo, clock, secure_cookies=False, engines=engines, jobs=jobs)          # перезапуск службы
     page = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
     assert "Проверка прервана перезапуском службы" in page and "недоступна" not in page
@@ -185,6 +186,29 @@ def test_hidden_sheets_left_out_of_the_text_are_reported(ivan, repo):
     notice = "Скрытые листы книги (2) не извлечены: их содержимое в очищенный текст не попало"
     assert notice in ivan.get(f"/chats/{chat_id}/items/{book.id}").text
     assert "Скрытые листы" not in ivan.get(f"/chats/{chat_id}/items/{plain.id}").text
+
+
+def test_partial_extraction_is_shown_in_the_feed_and_on_the_review(ivan, repo):
+    """Идея аудита 2026-10-21: «извлечено частично» со страницами — в заголовке элемента ленты и в сводке проверки;
+    о встроенных изображениях документа — предупреждение. В meta — только номера и числа."""
+    chat_id = ivan.chat()
+    state, version = repo.load_state(chat_id)
+    layers = ["ner", "llm"]
+    scan = Item(uuid.uuid4().hex, 0, "input", "Сотрудник", "Сотрудник", source="file", meta={
+        "kind": "pdf", "pages": 6, "ocr_pages": [1, 2, 3, 4], "unread_pages": [2], "doubtful_pages": [5], "layers": layers,
+    })
+    deck = Item(uuid.uuid4().hex, 0, "input", "Сотрудник", "Сотрудник", source="file",
+                meta={"kind": "pptx", "images": 3, "layers": layers})
+    repo.commit_chat(chat_id, state, version, [scan, deck])
+    feed = ivan.get(f"/chats/{chat_id}").text
+    assert feed.count("извлечено частично") == 1 and "извлечено частично: страницы 2, 5" in feed
+    review = ivan.get(f"/chats/{chat_id}/items/{scan.id}").text
+    assert "PDF, страниц — 6: распознаванием — 1–4; из слоя текста файла — 5, 6." in review
+    assert "Извлечено частично. На страницах 2 распознавание не нашло текста" in review
+    assert "Извлечено частично. На страницах 5 изображение занимает большую часть страницы" in review
+    review = ivan.get(f"/chats/{chat_id}/items/{deck.id}").text
+    assert "Встроенных изображений в документе — 3: текст на них не распознаётся" in review
+    assert "Извлечено частично" not in review and "PDF, страниц" not in review
 
 
 def test_failed_residual_risk_check_says_so(ivan, repo, engines):

@@ -37,6 +37,25 @@ def test_scan_is_recognised_and_marked_on_the_review(ivan, repo):
     assert '<span class="title">Файл 1</span>' in page and f'href="/chats/{chat_id}/items/{item.id}"' in page
 
 
+def test_user_can_ask_to_recognise_every_pdf_page(ivan, repo):
+    """Аудит 2026-10-21: отметка в форме «Файл» отправляет в распознавание и страницы со слоем текста."""
+    from pdfgen import make_pdf
+
+    chat_id = ivan.chat()
+    pdf = make_pdf(["Contact petrov.test@kontora-test.ru for access", "Second page of the letter"])
+    assert 'name="ocr" value="all"' in ivan.get(f"/chats/{chat_id}").text
+    ivan.client.post(f"/chats/{chat_id}/upload", data={"csrf": ivan.csrf}, files={"file": ("a.pdf", pdf)})
+    ivan.client.post(f"/chats/{chat_id}/upload", data={"csrf": ivan.csrf, "ocr": "all"}, files={"file": ("b.pdf", pdf)})
+    plain, recognised = repo.items(chat_id)
+    assert ("ocr_pages" not in plain.meta, recognised.meta["ocr_pages"], recognised.meta["ocr_all"]) == (True, [1, 2], True)
+    page = "Скан: почта scan@x.example\n\nДокумент: почта doc@x.example"           # распознанное и слой без повторов
+    assert recognised.original == f"{page}\n\n{page}"
+    advice = "загрузите файл ещё раз с отметкой «Распознать текст на всех страницах PDF»"
+    assert "PDF, страниц — 2: из слоя текста файла — 1, 2." in ivan.get(f"/chats/{chat_id}/items/{plain.id}").text
+    assert advice in ivan.get(f"/chats/{chat_id}/items/{plain.id}").text
+    assert advice not in ivan.get(f"/chats/{chat_id}/items/{recognised.id}").text
+
+
 def test_password_protected_file_fails_with_a_reason_and_no_retry(ivan, repo):
     """AC-2.4 в быстром наборе; повторять нечего — файл не хранится."""
     chat_id = ivan.chat()

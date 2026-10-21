@@ -16,7 +16,7 @@ from cleaner.core.entities.resolve import Resolver
 from cleaner.core.match import find_forms
 from cleaner.core.pipeline import DETECTORS, sanitize
 from cleaner.core.restore import StreamRestorer, restore
-from cleaner.core.types import ChatState, DictEntry, Settings, Surrogate
+from cleaner.core.types import ChatState, DictEntry, Entity, Settings, Surrogate
 from cleaner.core.types import EntityType as T
 
 # Модуль — в полном наборе, как норма скорости слоёв 1–3 (раздел 17): обход всех слоёв по сотне длинных рядов (17 с) — с
@@ -422,3 +422,20 @@ def test_names_written_with_escaped_dots_are_found_in_linear_time(text):
         started = time.perf_counter()
         (sanitize if step == "sanitize" else restore)(state, text, Settings())
         assert time.perf_counter() - started < 0.3, step
+
+
+def test_restorer_setup_is_fast_on_a_chat_with_many_dotted_labels(settings):
+    """Второе ревью: сборка восстановления на чате с 20 000 метками, значение которых — имя с точкой («i.ivanov»): ответ
+    списка суффиксов запоминается (test_restore.py считает вызовы), и сборка не дороже 30 мс. С пределом сравнивается
+    медиана сборки; из быстрого набора — с 21.10.2026: под нагрузкой машины медиана выходила за предел без ошибки."""
+    state = ChatState(chat_id="many", net_key=bytes(32))
+    for n in range(1, 20001):
+        entity = Entity(f"e{n}", T.ACCOUNT, n, f"i.ivanov{n}", f"i.ivanov{n}", "detector")
+        state.entities[entity.id] = entity
+        state.surrogates[f"<ACCOUNT_{n}>"] = Surrogate(entity.id)
+    times = []
+    for _ in range(20):
+        started = time.perf_counter()
+        assert restore(state, "ответ про <ACCOUNT_1>", settings).text == "ответ про i.ivanov1"
+        times.append(time.perf_counter() - started)
+    assert sorted(times)[10] * 20 < 0.6

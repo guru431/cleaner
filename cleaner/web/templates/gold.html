@@ -1,9 +1,73 @@
 {% extends "_settings.html" %}
 {% block title %}Эталонный набор — Cleaner{% endblock %}
+{% macro passport(p) %}
+<div class="panel-body">
+  <p class="badges">
+    <span class="sub">Замер {{ p.measured_at | local(tz) }}, примеров {{ p.examples }}, отпечаток набора <span class="mono">{{ p.fingerprint }}</span></span>
+    {% if p.changed %}<span class="badge warn">набор изменился после замера</span>{% endif %}
+    {% if p.drops %}<span class="badge bad">полнота упала против базового замера</span>
+    {% elif p.unchecked %}<span class="badge warn">несопоставимо с базовым замером — QA-6 не проверена</span>
+    {% else %}<span class="badge good">ни один класс не упал против базового замера</span>{% endif %}
+  </p>
+  <p class="sub">Единица подсчёта: {{ p.unit }}. Точность — по пересечению: найденное засчитывается, если задело любой эталонный фрагмент, без учёта типа и лишнего захвата.</p>
+  {% for line in p.drops %}<p class="flash bad">Полнота упала: {{ line }}</p>{% endfor %}
+  {% for line in p.unchecked %}<p class="flash warn">Не проверено: {{ line }}</p>{% endfor %}
+  <p class="sub">{% for name, value in p.versions %}{{ name }}: <span class="mono">{{ value }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</p>
+</div>
+<table class="grid">
+  <thead><tr><th>Класс QA-3</th><th class="num">Сущностей</th>{% for name in p.layers %}<th class="num">Слои {{ name }}</th>{% endfor %}<th class="num">Цель</th></tr></thead>
+  <tbody>
+  {% for row in p.classes %}
+  <tr><td>{{ row.title }}</td><td class="num">{{ row.total }}</td>{% for value in row.recalls %}<td class="num mono">{{ value }}</td>{% endfor %}<td class="num">{{ row.target }}</td></tr>
+  {% else %}
+  <tr><td colspan="{{ p.layers | length + 3 }}" class="empty">В разметке нет сущностей классов QA-3</td></tr>
+  {% endfor %}
+  {% for label, values in p.quality %}
+  <tr><td colspan="2">{{ label }}</td>{% for value in values %}<td class="num mono">{{ value }}</td>{% endfor %}<td></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<details class="panel">
+  <summary class="panel-head"><h3 class="title">По типам: полнота по сущностям, по упоминаниям, точность по пересечению</h3></summary>
+  <table class="grid">
+    <thead><tr><th>Тип</th>{% for name in p.layers %}<th>Слои {{ name }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for type_, cells in p.types %}
+    <tr><td class="mono">{{ type_ }}</td>{% for cell in cells %}<td class="mono">{{ cell }}</td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endmacro %}
 {% block content %}
 <h1>Эталонный набор</h1>
-<p class="lead">Примеров: {{ rows | length }} из {{ target }}, нужных к концу этапа 2. Примеры сохраняются кнопкой «Сохранить как эталон» на экране проверки; тексты здесь не показываются. Измерение — команда <code>python -m cleaner eval</code>.</p>
+<p class="lead">Примеров: {{ rows | length }} из {{ target }}, нужных к концу этапа 2. Примеры сохраняются кнопкой «Сохранить как эталон» на экране проверки; тексты здесь не показываются. Базовый замер для QA-6 сохраняет команда <code>python -m cleaner eval --save-baseline</code>.</p>
 <section class="panel">
+  <header class="panel-head">
+    <h2 class="title">Паспорт качества: собственный набор (QA-1)</h2>
+    <span class="state">слои {{ measure_layers | join(", ") }}</span>
+    {% if rows and engines %}
+    <div class="actions"><form method="post" action="/settings/gold/measure">{% include "_csrf.html" %}<button class="primary"{% if measure.status in ("queued", "running") %} disabled{% endif %}>Измерить собственный набор</button></form></div>
+    {% endif %}
+  </header>
+  {% if measure.status in ("queued", "running") %}
+  <div class="panel-body"><p class="muted" data-poll="/settings/gold/measure/status">{% if measure.status == "queued" %}Замер в очереди{% else %}Идёт замер{% endif %} (слои {{ measure.layers | join(", ") }})…</p></div>
+  {% elif measure.status == "failed" %}
+  <div class="panel-body"><p class="flash bad">{{ measure.error }}</p></div>
+  {% endif %}
+  {% if not rows %}
+  <div class="panel-body"><p class="flash warn">Собственный набор пуст: полнота по QA-1 не измерена.</p></div>
+  {% endif %}
+  {% if own %}{{ passport(own) }}{% elif rows %}<div class="panel-body"><p class="muted">Замеров собственного набора ещё не было.</p></div>{% endif %}
+</section>
+{% for p in opened %}
+<section class="panel">
+  <header class="panel-head"><h2 class="title">{{ p.title }}</h2><span class="state">для сравнения (QA-4), не выполнение QA-1</span></header>
+  {{ passport(p) }}
+</section>
+{% endfor %}
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Примеры</h2></header>
   <table class="grid">
     <thead><tr><th>Сохранён</th><th>Кем</th><th class="num">Знаков</th><th>Разметка</th><th></th></tr></thead>
     <tbody>

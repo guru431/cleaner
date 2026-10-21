@@ -168,6 +168,22 @@ def test_paragraph_continued_on_the_next_page_is_neither_lost_nor_repeated(docli
     assert CANARY in joined and joined.count("and his deputy") == 1
 
 
+def test_scan_with_a_digital_header_keeps_both_the_header_and_the_recognised_page(docling, no_network):
+    """Аудит 2026-10-21, находка 1, на настоящем Docling: страница — цифровой заголовок длиннее 20 знаков и
+    растровое изображение на 74 % площади. Раньше в текст попадал один заголовок, а распознавание не вызывалось."""
+    header = "Visible header for the financial report"
+    calls = []
+
+    def ocr(image, mime):
+        calls.append((mime, image[:8]))
+        return f"Balance sheet, contact {CANARY}"
+
+    result = Extractor(docling, ocr).extract("report.pdf", make_pdf([(header, 600), "Plain second page of the report"]))
+    assert calls == [("image/png", b"\x89PNG\r\n\x1a\n")]
+    assert result.text.count(header) == 1 and CANARY in result.text and "Plain second page" in result.text
+    assert (result.ocr_pages, result.unread_pages, result.doubtful_pages) == ((1,), (), ())
+
+
 def test_damaged_office_file_is_refused(docling, no_network):
     with pytest.raises(ExtractError):
         docling.convert(b"PK\x03\x04broken", "docx")

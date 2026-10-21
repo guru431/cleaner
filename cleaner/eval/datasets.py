@@ -1,11 +1,21 @@
-"""Открытые русские наборы для сравнения (QA-4) в формат eval: {"text", "spans": [{start, end, type, entity}]}."""
+"""Открытые русские наборы для сравнения (QA-4) в формат eval: {"text", "spans": [{start, end, type, entity}]}.
+
+Снимок набора — файл JSONL и манифест рядом (<имя>.manifest.json): источник, ревизия, sha256 файла, версия
+конвертера, число примеров. Повторная загрузка не подменяет принятый снимок незаметно (write_snapshot)."""
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections import Counter
 from collections.abc import Sequence
+from pathlib import Path
 
 from cleaner.core.detect.ner import ADDRESS_GAP
+
+# Версия преобразования разметки: другой номер — другие сущности, и замер с прежним несопоставим.
+# 1 — каждое упоминание отдельной сущностью; 2 — одинаковое значение одного типа в примере — одна сущность (QA-2).
+CONVERTER = 2
 
 # Метка набора -> тип ТЗ или часть: person — часть имени, street — улица, дом или весь адрес, place — город, регион, страна.
 LABELS = {
@@ -56,7 +66,11 @@ def bio_to_spans(
 
 
 def convert(text: str, spans: Sequence[tuple[int, int, str]], unmapped: Counter) -> dict:
-    """Части имени рядом — одна сущность PERSON; части адреса — один ADDRESS, если есть улица или дом (как слой 4)."""
+    """Части имени рядом — один фрагмент PERSON; части адреса — один ADDRESS, если есть улица или дом (как слой 4).
+
+    Упоминания одного значения одного типа в разных местах примера — одна сущность: по QA-2 она защищена, только
+    если скрыты все. Значение сравнивается без учёта регистра и пробелов; разные формы имени («Иванов», «Иванову»)
+    остаются разными сущностями — у открытых наборов нет разметки, что это один человек."""
     unmapped.update(label for _, _, label in spans if label not in LABELS)
     items = sorted((start, end, LABELS[label]) for start, end, label in spans if label in LABELS)
     groups: list[list] = []                          # [начало, конец, вид, есть ли улица или дом]
@@ -72,10 +86,57 @@ def convert(text: str, spans: Sequence[tuple[int, int, str]], unmapped: Counter)
             last[3] = last[3] or kind == "street"
         else:
             groups.append([start, end, kind, kind == "street"])
-    out = []
+    out: list[dict] = []
+    entities: dict[tuple[str, str], int] = {}
     for start, end, kind, has_street in groups:
         if kind in ("street", "place") and not has_street:
             continue                                  # город или страна сами по себе адресом не считаются
         type_ = "PERSON" if kind == "person" else "ADDRESS" if kind in ("street", "place") else kind
-        out.append({"start": start, "end": end, "type": type_, "entity": len(out)})
+        entity = entities.setdefault((type_, " ".join(text[start:end].split()).casefold()), len(entities))
+        out.append({"start": start, "end": end, "type": type_, "entity": entity})
     return {"text": text, "spans": out}
+
+
+def manifest_path(path: Path) -> Path:
+    return path.with_name(path.stem + ".manifest.json")
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_snapshot(out: Path, name: str, records: Sequence[dict], source: str, revision: str, pinned: bool) -> Path:
+    """Примеры с разметкой — в <имя>.jsonl с манифестом. Если там уже другой снимок, новый ложится рядом
+    (<имя>-<начало sha256>.jsonl): принятый, с которым связан базовый замер, не перезаписывается."""
+    kept = [record for record in records if record["spans"]]
+    data = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in kept).encode("utf-8")
+    digest = hashlib.sha256(data).hexdigest()
+    path = out / f"{name}.jsonl"
+    if path.exists() and file_sha256(path) != digest:
+        path = out / f"{name}-{digest[:12]}.jsonl"
+    path.write_bytes(data)
+    manifest = {
+        "name": name, "source": source, "revision": revision, "pinned": pinned, "sha256": digest,
+        "converter": CONVERTER, "examples": len(kept),
+    }
+    manifest_path(path).write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
+def check_snapshot(path: Path) -> tuple[str, dict | None, list[str]]:
+    """Имя набора (для базового замера и паспорта), манифест и расхождения снимка с ним."""
+    try:
+        manifest = json.loads(manifest_path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = None
+    if not isinstance(manifest, dict):
+        return path.stem, None, ["нет манифеста: источник, ревизия и версия конвертера неизвестны"]
+    problems = []
+    if manifest.get("sha256") != file_sha256(path):
+        problems.append("файл не совпадает с манифестом (sha256): снимок изменён после загрузки")
+    if manifest.get("converter") != CONVERTER:
+        problems.append(
+            f"снимок собран конвертером версии {manifest.get('converter')}, нынешняя — {CONVERTER}: "
+            "скачайте наборы заново (scripts/fetch_open_sets.py)"
+        )
+    return str(manifest.get("name") or path.stem), manifest, problems

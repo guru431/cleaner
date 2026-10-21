@@ -6,7 +6,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from cleaner.service import ChatView, EditRefused, InputView, TextTooLong
+from cleaner.service import LOCAL_PENDING, ChatView, EditRefused, InputView, TextTooLong, local_pending
 from cleaner.storage.repo import Chat, CheckpointBusy, Item
 from cleaner.web import render
 from cleaner.web.deps import Upload, Viewer, get_form, get_upload, get_viewer, own_chat, page, repo_of, service_of
@@ -15,6 +15,21 @@ log = logging.getLogger("cleaner.web")
 router = APIRouter()
 _TITLE = 200
 LAYER_NAMES = {"ner": "Слой 4 — модели распознавания имён", "llm": "Слой 5 — локальная модель"}
+OCR_ALL = "Распознать текст на всех страницах PDF"      # подпись отметки в форме «Файл» и совет в предупреждениях
+_LISTED_PAGES = 5           # больше — в заголовке ленты число, а не номера: список целиком — на экране проверки
+
+
+def partial_extraction(meta: dict[str, object]) -> str:
+    """Что из файла не попало в текст или могло не попасть — для «извлечено частично» в ленте. Только номера
+    страниц и число листов из meta (FR-11.2)."""
+    pages = sorted(set(meta.get("unread_pages", [])) | set(meta.get("doubtful_pages", [])))
+    parts = []
+    if pages:
+        parts.append(f"страниц — {len(pages)}" if len(pages) > _LISTED_PAGES else
+                     f"страниц{'а' if len(pages) == 1 else 'ы'} {', '.join(str(number) for number in pages)}")
+    if meta.get("hidden_sheets"):
+        parts.append(f"скрытых листов — {meta['hidden_sheets']}")
+    return "; ".join(parts)
 
 
 def chat_list(request: Request, viewer: Viewer, query: str = "") -> list[Chat]:
@@ -52,6 +67,7 @@ def _entries(view: ChatView) -> list[dict[str, object]]:
             blocked = frozenset(span["entity_id"] for span in entry.blocked)
             entries.append(common | {
                 "deliverable": entry.deliverable, "leaks": len(entry.leaks), "blocked": len(entry.blocked),
+                "partial": partial_extraction(item.meta),
                 "exposed": [", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],
                 "html": render.highlight(item.sanitized or "", render.sanitized_marks(item, view.state, entry.leaks, blocked)),
             })
@@ -94,10 +110,11 @@ def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depe
     provider_id, model = repo_of(request).chat_provider(chat_id)
     return page(
         request, "chat.html", viewer, chat=chat, chats=chat_list(request, viewer, q), q=q, entries=_entries(view),
-        max_file_mb=request.app.state.max_file_bytes // (1024 * 1024),
+        max_file_mb=request.app.state.max_file_bytes // (1024 * 1024), ocr_all=OCR_ALL,
         layers=service_of(request).layers(chat_id), layer_names=LAYER_NAMES,
         choices=_choices(request), chosen=f"{provider_id}|{model}" if provider_id else "",
         local=request.app.state.engines is not None,
+        local_pending=LOCAL_PENDING if local_pending(entry.item for entry in view.items) else "",
     )
 
 
@@ -146,7 +163,7 @@ def add_input(request: Request, chat_id: str, form: dict[str, str] = Depends(get
 @router.post("/chats/{chat_id}/upload")
 def upload(request: Request, chat_id: str, upload: Upload = Depends(get_upload), viewer: Viewer = Depends(get_viewer)) -> Response:
     own_chat(request, chat_id, viewer)
-    item = service_of(request).add_file(chat_id, viewer.user.id, upload.filename, upload.data)
+    item = service_of(request).add_file(chat_id, viewer.user.id, upload.filename, upload.data, upload.ocr_all)
     return RedirectResponse(f"/chats/{chat_id}/items/{item.id}", status_code=303)
 
 
