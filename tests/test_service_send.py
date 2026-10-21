@@ -69,7 +69,9 @@ def test_send_records_a_running_answer_and_finishes_it(repo, chat, provider):
     item = send(service, chat)
     assert (item.source, item.status) == ("api", "running")
     stored = answer(repo, chat)
-    assert (stored.status, stored.original, stored.meta) == ("done", "Ответ: пишите на <EMAIL_1>", {"provider": "Облако", "model": "m-1"})
+    assert (stored.status, stored.original, stored.meta) == (
+        "done", "Ответ: пишите на <EMAIL_1>", {"provider": "Облако", "model": "m-1", "in_request": 1},
+    )
     [(ctx, connection, checked)] = fake.calls
     assert checked and connection.api_key == KEY and ctx.model == "m-1"
     assert "a@x.example" not in " ".join(ctx.texts()) and ctx.messages[-1].text == "Вопрос: почта <EMAIL_1>"
@@ -398,6 +400,20 @@ def test_excluded_items_leave_the_request_and_change_its_digest(repo, chat, prov
     [(ctx, _, _)] = fake.calls
     assert ctx == short.outgoing.context
     assert repo.audit_events("cloud_send")[0].details["excluded"] == 1
+
+
+def test_replacements_in_the_request_follow_what_the_user_left_in_it(repo, chat, provider):
+    """FR-7.5 при сокращении контекста: «замен в запросе» считались по всем текстам после прошлого ответа, и исключённые
+    тоже, а исключённый ответ оставался границей. Число — то, что ушло, — пишется при отправке и показывается у ответа."""
+    user, chat_id = chat
+    service = dialogue(repo, chat, provider, FakeCloud("x"))
+    assert [view.result.counters["in_request"] for view in service.view(chat_id).items if isinstance(view, AnswerView)] == [1]
+    short = service.outgoing(chat_id, frozenset({2}))       # без ответа 2: оба вопроса — в одном ходе, с <EMAIL_1>
+    answer = service.send(chat_id, user, short.outgoing.context.digest(), frozenset({2}))
+    assert repo.item(chat_id, answer.id).meta["in_request"] == 1
+    [view] = [v for v in service.view(chat_id).items if isinstance(v, AnswerView) and v.item.id == answer.id]
+    assert view.result.counters["in_request"] == 1
+    assert repo.audit_events("restore")[0].details["in_request"] == 1
 
 
 def test_excluding_the_last_question_keeps_the_choice_and_refuses_sending(repo, chat, provider):

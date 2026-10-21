@@ -170,13 +170,17 @@ def _model_spans(result: SanitizeResult) -> list[dict]:
     ]
 
 
-def _in_request(items: list[Item]) -> list[int]:
+def _in_request(items: list[Item], exclude: frozenset[int] = frozenset()) -> list[int]:
     """«Замен в запросе» (FR-7.5) ответа на месте каждого элемента и ответа после всех: замены во входных текстах
     после предыдущего ответа, у первого — с начала чата. Отказ без текста и ответ, оборванный ошибкой провайдера
-    (FR-8.9), границей не считаются: вопрос уходит снова, и в запросе следующего ответа — те же тексты."""
+    (FR-8.9), границей не считаются: вопрос уходит снова, и в запросе следующего ответа — те же тексты. exclude —
+    номера элементов, исключённых пользователем из запроса (раздел 10.1): исключённый текст в счёт не идёт, исключённый
+    ответ — не граница (его в запросе нет, и вопросы до и после него уходят одним ходом)."""
     counts, count = [], 0
     for item in items:
         counts.append(count)
+        if item.seq in exclude:
+            continue
         if item.kind == "input" and item.status == "done":
             count += len(item.spans)
         elif item.kind == "answer" and item.original and not item.meta.get("aborted"):
@@ -706,7 +710,7 @@ class ChatService:
                 views.append(AnswerView(item, RestoreResult(item.original, [], {})))
             else:
                 result = restore(state, item.original, settings)
-                result.counters["in_request"] = in_request
+                result.counters["in_request"] = item.meta.get("in_request", in_request)    # у ответа облака — с отправки
                 views.append(AnswerView(item, result))
         return ChatView(state, settings, views)
 
@@ -832,8 +836,9 @@ class ChatService:
             if not outgoing.sendable:
                 raise SendRefused("В запросе найден оригинал или фрагмент запрещённого типа: отправка заблокирована")
             built["context"] = outgoing.context
-            in_request, excluded = _in_request(items)[-1], len(preview.excluded)
-            meta = {"provider": provider.name, "model": model}
+            in_request, excluded = _in_request(items, exclude)[-1], len(preview.excluded)
+            # Число — то, что ушло: вид чата пересчитать его не может, исключённые элементы запрос не хранит (FR-7.5).
+            meta = {"provider": provider.name, "model": model, "in_request": in_request}
             return [Item(uuid.uuid4().hex, 0, "answer", "", None, source="api", status="running", meta=meta)], []
 
         [item] = self._apply(chat_id, work)
