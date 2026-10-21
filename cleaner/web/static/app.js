@@ -1,12 +1,41 @@
 // Копирование, парная подсветка замен (FR-6.1) и выделение фрагмента оригинала (FR-6.3).
 "use strict";
 
+// Объявления для экранных читалок: подпись кнопки меняется молча, а область role=status читается. Область — с загрузки:
+// созданную в момент объявления читалка пропускает.
+const live = document.createElement("span");
+live.className = "sr-only";
+live.setAttribute("role", "status");
+document.body.append(live);
+
+// Итог копирования — на кнопке словом (и цветом, data-state), через несколько секунд подпись прежняя.
+const copyTimers = new WeakMap();
+function copyState(button, text, state, ms) {
+  const label = button.querySelector("span") || button;     // подпись — в <span>, если он есть: иконка остаётся
+  button.dataset.label ??= label.textContent;
+  label.textContent = text;
+  button.dataset.state = state;
+  live.textContent = text;
+  clearTimeout(copyTimers.get(button));
+  copyTimers.set(button, setTimeout(() => { label.textContent = button.dataset.label; delete button.dataset.state; }, ms));
+}
+
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-copy]");
   if (button) {
     const source = document.getElementById(button.dataset.copy);
-    // Подпись — в <span>, если он есть: иконка кнопки остаётся.
-    navigator.clipboard.writeText(source.textContent).then(() => { (button.querySelector("span") || button).textContent = "Скопировано"; });
+    // Буфер запрещён браузером или недоступен (адрес не https и не петля — navigator.clipboard нет): текст выделяется,
+    // и его копируют сами.
+    const failed = () => {
+      const range = document.createRange();
+      range.selectNodeContents(source);
+      const selection = document.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      copyState(button, "Не удалось скопировать — текст выделен, нажмите Ctrl+C", "failed", 8000);
+    };
+    if (!navigator.clipboard) { failed(); return; }
+    navigator.clipboard.writeText(source.textContent).then(() => copyState(button, "Скопировано", "done", 2000), failed);
     return;
   }
   document.querySelectorAll("mark.active").forEach((mark) => mark.classList.remove("active"));
@@ -33,7 +62,7 @@ document.addEventListener("selectionchange", () => {
 // видимый элемент и сдвиг от его верха (элемент, а не scrollTop: выросший выше элемент — повтор старого текста —
 // иначе сдвинул бы место чтения); у main — scrollTop (на проверке перезагружает итог проверки риска, а всё выше
 // вкладок остаётся прежним; без этого вкладка с итогом уходила под край окна).
-function reload() {
+function refresh() {
   const place = { ...history.state };
   const feed = document.querySelector("[data-scroll-end]");
   if (feed && feed.scrollHeight - feed.scrollTop - feed.clientHeight > 2) {
@@ -50,6 +79,51 @@ function reload() {
   window.location.reload();
 }
 
+// Начатый, но не отправленный ввод: перезагрузка его сбросила бы (поля браузер восстанавливает не всегда, выбор файла —
+// никогда). Скрытые поля пишет сервер — не в счёт; список без selected в разметке исходно стоит на первом варианте.
+function editing() {
+  return [...document.querySelectorAll("input, textarea, select")].some((field) => {
+    if (field.type === "hidden" || field.disabled) return false;
+    if (field.type === "file") return field.files.length > 0;
+    if (field.type === "checkbox" || field.type === "radio") return field.checked !== field.defaultChecked;
+    if (field.tagName === "SELECT") {
+      const options = [...field.options];
+      if (field.multiple) return options.some((option) => option.selected !== option.defaultSelected);
+      return options.length > 0 && field.selectedIndex !== Math.max(0, options.findIndex((option) => option.defaultSelected));
+    }
+    return field.value !== field.defaultValue;
+  });
+}
+
+// По концу задания, проверки риска или потока страница перезагружается, если ввод не начат. Иначе — строка над
+// страницей: что готово и кнопка «Обновить результат», которую нажимают, когда закончат; опрос больше не нужен.
+const finished = [];
+let note = null;
+function reload(what) {
+  if (!editing()) { refresh(); return; }
+  if (!finished.includes(what)) finished.push(what);
+  if (!note) {
+    note = document.createElement("div");
+    note.className = "reload-note";
+    note.setAttribute("role", "status");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Обновить результат";
+    button.title = "Перезагрузить страницу: не отправленный ввод в формах пропадёт";
+    button.addEventListener("click", refresh);
+    note.append(document.createElement("span"), button);
+    document.querySelector("main").before(note);
+  }
+  note.firstChild.textContent = `Готово: ${finished.join(", ")}. Страница не обновлена, чтобы не сбросить ваш ввод.`;
+}
+
+// Что готово — для строки выше: заголовок элемента ленты, иначе (проверка) — что именно шло.
+function finishedName(element) {
+  const title = element.closest(".item") && element.closest(".item").querySelector(".title");
+  if (title) return title.textContent.trim();
+  return element.dataset.pollField === "risk" ? "проверка остаточного риска" : "обработка текста";
+}
+
 // Ответ облачной модели по мере получения (раздел 14): события сервера несут весь восстановленный к этому
 // моменту текст; по «done» страница перезагружается и показывает полное восстановление с выделением.
 document.querySelectorAll("[data-stream]").forEach((element) => {
@@ -58,7 +132,7 @@ document.querySelectorAll("[data-stream]").forEach((element) => {
     element.classList.remove("muted");
     element.textContent = JSON.parse(event.data).text;
   };
-  source.addEventListener("done", () => { source.close(); reload(); });
+  source.addEventListener("done", () => { source.close(); reload(finishedName(element)); });
 });
 
 // Опрос фоновой обработки (раздел 14): пока задание в очереди или в работе — раз в секунду, потом перезагрузка.
@@ -72,20 +146,26 @@ document.querySelectorAll("[data-poll]").forEach((element) => {
         const progress = element.querySelector("[data-progress]");
         if (progress) progress.textContent = state.progress || "";
         if (state[field] === "queued" || state[field] === "running") setTimeout(check, 1000);
-        else reload();
+        else reload(finishedName(element));
       })
       .catch(() => setTimeout(check, 5000));
   };
   setTimeout(check, 1000);
 });
 
-// Тема (раздел 14): кнопка в шапке ставит противоположную действующей и запоминает выбор в этом браузере.
+// Тема (раздел 14): кнопка в шапке и на входе — по кругу «как в системе → светлая → тёмная». «Как в системе» — без
+// data-theme и без записи в localStorage, тогда действует prefers-color-scheme. Режим на кнопке показывает CSS по data-theme.
 const root = document.documentElement;
+const THEMES = ["", "light", "dark"];
 document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
   button.addEventListener("click", () => {
-    const dark = root.dataset.theme ? root.dataset.theme === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
-    root.dataset.theme = dark ? "light" : "dark";
-    try { localStorage.setItem("cleaner-theme", root.dataset.theme); } catch (error) { /* выбор — до перезагрузки */ }
+    const next = THEMES[(THEMES.indexOf(root.dataset.theme || "") + 1) % THEMES.length];
+    if (next) root.dataset.theme = next;
+    else delete root.dataset.theme;
+    try {
+      if (next) localStorage.setItem("cleaner-theme", next);
+      else localStorage.removeItem("cleaner-theme");
+    } catch (error) { /* выбор — до перезагрузки */ }
   });
 });
 

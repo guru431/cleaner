@@ -1,2 +1,10 @@
 {# Общие куски разметки. Иконка — символ из static/icons.svg, цвет — currentColor. #}
 {% macro icon(name) %}<svg class="icon" aria-hidden="true"><use href="/static/icons.svg#{{ name }}"></use></svg>{% endmacro %}
+{# Тема: по кругу «как в системе → светлая → тёмная» (app.js). Видна подпись действующего режима (app.css по data-theme),
+   она же — имя кнопки для читалок: скрытые подписи в имя не входят. #}
+{% macro theme_toggle() %}<button type="button" class="theme" data-theme-toggle title="Тема по кругу: как в системе, светлая, тёмная">
+  <span class="sr-only">Тема:</span>
+  <span class="mode m-system">{{ icon("auto") }}как в системе</span>
+  <span class="mode m-light">{{ icon("sun") }}светлая</span>
+  <span class="mode m-dark">{{ icon("moon") }}тёмная</span>
+</button>{% endmacro %}

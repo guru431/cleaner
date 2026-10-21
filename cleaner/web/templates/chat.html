@@ -150,12 +150,12 @@
         {% if local_pending %}
         <button disabled title="{{ local_pending }}">Спросить локальную модель</button>
         {% else %}
-        <button title="Без очистки: текст не покидает сервер">Спросить локальную модель</button>
+        <button title="{{ local_hint }}">Спросить локальную модель</button>
         {% endif %}
       </form>
       {% endif %}
     </div>
-    <div class="tabs" data-tabs>
+    <div class="tabs" data-tabs data-tabs-remember>
       <div class="tab-list" role="tablist">
         <button type="button" role="tab" data-tab="text" aria-selected="true">Текст</button>
         <button type="button" role="tab" data-tab="file" aria-selected="false">Файл</button>

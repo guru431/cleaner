@@ -124,7 +124,17 @@ def test_ask_local_answers_with_originals(ivan, engines):
     assert engines.completer.requests[-1]["messages"][-1]["content"] == "Вопрос: почта a@x.example"
     page = ivan.get(f"/chats/{chat_id}").text
     assert "Ответ локальной модели" in page and "Локально: пишите на a@x.example" in page
-    assert '<button title="Без очистки: текст не покидает сервер">Спросить локальную модель</button>' in page
+    hint = "Без очистки: оригиналы остаются на этом сервере (локальная модель по адресу 127.0.0.1:30000)"
+    assert f'<button title="{hint}">Спросить локальную модель</button>' in page
+
+
+def test_ask_local_hint_names_the_remote_gateway(ivan, repo):
+    """Аудит 21.10.2026: частный или доверенный адрес — уже другой сервер, и «текст не покидает сервер» было неправдой.
+    Подсказка называет узел и порт, без учётных данных из адреса."""
+    repo.set_setting("local_llm.url", "http://user:secret@10.0.0.5:4000/v1")
+    page = ivan.get(f"/chats/{ivan.chat()}").text
+    assert 'title="Без очистки: оригиналы уходят локальной модели на узел 10.0.0.5:4000"' in page
+    assert "secret" not in page
 
 
 def test_ask_local_is_off_while_a_local_answer_is_pending(ivan, repo):

@@ -8,8 +8,9 @@ from collections.abc import Callable
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
+from cleaner.core.match import find_forms
 from cleaner.core.risk import KINDS
-from cleaner.core.types import EntityType
+from cleaner.core.types import ChatState, EntityType
 from cleaner.service import ChatService, EditRefused
 from cleaner.storage.repo import Item
 from cleaner.web import render
@@ -109,6 +110,20 @@ def _warnings(item: Item) -> list[str]:
     return warnings
 
 
+def _opened(text: str, state: ChatState) -> int:
+    """Сколько значений, с которых в этом чате снята замена, стоит открытыми в очищенном тексте. Проверка утечек их
+    намеренно пропускает (раздел 8), поэтому её зелёный итог не говорит, что открытых значений нет. Ищутся так же, как
+    их вырезает она, — целыми словами."""
+    values = {rule.value.lower() for rule in state.rules if rule.action == "unmask"}
+    return len({value for _, _, value in find_forms(text, [(value, "letters", value) for value in values])})
+
+
+def _layers_ran(item: Item) -> str:
+    """Слои, выполненные для текста. Без отметки — текст очищен до слоёв 4 и 5 (этап 1), их не было (m-12)."""
+    ran = item.meta.get("layers") or []
+    return ", ".join(["1–3"] + [number for layer, number in (("ner", "4"), ("llm", "5")) if layer in ran])
+
+
 def _edit(
     request: Request, chat_id: str, viewer: Viewer, form: dict[str, str], action: Callable[[ChatService], None]
 ) -> Response:
@@ -143,7 +158,8 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
     notices = Counter(notice["code"] for notice in item.notices)
     return page(
         request, "review.html", viewer, chat=chat, item=item, deliverable=entry.deliverable,
-        leaks=len(entry.leaks), blocked=len(entry.blocked),
+        leaks=len(entry.leaks), blocked=len(entry.blocked), opened=_opened(item.sanitized or "", state),
+        layers_ran=_layers_ran(item),
         original=render.highlight(item.original, render.original_marks(item, state)),
         sanitized=render.highlight(item.sanitized or "", render.sanitized_marks(item, state, entry.leaks, blocked)),
         summary=render.summary(item, state), fragments=fragments,

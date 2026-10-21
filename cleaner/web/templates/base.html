@@ -10,6 +10,7 @@
 <script src="/static/app.js" defer></script>
 </head>
 <body>
+{% from "_ui.html" import theme_toggle %}
 {% if viewer %}
 {% set section = "settings" if request.url.path.startswith("/settings") else "chats" %}
 <header class="top">
@@ -19,10 +20,7 @@
     {% if viewer.is_admin %}<a href="/settings"{% if section == "settings" %} class="on" aria-current="true"{% endif %}>Настройки</a>{% endif %}
   </nav>
   <span class="who">{{ viewer.user.login }}</span>
-  <button type="button" class="theme" data-theme-toggle title="Светлая или тёмная тема" aria-label="Светлая или тёмная тема">
-    <svg class="icon i-moon" aria-hidden="true"><use href="/static/icons.svg#moon"></use></svg>
-    <svg class="icon i-sun" aria-hidden="true"><use href="/static/icons.svg#sun"></use></svg>
-  </button>
+  {{ theme_toggle() }}
   <form method="post" action="/logout">{% include "_csrf.html" %}<button>Выйти</button></form>
 </header>
 {% endif %}
