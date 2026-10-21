@@ -15,7 +15,7 @@ from typing import Any
 from cleaner.core import leakcheck, risk
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.llm import CompletionError
-from cleaner.core.entities import hostmap, labels, ops
+from cleaner.core.entities import hostmap, labels, ops, resolve
 from cleaner.core.leakcheck import Leak
 from cleaner.core.match import normalize
 from cleaner.core.pipeline import (
@@ -143,15 +143,16 @@ def _stricter(settings: Settings, found: EntityType, wanted: EntityType) -> bool
 _DOTTED_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
 
 
-def _name_parts(value: str, added: dict[str, EntityType]) -> list[tuple[str, EntityType]]:
-    """Новые правила на целой части имени с точками (часть или хвост из двух частей и больше — домен) и их типы. Имя
-    длиннее имени DNS целиком не записывается (resolve) — его хвосты не перебираются."""
+def _name_parts(value: str, added: dict[str, EntityType]) -> list[tuple[str, EntityType, EntityType]]:
+    """Новые правила на целой части имени с точками, свой тип части и тип правила. Части — те же, что подменяет
+    resolve._name: слева от домена (HOST) и сам регистрируемый домен (DOMAIN); правило на другом хвосте или на
+    нескольких частях имя поглощает (merge._name_kept). Имя длиннее имени DNS целиком не записывается (resolve)."""
     name = hostmap.dotted(value)
     if len(name) > hostmap.MAX_NAME or not _DOTTED_NAME.fullmatch(name):
         return []
-    parts = name.split(".")
-    candidates = [*parts, *(".".join(parts[i:]) for i in range(1, len(parts) - 1))]
-    return [(part, added[normalize(part)]) for part in candidates if normalize(part) in added]
+    left, registrable = resolve.name_parts(name, False)
+    candidates = [*((part, EntityType.HOST) for part in left), *(((registrable, EntityType.DOMAIN),) if registrable else ())]
+    return [(part, own, added[normalize(part)]) for part, own in candidates if normalize(part) in added]
 
 
 def _labelled(state: ChatState, surrogate: str, type_: EntityType) -> bool:
@@ -222,6 +223,9 @@ class Preview:
     candidates: list[tuple[int, str, int]] = field(default_factory=list)
     excluded: list[int] = field(default_factory=list)
     refused: str = ""
+    # Перенос вручную: сборка выдала бы значениям новые замены (словарь или правила изменились после очистки) —
+    # копировать нечего, пока тексты чата не очищены заново (ChatService.manual).
+    stale: bool = False
 
 
 @dataclass
@@ -798,22 +802,17 @@ class ChatService:
 
     def manual(self, chat_id: str, exclude: frozenset[int] = frozenset()) -> Preview:
         """Перенос вручную (сценарий 5.1): тот же запрос, что ушёл бы по API, — та же сборка и проверка утечек (SEC-2), —
-        но без подключения; provider_id и model в OutgoingContext пусты (они нужны только отпечатку). Сборка может выдать
-        замены значениям, которых состояние чата ещё не знало (словарь, пополненный после очистки): тогда состояние
-        записывается — иначе метки скопированного текста не восстановились бы во вставленном ответе. Без новых замен
-        ничего не пишется. В журнал — ничего: скопирован ли текст, серверу неизвестно."""
-        for _ in range(_ATTEMPTS):
-            state, version = self.repo.load_state(chat_id)
-            before = state_to_json(state)
-            preview = self._build(chat_id, state, self.repo.items(chat_id), self.repo.settings(), None, "", exclude)
-            if state_to_json(state) == before:
-                return preview
-            try:
-                self.repo.commit_chat(chat_id, state, version)
-            except StaleState:
-                continue
-            return preview
-        raise StaleState(chat_id)
+        но без подключения; provider_id и model в OutgoingContext пусты (они нужны только отпечатку). Страница по GET
+        состояние не пишет: запись подняла бы версию чата — гас бы снимок отмены последней правки, а открытый
+        предпросмотр правки отказывал бы «чат изменился», хотя пользователь лишь смотрел. Если сборка выдала бы
+        значениям новые замены (словарь, пополненный после очистки), — stale: метки такого текста не восстановились бы
+        во вставленном ответе, и копировать его нельзя, пока тексты чата не очищены заново. В журнал — ничего: скопирован
+        ли текст, серверу неизвестно."""
+        state, _ = self.repo.load_state(chat_id)
+        before = state_to_json(state)
+        preview = self._build(chat_id, state, self.repo.items(chat_id), self.repo.settings(), None, "", exclude)
+        preview.stale = state_to_json(state) != before
+        return preview
 
     def send(self, chat_id: str, user_id: str, digest: str, exclude: frozenset[int] = frozenset()) -> Item:
         """FR-8.4: запрос собирается заново и уходит, только если он совпал с показанным на экране подтверждения.
@@ -1032,12 +1031,20 @@ class ChatService:
                     if wanted is None:
                         # Правило на целой части имени с точками (исключение владельца 15.10.2026): легло, если часть
                         # получила метку его типа; нет — её держит политика HOST или DOMAIN (resolve._manual).
-                        for part, wanted in _name_parts(value, added):
+                        parts = _name_parts(value, added)
+                        for _, own, wanted in parts:
                             if _labelled(state, span.surrogate, wanted):
                                 applied = True
-                            elif _stricter(settings, own := EntityType.DOMAIN if "." in part else EntityType.HOST, wanted):
+                            elif _stricter(settings, own, wanted):
                                 held = own
-                        continue
+                        # Правило внутри фрагмента не на целой части поглощено им (или поглотило его): тип фрагмента —
+                        # записи, если её политика строже (5.7, шаг 4), а задетая правилом часть — с меткой правила.
+                        wanted = None if parts else next((t for v, t in added.items() if v in normalize(value)), None)
+                        if wanted is None:
+                            continue
+                        if _labelled(state, span.surrogate, wanted):
+                            applied = True
+                            continue
                     found = state.entities[span.entity_id].type
                     if found is not wanted and _stricter(settings, found, wanted):
                         held = found

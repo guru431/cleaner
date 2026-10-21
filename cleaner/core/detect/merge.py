@@ -153,6 +153,14 @@ def _name_kept(
     return name.type if all((s.start, s.end) in edges for s in group if s.source == "manual") else None
 
 
+def _opened(value: str, type_: EntityType, ctx: DetectContext) -> bool:
+    """Значение открыто списком «никогда не скрывать» или правилом «открыть»; имя через «\\.» — то же значение."""
+    value = value.lower()
+    if type_ in _NAME_TYPES:
+        value = hostmap.dotted(value)
+    return value in ctx.settings.never or value in ctx.unmask
+
+
 def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSpan]:
     policies = ctx.settings.policies
     active = sorted(
@@ -240,12 +248,14 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
             # Находка внутри адреса строже его политики (известный домен fabrikam.ru при DOMAIN «блокировать» в
             # ivanov@fabrikam.ru) — часть, которую держит её политика: адрес делится, как рядом с выданной заменой, и
             # часть получает свой тип (5.10). Одной меткой EMAIL (или правила, поглотившего адрес) он не блокировал бы
-            # выдачу.
+            # выдачу. Открытая часть (список «никогда не скрывать», правило «открыть») адрес не делит: иначе она снова
+            # получала подмену, и открытое пользователем значение блокировало выдачу.
             own = STRICTNESS.get(policies.get(type_), 0)
             inner = tuple(
                 (s.start, s.end, s.type) for s in group
                 if s.source != "manual" and (s.start, s.end) != (start, end)
                 and STRICTNESS.get(policies.get(s.type), 0) > own
+                and not _opened(text[s.start:s.end], s.type, ctx)
             )
             if inner:
                 ruled, mail, parted = ruled + inner, True, True

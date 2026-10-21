@@ -1,7 +1,8 @@
 """Открытые русские наборы для сравнения (QA-4) в формат eval: {"text", "spans": [{start, end, type, entity}]}.
 
 Снимок набора — файл JSONL и манифест рядом (<имя>.manifest.json): источник, ревизия, sha256 файла, версия
-конвертера, число примеров. Повторная загрузка не подменяет принятый снимок незаметно (write_snapshot)."""
+конвертера, число примеров. Повторная загрузка не подменяет принятый снимок незаметно: прежний сохраняется рядом
+под именем с началом своего sha256 (write_snapshot)."""
 from __future__ import annotations
 
 import hashlib
@@ -106,14 +107,19 @@ def file_sha256(path: Path) -> str:
 
 
 def write_snapshot(out: Path, name: str, records: Sequence[dict], source: str, revision: str, pinned: bool) -> Path:
-    """Примеры с разметкой — в <имя>.jsonl с манифестом. Если там уже другой снимок, новый ложится рядом
-    (<имя>-<начало sha256>.jsonl): принятый, с которым связан базовый замер, не перезаписывается."""
+    """Примеры с разметкой — в <имя>.jsonl с манифестом. Если там уже другой снимок, он переносится рядом
+    (<имя>-<начало его sha256>.jsonl, с манифестом, если он был): основное имя — у нового снимка, иначе снимок до
+    манифестов или прежнего конвертера оставался по пути, который документирован, и проверка отправляла скачивать
+    заново по кругу. Базовый замер привязан к отпечатку набора: сравнение с новым снимком скажет, что набор другой."""
     kept = [record for record in records if record["spans"]]
     data = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in kept).encode("utf-8")
     digest = hashlib.sha256(data).hexdigest()
     path = out / f"{name}.jsonl"
-    if path.exists() and file_sha256(path) != digest:
-        path = out / f"{name}-{digest[:12]}.jsonl"
+    if path.exists() and (previous := file_sha256(path)) != digest:
+        moved = out / f"{name}-{previous[:12]}.jsonl"
+        path.replace(moved)
+        if manifest_path(path).exists():
+            manifest_path(path).replace(manifest_path(moved))
     path.write_bytes(data)
     manifest = {
         "name": name, "source": source, "revision": revision, "pinned": pinned, "sha256": digest,

@@ -210,6 +210,27 @@ def test_retyping_a_part_held_by_the_stricter_host_policy_is_refused(repo, chat)
     assert repo.items(chat_id)[0].sanitized == "узел <TERM_1>.domain-1.example"
 
 
+@pytest.mark.parametrize("value, policy, found", [
+    ("b.contoso.ru", T.HOST, "HOST"), ("a.b", T.DOMAIN, "DOMAIN"), ("b.contoso.ru", T.DOMAIN, "DOMAIN"),
+])
+def test_rule_absorbed_by_a_stricter_name_is_refused_with_its_type(repo, chat, value, policy, found):
+    """Ревью 2026-10-21: правило не на целой части имени (хвост b.contoso.ru — не регистрируемый домен, две части слева
+    a.b) имя поглощает, и тип фрагмента — у записи со строже политикой (5.7, шаг 4). Служба перебирала любой хвост как
+    часть DOMAIN: при HOST «блокировать» такая правка молча не ложилась, а причина отказа угадывалась по точке в хвосте.
+    Теперь кандидаты в части — те же, что у подмены (resolve.name_parts), а поглощённое правило судится по типу фрагмента."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    item = service.add_input(chat_id, user, "узел a.b.contoso.ru")
+    repo.set_policy(policy, Policy.BLOCK)
+    service.refresh(chat_id, user)
+    with pytest.raises(EditRefused, match=f"значение найдено как {found}"):
+        service.mask_value(chat_id, user, item.id, value, T.TERM)
+    assert repo.load_state(chat_id)[0].rules == []
+    repo.set_policy(policy, Policy.MASK)
+    service.mask_value(chat_id, user, item.id, value, T.TERM)
+    assert repo.items(chat_id)[0].sanitized == "узел <TERM_1>"
+
+
 def test_view_blocks_by_the_types_held_in_a_fragment_and_by_pasted_surrogates(repo, chat):
     """Экран чата судит о блокировке по сохранённым данным элемента и нынешним политикам: тип находки, скрытой во
     фрагменте под другой меткой, и сущность вставленной замены записаны в spans и notices (только типы), и смена

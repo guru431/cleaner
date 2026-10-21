@@ -6,6 +6,7 @@ from collections import Counter
 
 from markupsafe import Markup, escape
 
+from cleaner.core.entities import ops
 from cleaner.core.leakcheck import Leak
 from cleaner.core.match import find_forms
 from cleaner.core.restore import Segment
@@ -111,7 +112,7 @@ def opened_marks(text: str, state: ChatState, marks: list[Mark]) -> list[Mark]:
     — как у проверки утечек (целыми словами); вхождение, которое задевает другую метку панели (часть замены
     «domain-1.example» при открытом «domain»), не выделяется — иначе highlight пропустил бы ту метку. В атрибутах —
     только подпись, без значения."""
-    values = {rule.value for rule in state.rules if rule.action == "unmask"}
+    values = ops.unmasked(state)
     if not values:
         return []
     taken = sorted((start, end) for start, end, _ in marks)

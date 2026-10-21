@@ -41,7 +41,7 @@ EVENTS = (
     "dictionary_changed", "dictionary_import", "pattern_changed", "policy_changed",
     "user_created", "user_disabled", "user_enabled", "password_changed", "error", "jobs_interrupted",
     "settings_changed", "gold_added", "gold_deleted", "risk_check", "layer_changed",
-    "provider_changed", "cloud_send", "local_answer", "eval_run",
+    "provider_changed", "cloud_send", "local_answer", "eval_run", "reviewed",
 )
 PROTOCOL_NAMES = {"openai": "OpenAI-совместимый", "anthropic": "Anthropic-совместимый"}
 AUTH_NAMES = {"bearer": "Authorization: Bearer", "x-api-key": "x-api-key"}
@@ -477,10 +477,6 @@ GOLD_TARGET = 200          # QA-1: не меньше 200 примеров к к�
 _MEASURING = threading.Lock()     # проверка «замер уже идёт» и постановка нового — одним шагом
 
 
-def _share(part: int, whole: int) -> str:
-    return f"{part / whole:.3f} ({part}/{whole})" if whole else "—"
-
-
 def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
     """Паспорт замера для страницы: только счётчики, знаменатели и отпечатки (тексты в паспорт не входят)."""
     layers = entry["layers"]
@@ -489,7 +485,7 @@ def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
     classes = [
         {
             "title": title, "total": first["classes"][title][1],
-            "recalls": [_share(*layers[name]["classes"].get(title, (0, 0))) for name in names],
+            "recalls": [runner.share(*layers[name]["classes"].get(title, (0, 0))) for name in names],
             "target": "не задана" if target is None else f"{target:.2f}",
         }
         for title, _, target in CLASSES if title in first["classes"]
@@ -499,11 +495,11 @@ def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
         return sum(counts[key] for counts in layers[name]["types"].values())
 
     quality = [
-        ("Точность по пересечению (задели эталон / найдено)", [_share(total(n, "correct"), total(n, "found")) for n in names]),
-        ("Точность типа (тот же тип / задели эталон)", [_share(total(n, "typed"), total(n, "correct")) for n in names]),
-        ("Скрыто знаков вне эталона — от скрытых", [_share(layers[n]["chars"][0], layers[n]["chars"][1]) for n in names]),
-        ("Скрыто знаков вне эталона — от текста вне эталона", [_share(layers[n]["chars"][0], layers[n]["chars"][2]) for n in names]),
-        ("Лишние замены среди версий, кодов ошибок и общеизвестных доменов", [_share(*layers[n]["overmasked"]) for n in names]),
+        ("Точность по пересечению (задели эталон / найдено)", [runner.share(total(n, "correct"), total(n, "found")) for n in names]),
+        ("Точность типа (тот же тип / задели эталон)", [runner.share(total(n, "typed"), total(n, "correct")) for n in names]),
+        ("Скрыто знаков вне эталона — от скрытых", [runner.share(layers[n]["chars"][0], layers[n]["chars"][1]) for n in names]),
+        ("Скрыто знаков вне эталона — от текста вне эталона", [runner.share(layers[n]["chars"][0], layers[n]["chars"][2]) for n in names]),
+        ("Лишние замены среди версий, кодов ошибок и общеизвестных доменов", [runner.share(*layers[n]["overmasked"]) for n in names]),
     ]
     types = sorted({type_ for name in names for type_ in layers[name]["types"]})
     empty = {"entities": [0, 0], "mentions": [0, 0], "found": 0, "correct": 0, "typed": 0}
@@ -513,8 +509,8 @@ def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
         for name in names:
             counts = layers[name]["types"].get(type_, empty)
             cells.append(
-                f"{_share(*counts['entities'])}; по упоминаниям {_share(*counts['mentions'])}; "
-                f"точность {_share(counts['correct'], counts['found'])}"
+                f"{runner.share(*counts['entities'])}; по упоминаниям {runner.share(*counts['mentions'])}; "
+                f"точность {runner.share(counts['correct'], counts['found'])}"
             )
         by_type.append((type_, cells))
     versions = entry["versions"]

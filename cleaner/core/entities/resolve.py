@@ -8,7 +8,7 @@ from functools import partial
 from uuid import uuid4
 
 from cleaner.core.detect.merge import NAME_WORDS, MergedSpan
-from cleaner.core.entities import hostmap, labels, macsid, names, netmap
+from cleaner.core.entities import hostmap, labels, macsid, names, netmap, ops
 from cleaner.core.match import has_invisible, normalize
 from cleaner.core.types import STRICTNESS, ChatState, Entity, EntityType, Settings, Surrogate
 
@@ -120,7 +120,7 @@ class Resolver:
                 other = self._lead(entry.type, form)
                 if other and other[0] is lead[0]:
                     self.alias[(other[0], normalize(other[1]))] = lead[1].lower()
-        self.open_values = settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
+        self.open_values = ops.open_values(state, settings)
         # Правила, которые дают части имени узла свой тип. Правило HOST или DOMAIN часть подменяет как обычно.
         self.manual = {
             normalize(r.value): r.type for r in state.rules

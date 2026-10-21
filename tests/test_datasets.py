@@ -1,3 +1,4 @@
+import hashlib
 import json
 from collections import Counter
 
@@ -61,26 +62,44 @@ def test_mentions_of_one_value_are_one_entity_and_other_forms_are_not():
     ]
 
 
+RECORD = {"text": "почта a@x.example", "spans": [{"start": 6, "end": 17, "type": "EMAIL", "entity": 0}]}
+
+
 def test_snapshot_keeps_the_accepted_file_and_is_checked_against_its_manifest(tmp_path):
-    """Идея аудита 21.10.2026: повторная загрузка не подменяет снимок, с которым связан базовый замер."""
-    record = {"text": "почта a@x.example", "spans": [{"start": 6, "end": 17, "type": "EMAIL", "entity": 0}]}
-    first = write_snapshot(tmp_path, "set", [record, {"text": "без разметки", "spans": []}], "org/set", "rev1", False)
+    """Идея аудита 21.10.2026: повторная загрузка не подменяет снимок, с которым связан базовый замер, незаметно —
+    новый занимает основное имя, прежний со своим манифестом сохраняется рядом."""
+    first = write_snapshot(tmp_path, "set", [RECORD, {"text": "без разметки", "spans": []}], "org/set", "rev1", False)
     assert first.name == "set.jsonl" and len(first.read_text(encoding="utf-8").splitlines()) == 1
     name, manifest, problems = check_snapshot(first)
     assert (name, problems) == ("set", [])
     assert {k: manifest[k] for k in ("source", "revision", "pinned", "converter", "examples")} == {
         "source": "org/set", "revision": "rev1", "pinned": False, "converter": CONVERTER, "examples": 1,
     }
-    assert write_snapshot(tmp_path, "set", [record], "org/set", "rev2", False) == first      # тот же снимок
-    other = {"text": "почта b@x.example", "spans": record["spans"]}
-    changed = write_snapshot(tmp_path, "set", [other], "org/set", "rev3", False)
-    assert changed.name.startswith("set-") and changed.name.endswith(".jsonl")
-    assert "a@x" in first.read_text(encoding="utf-8") and check_snapshot(changed)[::2] == ("set", [])
+    assert write_snapshot(tmp_path, "set", [RECORD], "org/set", "rev2", False) == first      # тот же снимок
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["set.jsonl", "set.manifest.json"]
+    other = {"text": "почта b@x.example", "spans": RECORD["spans"]}
+    previous = tmp_path / f"set-{manifest['sha256'][:12]}.jsonl"
+    assert write_snapshot(tmp_path, "set", [other], "org/set", "rev3", False) == first
+    assert "b@x" in first.read_text(encoding="utf-8") and check_snapshot(first)[::2] == ("set", [])
+    assert "a@x" in previous.read_text(encoding="utf-8")
+    assert check_snapshot(previous)[::2] == ("set", []) and check_snapshot(previous)[1]["revision"] == "rev2"
     first.write_text(first.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     assert check_snapshot(first)[2] == ["файл не совпадает с манифестом (sha256): снимок изменён после загрузки"]
-    stale = json.loads(manifest_path(changed).read_text(encoding="utf-8")) | {"converter": 1}
-    manifest_path(changed).write_text(json.dumps(stale), encoding="utf-8")
-    assert "конвертером версии 1" in check_snapshot(changed)[2][0]
+    stale = json.loads(manifest_path(previous).read_text(encoding="utf-8")) | {"converter": 1}
+    manifest_path(previous).write_text(json.dumps(stale), encoding="utf-8")
+    assert "конвертером версии 1" in check_snapshot(previous)[2][0]
+
+
+def test_snapshot_without_a_manifest_gives_way_to_the_new_one(tmp_path):
+    """Ревью 2026-10-21: снимок, скачанный до манифестов, оставался по документированному пути, новый ложился рядом,
+    и проверка отправляла скачивать заново — по кругу. Новый занимает основное имя, прежний сохраняется рядом."""
+    old = tmp_path / "set.jsonl"
+    old.write_text('{"text": "x", "spans": []}\n', encoding="utf-8")
+    digest = hashlib.sha256(old.read_bytes()).hexdigest()
+    path = write_snapshot(tmp_path, "set", [RECORD], "org/set", "rev1", False)
+    assert path == old and check_snapshot(path)[::2] == ("set", [])
+    moved = tmp_path / f"set-{digest[:12]}.jsonl"
+    assert moved.read_text(encoding="utf-8") == '{"text": "x", "spans": []}\n' and not manifest_path(moved).exists()
     lone = tmp_path / "lone.jsonl"
     lone.write_text("", encoding="utf-8")
     assert check_snapshot(lone) == ("lone", None, ["нет манифеста: источник, ревизия и версия конвертера неизвестны"])

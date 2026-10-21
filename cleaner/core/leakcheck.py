@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 
 from cleaner.core import surrogates
-from cleaner.core.entities import netmap
+from cleaner.core.entities import netmap, ops
 from cleaner.core.match import find_forms
 from cleaner.core.types import STRICT_TYPES, ChatState, EntityType, Policy, Settings
 
@@ -88,7 +88,7 @@ def check(text: str, state: ChatState, settings: Settings) -> list[Leak]:
     chars = list(text)
     for start, end in surrogates.find(state, text):
         chars[start:end] = " " * (end - start)
-    open_values = settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
+    open_values = ops.open_values(state, settings)
     # Открытые значения тоже вырезаются: внутри открытого «srv-dc01.corp.contoso.ru» части
     # «srv-dc01» и «contoso.ru» — не утечка, их показали намеренно. Только целыми словами:
     # открытое «Ivan» не должно прятать от проверки «ivanov».

@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import regex
@@ -8,6 +9,7 @@ from cleaner.core.types import Policy
 from cleaner.engines import LocalSettings, local_settings
 from cleaner.eval import runner
 from cleaner.local_llm import LocalLLMError
+from cleaner.web.routes_settings import EVENTS
 
 
 def test_settings_are_for_admins_only(ivan):
@@ -148,6 +150,18 @@ def test_audit_is_filtered_by_event_user_and_day(browser, repo, clock):
     assert events(since="2026-10-15") == ["login"]
     assert events(until="2026-10-14") == ["restore"]
     assert admin.get("/settings/audit", since="вчера").status_code == 400
+
+
+def test_audit_filter_lists_every_event_the_service_writes():
+    """Ревью 2026-10-21: событие «reviewed» в фильтр журнала не попало. Сверка с исходниками: каждое имя события в
+    repo.audit("…") есть в списке фильтра."""
+    root = Path(__file__).resolve().parents[1] / "cleaner"
+    written = {
+        name for path in root.rglob("*.py")
+        for name in re.findall(r'\.audit\(\s*"(\w+)"(?:\s+if\s+\w+\s+else\s+"(\w+)")?', path.read_text(encoding="utf-8"))
+        for name in name if name
+    }
+    assert "reviewed" in written and written <= set(EVENTS)
 
 
 def test_local_model_settings_are_saved_and_a_public_address_is_refused(boss, repo):

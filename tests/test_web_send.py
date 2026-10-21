@@ -201,6 +201,23 @@ def test_manual_transfer_offers_no_copy_when_a_fragment_is_blocked(ivan, repo, p
     assert "Копирование заблокировано" in page and 'data-copy="manual-text"' not in page
 
 
+def test_manual_transfer_with_new_replacements_offers_to_clean_again(ivan, repo):
+    """Ревью 2026-10-21: страница по GET состояние не пишет. Словарь пополнен после очистки — копирования нет, а
+    страница предлагает очистить тексты чата заново и после этого возвращает к переносу."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="клиент Ромашка")
+    repo.add_dictionary("always", "Ромашка", T.ORG)
+    version = repo.load_state(chat_id)[1]
+    page = ivan.get(f"/chats/{chat_id}/manual").text
+    assert "нужно скрыть заново" in page and 'data-copy="manual-text"' not in page and 'id="manual-text"' not in page
+    assert f'action="/chats/{chat_id}/refresh"' in page and 'name="back" value="manual"' in page
+    assert repo.load_state(chat_id)[1] == version
+    response = ivan.post(f"/chats/{chat_id}/refresh", back="manual")
+    assert (response.status_code, response.headers["location"]) == (303, f"/chats/{chat_id}/manual")
+    page = ivan.get(f"/chats/{chat_id}/manual").text
+    assert "нужно скрыть заново" not in page and 'data-copy="manual-text"' in page and "клиент &lt;ORG_1&gt;" in page
+
+
 def test_route_leads_from_review_to_transfer_and_the_mark_is_cleared_by_an_edit(ivan, repo):
     """Маршрут чата: после очистки — «Проверить», после отметки — «Копировать очищенное…»; правка снимает отметку."""
     chat_id = ivan.chat()

@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlencode
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
+from cleaner.core.entities import ops
 from cleaner.core.match import find_forms
 from cleaner.core.risk import KINDS
 from cleaner.core.types import ChatState, EntityType, Policy
@@ -48,11 +49,14 @@ def _entities_query(type_: str, number: int) -> str:
 
 
 def _back(chat_id: str, form: dict[str, str]) -> str:
-    """Возврат после правки: к экрану проверки текста, иначе в таблицу замен — на ту же страницу с тем же фильтром.
-    Адрес собирается здесь, не из формы: из поля back берутся только известный код типа и число."""
+    """Возврат после правки: к экрану проверки текста, на страницу переноса вручную (back=manual — её «Очистить тексты
+    чата заново»), иначе в таблицу замен — на ту же страницу с тем же фильтром. Адрес собирается здесь, не из формы:
+    из поля back берутся только известные слово, код типа и число."""
     item_id = form.get("item_id", "")
     if _ITEM_ID.fullmatch(item_id):
         return f"/chats/{chat_id}/items/{item_id}"
+    if form.get("back") == "manual":
+        return f"/chats/{chat_id}/manual"
     back = parse_qs(form.get("back", ""))
     type_ = back.get("type", [""])[0]
     number = back.get("page", [""])[0]
@@ -193,8 +197,7 @@ def _opened(text: str, state: ChatState) -> int:
     """Сколько значений, с которых в этом чате снята замена, стоит открытыми в очищенном тексте. Проверка утечек их
     намеренно пропускает (раздел 8), поэтому её зелёный итог не говорит, что открытых значений нет. Ищутся так же, как
     их вырезает она, — целыми словами."""
-    values = {rule.value.lower() for rule in state.rules if rule.action == "unmask"}
-    return len({value for _, _, value in find_forms(text, [(value, "letters", value) for value in values])})
+    return len({value for _, _, value in find_forms(text, [(value, "letters", value) for value in ops.unmasked(state)])})
 
 
 def _version(form: dict[str, str]) -> int | None:
