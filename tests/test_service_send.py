@@ -81,7 +81,7 @@ def test_audit_has_no_text_or_key(repo, chat, provider):
     service = ready(repo, chat, provider, FakeCloud("Ответ <EMAIL_1>"))
     send(service, chat)
     [sent] = repo.audit_events("cloud_send")
-    assert sent.details == {"provider": provider.id, "model": "m-1", "messages": 1, "chars": sent.details["chars"]}
+    assert sent.details == {"provider": provider.id, "model": "m-1", "messages": 1, "chars": sent.details["chars"], "excluded": 0}
     everything = repr([event.details for event in repo.audit_events()])
     assert "a@x.example" not in everything and KEY not in everything and "Ответ" not in everything
     assert repo.audit_events("restore")[0].details["restored"] == 1
@@ -369,6 +369,68 @@ def test_local_answer_is_not_restored(repo, chat, provider):
     fake_ip = repo.items(chat_id)[0].sanitized.split()[-1]
     repo.add_item(chat_id, Item("l" * 32, 0, "answer", f"Проверьте {fake_ip[:-1]}9", None, source="local"))
     assert service.view(chat_id).items[-1].result.text == f"Проверьте {fake_ip[:-1]}9"
+
+
+def dialogue(repo, chat, provider, fake) -> ChatService:
+    """Вопрос, вставленный ответ модели, второй вопрос — элементы 1, 2, 3."""
+    service = ready(repo, chat, provider, fake, text="Первый вопрос: почта a@x.example")
+    service.add_answer(chat[1], chat[0], "Ответ про <EMAIL_1>")
+    service.add_input(chat[1], chat[0], "Второй вопрос")
+    return service
+
+
+def test_excluded_items_leave_the_request_and_change_its_digest(repo, chat, provider):
+    """Сокращение контекста: исключённый ответ не уходит, вопросы вокруг склеиваются (раздел 10.1), отпечаток другой,
+    и отправка с отпечатком прежнего состава отказывает."""
+    user, chat_id = chat
+    fake = FakeCloud("x")
+    service = dialogue(repo, chat, provider, fake)
+    full = service.outgoing(chat_id)
+    assert [m.role for m in full.outgoing.context.messages] == ["user", "assistant", "user"]
+    assert [(seq, role) for seq, role, _ in full.candidates] == [(1, "user"), (2, "assistant"), (3, "user")]
+    short = service.outgoing(chat_id, frozenset({2, 99}))
+    assert short.excluded == [2]
+    assert [m.text for m in short.outgoing.context.messages] == ["Первый вопрос: почта <EMAIL_1>\n\nВторой вопрос"]
+    assert short.outgoing.context.digest() != full.outgoing.context.digest()
+    with pytest.raises(SendRefused, match="изменился"):
+        service.send(chat_id, user, full.outgoing.context.digest(), frozenset({2}))
+    service.send(chat_id, user, short.outgoing.context.digest(), frozenset({2}))
+    [(ctx, _, _)] = fake.calls
+    assert ctx == short.outgoing.context
+    assert repo.audit_events("cloud_send")[0].details["excluded"] == 1
+
+
+def test_excluding_the_last_question_keeps_the_choice_and_refuses_sending(repo, chat, provider):
+    user, chat_id = chat
+    service = dialogue(repo, chat, provider, FakeCloud("x"))
+    preview = service.outgoing(chat_id, frozenset({3}))
+    assert preview.outgoing is None and "Последним в запросе" in preview.refused and preview.excluded == [3]
+    with pytest.raises(SendRefused, match="Последним"):
+        service.send(chat_id, user, "0" * 64, frozenset({3}))
+
+
+def test_manual_transfer_is_the_api_request_without_a_connection(repo, chat, provider):
+    """Перенос вручную: та же сборка и проверка утечек, без подключения; без новых замен состояние не пишется."""
+    user, chat_id = chat
+    service = dialogue(repo, chat, provider, FakeCloud("x"))
+    version = repo.load_state(chat_id)[1]
+    manual = service.manual(chat_id)
+    assert manual.provider is None and (manual.outgoing.context.provider_id, manual.outgoing.context.model) == ("", "")
+    assert manual.outgoing.context.texts() == service.outgoing(chat_id).outgoing.context.texts()
+    assert repo.load_state(chat_id)[1] == version and repo.audit_events("cloud_send") == []
+
+
+def test_manual_transfer_keeps_the_replacements_it_issues(repo, chat):
+    """Словарь пополнен после очистки: сборка выдаёт новую замену, и состояние записывается — иначе метку
+    скопированного текста во вставленном ответе было бы нечем восстановить."""
+    user, chat_id = chat
+    service = service_with(repo, FakeCloud("x"))
+    service.add_input(chat_id, user, "клиент Ромашка")
+    repo.add_dictionary("always", "Ромашка", T.ORG)
+    [message] = service.manual(chat_id).outgoing.context.messages
+    assert message.text == "клиент <ORG_1>"
+    service.add_answer(chat_id, user, "Ответ для <ORG_1>")
+    assert service.view(chat_id).items[-1].result.text == "Ответ для Ромашка"
 
 
 def test_check_provider_sends_no_chat_data(repo, provider):

@@ -1,3 +1,4 @@
+import hashlib
 import re
 import threading
 
@@ -594,3 +595,36 @@ def test_edit_keeps_items_cleaned_before_layers_4_and_5_unmarked(repo, chat):
     ChatService(repo).mask_value(chat_id, user, "b" * 32, "Заря", T.TERM)
     stored = repo.item(chat_id, "b" * 32)
     assert (stored.sanitized, stored.meta) == ("Проект <TERM_1>", {})
+
+
+def _shown(item) -> str:
+    return hashlib.sha256(item.sanitized.encode("utf-8")).hexdigest()
+
+
+def test_reviewed_mark_is_kept_for_the_shown_text_and_cleared_when_it_changes(repo, chat):
+    """Аудит интерфейса 21.10.2026: «проверено» — отметка показанного текста; смена очищенного текста её снимает."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    first = service.add_input(chat_id, user, "Проект Заря запущен")
+    second = service.add_input(chat_id, user, "почта a@x.example")
+    with pytest.raises(EditRefused, match="изменился"):
+        service.mark_reviewed(chat_id, user, first.id, "0" * 64)
+    service.mark_reviewed(chat_id, user, first.id, _shown(first))
+    service.mark_reviewed(chat_id, user, second.id, _shown(second))
+    assert [e.readiness for e in service.view(chat_id).items] == ["reviewed", "reviewed"]
+    assert [e.details for e in repo.audit_events("reviewed")] == [{"seq": 2}, {"seq": 1}]
+    service.mask_value(chat_id, user, first.id, "Заря", T.TERM)      # меняет только первый текст
+    assert [bool(i.reviewed_at) for i in repo.items(chat_id)] == [False, True]
+    assert [e.readiness for e in service.view(chat_id).items] == ["review", "reviewed"]
+
+
+def test_readiness_names_processing_failed_and_blocked_texts(repo, chat):
+    user, chat_id = chat
+    service = ChatService(repo)
+    repo.add_item(chat_id, Item("q" * 32, 0, "input", "в очереди", None, status="queued"))
+    repo.add_item(chat_id, Item("f" * 32, 0, "input", "не очищен", None, status="failed"))
+    service.add_input(chat_id, user, "клиент Ромашка")
+    repo.add_dictionary("always", "Ромашка", T.ORG)
+    assert [e.readiness for e in service.view(chat_id).items] == ["processing", "failed", "blocked"]
+    with pytest.raises(EditRefused):
+        service.mark_reviewed(chat_id, user, "q" * 32, "")
