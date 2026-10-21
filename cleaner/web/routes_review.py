@@ -15,7 +15,7 @@ from cleaner.service import ChatService, EditRefused
 from cleaner.storage.repo import Item
 from cleaner.web import render
 from cleaner.web.deps import Viewer, get_admin, get_form, get_viewer, own_chat, page, repo_of, service_of
-from cleaner.web.routes_chats import LAYER_NAMES, OCR_ALL, can_retry, input_view
+from cleaner.web.routes_chats import LAYER_LABELS, LAYER_NAMES, OCR_ALL, can_retry, input_view
 from cleaner.web.routes_settings import DUPLICATE
 
 router = APIRouter()
@@ -104,8 +104,9 @@ def _warnings(item: Item) -> list[str]:
     for layer, label in LAYER_NAMES.items():
         if layer not in ran:
             warnings.append(
-                f"{label} для этого текста не выполнялся: слой выключен. Если он нужен — включите его для чата "
-                "и нажмите «Очистить заново всеми включёнными слоями»."
+                f"Переключатель «{LAYER_LABELS[layer]}» ({label[0].lower()}{label[1:]}) был выключен: для этого текста "
+                "слой не выполнялся. Если он нужен — включите переключатель в шапке чата и нажмите «Очистить заново "
+                "всеми включёнными слоями»."
             )
     return warnings
 

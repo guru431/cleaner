@@ -30,8 +30,8 @@
       <label class="field"><span>Тестовая строка</span><textarea name="sample" rows="3" class="mono">
 {{ form.sample or '' }}</textarea></label>
       <div class="buttons">
-        <button name="action" value="test">Проверить</button>
-        <button name="action" value="save" class="primary">Проверить и сохранить</button>
+        <button name="action" value="test" title="Показать совпадения в тестовой строке, не сохраняя шаблон">Проверить шаблон</button>
+        <button name="action" value="save" class="primary">Проверить шаблон и сохранить</button>
       </div>
     </form>
     {% if matches is not none %}

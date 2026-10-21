@@ -24,6 +24,7 @@ from cleaner.eval.metrics import CLASSES
 from cleaner.storage.repo import Provider, User
 from cleaner.web import auth, render
 from cleaner.web.deps import Viewer, get_admin, get_form, page, repo_of, service_of
+from cleaner.web.routes_chats import LAYER_LABELS, LAYER_NAMES
 
 router = APIRouter(prefix="/settings")
 
@@ -248,6 +249,7 @@ def _local_page(request: Request, viewer: Viewer, result: str = "", failed: bool
     return page(
         request, "local_llm.html", viewer, current=local_settings(repo_of(request)), status=status,
         key_env=GATEWAY_KEY_ENV, result=result, failed=failed, defaults=repo_of(request).layer_defaults(),
+        layer_names=LAYER_NAMES, layer_labels=LAYER_LABELS,
     )
 
 
@@ -348,7 +350,7 @@ def update_provider(request: Request, provider_id: str, form: dict[str, str] = D
         raise HTTPException(404, "Подключение не найдено")
     provider, key = _provider_form(form, provider_id)
     # Ключ уходит туда, куда указывает адрес: без нового ключа сменой адреса его можно было бы увести на свой узел
-    # кнопкой «Проверить» (FR-8.10).
+    # кнопкой «Проверить соединение» (FR-8.10).
     moved = (urlsplit(provider.base_url).hostname, urlsplit(provider.base_url).port) != (
         urlsplit(old.base_url).hostname, urlsplit(old.base_url).port,
     ) or provider.auth_style != old.auth_style

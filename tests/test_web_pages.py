@@ -65,10 +65,45 @@ def test_theme_toggle_names_three_modes_on_login_and_in_the_top_bar(browser, iva
 
 def test_browser_storage_keeps_only_the_theme_and_the_tab():
     """Хранилища браузера — только оформление и выбор вкладки (раздел 6 спецификации вида): ни текстов форм, ни данных
-    чатов. Запись — только по этим двум ключам."""
+    чатов. Запись — только по ключам темы, вида рабочего места и вкладки."""
     script = (WEB / "static" / "app.js").read_text(encoding="utf-8")
     keys = re.findall(r"(?:local|session)Storage\.setItem\(([^,]+),", script)
-    assert sorted(set(keys)) == ['"cleaner-theme"', "key"] and 'const key = `tab:${window.location.pathname}`' in script
+    assert sorted(set(keys)) == ['"cleaner-theme"', '"cleaner-view"', "key"]
+    assert 'const key = `tab:${window.location.pathname}`' in script
+    assert 'localStorage.setItem("cleaner-view", marks.join(" "))' in script     # только имена отметок вида
+
+
+def view_marks() -> list[str]:
+    """Отметки, которые theme.js ставит из localStorage до отрисовки, — только из своего списка."""
+    script = (WEB / "static" / "theme.js").read_text(encoding="utf-8")
+    return re.findall(r'"([a-z-]+)"', re.search(r"const marks = \[([^\]]*)\]", script).group(1))
+
+
+def test_every_view_mark_has_its_switch_its_style_and_survives_a_reload(boss):
+    """Идея аудита 21.10.2026: меню «Вид» в шапке. Отметка, которой нет в списке theme.js, работала бы до перезагрузки
+    и пропадала после; отметка без правила в app.css ничего бы не меняла."""
+    page = boss.get("/chats").text
+    menu = re.search(r'<details class="menu view-menu">(.*?)</details>', page, re.S).group(1)
+    assert re.findall(r'data-view-toggle="([a-z-]+)" aria-pressed="false"', menu) == view_marks()
+    css = (WEB / "static" / "app.css").read_text(encoding="utf-8")
+    assert all(f":root.view-{mark}" in css for mark in view_marks())
+    assert "html:not(.js) .view-menu" in css                    # без JS переключать нечем — меню не показывается
+
+
+def test_chat_list_and_composer_fold_in_place(ivan):
+    """Свёрнутые список чатов и редактор разворачиваются на месте, не только из меню «Вид»."""
+    page = ivan.get(f"/chats/{ivan.chat()}").text
+    folds = re.findall(r'data-view-fold="([a-z-]+)" aria-expanded="true"', page)
+    assert folds == ["side-folded", "composer-folded"] and set(folds) <= set(view_marks())
+    # Кнопка свёртки редактора — не в tablist: там только вкладки.
+    assert "data-view-fold" not in re.search(r'<div class="tab-list" role="tablist">(.*?)</div>', page, re.S).group(1)
+
+
+def test_check_buttons_name_what_they_check():
+    """Идея аудита 21.10.2026: «Проверить» без объекта — на подключениях, локальной модели и шаблонах — не говорит,
+    что будет проверено."""
+    bare = [path.name for path in TEMPLATES if re.search(r">\s*Проверить\s*<", path.read_text(encoding="utf-8"))]
+    assert bare == []
 
 
 def test_every_icon_used_in_the_templates_is_in_the_sprite(browser):
@@ -128,9 +163,12 @@ def test_chat_composer_tab_is_remembered(ivan):
 
 
 def test_layer_switch_states_its_layer_and_state(ivan):
+    """На кнопке — что слой даёт, номер слоя и состояние — в подсказке (идея аудита 21.10.2026)."""
     chat_id = ivan.chat()
     page = ivan.get(f"/chats/{chat_id}").text
     assert 'aria-pressed="true" title="Слой 4 — модели распознавания имён: включён"' in page
+    labels = re.findall(r'<button class="toggle"[^>]*><span class="switch"></span>([^<]+)</button>', page)
+    assert labels == ["Имена и организации", "Допроверка локальной моделью"]
     ivan.post(f"/chats/{chat_id}/layers", layer="ner", enabled="no")
     assert 'aria-pressed="false" title="Слой 4 — модели распознавания имён: выключен"' in ivan.get(f"/chats/{chat_id}").text
 
@@ -222,3 +260,24 @@ def test_every_settings_page_opens_with_its_menu_item_current(boss):
         assert re.findall(r'<a href="([^"]+)" class="on"', response.text) == ["/settings"], path
     preview = boss.post("/settings/dictionary/import", csv="a\r\nb\r\n", column="a", delimiter="comma", list="never", action="preview")
     assert preview.status_code == 200 and current(preview.text) == ["/settings/dictionary"]
+
+
+def test_settings_are_grouped_by_task_in_the_menu_and_on_the_cards(boss):
+    """Идея аудита 21.10.2026: группы по задачам вместо общей «Качество и доступ»; меню и карточки — из одного списка,
+    у каждой карточки одна строка «что получите»."""
+    groups = ["Модели и подключения", "Правила очистки", "Качество", "Доступ и аудит"]
+    index = boss.get("/settings").text
+    menu = re.search(r'<aside class="side side-nav"[^>]*>(.*?)</aside>', index, re.S).group(1)
+    assert re.findall(r"<h2>([^<]+)</h2>", menu) == groups
+    cards = index[index.index("</aside>"):]
+    assert re.findall(r"<h2>([^<]+)</h2>", cards) == groups
+    lines = re.findall(r'<a class="card" href="([^"]+)"><strong>[^<]+</strong><span>([^<]+)</span></a>', cards)
+    assert [href for href, _ in lines] == SETTINGS and all(line.strip() for _, line in lines)
+
+
+def test_layer_defaults_are_named_by_what_they_give(boss):
+    page = boss.get("/settings/local-llm").text
+    assert re.findall(r'name="(ner|llm)" value="yes"[^>]*> ([^<]+) <span class="hint">([^<]+)</span>', page) == [
+        ("ner", "Имена и организации", "слой 4 — модели распознавания имён"),
+        ("llm", "Допроверка локальной моделью", "слой 5 — локальная модель"),
+    ]
