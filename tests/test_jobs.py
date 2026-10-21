@@ -51,7 +51,7 @@ def test_pasted_text_is_cleaned_while_scans_hold_every_file_thread(repo, clock, 
     release = threading.Event()
 
     class StuckScan:
-        def extract(self, filename, data, progress):
+        def extract(self, filename, data, progress, ocr_all=False):
             reading[filename].set()
             release.wait(5)                     # отпускает тест; пять секунд — только страховка
             raise ExtractError("распознавание остановлено тестом")

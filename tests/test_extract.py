@@ -5,6 +5,7 @@ import zipfile
 import pytest
 from pdfgen import make_pdf
 
+from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.llm import CompletionError
 from cleaner.ingest.extract import ExtractError, Extractor, detect_kind
 
@@ -122,6 +123,91 @@ def test_page_without_recognised_signs_is_reported_and_not_fatal():
     ocr = Ocr(error=CompletionError("ocr_empty", "на странице не распознано ни одного знака"))
     result = Extractor(Documents(), ocr).extract("mixed.pdf", make_pdf([TEXT_PAGE, None]))
     assert (result.ocr_pages, result.unread_pages) == ((2,), (2,))
+
+
+HEADER = "Visible header for the financial report"
+
+
+class LayerDocuments(Documents):
+    """Docling для страниц со слоем текста: Markdown — заголовок страницы."""
+
+    def pdf_pages(self, data, pages):
+        self.calls.append(("pdf", list(pages)))
+        return {number: f"## {HEADER}" for number in pages}
+
+
+def test_scan_with_a_digital_header_is_recognised_too():
+    """Аудит 2026-10-21, находка 1: у скана с цифровым заголовком слой длиннее 20 знаков, и без распознавания
+    оставался один заголовок. Изображение на 74 % страницы — распознаётся; заголовок, которого распознавание не
+    нашло, не теряется."""
+    documents, ocr = LayerDocuments(), Ocr(text="Balance: petrov@x.example")
+    result = Extractor(documents, ocr).extract("report.pdf", make_pdf([(HEADER, 600)]))
+    assert documents.calls == [("pdf", [1])] and len(ocr.calls) == 1
+    assert result.text == f"Balance: petrov@x.example\n\n## {HEADER}"
+    assert (result.ocr_pages, result.unread_pages, result.doubtful_pages) == ((1,), (), ())
+
+
+def test_header_found_by_recognition_is_not_repeated():
+    ocr = Ocr(text=f"# {HEADER.upper()}\n\nBalance: petrov@x.example")
+    result = Extractor(LayerDocuments(), ocr).extract("report.pdf", make_pdf([(HEADER, 600)]))
+    assert result.text == f"# {HEADER.upper()}\n\nBalance: petrov@x.example"
+
+
+def test_image_inside_a_form_counts_at_its_size_on_the_page():
+    """pdfium даёт границы изображения внутри Form XObject в координатах формы: форма, увеличенная вдвое, иначе
+    показала бы 18 % страницы вместо 74 %."""
+    ocr = Ocr()
+    Extractor(LayerDocuments(), ocr).extract("report.pdf", make_pdf([(HEADER, 600)], form_scale=2))
+    assert len(ocr.calls) == 1
+
+
+def test_logo_on_a_text_page_is_not_recognised():
+    ocr = Ocr()
+    result = Extractor(LayerDocuments(), ocr).extract("letter.pdf", make_pdf([(HEADER, 200)]))
+    assert (ocr.calls, result.ocr_pages, result.doubtful_pages, result.text) == ([], (), (), f"## {HEADER}")
+
+
+@pytest.mark.parametrize("error", [
+    CompletionError("unavailable", "локальная модель недоступна"), DetectorError("ключ шлюза не задан"),
+])
+def test_unavailable_recognition_keeps_the_layer_and_marks_the_pages_doubtful(error):
+    """Страница со слоем текста не проваливает разбор из-за распознавания: слой остаётся, страница — сомнительной
+    полноты. Недоступное распознавание не ждут на каждой следующей странице."""
+    ocr = Ocr(error=error)
+    result = Extractor(LayerDocuments(), ocr).extract("report.pdf", make_pdf([(HEADER, 600), TEXT_PAGE, (HEADER, 600)]))
+    assert len(ocr.calls) == 1
+    assert (result.ocr_pages, result.doubtful_pages) == ((), (1, 3))
+    assert result.text == "\n\n".join([f"## {HEADER}"] * 3)
+
+
+def test_page_refused_by_recognition_does_not_stop_the_next_one():
+    """Отказ по одной странице (ответ обрезан) — сомнительна только она, следующую распознают."""
+    class Truncated(Ocr):
+        def __call__(self, image, mime):
+            self.calls.append(mime)
+            if len(self.calls) == 1:
+                raise CompletionError("ocr_truncated", "обрезано")
+            return "Balance"
+
+    result = Extractor(LayerDocuments(), Truncated()).extract("report.pdf", make_pdf([(HEADER, 600), (HEADER, 600)]))
+    assert (result.ocr_pages, result.doubtful_pages) == ((2,), (1,))
+
+
+def test_user_can_ask_to_recognise_every_page():
+    """Выбор при загрузке: распознаётся и страница с одним слоем текста, распознанное дополняет слой."""
+    documents, ocr = LayerDocuments(), Ocr(text="Contact petrov.test@kontora-test.ru")
+    result = Extractor(documents, ocr).extract("mixed.pdf", make_pdf([TEXT_PAGE, None]), ocr_all=True)
+    assert documents.calls == [("pdf", [1])] and len(ocr.calls) == 2
+    assert result.text == f"Contact petrov.test@kontora-test.ru\n\n## {HEADER}\n\nContact petrov.test@kontora-test.ru"
+    assert result.ocr_pages == (1, 2)
+
+
+def test_pictures_of_office_files_are_counted():
+    """Идея аудита 2026-10-21: рисунки DOCX, XLSX и PPTX Docling не распознаёт — их число идёт в предупреждение."""
+    extract = Extractor(Documents(), Ocr()).extract
+    assert extract("t.docx", docx(para("x"))).images == 1
+    assert extract("t.pptx", pptx(slide(shape("x")))).images == 1
+    assert extract("t.docx", package({"word/document.xml": DOCX.format(para("x"))})).images == 0
 
 
 def test_recognition_failure_stops_extraction_with_a_reason():
