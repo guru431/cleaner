@@ -70,6 +70,18 @@ class InputView:
     def deliverable(self) -> bool:
         return self.item.status == "done" and not self.leaks and not self.blocked
 
+    @property
+    def readiness(self) -> str:
+        """Готовность текста к передаче (аудит интерфейса 21.10.2026): processing | failed | blocked | review | reviewed.
+        «Проверено» — отметка пользователя, а не гарантия: подсказка, копирование и отправку она не запрещает."""
+        if self.item.status in ("queued", "running"):
+            return "processing"
+        if self.item.status != "done":
+            return "failed"
+        if not self.deliverable:
+            return "blocked"
+        return "reviewed" if self.item.reviewed_at else "review"
+
 
 @dataclass
 class AnswerView:

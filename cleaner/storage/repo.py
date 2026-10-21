@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import sqlite3
@@ -76,6 +77,7 @@ class Item:
     meta: dict = field(default_factory=dict)             # вид файла, страницы, слои, ход, причина отказа — без текста
     model_spans: list[dict] = field(default_factory=list)  # находки слоёв 4–5: start, end, type, source, score
     risk_status: str = ""                                # "" | queued | running | done | failed | interrupted
+    reviewed_at: str = ""                                # когда пользователь отметил очищенный текст проверенным; "" — нет
 
 
 @dataclass(frozen=True)
@@ -319,7 +321,7 @@ class Repository:
             sanitized=None if sanitized is None else self._dec(key, sanitized, f"items.sanitized:{row['id']}"),
             spans=json.loads(row["spans"]), notices=json.loads(row["notices"]), exposed=json.loads(row["exposed"]),
             created_at=row["created_at"], source=row["source"], status=row["status"], meta=json.loads(row["meta"]),
-            model_spans=json.loads(row["model_spans"]), risk_status=row["risk_status"],
+            model_spans=json.loads(row["model_spans"]), risk_status=row["risk_status"], reviewed_at=row["reviewed_at"] or "",
         )
 
     def items(self, chat_id: str) -> list[Item]:
@@ -362,8 +364,9 @@ class Repository:
         """Состояние и элементы — одной транзакцией. StaleState, если чат успели изменить.
 
         Если очищенный текст элемента изменился, догадки проверки риска стираются, а идущая проверка
-        отменяется вместе с её заданием: они о прежнем тексте (FR-9.3). Сравнение — здесь, а не у
-        вызывающего: так его не обойти.
+        отменяется вместе с её заданием: они о прежнем тексте (FR-9.3). Так же снимается отметка
+        «проверено пользователем»: проверяли прежний текст. Сравнение — здесь, а не у вызывающего:
+        так его не обойти.
         """
         key = self._dek(chat_id)
         now = self._now()
@@ -386,7 +389,8 @@ class Repository:
                 before = None if sealed is None else self._dec(key, sealed, f"items.sanitized:{item.id}")
                 if before != item.sanitized:
                     self.conn.execute(
-                        "UPDATE items SET risk_enc = NULL, risk_status = '', risk_job = NULL WHERE id = ? AND chat_id = ?",
+                        "UPDATE items SET risk_enc = NULL, risk_status = '', risk_job = NULL, reviewed_at = NULL "
+                        "WHERE id = ? AND chat_id = ?",
                         (item.id, chat_id),
                     )
                 self.conn.execute(
@@ -518,6 +522,24 @@ class Repository:
             if current != sanitized:
                 return False
             self.conn.execute("UPDATE items SET risk_enc = ?, risk_status = 'done' WHERE id = ?", (sealed, item_id))
+        return True
+
+    def mark_reviewed(self, chat_id: str, item_id: str, digest: str) -> bool:
+        """Отметка «проверено пользователем» — только готовому входному тексту и только тому очищенному тексту,
+        который пользователь видел (digest — sha256 показанного): если текст сменили, пока страница была открыта,
+        отмечать нечего. False — отметки нет. Снимает её commit_chat при смене очищенного текста."""
+        key = self._dek(chat_id)
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT sanitized_enc FROM items WHERE id = ? AND chat_id = ? AND kind = 'input' AND status = 'done'",
+                (item_id, chat_id),
+            ).fetchone()
+            if row is None or row["sanitized_enc"] is None:
+                return False
+            current = self._dec(key, row["sanitized_enc"], f"items.sanitized:{item_id}")
+            if hashlib.sha256(current.encode("utf-8")).hexdigest() != digest:
+                return False
+            self.conn.execute("UPDATE items SET reviewed_at = ? WHERE id = ?", (self._now(), item_id))
         return True
 
     def item_risk(self, chat_id: str, item_id: str) -> dict | None:
