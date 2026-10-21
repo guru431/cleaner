@@ -12,7 +12,7 @@ from fastapi.responses import RedirectResponse, Response
 from cleaner.core.match import find_forms
 from cleaner.core.risk import KINDS
 from cleaner.core.types import ChatState, EntityType, Policy
-from cleaner.service import ChatService, EditRefused
+from cleaner.service import UNDOABLE, ChatService, EditPreview, EditRefused
 from cleaner.storage.repo import Item
 from cleaner.web import render
 from cleaner.web.deps import Viewer, get_admin, get_form, get_viewer, own_chat, page, repo_of, service_of
@@ -191,17 +191,47 @@ def _layers_ran(item: Item) -> str:
     return ", ".join(["1–3"] + [number for layer, number in (("ner", "4"), ("llm", "5")) if layer in ran])
 
 
+def _version(form: dict[str, str]) -> int | None:
+    """Версия чата, для которой показан предпросмотр; без поля — правка напрямую, без сверки (прежние формы, тесты)."""
+    raw = form.get("version", "")
+    if not raw:
+        return None
+    if not raw.isdigit() or len(raw) > 18:
+        raise HTTPException(400, "Неверная версия чата")
+    return int(raw)
+
+
 def _edit(
-    request: Request, chat_id: str, viewer: Viewer, form: dict[str, str], action: Callable[[ChatService], None]
+    request: Request, chat_id: str, viewer: Viewer, form: dict[str, str],
+    action: Callable[..., EditPreview | None], what: Callable[[], str] = lambda: "",
 ) -> Response:
-    own_chat(request, chat_id, viewer)
+    """Правка — или её предпросмотр, если адрес кончается на /preview: та же работа без записи (ChatService._edit,
+    dry). Предпросмотр — ответ на POST, а не страница по GET: значение правки (выделенный фрагмент) — оригинал, и в
+    адресе ему не место. Подтверждение повторяет поля формы и добавляет версию чата: изменился чат — отказ."""
+    chat = own_chat(request, chat_id, viewer)
+    dry = request.url.path.endswith("/preview")
     try:
-        action(service_of(request))
+        preview = action(service_of(request), version=_version(form), dry=dry)
+        title = what() if dry else ""
     except EditRefused as exc:
         raise HTTPException(400, str(exc)) from None
     except KeyError:
         raise HTTPException(404, "Сущность не найдена") from None
-    return RedirectResponse(_back(chat_id, form), status_code=303)
+    if preview is None:
+        return RedirectResponse(_back(chat_id, form), status_code=303)
+    fields = [(key, value) for key, value in form.items() if key not in ("csrf", "version")]
+    target = request.url.path.removesuffix("/preview")
+    return page(
+        request, "edit_preview.html", viewer, chat=chat, preview=preview, what=title, fields=fields,
+        target=target, back=_back(chat_id, form),
+        totals={key: sum(getattr(t, key) for t in preview.texts) for key in ("hidden", "opened", "relabeled", "exposed")},
+        sent=[t.seq for t in preview.texts if t.sent], undoable=not target.endswith("/undo"),
+    )
+
+
+def _labels(state: ChatState, entity_id: str) -> str:
+    """Замены сущности для заголовка предпросмотра — метки, не значения."""
+    return ", ".join(render.surrogates_by_entity(state).get(entity_id, [])) or "сущность"
 
 
 @router.get("/chats/{chat_id}/items/{item_id}")
@@ -250,6 +280,7 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
         exposed=[", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],
         types=render.TYPE_NAMES, pending=False, retry=can_retry(item), warnings=_warnings(item), extraction=_extraction(item),
         risk=repo_of(request).item_risk(chat_id, item_id) if item.risk_status == "done" else None, risk_kinds=KINDS,
+        undo=repo_of(request).undo_action(chat_id), undo_names=UNDOABLE,
     )
 
 
@@ -278,22 +309,35 @@ def save_gold(request: Request, chat_id: str, item_id: str, form: dict[str, str]
 
 
 @router.post("/chats/{chat_id}/mask")
+@router.post("/chats/{chat_id}/mask/preview")
 def mask(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    return _edit(request, chat_id, viewer, form, lambda service: service.mask_value(
-        chat_id, viewer.user.id, form.get("item_id", ""), form.get("value", ""), _type(form)
-    ))
+    return _edit(request, chat_id, viewer, form, lambda service, **edit: service.mask_value(
+        chat_id, viewer.user.id, form.get("item_id", ""), form.get("value", ""), _type(form), **edit
+    ), lambda: f"Скрывать во всём чате «{form.get('value', '').strip()}» как «{render.TYPE_NAMES[_type(form)]}»")
 
 
 @router.post("/chats/{chat_id}/unmask")
+@router.post("/chats/{chat_id}/unmask/preview")
 def unmask(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    return _edit(request, chat_id, viewer, form, lambda service: service.unmask(
-        chat_id, viewer.user.id, [form.get("value", "")]
-    ))
+    return _edit(request, chat_id, viewer, form, lambda service, **edit: service.unmask(
+        chat_id, viewer.user.id, [form.get("value", "")], **edit
+    ), lambda: f"Снять замену во всём чате с «{form.get('value', '').strip()}»")
+
+
+@router.post("/chats/{chat_id}/undo")
+@router.post("/chats/{chat_id}/undo/preview")
+def undo(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
+    """Отмена последней правки — тоже через предпросмотр: она так же пересчитывает все тексты чата."""
+    def what() -> str:
+        last = repo_of(request).undo_action(chat_id)
+        return f"Отменить последнюю правку: {UNDOABLE.get(last[0], '') if last else ''}"
+
+    return _edit(request, chat_id, viewer, form, lambda service, **edit: service.undo(chat_id, viewer.user.id, **edit), what)
 
 
 @router.post("/chats/{chat_id}/refresh")
 def refresh(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    return _edit(request, chat_id, viewer, form, lambda service: service.refresh(chat_id, viewer.user.id))
+    return _edit(request, chat_id, viewer, form, lambda service, **_: service.refresh(chat_id, viewer.user.id))
 
 
 @router.get("/chats/{chat_id}/entities")
@@ -332,42 +376,53 @@ def entities(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer
         present=[(type_, render.TYPE_NAMES[type_], by_type[type_]) for type_ in by_type], shown_type=shown_type,
         total=len(ordered), chosen=len(chosen), first=(number - 1) * ENTITIES_PAGE + 1, number=number, pages=pages,
         query=lambda target: _entities_query(code, target), back=_entities_query(code, number).lstrip("?"),
+        undo=repo.undo_action(chat_id), undo_names=UNDOABLE,
     )
 
 
 @router.post("/chats/{chat_id}/entities/merge")
+@router.post("/chats/{chat_id}/entities/merge/preview")
 def merge(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
     # Присоединяемая сущность — по её замене (поле со списком кандидатов): тот же ли тип, проверяет ChatService.merge.
-    def action(service: ChatService) -> None:
+    def action(service: ChatService, **edit: object) -> EditPreview | None:
         surrogate = repo_of(request).load_state(chat_id)[0].surrogates.get(form.get("surrogate", "").strip())
         if surrogate is None:
             raise EditRefused("такой замены в таблице чата нет")
-        service.merge(chat_id, viewer.user.id, form.get("keep", ""), surrogate.entity_id)
+        return service.merge(chat_id, viewer.user.id, form.get("keep", ""), surrogate.entity_id, **edit)
 
-    return _edit(request, chat_id, viewer, form, action)
+    def what() -> str:
+        state = repo_of(request).load_state(chat_id)[0]
+        return f"Присоединить {form.get('surrogate', '').strip()} к {_labels(state, form.get('keep', ''))}"
+
+    return _edit(request, chat_id, viewer, form, action, what)
 
 
 @router.post("/chats/{chat_id}/entities/{entity_id}/retype")
+@router.post("/chats/{chat_id}/entities/{entity_id}/retype/preview")
 def retype(request: Request, chat_id: str, entity_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    return _edit(request, chat_id, viewer, form, lambda service: service.retype(
-        chat_id, viewer.user.id, entity_id, _type(form)
-    ))
+    return _edit(request, chat_id, viewer, form, lambda service, **edit: service.retype(
+        chat_id, viewer.user.id, entity_id, _type(form), **edit
+    ), lambda: f"Сменить тип {_labels(repo_of(request).load_state(chat_id)[0], entity_id)} на «{render.TYPE_NAMES[_type(form)]}»")
 
 
 @router.post("/chats/{chat_id}/entities/{entity_id}/restore-value")
 def restore_value(request: Request, chat_id: str, entity_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    return _edit(request, chat_id, viewer, form, lambda service: service.set_restore_value(
+    # Без предпросмотра: значение для восстановления не меняет ни одного очищенного текста.
+    return _edit(request, chat_id, viewer, form, lambda service, **_: service.set_restore_value(
         chat_id, viewer.user.id, entity_id, form.get("value", "")
     ))
 
 
 @router.post("/chats/{chat_id}/entities/{entity_id}/unmask")
+@router.post("/chats/{chat_id}/entities/{entity_id}/unmask/preview")
 def unmask_entity(request: Request, chat_id: str, entity_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    def action(service: ChatService) -> None:
+    def action(service: ChatService, **edit: object) -> EditPreview | None:
         entity = repo_of(request).load_state(chat_id)[0].entities[entity_id]        # KeyError — 404
-        service.unmask(chat_id, viewer.user.id, entity.forms or [entity.restore_value])
+        return service.unmask(chat_id, viewer.user.id, entity.forms or [entity.restore_value], **edit)
 
-    return _edit(request, chat_id, viewer, form, action)
+    return _edit(request, chat_id, viewer, form, action, lambda: (
+        f"Снять замену {_labels(repo_of(request).load_state(chat_id)[0], entity_id)} во всём чате"
+    ))
 
 
 @router.post("/chats/{chat_id}/dictionary")

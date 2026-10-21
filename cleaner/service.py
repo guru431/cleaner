@@ -33,6 +33,19 @@ LAYERS = ("ner", "llm")          # слой 4 и слой 5; совпадают 
 _INTERNAL = "Внутренняя ошибка очистки: текст не обработан и никуда не передан"
 _BUSY = "Чат меняли одновременно, текст не обработан — запустите его ещё раз"
 _IN_PROGRESS = "текст ещё обрабатывается"
+_CHANGED = "Чат изменился после предпросмотра: правка не применена — проверьте её последствия ещё раз"
+_NOTHING_TO_UNDO = "Отменять нечего: последнюю правку уже отменили или правок не было"
+_UNDO_STALE = (
+    "Отменить последнюю правку нельзя: после неё в чате записано новое — текст, ответ, отправка, очистка заново. "
+    "Снимок до правки этого не содержит, и отмена потеряла бы новые замены. Измените правило заново"
+)
+# Правки, после которых сохраняется снимок для отмены (вид — в журнал и на кнопку, без значений).
+UNDOABLE = {
+    "mask": "скрыть значение во всём чате", "unmask": "снять замену во всём чате", "retype": "сменить тип",
+    "merge": "присоединить сущность", "restore_value": "значение при восстановлении",
+}
+_EXAMPLES = 5                       # примеров «было → станет» в предпросмотре
+_EXAMPLE_CONTEXT, _EXAMPLE_WIDTH = 40, 120
 _RISK_IDLE = ("", "done", "failed", "interrupted")     # состояния проверки риска, из которых её можно запустить
 INPUT_SOURCES = ("paste", "instruction")                # вставленный текст и инструкция пользователя для модели (FR-8.5)
 LOCAL_ANSWER_TOKENS = 4096
@@ -153,6 +166,86 @@ class Preview:
     skipped: list[tuple[int, str]]      # номер элемента в чате и причина
 
 
+@dataclass
+class TextChange:
+    """Что правка сделает с одним входным текстом. Счётчики — по фрагментам (spans), без значений: в журнал годятся."""
+
+    item_id: str
+    seq: int
+    hidden: int                         # вхождений станет скрыто
+    opened: int                         # вхождений станет открыто
+    relabeled: int                      # вхождений получит другую замену (объединение, смена типа)
+    exposed: int                        # значений, открытых в прежнем варианте, а теперь скрываемых (FR-6.8)
+    sent: bool                          # после текста в чате есть ответ облака: прежний вариант уже ушёл
+    before: str = ""                    # пример: очищенный текст вокруг первого различия — только для страницы
+    after: str = ""
+
+
+@dataclass
+class EditPreview:
+    """Последствия правки, посчитанные без записи (FR-6.2–6.4): страница подтверждения и её отпечаток — версия чата."""
+
+    action: str
+    version: int
+    texts: list[TextChange]
+    leaks: int
+
+
+def _common_start(a: str, b: str) -> int:
+    """Длина общего начала двух строк — делением пополам: сравнение срезов идёт в C, текст бывает в 500 000 знаков."""
+    low, high = 0, min(len(a), len(b))
+    while low < high:
+        middle = (low + high + 1) // 2
+        if a[:middle] == b[:middle]:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+def _example(before: str, after: str) -> tuple[str, str]:
+    """«Было → станет»: окно вокруг первого различия, общее начало и конец отрезаны, середина — не длиннее
+    _EXAMPLE_WIDTH. Пример один на текст: правка меняет одно значение, остальные места выглядят так же."""
+    start = _common_start(before, after)
+    tail = _common_start(before[start:][::-1], after[start:][::-1])
+    lead = ("…" if start > _EXAMPLE_CONTEXT else "") + before[max(0, start - _EXAMPLE_CONTEXT):start]
+
+    def window(text: str) -> str:
+        middle = text[start:len(text) - tail]
+        if len(middle) > _EXAMPLE_WIDTH:
+            return lead + middle[:_EXAMPLE_WIDTH] + "…"
+        rest = text[len(text) - tail:]
+        return lead + middle + rest[:_EXAMPLE_CONTEXT] + ("…" if len(rest) > _EXAMPLE_CONTEXT else "")
+
+    return window(before), window(after)
+
+
+def _changes(pairs: list[tuple[Item, Item]], items: list[Item]) -> list[TextChange]:
+    """Сводка правки по текстам, очищенный вариант которых изменится. «Ушёл» — после текста есть ответ облака,
+    полученный по API или вставленный: запрос с прежним вариантом уже состоялся, и правка его не вернёт."""
+    sent, later = set(), False
+    for item in reversed(items):
+        if item.kind == "answer" and item.source in ("api", "pasted_answer") and item.original:
+            later = True
+        elif item.kind == "input" and later:
+            sent.add(item.id)
+    changes = []
+    for old, fresh in pairs:
+        if fresh.sanitized == old.sanitized:
+            continue                    # изменилась только отметка слоёв
+        was = {(s["start"], s["end"]): s["surrogate"] for s in old.spans}
+        now = {(s["start"], s["end"]): s["surrogate"] for s in fresh.spans}
+        change = TextChange(
+            old.id, old.seq, hidden=len(now.keys() - was.keys()), opened=len(was.keys() - now.keys()),
+            relabeled=sum(1 for key in now.keys() & was.keys() if now[key] != was[key]),
+            exposed=len(set(fresh.exposed) - set(old.exposed)), sent=old.id in sent,
+        )
+        if len(changes) < _EXAMPLES:
+            change.before, change.after = _example(old.sanitized or "", fresh.sanitized or "")
+        changes.append(change)
+    return changes
+
+
 class LiveAnswer:
     """Ответ облака, пока он идёт: фрагменты копятся в памяти, страница получает их событиями сервера."""
 
@@ -257,19 +350,27 @@ class ChatService:
         if len(text) > self.max_text_chars:
             raise TextTooLong(f"текст длиннее {self.max_text_chars} знаков")
 
-    def _apply(self, chat_id: str, work: Work) -> list[Item]:
+    def _apply(
+        self, chat_id: str, work: Work, expected: int | None = None, after: Callable[[int], None] | None = None,
+    ) -> list[Item]:
         """Работа над загруженным состоянием и запись одной транзакцией.
 
         Исключение ядра отбрасывает изменённое состояние: в базе ничего не меняется.
-        Если чат успели изменить, работа повторяется на свежем состоянии.
+        Если чат успели изменить, работа повторяется на свежем состоянии — кроме правки после предпросмотра
+        (expected — версия, которую он показал): её последствия посчитаны для той версии, и она отклоняется.
+        after получает версию, которую дала запись.
         """
         for _ in range(_ATTEMPTS):
             state, version = self.repo.load_state(chat_id)
+            if expected is not None and version != expected:
+                raise EditRefused(_CHANGED)
             new_items, updated = work(state, self.repo.items(chat_id), self.repo.settings())
             try:
                 self.repo.commit_chat(chat_id, state, version, new_items, updated)
             except StaleState:
                 continue
+            if after is not None:
+                after(version + 1)
             return new_items
         raise StaleState(chat_id)
 
@@ -774,17 +875,31 @@ class ChatService:
 
     # --- правки (FR-6) -------------------------------------------------------------
 
-    def _edit(self, chat_id: str, user_id: str, action: str, change: Callable[[ChatState, list[Item]], None]) -> None:
-        """Правка состояния и повторная очистка входных текстов чата (FR-6.5, FR-6.8). Модели не вызываются."""
+    def _edit(
+        self, chat_id: str, user_id: str, action: str, change: Callable[[ChatState, list[Item]], None],
+        version: int | None = None, dry: bool = False, undone: str = "",
+    ) -> EditPreview | None:
+        """Правка состояния и повторная очистка входных текстов чата (FR-6.5, FR-6.8). Модели не вызываются.
+
+        dry — предпросмотр: та же работа над загруженным состоянием, но без записи; итог — сводка последствий.
+        version — версия чата, для которой показан предпросмотр: изменился чат — правка отклоняется (_CHANGED).
+        Правка из UNDOABLE оставляет снимок состояния до себя для отмены (undo), одной глубины; undone — вид
+        отменяемой правки, для журнала отмены."""
         leaks = Counter()
         on = self._enabled(chat_id)
+        done: dict[str, Any] = {}
 
         def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
             before = set(state.rules)
+            if action in UNDOABLE and not dry:
+                done["before"] = state_to_json(state)
             change(state, items)
             # Новые правила «скрывать» (выделение, смена типа) и что с ними стало: тип находки, политика которой строже
             # типа правила, остаётся (5.7, шаг 4), и правка, которая нигде не легла, — отказ с причиной, а не тишина.
-            added = {normalize(r.value): r.type for r in state.rules if r.action == "mask" and r not in before}
+            # Отмена возвращает правила, которые уже прошли эту проверку: ей не отказывают.
+            added = {} if action == "undo" else {
+                normalize(r.value): r.type for r in state.rules if r.action == "mask" and r not in before
+            }
             held, applied = None, False
             leaks.clear()                       # при повторе на свежем состоянии считаем заново
             pairs = []
@@ -820,17 +935,64 @@ class ChatService:
             for old, fresh in pairs:
                 opened = {leak.entity_id for leak in leakcheck.check(old.sanitized or "", state, settings) if leak.entity_id}
                 fresh.exposed = sorted(set(old.exposed) | opened)
+            done["pairs"], done["items"] = pairs, items
             return [], [fresh for _, fresh in pairs]
 
-        self._apply(chat_id, work)
-        self.repo.audit("edit", user_id, chat_id, action=action)
+        if dry:
+            # Предпросмотр только читает: в журнал не пишется, как и экран подтверждения отправки (outgoing).
+            state, current = self.repo.load_state(chat_id)
+            if version is not None and current != version:
+                raise EditRefused(_CHANGED)
+            work(state, self.repo.items(chat_id), self.repo.settings())
+            return EditPreview(action, current, _changes(done["pairs"], done["items"]), leaks["count"])
+
+        def after(committed: int) -> None:
+            # Снимок — сразу за записью и только для версии, которую она дала (save_undo): успела другая запись —
+            # снимка нет. Отмена его стирает; правка не из UNDOABLE сменила версию, и прежний снимок не действует.
+            if "before" in done:
+                self.repo.save_undo(chat_id, done["before"], committed, action)
+            elif action == "undo":
+                self.repo.clear_undo(chat_id)
+
+        self._apply(chat_id, work, expected=version, after=after)
+        # В журнал — вид правки и сколько текстов она изменила, без значений (FR-11.2).
+        changed = sum(1 for old, fresh in done["pairs"] if fresh.sanitized != old.sanitized)
+        if action == "undo":
+            self.repo.audit("edit_undo", user_id, chat_id, action=undone, texts=changed)
+        else:
+            self.repo.audit("edit", user_id, chat_id, action=action, texts=changed)
         if leaks["count"]:
             self.repo.audit("leak", user_id, chat_id, count=leaks["count"])
+        return None
 
     def refresh(self, chat_id: str, user_id: str) -> None:
         self._edit(chat_id, user_id, "refresh", lambda state, items: None)
 
-    def mask_value(self, chat_id: str, user_id: str, item_id: str, value: str, type_: EntityType) -> None:
+    def undo(self, chat_id: str, user_id: str, version: int | None = None, dry: bool = False) -> EditPreview | None:
+        """Отменить последнюю правку из UNDOABLE: состояние — из снимка до неё (ops.revert: выданные ею замены остаются
+        за своими сущностями), входные тексты очищаются заново, как при правке. Снимок действует, только пока после
+        правки в чате ничего не записано: иначе он не содержит новых сущностей, и отмена отказывает. Уже переданное —
+        скопированное, скачанное, отправленное облаку — отмена не возвращает."""
+        snapshot = self.repo.undo_snapshot(chat_id)
+        if snapshot is None:
+            raise EditRefused(_NOTHING_TO_UNDO)
+        before, kind, made, current = snapshot
+        if made != current:
+            if not dry:
+                self.repo.clear_undo(chat_id)         # устаревший снимок больше ни к чему
+            raise EditRefused(_UNDO_STALE)
+        if version is not None and version != made:
+            raise EditRefused(_CHANGED)
+        # Версия — всегда та, что дала правка: запись, успевшая между чтением снимка и отменой, её отклонит.
+        result = self._edit(chat_id, user_id, "undo", lambda state, items: ops.revert(state, before), made, dry, kind)
+        if result is not None:
+            result.action = kind
+        return result
+
+    def mask_value(
+        self, chat_id: str, user_id: str, item_id: str, value: str, type_: EntityType,
+        version: int | None = None, dry: bool = False,
+    ) -> EditPreview | None:
         def change(state: ChatState, items: list[Item]) -> None:
             item = next((i for i in items if i.id == item_id and i.kind == "input" and i.status == "done"), None)
             cleaned = value.strip()
@@ -840,9 +1002,11 @@ class ChatService:
                 raise EditRefused("такого фрагмента в тексте нет")
             ops.mask(state, cleaned, type_)
 
-        self._edit(chat_id, user_id, "mask", change)
+        return self._edit(chat_id, user_id, "mask", change, version, dry)
 
-    def unmask(self, chat_id: str, user_id: str, values: Iterable[str]) -> None:
+    def unmask(
+        self, chat_id: str, user_id: str, values: Iterable[str], version: int | None = None, dry: bool = False,
+    ) -> EditPreview | None:
         """Снять замену со значений во всём чате (FR-6.2). Таблица чата передаёт все написания сущности."""
         cleaned = [value.strip() for value in values if value.strip()]
         if not cleaned:
@@ -852,12 +1016,16 @@ class ChatService:
             for value in cleaned:
                 ops.unmask(state, value)
 
-        self._edit(chat_id, user_id, "unmask", change)
+        return self._edit(chat_id, user_id, "unmask", change, version, dry)
 
-    def retype(self, chat_id: str, user_id: str, entity_id: str, type_: EntityType) -> None:
-        self._edit(chat_id, user_id, "retype", lambda state, items: ops.retype(state, entity_id, type_))
+    def retype(
+        self, chat_id: str, user_id: str, entity_id: str, type_: EntityType, version: int | None = None, dry: bool = False,
+    ) -> EditPreview | None:
+        return self._edit(chat_id, user_id, "retype", lambda state, items: ops.retype(state, entity_id, type_), version, dry)
 
-    def merge(self, chat_id: str, user_id: str, keep_id: str, drop_id: str) -> None:
+    def merge(
+        self, chat_id: str, user_id: str, keep_id: str, drop_id: str, version: int | None = None, dry: bool = False,
+    ) -> EditPreview | None:
         if keep_id == drop_id:
             raise EditRefused("выберите две разные сущности")
 
@@ -866,7 +1034,7 @@ class ChatService:
                 raise EditRefused("объединять можно только сущности одного типа")
             ops.merge_entities(state, keep_id, drop_id)
 
-        self._edit(chat_id, user_id, "merge", change)
+        return self._edit(chat_id, user_id, "merge", change, version, dry)
 
     def set_restore_value(self, chat_id: str, user_id: str, entity_id: str, value: str) -> None:
         cleaned = value.strip()
