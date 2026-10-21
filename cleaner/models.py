@@ -118,7 +118,11 @@ def install(models_dir: Path, spec: ModelSpec, fetch: Callable[[Path], None] | N
     shutil.rmtree(incoming, ignore_errors=True)          # прошлая загрузка прервана
     incoming.mkdir(parents=True)
     (fetch or spec.fetch)(incoming)
-    shutil.rmtree(incoming / ".cache", ignore_errors=True)     # служебные файлы huggingface_hub
+    # Служебные файлы huggingface_hub — в корне и в каталоге каждой модели (Docling качает несколько в подкаталоги):
+    # это не поставка, и в манифесте их быть не должно.
+    for cache in sorted(incoming.rglob(".cache"), key=lambda path: len(path.parts), reverse=True):
+        if cache.is_dir():
+            shutil.rmtree(cache, ignore_errors=True)
     manifest = {"source": spec.source, "revision": spec.revision(), "files": _files(incoming)}
     (incoming / MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8")
     incoming.rename(final)

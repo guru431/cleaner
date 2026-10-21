@@ -12,8 +12,10 @@ def fake_spec(name: str = "demo") -> models.ModelSpec:
         (target / "weights.bin").write_bytes(b"\x01\x02")
         (target / "sub").mkdir()
         (target / "sub" / "config.json").write_text("{}", encoding="utf-8")
-        (target / ".cache").mkdir()
-        (target / ".cache" / "lock").write_text("служебный файл загрузчика", encoding="utf-8")
+        # Служебные файлы huggingface_hub — и в корне, и в каталоге каждой модели (Docling качает несколько в подкаталоги).
+        for cache in (target / ".cache", target / "sub" / ".cache" / "huggingface"):
+            cache.mkdir(parents=True)
+            (cache / "lock").write_text("служебный файл загрузчика", encoding="utf-8")
 
     return models.ModelSpec(name, "test/demo", lambda: "rev1", fetch)
 
