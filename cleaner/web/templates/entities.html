@@ -5,6 +5,12 @@
 <div class="bar">
   <nav class="crumbs"><a href="/chats/{{ chat.id }}" title="{{ chat.title }}">{{ chat.title }}</a><span class="sep">/</span><h1>Таблица замен</h1></nav>
   <span class="spacer"></span>
+  {% if undo %}
+  <form method="post" action="/chats/{{ chat.id }}/undo/preview">
+    {% include "_csrf.html" %}{{ back_field() }}
+    <button title="Последняя правка — {{ undo_names[undo[0]] }}. Сначала покажет, что вернётся; уже скопированное или отправленное отмена не вернёт">Отменить последнюю правку…</button>
+  </form>
+  {% endif %}
   <form method="post" action="/chats/{{ chat.id }}/refresh">
     {% include "_csrf.html" %}
     <button>Очистить тексты чата заново с текущими настройками</button>
@@ -37,16 +43,17 @@
       <td>{{ r.restore_value }}{% if r.forms | length > 1 %}<div class="sub">{{ r.forms | join(", ") }}</div>{% endif %}</td>
       <td class="num">{{ r.count }}</td>
       <td class="actions">
-        <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/unmask">
-          {% include "_csrf.html" %}{{ back_field() }}<button class="danger">Снять замену</button>
+        {# Снять замену, сменить тип, присоединить — через предпросмотр последствий (/preview). #}
+        <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/unmask/preview">
+          {% include "_csrf.html" %}{{ back_field() }}<button class="danger">Снять замену…</button>
         </form>
         <details class="inline" name="edit">
           <summary class="btn">Изменить…</summary>
           <div class="pop">
-            <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/retype">
+            <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/retype/preview">
               {% include "_csrf.html" %}{{ back_field() }}
               <select name="type" aria-label="Тип">{% for code, name in types.items() %}<option value="{{ code.value }}"{% if code == r.type %} selected{% endif %}>{{ name }}</option>{% endfor %}</select>
-              <button>Сменить тип</button>
+              <button>Сменить тип…</button>
             </form>
             <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/restore-value">
               {% include "_csrf.html" %}{{ back_field() }}
@@ -54,11 +61,11 @@
               <button>Подставлять при восстановлении</button>
             </form>
             {% if r.peers %}
-            <form method="post" action="/chats/{{ chat.id }}/entities/merge">
+            <form method="post" action="/chats/{{ chat.id }}/entities/merge/preview">
               {% include "_csrf.html" %}{{ back_field() }}
               <input type="hidden" name="keep" value="{{ r.id }}">
               <input name="surrogate" list="peers-{{ r.type.value }}" required autocomplete="off" placeholder="Замена того же типа" aria-label="Замена того же типа, которую присоединить">
-              <button>Присоединить</button>
+              <button>Присоединить…</button>
             </form>
             {% endif %}
           </div>

@@ -311,6 +311,39 @@ class Repository:
         raw = crypto.unseal(self._dek(chat_id), row["state_enc"], f"chats.state:{chat_id}")
         return state_from_json(raw), row["version"]
 
+    # --- отмена последней правки (раздел 14) -------------------------------------------
+
+    def save_undo(self, chat_id: str, before: bytes, version: int, action: str) -> bool:
+        """Снимок состояния до правки (запись state_to_json) — под ключом чата, как само состояние (SEC-4). Пишется,
+        только если версия чата та, что дала правка: успела другая запись — снимка нет, отменять нечего."""
+        sealed = crypto.seal(self._dek(chat_id), before, f"chats.undo:{chat_id}")
+        return self._run(
+            "UPDATE chats SET undo_enc = ?, undo_action = ?, undo_version = ? WHERE id = ? AND version = ?",
+            sealed, action, version, chat_id, version,
+        ) == 1
+
+    def undo_action(self, chat_id: str) -> tuple[str, int] | None:
+        """Вид правки, которую можно отменить, и версия чата, к которой относится снимок; None — отменять нечего.
+        Снимок действует, только пока версия чата та, что дала правка (без расшифровки — для кнопки на странице)."""
+        row = self._one("SELECT undo_action, undo_version, version FROM chats WHERE id = ? AND undo_enc IS NOT NULL", chat_id)
+        if row is None or row["undo_version"] != row["version"]:
+            return None
+        return row["undo_action"], row["version"]
+
+    def undo_snapshot(self, chat_id: str) -> tuple[ChatState, str, int, int] | None:
+        """Снимок до правки, её вид, версия чата, которую дала правка, и нынешняя версия: снимок действует, только
+        пока они равны. None — снимка нет."""
+        row = self._one("SELECT undo_enc, undo_action, undo_version, version FROM chats WHERE id = ?", chat_id)
+        if row is None:
+            raise KeyError(chat_id)
+        if row["undo_enc"] is None:
+            return None
+        raw = crypto.unseal(self._dek(chat_id), row["undo_enc"], f"chats.undo:{chat_id}")
+        return state_from_json(raw), row["undo_action"], row["undo_version"], row["version"]
+
+    def clear_undo(self, chat_id: str) -> None:
+        self._run("UPDATE chats SET undo_enc = NULL, undo_action = NULL, undo_version = NULL WHERE id = ?", chat_id)
+
     def _item(self, row: sqlite3.Row, key: bytes) -> Item:
         sanitized = row["sanitized_enc"]
         return Item(

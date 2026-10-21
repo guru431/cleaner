@@ -6,6 +6,13 @@
   <nav class="crumbs"><a href="/chats/{{ chat.id }}" title="{{ chat.title }}">{{ chat.title }}</a><span class="sep">/</span><h1>Проверка текста {{ item.seq }}</h1></nav>
   <span class="spacer"></span>
   <a class="btn" href="/chats/{{ chat.id }}/entities">Таблица замен</a>
+  {% if undo %}
+  <form method="post" action="/chats/{{ chat.id }}/undo/preview">
+    {% include "_csrf.html" %}
+    <input type="hidden" name="item_id" value="{{ item.id }}">
+    <button title="Последняя правка — {{ undo_names[undo[0]] }}. Сначала покажет, что вернётся; уже скопированное или отправленное отмена не вернёт">Отменить последнюю правку…</button>
+  </form>
+  {% endif %}
   {% if retry %}
   <form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/retry">
     {% include "_csrf.html" %}
@@ -121,13 +128,14 @@
   </div>
 </template>
 
-<form method="post" action="/chats/{{ chat.id }}/mask" class="panel mask-row">
+{# Глобальные правки — через предпросмотр (/preview): сколько текстов и вхождений изменится и что уже ушло. #}
+<form method="post" action="/chats/{{ chat.id }}/mask/preview" class="panel mask-row">
   {% include "_csrf.html" %}
   <input type="hidden" name="item_id" value="{{ item.id }}">
   <label for="mask-value">Скрыть фрагмент</label>
   <textarea id="mask-value" name="value" rows="1" required placeholder="Выделите фрагмент в оригинале или впишите его"></textarea>
   <select name="type" aria-label="Тип">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select>
-  <button class="primary">Скрывать во всём чате</button>
+  <button class="primary">Скрывать во всём чате…</button>
 </form>
 
 <div class="tabs" data-tabs data-tabs-remember>
@@ -157,11 +165,11 @@
         <td class="mono">{{ f.value }}</td><td class="mono nowrap">{{ f.surrogate }}</td><td class="nowrap">{{ f.type }}</td>
         <td class="sub">{{ f.why.names | join("; ") }}{% if f.why.validated %}; формат подтверждён{% endif %}</td>
         <td class="actions">
-          <form method="post" action="/chats/{{ chat.id }}/unmask">
+          <form method="post" action="/chats/{{ chat.id }}/unmask/preview">
             {% include "_csrf.html" %}
             <input type="hidden" name="item_id" value="{{ item.id }}">
             <input type="hidden" name="value" value="{{ f.value }}">
-            <button class="danger">Снять замену во всём чате</button>
+            <button class="danger">Снять замену во всём чате…</button>
           </form>
         </td>
       </tr>
