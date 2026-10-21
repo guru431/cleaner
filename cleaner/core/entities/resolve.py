@@ -476,7 +476,13 @@ class Resolver:
         if "." not in value and whole:
             if type_ is T.DOMAIN:
                 return self._netbios(value, origin)
-            return self._manual(value) or self._part(value, origin, leading=True, standalone=True)
+            # Имя узла, которое правило поглотило бы, остаётся HOST, если у HOST политика строже (merge, 5.7): метка
+            # правила вернула бы мягкую политику.
+            retyped = self.manual.get(normalize(value))
+            policies = self.settings.policies
+            if retyped and STRICTNESS.get(policies.get(retyped), 0) >= STRICTNESS.get(policies.get(type_), 0):
+                return self._manual(value)
+            return self._part(value, origin, leading=True, standalone=True)
         # Часть имени рядом с заменой — не имя целиком (5.10): в частях перед заменой домена нет, одиночная часть после
         # неё — тоже часть. Первой часть после замены не бывает, и отдельным написанием никакая из них не становится.
         left, registrable = name_parts(value, precedes)
