@@ -15,7 +15,7 @@ from cleaner.core import leakcheck, restore, surrogates
 from cleaner.core.detect import dictionary, infra, ner, orgs, rules, secrets
 from cleaner.core.detect.base import DetectContext, Detector
 from cleaner.core.detect.merge import MergedSpan, merge
-from cleaner.core.entities import hostmap, labels, netmap
+from cleaner.core.entities import hostmap, labels, netmap, ops
 from cleaner.core.entities.resolve import ResolvedSpan, Resolver, name_parts
 from cleaner.core.leakcheck import Leak
 from cleaner.core.match import normalize
@@ -216,7 +216,7 @@ def _context(state: ChatState, settings: Settings) -> DetectContext:
         settings=settings,
         known=tuple((form, e.type) for e in state.entities.values() for form in e.forms),
         manual=tuple((r.value, r.type, r.bounds) for r in state.rules if r.action == "mask" and r.type is not None),
-        unmask=frozenset(r.value.lower() for r in state.rules if r.action == "unmask"),
+        unmask=ops.unmasked(state),
         issued_domains=frozenset(fake.lower() for slot, fake in state.issued.items() if slot.endswith("|dns"))
         | {label.lower() for label in labels.domain_labels(state)},
         issued_names=frozenset(fake.lower() for slot, fake in state.issued.items() if slot.endswith("|name")),
@@ -258,10 +258,6 @@ def _passes(
     return resolved, found
 
 
-def _open_values(state: ChatState, settings: Settings) -> frozenset[str]:
-    return settings.never | {r.value.lower() for r in state.rules if r.action == "unmask"}
-
-
 def _held(
     text: str, resolved: list[ResolvedSpan], found: list[Span], state: ChatState, settings: Settings,
 ) -> list[ResolvedSpan]:
@@ -273,7 +269,7 @@ def _held(
     (FR-3.6, FR-6.2) не держит ничего, как и вне фрагмента; правило пользователя — не находка. Находки одного типа
     сливаются, и каждый фрагмент проходится один раз на интервал слияния: время линейно."""
     policies = settings.policies
-    opened = _open_values(state, settings)
+    opened = ops.open_values(state, settings)
     longest = max(map(len, opened), default=0)
     addresses: set[str] | None = None
     intervals: dict[EntityType, list[tuple[int, int]]] = {}
@@ -324,7 +320,7 @@ def _pasted(state: ChatState, settings: Settings, hits: list[surrogates.Hit]) ->
     тоже не блокирует, и иначе вставленную замену было бы нечем снять."""
     if not hits:
         return []
-    opened = _open_values(state, settings)
+    opened = ops.open_values(state, settings)
     by_entity: dict[str, EntityType | None] = {}
     by_key: dict[str, tuple[EntityType, ...]] = {}
 

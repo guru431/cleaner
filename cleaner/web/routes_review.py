@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlencode
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
+from cleaner.core.entities import ops
 from cleaner.core.match import find_forms
 from cleaner.core.risk import KINDS
 from cleaner.core.types import ChatState, EntityType, Policy
@@ -196,8 +197,7 @@ def _opened(text: str, state: ChatState) -> int:
     """Сколько значений, с которых в этом чате снята замена, стоит открытыми в очищенном тексте. Проверка утечек их
     намеренно пропускает (раздел 8), поэтому её зелёный итог не говорит, что открытых значений нет. Ищутся так же, как
     их вырезает она, — целыми словами."""
-    values = {rule.value.lower() for rule in state.rules if rule.action == "unmask"}
-    return len({value for _, _, value in find_forms(text, [(value, "letters", value) for value in values])})
+    return len({value for _, _, value in find_forms(text, [(value, "letters", value) for value in ops.unmasked(state)])})
 
 
 def _version(form: dict[str, str]) -> int | None:

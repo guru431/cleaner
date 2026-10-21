@@ -2,7 +2,17 @@
 from __future__ import annotations
 
 from cleaner.core.entities.names import FIXED_RANK
-from cleaner.core.types import STRICT_TYPES, ChatRule, ChatState, Entity, EntityType
+from cleaner.core.types import STRICT_TYPES, ChatRule, ChatState, Entity, EntityType, Settings
+
+
+def unmasked(state: ChatState) -> frozenset[str]:
+    """Значения, открытые правилом пользователя «открыть» (FR-6.2), в нижнем регистре: «открыто по решению пользователя»."""
+    return frozenset(rule.value.lower() for rule in state.rules if rule.action == "unmask")
+
+
+def open_values(state: ChatState, settings: Settings) -> frozenset[str]:
+    """Все открытые значения: список «никогда не скрывать» (FR-3.6) и правила «открыть» (FR-6.2), в нижнем регистре."""
+    return settings.never | unmasked(state)
 
 
 def _forget(state: ChatState, value: str) -> None:
