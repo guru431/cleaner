@@ -88,13 +88,15 @@ def _interrupt(repo: Repository) -> None:
 def create_app(
     repo: Repository, clock: Clock, *, secure_cookies: bool, max_text_chars: int = 500_000,
     tz: tzinfo = timezone.utc, engines: Any = None, jobs: Jobs | None = None, max_file_mb: int = 50,
-    sends: Jobs | None = None, cloud_send: Any = None, files: Jobs | None = None,
+    sends: Jobs | None = None, cloud_send: Any = None, files: Jobs | None = None, measures: Jobs | None = None,
 ) -> FastAPI:
     jobs = jobs or Jobs()
     # Отправки облаку и разбор файлов — свои пулы: скан идёт минуту на страницу, и в общем пуле из двух потоков
     # два скана держали бы десятки минут и ответы облака, и каждый вставленный текст (раздел 14).
     sends = sends or Jobs(ThreadPoolExecutor(max_workers=SEND_WORKERS, thread_name_prefix="cleaner-send"))
     files = files or Jobs(ThreadPoolExecutor(max_workers=FILE_WORKERS, thread_name_prefix="cleaner-file"))
+    # Замер эталонного набора идёт минуты и в общем пуле занял бы поток очистки текстов пользователей.
+    measures = measures or Jobs(ThreadPoolExecutor(max_workers=1, thread_name_prefix="cleaner-eval"))
     service = ChatService(
         repo, max_text_chars, engines, submit=jobs.submit, send_submit=sends.submit, cloud_send=cloud_send or cloud.send,
         file_submit=files.submit,
@@ -108,7 +110,7 @@ def create_app(
         # Их потоки процесс не ждёт: по SIGTERM uvicorn сразу после этого повторяет сигнал, и процесс кончается,
         # а если uvicorn.run вернулся (Ctrl+C), serve выходит по unfinished_jobs, закрыв базу (раздел 14).
         service.live.cancel_all()            # идущие ответы облака сохраняются неполными
-        app.state.unfinished_jobs = shutdown(jobs, sends, files)
+        app.state.unfinished_jobs = shutdown(jobs, sends, files, measures)
         _interrupt(repo)
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -116,6 +118,9 @@ def create_app(
     app.state.clock = clock
     app.state.engines = engines                      # cleaner.engines.Engines; в тестах — заглушка
     app.state.jobs = jobs
+    app.state.measures = measures
+    # Состояние замера — в памяти процесса: после перезапуска прерванного замера нет, а итог пишет само задание.
+    app.state.measure = {"status": "idle"}
     app.state.unfinished_jobs = 0                    # сколько заданий остановка не дождалась (lifespan)
     app.state.max_file_bytes = max_file_mb * 1024 * 1024
     app.state.service = service

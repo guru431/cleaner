@@ -141,6 +141,8 @@ class FakeDocuments:
 class FakeEngines:
     """Тяжёлые и сетевые части для тестов: модели и локальная модель подменены, сети нет."""
 
+    models_dir = None                          # моделей на диске нет: в паспорте замера ревизий моделей нет
+
     def __init__(self) -> None:
         self.ner_layer = FakeNer()
         self.second = FakeSecondPass()
@@ -276,6 +278,7 @@ def app(repo, clock, monkeypatch, engines, jobs):
     monkeypatch.setattr(auth, "_hasher", PasswordHasher(time_cost=1, memory_cost=1024, parallelism=1))
     return create_app(
         repo, clock, secure_cookies=False, engines=engines, jobs=jobs, sends=Jobs(Immediate()), files=Jobs(Immediate()),
+        measures=Jobs(Immediate()),
     )
 
 

@@ -180,24 +180,60 @@ def test_models_verify_names_what_is_missing(home, capsys):
     assert "docling: нет каталога" in capsys.readouterr().out
 
 
-def test_eval_measures_the_gold_set_and_guards_against_a_drop(home, monkeypatch, capsys, clock):
-    """FR-12.5, QA-6."""
+def test_eval_measures_the_gold_set_and_guards_against_a_drop(home, monkeypatch, capsys, clock, offline_env):
+    """FR-12.5, QA-6. Код выхода: 2 — сопоставимого базового замера нет, 1 — полнота упала, 0 — не упала."""
     key = init(home)
     monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
-    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY", "DO_NOT_TRACK", "TOKENIZERS_PARALLELISM"):
-        monkeypatch.setenv(name, "")
-    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    database = home / "data" / "cleaner.db"
+    repo = open_repo(database, key, clock)
     repo.add_gold(None, "почта a@x.example", [{"start": 6, "end": 17, "type": "EMAIL", "entity": 0, "origin": "detector"}])
-    repo.set_setting("eval.baseline", json.dumps({"1-3": {"ФИО": 1.0}}, ensure_ascii=False))
     repo.conn.close()
+    assert main(["eval", "--layers", "1-3"]) == 2
+    out = capsys.readouterr().out
+    assert "EMAIL | 1.000 (1/1)" in out and "НЕ ПРОВЕРЕНО: слои 1-3: базового замера нет" in out and "QA-6 не проверена" in out
+    assert main(["eval", "--layers", "1-3", "--save-baseline"]) == 2
+    assert "Замер сохранён как базовый для слоёв 1-3" in capsys.readouterr().out
     assert main(["eval", "--layers", "1-3"]) == 0
-    assert "EMAIL | 1.000 (1/1)" in capsys.readouterr().out
-    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    assert "ни один класс не упал" in capsys.readouterr().out
+
+    repo = open_repo(database, key, clock)
     repo.add_gold(None, "звонил Петров", [{"start": 7, "end": 13, "type": "PERSON", "entity": 0, "origin": "detector"}])
+    repo.conn.close()
+    assert main(["eval", "--layers", "1-3", "--save-baseline"]) == 2          # набор другой: замена — только явно
+    out = capsys.readouterr().out
+    assert "снят на другом наборе (примеров было 1, сейчас 2)" in out and "--replace-baseline" in out
+    assert main(["eval", "--layers", "1-3", "--replace-baseline"]) == 2
+    assert "Замер сохранён как базовый" in capsys.readouterr().out
+
+    repo = open_repo(database, key, clock)
+    stored = json.loads(repo.setting("eval.baseline"))
+    stored["datasets"]["gold"]["1-3"]["classes"]["ФИО"] = [1, 1]                # прежде имя скрывалось
+    repo.set_setting("eval.baseline", json.dumps(stored, ensure_ascii=False))
     repo.conn.close()
     assert main(["eval", "--layers", "1-3", "--save-baseline"]) == 1
     out = capsys.readouterr().out
-    assert "ПОЛНОТА УПАЛА: слои 1-3, «ФИО»: 1.000 → 0.000" in out and "не сохранён" in out
+    assert "ПОЛНОТА УПАЛА: слои 1-3, «ФИО»: 1.000 → 0.000 (1 → 0 из 1)" in out and "не сохранён" in out
+    repo = open_repo(database, key, clock)
+    assert json.loads(repo.setting("eval.baseline"))["datasets"]["gold"]["1-3"]["classes"]["ФИО"] == [1, 1]
+    assert "Петров" not in repo.setting("eval.passport") and "a@x" not in repo.setting("eval.passport")
+    repo.conn.close()
+
+
+def test_eval_of_an_open_set_checks_its_manifest_and_keeps_its_own_baseline(home, monkeypatch, capsys, clock, offline_env):
+    """Идея аудита 21.10.2026: снимок сверяется с манифестом, а его базовый замер — отдельно от собственного набора."""
+    from cleaner.eval.datasets import write_snapshot
+
+    key = init(home)
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    record = {"text": "почта a@x.example", "spans": [{"start": 6, "end": 17, "type": "EMAIL", "entity": 0}]}
+    path = write_snapshot(home, "set", [record], "org/set", "abc123", True)
+    assert main(["eval", "--jsonl", str(path), "--layers", "1-3", "--save-baseline"]) == 2
+    out = capsys.readouterr().out
+    assert "Набор: open:set; единица подсчёта — сущности после преобразования" in out and "НАБОР:" not in out
+    assert "Снимок: org/set @ abc123" in out
+    path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert main(["eval", "--jsonl", str(path), "--layers", "1-3"]) == 0
+    assert "НАБОР: файл не совпадает с манифестом" in capsys.readouterr().out
     repo = open_repo(home / "data" / "cleaner.db", key, clock)
-    assert json.loads(repo.setting("eval.baseline")) == {"1-3": {"ФИО": 1.0}}
+    assert set(json.loads(repo.setting("eval.baseline"))["datasets"]) == {"open:set"}
     repo.conn.close()
