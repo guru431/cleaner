@@ -237,6 +237,9 @@ def test_logins_waiting_for_a_password_slot_hold_no_shared_threads(browser, monk
 
     b = browser()
     b.user("ivan")
+    # Пауза после пяти неудач здесь ни при чём: шесть неверных паролей разом, и под нагрузкой машины последний вход
+    # доходил до проверки паузы после пяти записанных неудач — 429 вместо 401 (аудит 21.10.2026).
+    monkeypatch.setattr(auth.Throttle, "FREE", auth.HASH_SLOTS + 3)
     with b.client as client:                    # один цикл событий на все запросы, как у uvicorn
         monkeypatch.setattr(auth, "_hasher", Held(time_cost=1, memory_cost=1024, parallelism=1))
         client.portal.call(_shared_threads, auth.HASH_SLOTS)     # общий пул — четыре потока вместо сорока
