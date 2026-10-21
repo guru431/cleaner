@@ -4,13 +4,14 @@ from __future__ import annotations
 import csv
 import io
 import json
+import threading
 from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import urlsplit
 
 import regex
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from cleaner.core.detect.base import DetectorError, load_builtin
 from cleaner.core.detect.dictionary import PATTERN_TIMEOUT
@@ -18,6 +19,8 @@ from cleaner.core.detect.llm import CompletionError
 from cleaner.core.types import EntityType, Policy
 from cleaner.egress import ProviderError, cloud
 from cleaner.engines import GATEWAY_KEY_ENV, LocalSettings, local_settings, save_local_settings
+from cleaner.eval import runner
+from cleaner.eval.metrics import CLASSES
 from cleaner.storage.repo import Provider, User
 from cleaner.web import auth, render
 from cleaner.web.deps import Viewer, get_admin, get_form, page, repo_of, service_of
@@ -37,7 +40,7 @@ EVENTS = (
     "dictionary_changed", "dictionary_import", "pattern_changed", "policy_changed",
     "user_created", "user_disabled", "user_enabled", "password_changed", "error", "jobs_interrupted",
     "settings_changed", "gold_added", "gold_deleted", "risk_check", "layer_changed",
-    "provider_changed", "cloud_send", "local_answer",
+    "provider_changed", "cloud_send", "local_answer", "eval_run",
 )
 PROTOCOL_NAMES = {"openai": "OpenAI-совместимый", "anthropic": "Anthropic-совместимый"}
 AUTH_NAMES = {"bearer": "Authorization: Bearer", "x-api-key": "x-api-key"}
@@ -469,21 +472,142 @@ def audit(
 # --- эталонный набор (FR-6.10, QA-1) ----------------------------------------------------
 
 GOLD_TARGET = 200          # QA-1: не меньше 200 примеров к концу этапа 2
+_MEASURING = threading.Lock()     # проверка «замер уже идёт» и постановка нового — одним шагом
+
+
+def _share(part: int, whole: int) -> str:
+    return f"{part / whole:.3f} ({part}/{whole})" if whole else "—"
+
+
+def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
+    """Паспорт замера для страницы: только счётчики, знаменатели и отпечатки (тексты в паспорт не входят)."""
+    layers = entry["layers"]
+    names = list(layers)
+    first = layers[names[0]] if names else {"classes": {}, "types": {}}
+    classes = [
+        {
+            "title": title, "total": first["classes"][title][1],
+            "recalls": [_share(*layers[name]["classes"].get(title, (0, 0))) for name in names],
+            "target": "не задана" if target is None else f"{target:.2f}",
+        }
+        for title, _, target in CLASSES if title in first["classes"]
+    ]
+
+    def total(name: str, key: str) -> int:
+        return sum(counts[key] for counts in layers[name]["types"].values())
+
+    quality = [
+        ("Точность по пересечению (задели эталон / найдено)", [_share(total(n, "correct"), total(n, "found")) for n in names]),
+        ("Точность типа (тот же тип / задели эталон)", [_share(total(n, "typed"), total(n, "correct")) for n in names]),
+        ("Скрыто знаков вне эталона — от скрытых", [_share(layers[n]["chars"][0], layers[n]["chars"][1]) for n in names]),
+        ("Скрыто знаков вне эталона — от текста вне эталона", [_share(layers[n]["chars"][0], layers[n]["chars"][2]) for n in names]),
+        ("Лишние замены среди версий, кодов ошибок и общеизвестных доменов", [_share(*layers[n]["overmasked"]) for n in names]),
+    ]
+    types = sorted({type_ for name in names for type_ in layers[name]["types"]})
+    empty = {"entities": [0, 0], "mentions": [0, 0], "found": 0, "correct": 0, "typed": 0}
+    by_type = []
+    for type_ in types:
+        cells = []
+        for name in names:
+            counts = layers[name]["types"].get(type_, empty)
+            cells.append(
+                f"{_share(*counts['entities'])}; по упоминаниям {_share(*counts['mentions'])}; "
+                f"точность {_share(counts['correct'], counts['found'])}"
+            )
+        by_type.append((type_, cells))
+    versions = entry["versions"]
+    shown = [("Код ядра", versions["code"][:12]), ("Настройки распознавания", versions["settings"][:12])]
+    shown += [(f"Модель {directory}", revision[:12]) for directory, revision in versions.get("models", {}).items()]
+    if "local_model" in versions:
+        shown.append(("Локальная модель слоя 5", versions["local_model"]))
+    source = entry.get("source") or {}
+    if source:
+        pinned = "" if source.get("pinned") else ", ревизия на момент загрузки"
+        shown.append((
+            "Снимок",
+            f"{source.get('source')} @ {str(source.get('revision') or '—')[:12]}{pinned}; sha256 "
+            f"{str(source.get('sha256'))[:12]}; конвертер {source.get('converter')}",
+        ))
+    return {
+        "title": "Собственный набор" if dataset == runner.GOLD else f"Открытый набор «{dataset.removeprefix(runner.OPEN_PREFIX)}»",
+        "measured_at": entry["measured_at"], "examples": entry["examples"], "unit": entry["unit"],
+        "fingerprint": entry["fingerprint"][:12], "changed": current is not None and current != entry["fingerprint"],
+        "versions": shown, "layers": names, "classes": classes, "quality": quality, "types": by_type,
+        "drops": entry["drops"], "unchecked": entry["unchecked"],
+    }
+
+
+def _measure_layers(repo) -> list[str]:
+    """Слой 5 — только если он включён по умолчанию: иначе замер шёл бы с тем, чем чаты не пользуются."""
+    return ["1-3", "1-4"] + (["1-5"] if repo.layer_defaults()["llm"] else [])
+
+
+def _measure(app, user_id: str, layers: list[str]) -> None:
+    """Фоновый замер собственного набора: итог — в паспорт (runner.measure), в журнал — только счётчики (FR-11.2)."""
+    state, repo, engines = app.state.measure, app.state.repo, app.state.engines
+    state["status"] = "running"
+    try:
+        done = runner.measure(repo, runner.GOLD, runner.gold_examples(repo), layers, engines, engines.models_dir)
+    except DetectorError as exc:
+        state.update(status="failed", error=f"Замер не выполнен: {exc}")
+        repo.audit("eval_run", user_id, dataset=runner.GOLD, layers=layers, outcome="failed")
+        return
+    except Exception:
+        state.update(status="failed", error="Замер не выполнен: внутренняя ошибка")
+        repo.audit("eval_run", user_id, dataset=runner.GOLD, layers=layers, outcome="failed")
+        raise                                   # вид ошибки — в журнал службы (jobs._run), без текста
+    repo.audit(
+        "eval_run", user_id, dataset=runner.GOLD, layers=layers, outcome="done", examples=done.examples,
+        drops=len(done.comparison.drops), unchecked=len(done.comparison.unchecked),
+    )
+    state["status"] = "done"
 
 
 @router.get("/gold")
 def gold(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
-    """Число примеров и разметка по типам — без текстов: чужие тексты администратор не видит (раздел 4 ТЗ)."""
+    """Число примеров и разметка по типам — без текстов: чужие тексты администратор не видит (раздел 4 ТЗ).
+    Паспорт качества — последний замер собственного набора и открытых наборов, раздельно."""
     repo = repo_of(request)
     logins = {user.id: user.login for user in repo.users()}
+    examples = repo.gold()
     rows = [
         {
             "id": row.id, "created_at": row.created_at, "login": logins.get(row.user_id, "—"), "length": len(row.text),
             "types": ", ".join(f"{type_} — {count}" for type_, count in sorted(Counter(s["type"] for s in row.spans).items())),
         }
-        for row in repo.gold()
+        for row in examples
     ]
-    return page(request, "gold.html", viewer, rows=rows, target=GOLD_TARGET)
+    stored = runner.passport(repo)
+    current = runner.fingerprint([runner.example_from(r.text, r.spans) for r in examples], repo.global_key)
+    own = _passport_view(runner.GOLD, stored[runner.GOLD], current) if runner.GOLD in stored else None
+    opened = [_passport_view(name, entry, None) for name, entry in sorted(stored.items()) if name.startswith(runner.OPEN_PREFIX)]
+    return page(
+        request, "gold.html", viewer, rows=rows, target=GOLD_TARGET, own=own, opened=opened,
+        measure=request.app.state.measure, measure_layers=_measure_layers(repo), engines=request.app.state.engines is not None,
+    )
+
+
+@router.post("/gold/measure")
+def measure_gold(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    """Замер собственного набора фоновым заданием; повторное нажатие, пока он идёт, второго не запускает."""
+    app, repo = request.app, repo_of(request)
+    if app.state.engines is None:
+        raise HTTPException(400, "Модели слоя 4 не подключены к приложению")
+    if not repo.gold():
+        raise HTTPException(400, "Эталонный набор пуст: измерять нечего")
+    layers = _measure_layers(repo)
+    with _MEASURING:
+        if app.state.measure["status"] in ("queued", "running"):
+            return _redirect("/settings/gold")
+        app.state.measure = {"status": "queued", "layers": layers}
+    app.state.measures.submit(_measure, app, viewer.user.id, layers)
+    return _redirect("/settings/gold")
+
+
+@router.get("/gold/measure/status")
+def measure_status(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
+    """Для опроса из app.js: только состояние."""
+    return JSONResponse({"status": request.app.state.measure["status"]})
 
 
 @router.post("/gold/{gold_id}/delete")

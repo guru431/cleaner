@@ -211,28 +211,52 @@ def cmd_models(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    """FR-12.5: полнота и точность по типам на эталонном наборе или наборе JSONL; QA-5 — по слоям, QA-6 — сравнение."""
+    """FR-12.5: полнота и точность по типам на эталонном наборе или наборе JSONL; QA-5 — по слоям, QA-6 — сравнение.
+
+    Код выхода: 1 — полнота упала, 2 — QA-6 не проверена (сопоставимого базового замера нет), 0 — ни один класс не упал."""
     _offline()
     from cleaner.engines import Engines
-    from cleaner.eval import runner
+    from cleaner.eval import datasets, runner
 
     cfg = _config(args)
     with _repository(cfg) as repo:
-        examples = runner.jsonl_examples(Path(args.jsonl)) if args.jsonl else runner.gold_examples(repo)
+        unit, source = runner.UNIT_GOLD, None
+        if args.jsonl:
+            path = Path(args.jsonl)
+            name, source, problems = datasets.check_snapshot(path)
+            for problem in problems:
+                print(f"НАБОР: {problem}")
+            dataset = runner.OPEN_PREFIX + name
+            unit = runner.UNIT_OPEN if source and source.get("converter") == datasets.CONVERTER else runner.UNIT_FILE
+            examples = runner.jsonl_examples(path)
+        else:
+            dataset, examples = runner.GOLD, runner.gold_examples(repo)
         if not examples:
             raise ValueError("эталонный набор пуст: примеры сохраняются кнопкой «Сохранить как эталон» на экране проверки")
-        results = runner.run(examples, repo.settings(), args.layers, Engines(repo, cfg.models_dir))
-        print(runner.format_results(results, len(examples)))
-        drops = [] if args.jsonl else runner.compare(results, runner.load_baseline(repo))
-        for drop in drops:
-            print(f"ПОЛНОТА УПАЛА: {drop}")
-        if args.save_baseline and not args.jsonl:
-            if drops:
+        done = runner.measure(repo, dataset, examples, args.layers, Engines(repo, cfg.models_dir), cfg.models_dir, unit, source)
+        print(f"Набор: {dataset}; единица подсчёта — {unit}")
+        if source:
+            print(f"Снимок: {source.get('source')} @ {source.get('revision') or '—'}, sha256 {str(source.get('sha256'))[:12]}")
+        print(runner.format_results(done.results, done.examples))
+        print()
+        comparison = done.comparison
+        for line in comparison.lines():
+            print(line)
+        if args.save_baseline or args.replace_baseline:
+            if comparison.drops and not args.replace_baseline:
                 print("Замер не сохранён как базовый: полнота упала.")
+            elif comparison.replace and not args.replace_baseline:
+                print(
+                    f"Замер не сохранён как базовый: у слоёв {', '.join(comparison.replace)} базовый замер снят на другом "
+                    "наборе или в прежнем формате. Принять новый замер — явным решением, ключом --replace-baseline."
+                )
             else:
-                runner.save_baseline(repo, results)
-                print("Замер сохранён как базовый для следующих сравнений (QA-6).")
-    return 1 if drops else 0
+                runner.save_baseline(repo, dataset, done.results, done.fingerprint, done.examples)
+                print(
+                    f"Замер сохранён как базовый для слоёв {', '.join(done.results)} (QA-6); "
+                    "базовые замеры других слоёв не тронуты."
+                )
+    return 1 if comparison.drops else 2 if comparison.unchecked else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -271,7 +295,14 @@ def main(argv: list[str] | None = None) -> int:
     evaluate = commands.add_parser("eval", help="измерение качества на эталонном наборе (FR-12.5)")
     evaluate.add_argument("--layers", nargs="+", choices=("1-3", "1-4", "1-5"), default=["1-3", "1-4"])
     evaluate.add_argument("--jsonl", help="вместо эталонного набора — файл JSONL (открытые наборы, QA-4)")
-    evaluate.add_argument("--save-baseline", action="store_true", help="сохранить замер как базовый, если полнота не упала")
+    evaluate.add_argument(
+        "--save-baseline", action="store_true",
+        help="сохранить замер как базовый для измеренных слоёв, если полнота не упала и набор тот же",
+    )
+    evaluate.add_argument(
+        "--replace-baseline", action="store_true",
+        help="сохранить как базовый и при другом наборе или упавшей полноте — явное решение (QA-3, QA-6)",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "verify":

@@ -1,10 +1,12 @@
 import re
+from types import SimpleNamespace
 
 import regex
 
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Policy
 from cleaner.engines import LocalSettings, local_settings
+from cleaner.eval import runner
 from cleaner.local_llm import LocalLLMError
 
 
@@ -183,6 +185,73 @@ def test_gold_list_shows_counts_but_no_text_and_only_to_admins(boss, ivan, repo)
     assert repo.gold() == []
     assert boss.post(f"/settings/gold/{gold_id}/delete").status_code == 404
     assert len(repo.audit_events("gold_deleted")) == 1
+
+
+GOLD_SPANS = [
+    {"start": 7, "end": 13, "type": "PERSON", "entity": 0, "origin": "detector"},
+    {"start": 21, "end": 32, "type": "EMAIL", "entity": 1, "origin": "detector"},
+]
+
+
+def test_gold_measure_runs_in_the_background_and_fills_the_passport(boss, ivan, repo, engines):
+    """Идея аудита 21.10.2026: паспорт качества — без текстов, с единицей подсчёта, знаменателями и сравнением слоёв."""
+    repo.add_gold(None, "звонил Петров, почта a@x.example", GOLD_SPANS)
+    page = boss.get("/settings/gold").text
+    assert "Замеров собственного набора ещё не было" in page and "Измерить собственный набор" in page
+    assert ivan.post("/settings/gold/measure").status_code == 403
+    assert ivan.get("/settings/gold/measure/status").status_code == 403
+    engines.ner_layer.marks["Петров"] = T.PERSON
+    assert boss.post("/settings/gold/measure").status_code == 303
+    assert boss.get("/settings/gold/measure/status").json() == {"status": "done"}
+    page = boss.get("/settings/gold").text
+    assert "Петров" not in page and "a@x" not in page
+    assert "Слои 1-3" in page and "Слои 1-4" in page and "Слои 1-5" not in page            # слой 5 выключен по умолчанию
+    fio = re.search(r"<td>ФИО</td><td class=\"num\">1</td>(.*?)</tr>", page).group(1)
+    assert re.findall(r'<td class="num mono">([^<]+)</td>', fio) == ["0.000 (0/1)", "1.000 (1/1)"]
+    assert "Единица подсчёта: сущности разметки экрана проверки" in page and "QA-6 не проверена" in page
+    assert "data-poll" not in page
+    [event] = repo.audit_events("eval_run")
+    assert event.details == {
+        "dataset": "gold", "layers": ["1-3", "1-4"], "outcome": "done", "examples": 1, "drops": 0, "unchecked": 2,
+    }
+    repo.add_gold(None, "ещё пример", [])
+    assert "набор изменился после замера" in boss.get("/settings/gold").text
+
+
+def test_second_press_while_measuring_does_not_start_another(boss, repo, app):
+    repo.add_gold(None, "звонил Петров, почта a@x.example", GOLD_SPANS)
+    repo.set_layer_defaults({"ner": False, "llm": True})
+    calls = []
+    app.state.measures = SimpleNamespace(submit=lambda *args: calls.append(args))         # задание ещё в очереди
+    boss.post("/settings/gold/measure")
+    boss.post("/settings/gold/measure")
+    assert len(calls) == 1 and calls[0][-1] == ["1-3", "1-4", "1-5"]                      # слой 5 включён по умолчанию
+    page = boss.get("/settings/gold").text
+    assert 'data-poll="/settings/gold/measure/status"' in page and "disabled" in page
+    assert boss.get("/settings/gold/measure/status").json() == {"status": "queued"}
+
+
+def test_gold_measure_failure_is_shown_and_an_empty_set_is_marked(boss, repo, engines):
+    page = boss.get("/settings/gold").text
+    assert "Собственный набор пуст: полнота по QA-1 не измерена" in page and "Измерить собственный набор" not in page
+    assert boss.post("/settings/gold/measure").status_code == 400
+    repo.add_gold(None, "звонил Петров, почта a@x.example", GOLD_SPANS)
+    engines.unavailable = "модели слоя 4 не загружены"
+    boss.post("/settings/gold/measure")
+    assert "Замер не выполнен: модели слоя 4 не загружены" in boss.get("/settings/gold").text
+    assert [e.details["outcome"] for e in repo.audit_events("eval_run")] == ["failed"]
+
+
+def test_open_set_passport_is_shown_apart_from_the_own_set(boss, repo):
+    record = runner.example_from("почта a@x.example", [{"start": 6, "end": 17, "type": "EMAIL", "entity": 0}])
+    source = {"name": "hivetrace", "source": "hivetrace/pii-bench", "revision": "0123456789abcdef", "pinned": False,
+              "sha256": "f" * 64, "converter": 2, "examples": 1}
+    runner.measure(repo, "open:hivetrace", [record], ["1-3"], None, None, runner.UNIT_OPEN, source)
+    page = boss.get("/settings/gold").text
+    assert "Открытый набор «hivetrace»" in page and "не выполнение QA-1" in page
+    assert "hivetrace/pii-bench @ 0123456789ab, ревизия на момент загрузки" in page
+    assert "Единица подсчёта: сущности после преобразования открытого набора" in page
+    assert "Собственный набор пуст" in page
 
 
 def test_admin_sets_the_layer_defaults(boss, repo, ivan):
