@@ -1,5 +1,8 @@
-"""Меры качества (ТЗ, раздел 9, QA-2): полнота по сущностям, точность, лишние замены среди версий, кодов ошибок
-и общеизвестных доменов."""
+"""Меры качества (ТЗ, раздел 9, QA-2): полнота по сущностям и по упоминаниям, точность по пересечению, точность
+типа, лишне скрытые знаки вне эталона, лишние замены среди версий, кодов ошибок и общеизвестных доменов.
+
+Точность по пересечению засчитывает найденный фрагмент, если он задел любой эталонный, — без учёта типа и лишнего
+захвата: одна замена на весь текст дала бы 1,0. Поэтому рядом — точность типа и доля скрытых знаков вне эталона."""
 from __future__ import annotations
 
 import re
@@ -52,9 +55,15 @@ _DOTTED = re.compile(r"(?<![\w.-])[\w-]+(?:\.[\w-]+)+(?![\w-])")
 class Report:
     entities: Counter = field(default_factory=Counter)           # тип -> сущностей в эталоне
     protected: Counter = field(default_factory=Counter)          # тип -> скрытых целиком
+    mentions: Counter = field(default_factory=Counter)           # тип -> упоминаний в эталоне
+    mentions_hidden: Counter = field(default_factory=Counter)    # тип -> упоминаний, закрытых целиком
     classes: dict[str, list[int]] = field(default_factory=dict)  # класс QA-3 -> [скрыто, всего]
     found: Counter = field(default_factory=Counter)              # тип найденного -> фрагментов
     correct: Counter = field(default_factory=Counter)            # тип найденного -> задевших эталон
+    typed: Counter = field(default_factory=Counter)              # тип найденного -> задевших эталон того же типа
+    chars_masked: int = 0         # знаков, закрытых найденным
+    chars_outside: int = 0        # из них вне всех эталонных фрагментов
+    chars_free: int = 0           # знаков текста вне всех эталонных фрагментов
     candidates: int = 0           # версий, кодов ошибок и общеизвестных доменов вне эталонной разметки
     overmasked: int = 0           # из них заменено
 
@@ -73,6 +82,28 @@ def covered(start: int, end: int, ranges: Sequence[tuple[int, int]]) -> bool:
 
 def _overlaps(start: int, end: int, ranges: Sequence[tuple[int, int]]) -> bool:
     return any(s < end and start < e for s, e in ranges)
+
+
+def _union(ranges: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[list[int]] = []
+    for s, e in sorted(ranges):
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        elif s < e:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged]
+
+
+def _common(a: Sequence[tuple[int, int]], b: Sequence[tuple[int, int]]) -> int:
+    """Знаков в пересечении двух объединений (отрезки упорядочены и не пересекаются)."""
+    total = i = j = 0
+    while i < len(a) and j < len(b):
+        total += max(0, min(a[i][1], b[j][1]) - max(a[i][0], b[j][0]))
+        if a[i][1] < b[j][1]:
+            i += 1
+        else:
+            j += 1
+    return total
 
 
 def _candidates(text: str) -> list[tuple[int, int]]:
@@ -96,9 +127,12 @@ def evaluate(examples: Sequence[Example], predict: Predict) -> Report:
             by_entity.setdefault(span.entity, []).append(span)
         for mentions in by_entity.values():
             first = mentions[0]
-            hidden = all(covered(m.start, m.end, ranges) for m in mentions)
+            closed = [covered(m.start, m.end, ranges) for m in mentions]
+            hidden = all(closed)
             report.entities[first.type] += 1
             report.protected[first.type] += hidden
+            report.mentions[first.type] += len(mentions)
+            report.mentions_hidden[first.type] += sum(closed)
             for title, belongs, _ in CLASSES:
                 if belongs(first.type, first.origin):
                     counts = report.classes.setdefault(title, [0, 0])
@@ -107,6 +141,12 @@ def evaluate(examples: Sequence[Example], predict: Predict) -> Report:
         for start, end, type_ in predicted:
             report.found[type_] += 1
             report.correct[type_] += _overlaps(start, end, gold)
+            report.typed[type_] += _overlaps(start, end, [(s.start, s.end) for s in example.spans if s.type is type_])
+        masked, marked = _union(ranges), _union(gold)
+        length = sum(e - s for s, e in masked)
+        report.chars_masked += length
+        report.chars_outside += length - _common(masked, marked)
+        report.chars_free += len(example.text) - sum(e - s for s, e in marked)
         for start, end in _candidates(example.text):
             if not _overlaps(start, end, gold):
                 report.candidates += 1
