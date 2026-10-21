@@ -79,3 +79,26 @@ def merge_entities(state: ChatState, keep_id: str, drop_id: str) -> None:
         if target == drop.id:
             state.key_alias[key] = keep.id      # прежние объединения ведут туда же
     state.key_alias[f"{drop.type.value}:{drop.key}"] = keep.id
+
+
+def revert(state: ChatState, before: ChatState) -> None:
+    """Отменить правку: правила, объединения и сущности — как в снимке before, сделанном до неё.
+
+    Выданное правкой не забывается (FR-5.2: одна сущность — одна замена). Тексты с её заменами могли уже уйти, и
+    номер, вернувшийся в счётчик, достался бы другой сущности, а ответ облака восстановился бы чужим значением.
+    Поэтому сущности, которых в снимке нет, остаются без написаний — не ищутся, но их замены восстанавливаются, как у
+    сущности после смены типа (retype); замены, номера и подсети — объединением со снимком."""
+    created = {key: entity for key, entity in state.entities.items() if key not in before.entities}
+    for entity in created.values():
+        entity.forms = []
+    state.entities = before.entities | created
+    state.surrogates = state.surrogates | before.surrogates
+    state.issued = state.issued | before.issued
+    state.rules = before.rules
+    state.key_alias = before.key_alias
+    state.foreign_labels = state.foreign_labels | before.foreign_labels
+    state.counters = {
+        type_: max(state.counters.get(type_, 0), before.counters.get(type_, 0))
+        for type_ in state.counters.keys() | before.counters.keys()
+    }
+    state.net6 = state.net6 | before.net6

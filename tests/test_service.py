@@ -1,3 +1,4 @@
+import re
 import threading
 
 import pytest
@@ -169,6 +170,71 @@ def test_blank_or_absent_fragment_is_refused(repo, chat):
         service.unmask(chat_id, user, [" "])
     with pytest.raises(KeyError):
         service.set_restore_value(chat_id, user, "нет-такой-сущности", "x")
+
+
+def test_edit_held_by_the_stricter_policy_of_the_found_value_is_refused_with_the_reason(repo, chat):
+    """Выделение или смена типа, которые не смягчают политику найденного значения (5.7, шаг 4), ничего не меняли молча —
+    как сбой. Теперь — отказ с причиной без данных пользователя, и правило не сохраняется; где правка легла, она действует."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    repo.set_policy(T.PHONE, Policy.BLOCK)
+    item = service.add_input(chat_id, user, "звонить +79161234567")
+    phone = next(e for e in repo.load_state(chat_id)[0].entities.values() if e.type is T.PHONE)
+    reason = "Тип не изменён: значение найдено как PHONE, и политика этого типа («блокировать») строже выбранного"
+    with pytest.raises(EditRefused, match=re.escape(reason)):
+        service.mask_value(chat_id, user, item.id, "+79161234567", T.TERM)
+    with pytest.raises(EditRefused, match=re.escape(reason)):
+        service.retype(chat_id, user, phone.id, T.TERM)
+    state, _ = repo.load_state(chat_id)
+    assert state.rules == [] and repo.items(chat_id)[0].sanitized == "звонить <PHONE_1>"
+    assert "+79161234567" not in reason
+    repo.set_policy(T.SECRET, Policy.BLOCK)
+    service.mask_value(chat_id, user, item.id, "+79161234567", T.SECRET)    # политика не мягче — правка легла
+    assert repo.items(chat_id)[0].sanitized == "звонить <SECRET_1>"
+
+
+def test_retyping_a_part_held_by_the_stricter_host_policy_is_refused(repo, chat):
+    """Часть имени с точками, которой правило дало бы мягче политику, остаётся HOST (resolve._manual): смена типа, которая
+    так не легла нигде, — отказ с причиной, как у короткого имени; при обычной политике HOST — метка правила."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    repo.set_policy(T.HOST, Policy.BLOCK)
+    service.add_input(chat_id, user, "узел srv01.contoso.ru")
+    host = next(e for e in repo.load_state(chat_id)[0].entities.values() if e.key == "srv01")
+    with pytest.raises(EditRefused, match="значение найдено как HOST"):
+        service.retype(chat_id, user, host.id, T.TERM)
+    assert repo.load_state(chat_id)[0].rules == []
+    repo.set_policy(T.HOST, Policy.MASK)
+    service.retype(chat_id, user, host.id, T.TERM)
+    assert repo.items(chat_id)[0].sanitized == "узел <TERM_1>.domain-1.example"
+
+
+def test_view_blocks_by_the_types_held_in_a_fragment_and_by_pasted_surrogates(repo, chat):
+    """Экран чата судит о блокировке по сохранённым данным элемента и нынешним политикам: тип находки, скрытой во
+    фрагменте под другой меткой, и сущность вставленной замены записаны в spans и notices (только типы), и смена
+    политики видна без повторной очистки. Тексты, очищенные раньше, получают эти типы при обновлении чата, даже если
+    очищенный текст не изменился."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    service.add_input(chat_id, user, "домен fabrikam.ru")
+    hidden = service.add_input(chat_id, user, "token=+79161234567abcdef")
+    pasted = service.add_input(chat_id, user, "про domain-1.example")
+    assert repo.item(chat_id, hidden.id).spans[0]["held"] == ["PHONE"]
+    assert repo.item(chat_id, pasted.id).notices[0]["held"] == ["DOMAIN"]
+    assert all(entry.deliverable for entry in service.view(chat_id).items)
+    repo.set_policy(T.PHONE, Policy.BLOCK)
+    repo.set_policy(T.DOMAIN, Policy.BLOCK)
+    deliverable = [(entry.deliverable, len(entry.blocked)) for entry in service.view(chat_id).items]
+    assert deliverable == [(False, 1), (False, 1), (False, 1)]
+    repo.set_policy(T.PHONE, Policy.MASK)
+    repo.set_policy(T.DOMAIN, Policy.MASK)
+    # Элемент, записанный до этих полей: обновление чата их дописывает, хотя очищенный текст тот же.
+    state, version = repo.load_state(chat_id)
+    old = repo.item(chat_id, hidden.id)
+    old.spans = [{k: v for k, v in span.items() if k != "held"} for span in old.spans]
+    repo.commit_chat(chat_id, state, version, [], [old])
+    service.refresh(chat_id, user)
+    assert repo.item(chat_id, hidden.id).spans[0]["held"] == ["PHONE"]
 
 
 def test_leaks_are_logged_on_sanitizing_and_on_refresh(repo, chat, monkeypatch):

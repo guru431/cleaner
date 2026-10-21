@@ -1,14 +1,37 @@
 {% extends "base.html" %}
 {% block title %}Таблица замен — {{ chat.title }} — Cleaner{% endblock %}
+{% macro back_field() %}{% if back %}<input type="hidden" name="back" value="{{ back }}">{% endif %}{% endmacro %}
 {% block main %}
 <div class="bar">
   <nav class="crumbs"><a href="/chats/{{ chat.id }}" title="{{ chat.title }}">{{ chat.title }}</a><span class="sep">/</span><h1>Таблица замен</h1></nav>
   <span class="spacer"></span>
+  {% if undo %}
+  <form method="post" action="/chats/{{ chat.id }}/undo/preview">
+    {% include "_csrf.html" %}{{ back_field() }}
+    <button title="Последняя правка — {{ undo_names[undo[0]] }}. Сначала покажет, что вернётся; уже скопированное или отправленное отмена не вернёт">Отменить последнюю правку…</button>
+  </form>
+  {% endif %}
   <form method="post" action="/chats/{{ chat.id }}/refresh">
     {% include "_csrf.html" %}
     <button>Очистить тексты чата заново с текущими настройками</button>
   </form>
 </div>
+{# Фильтр — код типа в адресе (GET), не значение; страницы — на сервере: DOM таблицы ограничен ENTITIES_PAGE строками. #}
+<form method="get" action="/chats/{{ chat.id }}/entities" class="inline-form table-bar">
+  <select name="type" aria-label="Тип">
+    <option value="">Все типы ({{ total }})</option>
+    {% for code, name, count in present %}<option value="{{ code.value }}"{% if code == shown_type %} selected{% endif %}>{{ name }} ({{ count }})</option>{% endfor %}
+  </select>
+  <button>Показать</button>
+  <span class="muted" data-shown>{% if chosen %}Показаны {{ first }}–{{ first + rows | length - 1 }} из {{ chosen }}{% else %}Показаны 0 из 0{% endif %}</span>
+  {% if pages > 1 %}
+  <nav class="pager" aria-label="Страницы таблицы">
+    {% if number > 1 %}<a class="btn" href="/chats/{{ chat.id }}/entities{{ query(number - 1) }}" rel="prev">← Предыдущая</a>{% endif %}
+    <span class="muted">страница {{ number }} из {{ pages }}</span>
+    {% if number < pages %}<a class="btn" href="/chats/{{ chat.id }}/entities{{ query(number + 1) }}" rel="next">Следующая →</a>{% endif %}
+  </nav>
+  {% endif %}
+</form>
 <section class="panel">
   <table class="grid">
     <thead><tr><th>Замена</th><th>Тип</th><th>Оригинал</th><th class="num">Вхождений</th><th>Действия</th></tr></thead>
@@ -20,28 +43,29 @@
       <td>{{ r.restore_value }}{% if r.forms | length > 1 %}<div class="sub">{{ r.forms | join(", ") }}</div>{% endif %}</td>
       <td class="num">{{ r.count }}</td>
       <td class="actions">
-        <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/unmask">
-          {% include "_csrf.html" %}<button class="danger">Снять замену</button>
+        {# Снять замену, сменить тип, присоединить — через предпросмотр последствий (/preview). #}
+        <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/unmask/preview">
+          {% include "_csrf.html" %}{{ back_field() }}<button class="danger">Снять замену…</button>
         </form>
         <details class="inline" name="edit">
           <summary class="btn">Изменить…</summary>
           <div class="pop">
-            <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/retype">
-              {% include "_csrf.html" %}
+            <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/retype/preview">
+              {% include "_csrf.html" %}{{ back_field() }}
               <select name="type" aria-label="Тип">{% for code, name in types.items() %}<option value="{{ code.value }}"{% if code == r.type %} selected{% endif %}>{{ name }}</option>{% endfor %}</select>
-              <button>Сменить тип</button>
+              <button>Сменить тип…</button>
             </form>
             <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/restore-value">
-              {% include "_csrf.html" %}
+              {% include "_csrf.html" %}{{ back_field() }}
               <input name="value" value="{{ r.restore_value }}" required aria-label="Значение при восстановлении">
               <button>Подставлять при восстановлении</button>
             </form>
             {% if r.peers %}
-            <form method="post" action="/chats/{{ chat.id }}/entities/merge">
-              {% include "_csrf.html" %}
+            <form method="post" action="/chats/{{ chat.id }}/entities/merge/preview">
+              {% include "_csrf.html" %}{{ back_field() }}
               <input type="hidden" name="keep" value="{{ r.id }}">
-              <select name="drop" aria-label="Замена того же типа">{% for peer_id, label in r.peers %}<option value="{{ peer_id }}">{{ label }}</option>{% endfor %}</select>
-              <button>Присоединить</button>
+              <input name="surrogate" list="peers-{{ r.type.value }}" required autocomplete="off" placeholder="Замена того же типа" aria-label="Замена того же типа, которую присоединить">
+              <button>Присоединить…</button>
             </form>
             {% endif %}
           </div>
@@ -54,4 +78,8 @@
     </tbody>
   </table>
 </section>
+{# Кандидаты на объединение — один список на тип для всей страницы, а не в каждой строке (O(n)). #}
+{% for type_, options in peers.items() %}
+<datalist id="peers-{{ type_.value }}">{% for text, label in options %}<option value="{{ text }}">{{ label }}</option>{% endfor %}</datalist>
+{% endfor %}
 {% endblock %}

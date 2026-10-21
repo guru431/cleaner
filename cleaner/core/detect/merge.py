@@ -25,11 +25,17 @@ class MergedSpan:
     # части адреса (имя входа — ACCOUNT).
     ruled: tuple[tuple[int, int, EntityType], ...] = ()
     mail: bool = False
+    # Адрес e-mail делится и без выданной замены рядом: в нём лежит находка строже его политики (известный домен при
+    # DOMAIN «блокировать»), и её часть держит свою политику — она тоже в ruled (5.10).
+    parted: bool = False
     # Фрагмент имени стоит через точку после выданной замены или метки и перед ней (5.10): это часть имени, а не имя.
     follows: bool = False
     precedes: bool = False
     # Значение сущности, если оно не текст фрагмента: адрес e-mail с выданной заменой внутри — с её оригиналом (5.10).
     value: str | None = None
+    # Фрагмент целиком — находка старшего типа, подтверждённая контрольной суммой или строгим форматом (Span.validated):
+    # экран проверки объясняет этим замену (FR-6.1). Части записи и слитые из нескольких находок — нет.
+    validated: bool = False
 
 
 def _rank(span: Span) -> int:
@@ -191,7 +197,16 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
                     continue
         kept = senior.source == "manual" and _name_kept(text, group, start, end, policies)
         type_ = kept or senior.type
-        if senior.source != "manual":
+        if senior.source == "manual":
+            # Решение пользователя тоже не смягчает политику автоматической находки того же значения: выделение
+            # «+79161234567» с типом TERM при PHONE «блокировать» давало <TERM_1>, и выдача не блокировалась. Тип — у
+            # находки, если её политика строже, при равных — правила; открыть значение можно правилом «открыть» (FR-6.2).
+            whole = [s for s in group if s.source != "manual" and (s.start, s.end) == (start, end)]
+            if whole:
+                strict = min(whole, key=lambda s: (-STRICTNESS.get(policies.get(s.type), 0), _rank(s))).type
+                if STRICTNESS.get(policies.get(strict), 0) > STRICTNESS.get(policies.get(type_), 0):
+                    type_ = strict
+        else:
             # Старшинство выбирает тип, но политика фрагмента не мягче строжайшей из находок того же значения (FR-3.3):
             # иначе «password=+79161234567» при PHONE «блокировать» давал <SECRET_1>, и выдача не блокировалась. Тип —
             # находки со строже политикой, при равных — старшей. Тип и есть решение: то же значение в следующих текстах
@@ -200,7 +215,18 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
             whole = [senior, *(s for s in group if (s.start, s.end) == (start, end))]
             type_ = min(whole, key=lambda s: (-STRICTNESS.get(policies.get(s.type), 0), _rank(s))).type
         ruled, mail = (), False
-        records = [s.type for s in group if s.source != "manual" and s.type in (*_NAME_TYPES, EntityType.EMAIL)]
+        # Имя внутри адреса e-mail — его часть, а не поглощённая запись: её политику держит деление адреса (ниже).
+        # Группа упорядочена по началу (при равном — длинные раньше), и адрес, внутри которого лежит имя, уже пройден:
+        # один проход, а не сверка каждого имени с каждым адресом цепочки.
+        records, reach = [], -1
+        for s in group:
+            if s.source == "manual" or s.type not in (*_NAME_TYPES, EntityType.EMAIL):
+                continue
+            if s.type is EntityType.EMAIL:
+                records.append(s.type)
+                reach = max(reach, s.end)
+            elif reach < s.end:
+                records.append(s.type)
         if senior.source == "manual" and not kept and records:
             ruled = tuple((s.start, s.end, s.type) for s in group if s.source == "manual")
             mail = EntityType.EMAIL in records
@@ -209,6 +235,20 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
             record = max(records, key=lambda t: STRICTNESS.get(policies.get(t), 0))
             if STRICTNESS.get(policies.get(record), 0) > STRICTNESS.get(policies.get(type_), 0):
                 type_ = record
+        parted = False
+        if type_ is EntityType.EMAIL or mail:
+            # Находка внутри адреса строже его политики (известный домен fabrikam.ru при DOMAIN «блокировать» в
+            # ivanov@fabrikam.ru) — часть, которую держит её политика: адрес делится, как рядом с выданной заменой, и
+            # часть получает свой тип (5.10). Одной меткой EMAIL (или правила, поглотившего адрес) он не блокировал бы
+            # выдачу.
+            own = STRICTNESS.get(policies.get(type_), 0)
+            inner = tuple(
+                (s.start, s.end, s.type) for s in group
+                if s.source != "manual" and (s.start, s.end) != (start, end)
+                and STRICTNESS.get(policies.get(s.type), 0) > own
+            )
+            if inner:
+                ruled, mail, parted = ruled + inner, True, True
         # Искомым значение делает любая находка того же типа: слово после «Пароль —», которое нашли и словарём чата.
         # Слияние пересекающихся находок, ни одна из которых не покрывает его целиком («Иван Иван» словаря в «Иван Иван
         # Иван …», правило «la la» в «la la la …», цепочка адресов e-mail «a@b.c.a@b.c.a…»), — не значение: искомы
@@ -218,5 +258,6 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
         if searchable and not any((s.start, s.end) == (start, end) for s in group):
             forms = tuple(dict.fromkeys(text[s.start:s.end] for s in group if s.type is type_ and s.searchable))
             searchable = False
-        merged.append(MergedSpan(start, end, type_, sources, searchable, forms, ruled, mail))
+        validated = senior.validated and senior.type is type_ and (senior.start, senior.end) == (start, end)
+        merged.append(MergedSpan(start, end, type_, sources, searchable, forms, ruled, mail, parted=parted, validated=validated))
     return _join_names(text, merged)

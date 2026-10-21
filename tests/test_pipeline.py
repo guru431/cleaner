@@ -545,12 +545,174 @@ def test_secret_keeps_the_block_of_the_record_it_swallows(state, value, record):
     assert not sanitize(state, text, blocked).deliverable
 
 
+@pytest.mark.parametrize("text", ["пароль: Abc+7 916 123-45-67xyz", "пароль: Abc+7 916 123-45-67"])
+def test_phone_that_a_password_runs_into_is_hidden_whole(state, settings, text):
+    """Аудит 2026-10-21: секрет слоя 2 кончался на «+7», а телефон после буквы слой 1 не искал — «<SECRET_1> 916
+    123-45-67xyz», десять цифр номера открыты. Теперь номер найден, и пересечение с секретом — один фрагмент."""
+    result = sanitize(state, text, settings)
+    assert "916" not in result.sanitized and "45-67" not in result.sanitized
+
+
 def test_infrastructure_value_keeps_the_block_of_a_name_found_by_layer_4(state):
     """Та же находка у других старшинств: домен слоя 3 поглощал организацию слоя 4, и ORG=BLOCK терялся."""
     settings = Settings(policies=default_policies() | {T.ORG: Policy.BLOCK})
     result = sanitize(state, "клиент contoso.ru", settings, Layers(cached=(Span(7, 17, T.ORG, "ner"),)))
     assert result.sanitized == "клиент <ORG_1>" and not result.deliverable
     assert sanitize(state, "клиент contoso.ru", Settings(), Layers(cached=(Span(7, 17, T.ORG, "ner"),))).deliverable
+
+
+@pytest.mark.parametrize("policy", [Policy.BLOCK, Policy.HIDE])
+def test_email_with_a_known_domain_of_a_stricter_policy_is_split(state, policy):
+    """Находка 2026-10-21: домен, известный чату, при DOMAIN «блокировать» в ivanov@fabrikam.ru терялся под <EMAIL_1> —
+    выдача не блокировалась, а при «скрывать без восстановления» домен восстанавливался вместе с адресом. Часть строже
+    адреса держит свою политику: адрес делится, как рядом с выданной заменой (5.10), и домен — та же сущность."""
+    settings = Settings(policies=default_policies() | {T.DOMAIN: policy})
+    domain = sanitize(state, "домен fabrikam.ru", settings).spans[0].entity_id
+    # Имя узла с частью «скрывать без восстановления» не восстанавливается целиком (раздел 7), имя входа — да.
+    for text, expected, hidden in (
+        ("почта ivanov@fabrikam.ru", "почта <ACCOUNT_1>@domain-1.example", "почта ivanov@domain-1.example"),
+        (
+            "почта ivanov@srv01.fabrikam.ru", "почта <ACCOUNT_1>@host-1.domain-1.example",
+            "почта ivanov@host-1.domain-1.example",
+        ),
+    ):
+        result = sanitize(state, text, settings)
+        assert result.sanitized == expected
+        assert [s.entity_id for s in result.blocked] == ([domain] if policy is Policy.BLOCK else [])
+        assert sanitize(state, text, settings).sanitized == expected            # повторная очистка — то же
+        assert sanitize(state, expected, settings).sanitized == expected        # повторная вставка ничего не меняет
+        assert restore(state, expected, settings).text == (text if policy is Policy.BLOCK else hidden)
+    # Политика домена обычная — адрес снова одна метка, как прежде.
+    assert sanitize(state, "почта ivanov@fabrikam.ru", Settings()).sanitized == "почта <EMAIL_1>"
+
+
+def test_known_person_in_an_email_login_keeps_the_stricter_person_policy(state):
+    """Так же — известный чату человек в имени входа: часть получает тип своей находки (5.10)."""
+    settings = Settings(policies=default_policies() | {T.PERSON: Policy.BLOCK})
+    ops.mask(state, "Ivanov", T.PERSON)
+    sanitize(state, "пишет Ivanov", settings)
+    state.rules.clear()                 # дальше человек — известное значение чата, а не правило
+    result = sanitize(state, "почта ivanov@fabrikam.ru", settings)
+    assert result.sanitized == "почта <PERSON_1>@domain-1.example"
+    assert [state.entities[s.entity_id].type for s in result.blocked] == [T.PERSON]
+
+
+def test_host_name_with_a_known_domain_of_a_stricter_policy_is_blocked(state):
+    """То же у имени узла: политику части держит подмена (resolve._name) — проверка, что так и есть."""
+    settings = Settings(policies=default_policies() | {T.DOMAIN: Policy.BLOCK})
+    sanitize(state, "домен fabrikam.ru", settings)
+    result = sanitize(state, "узел srv01.fabrikam.ru", settings)
+    assert result.sanitized == "узел host-1.domain-1.example"
+    assert [state.entities[s.entity_id].type for s in result.blocked] == [T.DOMAIN]
+
+
+def test_selection_of_an_email_with_a_stricter_known_domain_keeps_the_domain(state):
+    """Правило, поглотившее адрес, не смягчает и часть строже себя: адрес делится, части в правиле — его тип, домен —
+    свой; раньше выделение давало <DOMAIN_2> — метку домена на весь адрес."""
+    settings = Settings(policies=default_policies() | {T.DOMAIN: Policy.BLOCK})
+    sanitize(state, "домен fabrikam.ru", settings)
+    ops.mask(state, "ivanov@fabrikam.ru", T.TERM)
+    result = sanitize(state, "почта ivanov@fabrikam.ru", settings)
+    assert result.sanitized == "почта <TERM_1>@domain-1.example"
+    assert [state.entities[s.entity_id].type for s in result.blocked] == [T.DOMAIN]
+    assert sanitize(state, "почта ivanov@fabrikam.ru", Settings()).sanitized == "почта <TERM_2>"     # адрес целиком
+
+
+@pytest.mark.parametrize("text, value, found", [
+    ("звонить +79161234567", "+79161234567", T.PHONE), ("почта ivanov@contoso.ru", "ivanov@contoso.ru", T.EMAIL),
+    ("узел 10.1.2.5", "10.1.2.5", T.IP), ("пароль: Qwerty123!", "Qwerty123!", T.SECRET),
+], ids=["phone", "email", "ip", "secret"])
+def test_selection_does_not_soften_the_stricter_policy_of_the_found_value(state, text, value, found):
+    """Выделение «+79161234567» с типом TERM при PHONE «блокировать» давало <TERM_1>, и выдача не блокировалась. Решение
+    пользователя не смягчает политику находки того же значения: тип — у находки, если её политика строже (5.7, шаг 4);
+    при той же политике — тип правила, как прежде. Открыть значение по-прежнему можно правилом «открыть» (FR-6.2)."""
+    blocked = Settings(policies=default_policies() | {found: Policy.BLOCK})
+    ops.mask(state, value, T.TERM)
+    result = sanitize(state, text, blocked)
+    assert value not in result.sanitized and [state.entities[s.entity_id].type for s in result.blocked] == [found]
+    lenient = Settings(policies=default_policies() | {found: Policy.MASK})
+    assert sanitize(state, text, lenient).sanitized == text.replace(value, "<TERM_1>")
+    ops.unmask(state, value)
+    assert sanitize(state, text, blocked).sanitized == text
+
+
+@pytest.mark.parametrize("text, mask, found, expected", [
+    ("звонить +79161234567 доб 12", ("+79161234567 доб", T.TERM), T.PHONE, "звонить <TERM_1> 12"),
+    ("token=+79161234567abcdef", None, T.PHONE, "token=<SECRET_1>"),
+], ids=["selection", "secret"])
+def test_finding_inside_a_larger_fragment_keeps_its_block(state, text, mask, found, expected):
+    """Фрагмент, внутри которого лежит находка строже его, терял её запрет: выделение «+79161234567 доб» с типом TERM или
+    пароль с телефоном внутри при PHONE «блокировать» выдавались. Тип фрагмента не меняется — находка покрывает лишь часть
+    значения, — но её тип записан у фрагмента (held), и блокировка — по нынешней политике: смена политики очистки не
+    требует. Значение, открытое правилом «открыть», ничего не держит, как и вне фрагмента."""
+    if mask:
+        ops.mask(state, *mask)
+    blocked = Settings(policies=default_policies() | {found: Policy.BLOCK})
+    result = sanitize(state, text, blocked)
+    [span] = result.spans
+    assert result.sanitized == expected and span.held == (found,)
+    assert result.blocked == [span] and not result.deliverable
+    lenient = sanitize(state, text, Settings())
+    assert lenient.sanitized == expected and lenient.spans[0].held == (found,) and lenient.deliverable
+    ops.unmask(state, "+79161234567")
+    assert sanitize(state, text, blocked).deliverable
+
+
+def test_whole_host_name_selected_over_a_blocked_known_domain_stays_blocked(state):
+    """Выделение всего имени узла с типом TERM при известном чату домене и DOMAIN «блокировать»: имя — запись, которую
+    правило поглотило, и фрагмент берёт тип записи строже (5.7, шаг 4); домен держит выдачу."""
+    settings = Settings(policies=default_policies() | {T.DOMAIN: Policy.BLOCK})
+    sanitize(state, "домен fabrikam.ru", settings)
+    ops.mask(state, "srv01.fabrikam.ru", T.TERM)
+    result = sanitize(state, "узел srv01.fabrikam.ru", settings)
+    assert result.sanitized == "узел host-1.domain-1.example" and not result.deliverable
+
+
+def test_pasted_surrogate_of_a_blocked_entity_blocks_like_its_original(state):
+    """Замены чата во входном тексте не заменяются снова (FR-5.9), и текст с выданной заменой сущности «блокировать»
+    выдавался, хотя тот же текст с оригиналом — нет. Вставленная замена держит политику своей сущности, у имени узла — и
+    его частей, по нынешней политике; сущность, значение которой открыто, — нет."""
+    sanitize(state, "узел srv01.fabrikam.ru", Settings())       # имя выдано, пока у домена обычная политика
+    blocked = Settings(policies=default_policies() | {T.DOMAIN: Policy.BLOCK})
+    for text in ("почта ivanov@domain-1.example", "узел host-1.domain-1.example", "домен domain-1.example"):
+        result = sanitize(state, text, blocked)
+        [notice] = result.blocked_surrogates
+        assert notice.code == "surrogate_in_input" and T.DOMAIN in notice.held and not result.deliverable, text
+        assert sanitize(state, text, Settings()).deliverable
+    assert [n.held for n in sanitize(state, "узел host-1.domain-1.example", blocked).notices] == [(T.HOST, T.DOMAIN)]
+    ops.unmask(state, "fabrikam.ru")
+    assert sanitize(state, "домен domain-1.example", blocked).deliverable
+
+
+def test_selection_of_a_short_host_name_keeps_the_stricter_host_policy(state):
+    """Короткое имя узла правило тоже не смягчает: resolve._name давал ему метку правила и после того, как объединение
+    оставило HOST. Часть полного имени — так же: исключение владельца 15.10.2026 (5.7, шаг 4) — о строении имени, и
+    <TERM_1>.domain-1.example при HOST=BLOCK не блокировал выдачу."""
+    settings = Settings(policies=default_policies() | {T.HOST: Policy.BLOCK})
+    sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    ops.mask(state, "srv01", T.TERM)
+    result = sanitize(state, "узел srv01.contoso.ru и srv01", settings)
+    assert result.sanitized == "узел host-1.domain-1.example и host-1"
+    assert [state.entities[s.entity_id].type for s in result.blocked] == [T.HOST, T.HOST]
+    # Политика HOST не строже — часть получает метку правила, как прежде.
+    assert sanitize(state, "узел srv01.contoso.ru и srv01", Settings()).sanitized == "узел <TERM_1>.domain-1.example и <TERM_1>"
+
+
+@pytest.mark.parametrize("own, part", [(T.HOST, "srv01"), (T.DOMAIN, "contoso.ru")], ids=["host", "domain"])
+@pytest.mark.parametrize("policy", [Policy.BLOCK, Policy.HIDE])
+def test_retyped_part_of_a_dotted_name_keeps_the_stricter_policy_of_its_own_type(state, own, part, policy):
+    """Смена типа части srv01 на TERM при HOST «блокировать» давала <TERM_1>.domain-1.example — выдача не блокировалась, а
+    при «скрывать без восстановления» часть восстанавливалась. Часть, которой правило дало мягче политику, остаётся своего
+    типа: HOST у части слева, DOMAIN у домена (resolve._manual); правило не мягче — метка, как прежде."""
+    text, expected = "узел srv01.contoso.ru", "узел host-1.domain-1.example"
+    settings = Settings(policies=default_policies() | {own: policy})
+    sanitize(state, text, settings)
+    ops.retype(state, next(e for e in state.entities.values() if e.key == part).id, T.TERM)
+    result = sanitize(state, text, settings)
+    assert result.sanitized == expected
+    assert result.deliverable is (policy is Policy.HIDE)
+    assert (restore(state, expected, settings).text == text) is (policy is Policy.BLOCK)
+    assert "<TERM_1>" in sanitize(state, text, Settings(policies=default_policies() | {own: policy, T.TERM: policy})).sanitized
 
 
 @pytest.mark.parametrize("email", [Policy.MASK, Policy.BLOCK])
@@ -625,13 +787,17 @@ def test_email_next_to_a_replacement_is_split_when_its_parts_are_as_strict(state
 def test_email_split_check_sees_the_type_a_retyped_part_gets(state):
     """Ревью раунда 6, P3: проверка, держат ли части адреса его политику, считала часть имени HOST, а часть, которой
     пользователь дал другой тип, получает метку этого типа. При EMAIL=HIDE, HOST=BLOCK и srv02 → TERM адрес делился на
-    <ACCOUNT_1>@<TERM_1>.domain-1.example: ничто не блокировало, и ответ восстанавливал адрес целиком."""
+    <ACCOUNT_1>@<TERM_1>.domain-1.example: ничто не блокировало, и ответ восстанавливал адрес целиком. Теперь правило
+    мягче HOST часть и не получает (resolve._manual): она остаётся HOST и блокирует выдачу, а проверка видит тот же тип."""
     settings = Settings(policies=default_policies() | {T.EMAIL: Policy.HIDE, T.HOST: Policy.BLOCK})
     sanitize(state, "Сервер srv-dc01.contoso.ru", settings)
     ops.mask(state, "srv02", T.TERM)
     result = sanitize(state, "почта petrov@srv02.domain-1.example", settings)
-    assert result.sanitized == "почта <EMAIL_1>"
-    assert restore(state, result.sanitized, settings).text == "почта <EMAIL_1>"
+    assert result.sanitized == "почта <ACCOUNT_1>@host-2.domain-1.example"
+    assert [state.entities[s.entity_id].type for s in result.blocked] == [T.HOST]
+    # Правило не мягче HOST — часть меткой правила, и проверка видит её тип: ACCOUNT и TERM не мягче EMAIL — адрес делится.
+    strict = Settings(policies=default_policies() | {T.EMAIL: Policy.HIDE, T.ACCOUNT: Policy.HIDE, T.TERM: Policy.HIDE})
+    assert sanitize(state, "почта petrov@srv02.domain-1.example", strict).sanitized == "почта <ACCOUNT_1>@<TERM_1>.domain-1.example"
 
 
 @pytest.mark.parametrize("text, expected", [

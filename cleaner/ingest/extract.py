@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import ctypes
 import io
 import re
 import zipfile
@@ -24,6 +25,13 @@ _SCANNED_BELOW = 20                 # меньше стольких знаков
 # заголовком, частичный слой распознавания сканера. Такая страница распознаётся и при слое текста. Логотип, подпись,
 # печать и фото в тексте занимают заметно меньше; лишнее распознавание дороже по времени, но не теряет текст.
 _IMAGE_SHARE = 0.3
+# Не больше стольких пт² площади изображений на один непробельный знак слоя, лежащий в них, — слой покрывает
+# изображения, страница уже распознана (сканер или ПО сканирования: невидимый слой поверх растра) или это бланк
+# с подложкой, и распознавать её заново не нужно (ocr-ru — 72 с на страницу). Машинописная страница A4 (500 000 пт²)
+# — 1500–3500 знаков, по знаку на 140–330 пт²; изображению на всю страницу нужно не меньше 335 знаков, 5–8 строк.
+# Цифровой заголовок вне изображения не засчитывается, а штамп или номер поверх скана (десятки знаков) много ниже
+# порога. Редкий скан почти без текста распознаётся заново — дольше, но без потери текста.
+_LAYER_AREA = 1500
 _WORDS = re.compile(r"\w+")
 _OCR_DOWN = frozenset({"unavailable", "auth"})   # распознавание недоступно целиком, а не отказало на одной странице
 _OCR_LIMIT = 20 * 1024 * 1024       # предел ocr-ru на одно изображение
@@ -378,15 +386,17 @@ def _open_pdf(data: bytes):
         raise ExtractError("PDF повреждён или не разбирается") from None
 
 
-def _images(page) -> tuple[bool, float]:
-    """Есть ли на странице изображения и какую долю её площади (CropBox) они покрывают. Границы объекта внутри
-    Form XObject pdfium даёт в координатах формы — они переводятся в координаты страницы матрицами форм-родителей.
-    Перекрытия не вычитаются: доля — оценка сверху, лишнее распознавание дешевле пропущенного скана."""
+_Box = tuple[float, float, float, float]       # лево, низ, право, верх в координатах страницы
+
+
+def _images(page) -> tuple[bool, list[_Box]]:
+    """Есть ли на странице изображения и их прямоугольники, обрезанные по CropBox. Границы объекта внутри
+    Form XObject pdfium даёт в координатах формы — они переводятся в координаты страницы матрицами форм-родителей."""
     import pypdfium2 as pdfium
     import pypdfium2.raw as pdfium_c
 
     left, bottom, right, top = page.get_cropbox()
-    found, covered = False, 0.0
+    found, boxes = False, []
     for image in page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE], max_depth=2):
         found = True
         try:
@@ -397,26 +407,52 @@ def _images(page) -> tuple[bool, float]:
         while form is not None:
             box = form.get_matrix().on_rect(*box)
             form = form.container
-        width, height = min(box[2], right) - max(box[0], left), min(box[3], top) - max(box[1], bottom)
-        covered += max(width, 0) * max(height, 0)
-    area = (right - left) * (top - bottom)
-    return found, covered / area if area > 0 else 0.0
+        box = (max(box[0], left), max(box[1], bottom), min(box[2], right), min(box[3], top))
+        if box[2] > box[0] and box[3] > box[1]:
+            boxes.append(box)
+    return found, boxes
+
+
+def _layer_inside(textpage, boxes: list[_Box]) -> int:
+    """Непробельные знаки слоя текста, середина которых лежит внутри какого-нибудь из изображений."""
+    import pypdfium2.raw as pdfium_c
+
+    inside = 0
+    left, bottom, right, top = (ctypes.c_double() for _ in range(4))
+    for index in range(textpage.count_chars()):
+        code = pdfium_c.FPDFText_GetUnicode(textpage, index)
+        if code > 0x10FFFF or chr(code).isspace():
+            continue
+        if not pdfium_c.FPDFText_GetCharBox(textpage, index, left, right, bottom, top):    # порядок в pdfium — лпнв
+            continue
+        x, y = (left.value + right.value) / 2, (bottom.value + top.value) / 2
+        inside += any(box[0] <= x <= box[2] and box[1] <= y <= box[3] for box in boxes)
+    return inside
 
 
 def _page_kinds(data: bytes) -> list[str]:
     """scan — в слое текста почти нет знаков, а изображение есть: только распознавание; mixed — слой текста есть, но
-    изображения покрывают заметную долю страницы: и слой, и распознавание; text — только слой текста."""
+    изображения покрывают заметную долю страницы, а слой их не покрывает (_LAYER_AREA): и слой, и распознавание;
+    text — только слой текста."""
     pdf = _open_pdf(data)
     try:
         result = []
         for index in range(len(pdf)):
             page = pdf[index]
-            chars = len("".join(page.get_textpage().get_text_range().split()))
-            found, share = _images(page)
+            textpage = page.get_textpage()
+            chars = len("".join(textpage.get_text_range().split()))
+            found, boxes = _images(page)
+            left, bottom, right, top = page.get_cropbox()
+            area = (right - left) * (top - bottom)
+            # Перекрытия не вычитаются — доля оценивается сверху; но площадь изображений не больше страницы: сжатие
+            # MRC кладёт под слой распознавания два растра на всю страницу (фон и маску букв).
+            covered = min(sum((box[2] - box[0]) * (box[3] - box[1]) for box in boxes), max(area, 0))
             if chars < _SCANNED_BELOW:
                 result.append("scan" if found else "text")
+            elif area <= 0 or covered < _IMAGE_SHARE * area:
+                result.append("text")
             else:
-                result.append("mixed" if share >= _IMAGE_SHARE else "text")
+                result.append("text" if _layer_inside(textpage, boxes) * _LAYER_AREA >= covered else "mixed")
         return result
     finally:
         pdf.close()

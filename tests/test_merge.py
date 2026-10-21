@@ -14,14 +14,17 @@ def test_overlapping_fragments_become_one_with_the_senior_type():
         Span(9, 19, T.DOMAIN, "infra"),
         Span(2, 8, T.ACCOUNT, "dict"),
     ]
-    assert merge("i.ivanov@contoso.ru", spans, CTX) == [MergedSpan(0, 19, T.EMAIL, ("rules", "dict", "infra"))]
+    assert merge("i.ivanov@contoso.ru", spans, CTX) == [MergedSpan(0, 19, T.EMAIL, ("rules", "dict", "infra"), validated=True)]
 
 
 def test_secret_outranks_everything_except_a_manual_rule():
     spans = [Span(6, 15, T.SECRET, "secrets"), Span(6, 15, T.TERM, "dict")]
     assert merge("token=abc123def", spans, CTX)[0].type is T.SECRET
     spans.append(Span(6, 15, T.TERM, "manual"))
-    assert merge("token=abc123def", spans, CTX)[0].type is T.TERM
+    lenient = DetectContext(Settings(policies=default_policies() | {T.SECRET: Policy.MASK}))
+    assert merge("token=abc123def", spans, lenient)[0].type is T.TERM
+    # Правило не смягчает политику находки того же значения: SECRET «скрывать без восстановления» строже TERM (5.7).
+    assert merge("token=abc123def", spans, CTX)[0].type is T.SECRET
 
 
 def test_manual_rule_on_a_whole_part_of_a_name_keeps_the_name_type():
@@ -127,6 +130,40 @@ def test_senior_type_does_not_soften_the_policy_of_a_finding_it_swallows():
     spans = [Span(0, 18, T.EMAIL, "rules", validated=True), Span(7, 18, T.DOMAIN, "dict")]
     blocked = DetectContext(Settings(policies=default_policies() | {T.DOMAIN: Policy.BLOCK}))
     assert merge("ivanov@fabrikam.ru", spans, blocked)[0].type is T.EMAIL
+
+
+def test_email_with_a_stricter_part_inside_is_split():
+    """Находка 2026-10-21: известный домен fabrikam.ru при DOMAIN=BLOCK в ivanov@fabrikam.ru терялся под <EMAIL_1>, и выдача
+    не блокировалась. Часть строже адреса держит свою политику: адрес делится и без выданной замены, часть — в ruled со
+    своим типом (5.10). Так же — у адреса, поглощённого правилом: имя внутри адреса — его часть, а не поглощённая запись."""
+    text = "ivanov@fabrikam.ru"
+    spans = [Span(0, 18, T.EMAIL, "rules", validated=True), Span(7, 18, T.DOMAIN, "dict")]
+    for changed, parted in (
+        ({}, False), ({T.DOMAIN: Policy.BLOCK}, True), ({T.DOMAIN: Policy.HIDE}, True),
+        ({T.EMAIL: Policy.HIDE, T.DOMAIN: Policy.HIDE}, False),
+    ):
+        [merged] = merge(text, spans, DetectContext(Settings(policies=default_policies() | changed)))
+        assert (merged.type, merged.parted, merged.mail, merged.ruled) == (
+            T.EMAIL, parted, parted, ((7, 18, T.DOMAIN),) if parted else (),
+        ), changed
+    blocked = DetectContext(Settings(policies=default_policies() | {T.DOMAIN: Policy.BLOCK}))
+    [ruled] = merge(text, [*spans, Span(0, 18, T.TERM, "manual")], blocked)
+    assert (ruled.type, ruled.parted, ruled.ruled) == (T.TERM, True, ((0, 18, T.TERM), (7, 18, T.DOMAIN)))
+
+
+def test_user_rule_does_not_soften_the_policy_of_a_finding_of_the_same_value():
+    """Выделение «+79161234567» с типом TERM при PHONE=BLOCK давало <TERM_1>, и выдача не блокировалась. Правило над
+    автоматической находкой на весь фрагмент берёт её тип, если её политика строже; при равных — тип правила (5.7, шаг 4).
+    Правило внутри находки — так же: иначе оно поглотило бы её значение."""
+    text = "+79161234567"
+    for rule in ((0, 12), (2, 6)):
+        spans = [Span(0, 12, T.PHONE, "rules"), Span(*rule, T.TERM, "manual")]
+        for changed, expected in (
+            ({}, T.TERM), ({T.PHONE: Policy.BLOCK}, T.PHONE), ({T.PHONE: Policy.HIDE}, T.PHONE),
+            ({T.PHONE: Policy.HIDE, T.TERM: Policy.HIDE}, T.TERM), ({T.PHONE: Policy.HIDE, T.TERM: Policy.BLOCK}, T.TERM),
+        ):
+            [merged] = merge(text, spans, DetectContext(Settings(policies=default_policies() | changed)))
+            assert merged.type is expected, (rule, changed)
 
 
 def test_partial_overlap_covers_the_union():

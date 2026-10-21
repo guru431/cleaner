@@ -9,9 +9,15 @@
   --mark: #e8eaf6; --t-person: #ffe0b2; --t-org: #dcedc8; --t-address: #f0f4c3; --t-email: #b3e5fc; --t-phone: #b2dfdb;
   --t-secret: #ffcdd2; --t-account: #e1bee7; --t-ip: #c5cae9; --t-host: #d1c4e9; --t-sid: #cfd8dc; --t-term: #fff9c4;
   --r-restored: #c8e6c9; --r-altered: #fff59d; --r-derived: #b3e5fc; --r-kept: #e0e0e0;
+  --opened: #8250df;
   --font: "Segoe UI", system-ui, sans-serif;
   --mono: Consolas, "Cascadia Mono", monospace;
   --radius: 6px;
+  /* Размеры, которые меняет меню «Вид» (ниже, по классам view-… на <html>), — в одном месте; исходные — компактный вид. */
+  --text-size: 12.5px;        /* тексты элементов, панели проверки, замены, выражения — моноширинным */
+  --text-line: 1.5;
+  --ui-line: 1.45;
+  --cell-y: 6px;              /* отступ строк таблиц сверху и снизу */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -24,6 +30,7 @@
     --mark: #2b2f45; --t-person: #5a3a12; --t-org: #2f4a1e; --t-address: #45481a; --t-email: #123f57; --t-phone: #11433f;
     --t-secret: #5c1f24; --t-account: #4a2352; --t-ip: #2b3263; --t-host: #3a2d5c; --t-sid: #33404a; --t-term: #4d4614;
     --r-restored: #1f4a2a; --r-altered: #4d4614; --r-derived: #123f57; --r-kept: #3a3f45;
+    --opened: #a371f7;
   }
 }
 
@@ -36,7 +43,11 @@
   --mark: #2b2f45; --t-person: #5a3a12; --t-org: #2f4a1e; --t-address: #45481a; --t-email: #123f57; --t-phone: #11433f;
   --t-secret: #5c1f24; --t-account: #4a2352; --t-ip: #2b3263; --t-host: #3a2d5c; --t-sid: #33404a; --t-term: #4d4614;
   --r-restored: #1f4a2a; --r-altered: #4d4614; --r-derived: #123f57; --r-kept: #3a3f45;
+  --opened: #a371f7;
 }
+
+:root.view-text-large { --text-size: 14.5px; }
+:root.view-rows-loose { --text-line: 1.75; --ui-line: 1.65; --cell-y: 10px; }
 
 /* --- основа ------------------------------------------------------------------ */
 
@@ -45,7 +56,7 @@
 html, body { height: 100%; }
 body {
   margin: 0; display: flex; flex-direction: column;
-  background: var(--bg); color: var(--fg); font: 13px/1.45 var(--font);
+  background: var(--bg); color: var(--fg); font: 13px/var(--ui-line) var(--font);
 }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -53,7 +64,7 @@ h1 { font-size: 16px; font-weight: 600; margin: 0; }
 h2 { font-size: 14px; font-weight: 600; margin: 0; }
 p { margin: 0 0 8px; }
 ul { margin: 0 0 8px; padding-left: 20px; }
-code, kbd, .mono { font-family: var(--mono); font-size: 12.5px; }
+code, kbd, .mono { font-family: var(--mono); font-size: var(--text-size); }
 .muted { color: var(--muted); }
 .hint { color: var(--muted); font-size: 12px; }
 .spacer { flex: 1; }
@@ -124,7 +135,7 @@ button[data-state="failed"] { color: var(--bad); }
 input, select, textarea {
   min-height: 28px; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg);
 }
-textarea { display: block; width: 100%; resize: vertical; line-height: 1.45; }
+textarea { display: block; width: 100%; resize: vertical; line-height: var(--ui-line); }
 input[type="checkbox"] { min-height: 0; margin: 0; accent-color: var(--primary); }
 input[type="file"] { padding: 0; border: 0; background: none; min-height: 0; }
 input[type="file"]::file-selector-button {
@@ -175,7 +186,7 @@ label.stack input { font-weight: 400; width: 100%; }
 .panel-body > :last-child { margin-bottom: 0; }
 pre.text {
   margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
-  font: 12.5px/1.5 var(--mono); color: var(--fg);
+  font: var(--text-size)/var(--text-line) var(--mono); color: var(--fg);
 }
 .panel > pre.text { padding: 12px; }
 .counters { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
@@ -186,7 +197,7 @@ details.raw pre.text { margin-top: 8px; padding: 8px 12px; border: 1px solid var
 /* --- таблицы ------------------------------------------------------------------- */
 
 table { width: 100%; border-collapse: collapse; }
-th, td { padding: 6px 12px; text-align: left; vertical-align: baseline; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
+th, td { padding: var(--cell-y) 12px; text-align: left; vertical-align: baseline; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
 th { background: var(--bg-sub); color: var(--muted); font-weight: 600; white-space: nowrap; border-bottom-color: var(--line); }
 tbody tr:last-child td { border-bottom: 0; }
 .panel > table thead th:first-child { border-top-left-radius: var(--radius); }
@@ -197,13 +208,15 @@ th.num, td.num { text-align: right; }
 td.actions { width: 1%; white-space: nowrap; overflow-wrap: normal; }
 td.actions > form, td.actions > details { display: inline-flex; margin: 0 4px 0 0; }
 td form { margin: 0; display: inline-flex; align-items: center; gap: 6px; }
-td.mono, td.event { font-family: var(--mono); font-size: 12.5px; }
+td.mono, td.event { font-family: var(--mono); font-size: var(--text-size); }
 /* Перенос где угодно (anywhere) сжимает колонку до одного знака: рядом с длинным ключом или base64 короткие колонки
    ломались посреди слова («Секре|т», «<SECRET_1|>»). Тип и число не переносятся, список замен — только между словами;
    anywhere остаётся колонкам значений. */
 td.nowrap, td.event, td.num { white-space: nowrap; overflow-wrap: normal; }
 td.words { overflow-wrap: normal; }
 td.empty { color: var(--muted); }
+/* Пример «было → станет» в предпросмотре правки: переводы строк текста сохраняются. */
+td.example { white-space: pre-wrap; }
 .sub { color: var(--muted); font-size: 12px; }
 td .sub { margin-top: 2px; }
 
@@ -325,6 +338,34 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 }
 .sticky-bottom form { margin: 0; }
 
+/* Рабочее место проверки: поиск, переходы по заменам, легенда-фильтр, синхронная прокрутка, карточка «Почему скрыто».
+   Всё это — app.js; без него строки инструментов и карточка не показываются, фильтры таблицы — тоже. */
+.review-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 8px; }
+.review-tools .search { width: 280px; }
+.review-tools .legend { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { height: 24px; padding: 0 8px; gap: 6px; font-size: 12px; }
+.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--bg); font-weight: 600; }
+.swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--line); }   /* фон — от .t-* */
+.swatch.leak, .swatch.blocked { background: var(--t-secret); border-color: var(--bad); }
+.swatch.opened { background: none; border: 0; border-bottom: 2px dashed var(--opened); border-radius: 0; }
+html:not(.js) .review-tools, html:not(.js) .why, html:not(.js) .table-filter { display: none; }
+.why .panel-body { padding: 8px 12px; }
+.why .panel-body p { margin: 0 0 4px; }
+.why-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 4px 0; }
+.why-list dt { color: var(--muted); }
+.why-list dd { margin: 0; }
+.table-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 8px; }
+.tab-panel > .table-filter + table { margin: 0 -12px -12px; border-top: 1px solid var(--line); }
+.table-bar { margin-bottom: 8px; }
+.pager { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* Панель текста — одна остановка Tab; выбранная замена получает фокус (клавиши N / P). */
+pre.text:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+mark:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+mark.opened { background: none; border-radius: 0; border-bottom: 2px dashed var(--opened); }
+pre.text.only mark:not(.pick) { background: none; outline: 0; border-bottom: 0; }
+::highlight(review-find) { background-color: color-mix(in srgb, var(--accent) 30%, transparent); text-decoration: underline 2px var(--accent); }
+::highlight(review-find-current) { background-color: var(--accent); color: #fff; }
+
 /* --- настройки ------------------------------------------------------------------ */
 
 .side-nav h2 { margin: 12px 0 4px; font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
@@ -350,7 +391,7 @@ details.panel > summary::-webkit-details-marker { display: none; }
 details.panel > summary::after { content: "▸"; margin-left: auto; color: var(--muted); }
 details.panel[open] > summary::after { content: "▾"; }
 details.panel:not([open]) > summary { border-bottom: 0; border-radius: var(--radius); }
-.values { columns: 3 220px; margin: 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 12.5px; }
+.values { columns: 3 220px; margin: 0; padding: 0; list-style: none; font-family: var(--mono); font-size: var(--text-size); }
 .values li { overflow-wrap: anywhere; }
 
 /* --- вход и ошибка ---------------------------------------------------------------- */
@@ -363,3 +404,40 @@ details.panel:not([open]) > summary { border-bottom: 0; border-radius: var(--rad
 .login-form .flash { margin: 0; }
 .login-theme { display: flex; justify-content: center; margin-top: 12px; }
 .narrow { max-width: 560px; }
+
+/* --- опасные действия ------------------------------------------------------------- */
+
+/* Опасное действие строки (удалить, снять замену) — за чертой от основных: рядом с «Изменить» и проверкой его легко задеть. */
+td.actions > form:has(> button.danger):not(:only-child):last-child { margin: 0 0 0 4px; padding-left: 8px; border-left: 1px solid var(--line); }
+td.actions > form:has(> button.danger):not(:only-child):first-child { margin-right: 8px; padding-right: 8px; border-right: 1px solid var(--line); }
+
+/* --- вид рабочего места: меню «Вид» в шапке, классы view-… на <html> (theme.js, app.js) -------------------- */
+
+/* Без JS переключать нечем — меню и кнопки свёртки не показываются, вид исходный. */
+html:not(.js) .view-menu, html:not(.js) .side-fold, html:not(.js) .tab-fold { display: none; }
+.top summary.btn { background: transparent; color: var(--top-fg); border-color: var(--top-on); }
+.top summary.btn:hover, .top details[open] > summary.btn { background: var(--top-on); }
+.view-menu > .pop { min-width: 290px; gap: 4px; color: var(--fg); }
+.top .pop button { justify-content: flex-start; width: 100%; background: var(--bg-sub); color: var(--fg); border-color: var(--line); }
+.top .pop button:hover { background: var(--line-soft); }
+.top .pop :focus-visible { outline-color: var(--accent); }
+.view-menu .hint { margin-top: 4px; }
+
+/* Свёрнутый список чатов — узкая полоса с кнопкой «Список чатов» (_sidebar.html). Меню настроек не сворачивается. */
+.side-new .side-fold { flex: none; padding: 0 7px; }
+:root.view-side-folded .side:not(.side-nav) { width: auto; padding: 12px 6px; }
+:root.view-side-folded .side:not(.side-nav) > :not(.side-new), :root.view-side-folded .side-new > :not(.side-fold) { display: none; }
+
+/* Свёрнутый редактор — строка вкладок; кнопка свёртки — справа на ней (в tablist ей не место). */
+.composer .tabs { position: relative; }
+.tab-fold { position: absolute; top: 2px; right: 0; }
+.tab-fold .when-folded, :root.view-composer-folded .tab-fold .when-open { display: none; }
+:root.view-composer-folded .tab-fold .when-folded { display: inline; }
+:root.view-composer-folded .composer .tab-panel { display: none; }
+
+/* Режим чтения на проверке: панели «Оригинал» и «Очищенный» — первыми и на всю высоту окна (main), остальное ниже. */
+:root.view-reading main.page:has(> .compare) { display: flex; flex-direction: column; }
+:root.view-reading main.page:has(> .compare) > * { flex: none; }
+:root.view-reading .compare { order: -1; height: 100%; margin-bottom: 12px; }
+:root.view-reading .compare > .panel { display: flex; flex-direction: column; min-height: 0; margin: 0; }
+:root.view-reading .compare pre.text { flex: 1; min-height: 0; max-height: none; }

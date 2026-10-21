@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Предпросмотр правки — {{ chat.title }} — Cleaner{% endblock %}
+{% block main %}
+{# Последствия правки, посчитанные без записи. Примеры — очищенные тексты, как на экране проверки: страница видна
+   только владельцу чата, в журнал и в адрес ничего из неё не уходит. #}
+<div class="bar">
+  <nav class="crumbs"><a href="/chats/{{ chat.id }}" title="{{ chat.title }}">{{ chat.title }}</a><span class="sep">/</span><h1>Предпросмотр правки</h1></nav>
+</div>
+<p class="lead">{{ what }}</p>
+<section class="summary">
+  <div class="badges">
+    <span class="badge">текстов изменится — {{ preview.texts | length }}</span>
+    <span class="badge">скрыто станет вхождений — {{ totals.hidden }}</span>
+    <span class="badge{% if totals.opened %} warn{% endif %}">открыто станет вхождений — {{ totals.opened }}</span>
+    <span class="badge">сменится замена у вхождений — {{ totals.relabeled }}</span>
+  </div>
+  {% if not preview.texts %}
+  <p class="flash warn">Ни один очищенный текст чата не изменится: правка подействует на следующие тексты.</p>
+  {% endif %}
+  {% if sent %}
+  <p class="flash warn">Уже ушло облачной модели — после этих текстов в чате есть её ответ: {% for seq in sent %}текст {{ seq }}{% if not loop.last %}, {% endif %}{% endfor %}. Правка изменит их здесь и в следующих запросах, а состоявшуюся передачу отменить нельзя.</p>
+  {% endif %}
+  {% if totals.exposed %}
+  <p class="flash warn">Прежний вариант содержит открытым то, что теперь будет скрываться (значений — {{ totals.exposed }}): такие тексты будут помечены на экране проверки. Если прежний вариант уже передан, значение ушло открытым.</p>
+  {% endif %}
+  {% if preview.leaks %}
+  <p class="flash bad">После правки проверка утечек найдёт в текстах чата оригиналов — {{ preview.leaks }}: их выдача будет заблокирована.</p>
+  {% endif %}
+  <p class="muted">Скопированное и скачанное раньше правка не изменит.{% if undoable %} После применения её можно отменить кнопкой «Отменить последнюю правку…» на экране проверки и в таблице замен — пока в чате не записано ничего нового.{% endif %}</p>
+</section>
+{% if preview.texts %}
+<section class="panel">
+  <table class="grid">
+    <thead><tr><th>Текст</th><th class="num">Скрыто</th><th class="num">Открыто</th><th class="num">Другая замена</th><th>Было</th><th>Станет</th></tr></thead>
+    <tbody>
+    {% for t in preview.texts %}
+    <tr>
+      <td class="nowrap"><a href="/chats/{{ chat.id }}/items/{{ t.item_id }}">{% if t.source == "file" %}Файл{% elif t.source == "instruction" %}Инструкция для модели{% else %}Текст{% endif %} {{ t.seq }}</a>{% if t.sent %}<div class="sub">уже ушёл облаку</div>{% endif %}</td>
+      <td class="num">{{ t.hidden }}</td><td class="num">{{ t.opened }}</td><td class="num">{{ t.relabeled }}</td>
+      {% if t.before or t.after %}
+      <td class="mono example">{{ t.before }}</td><td class="mono example">{{ t.after }}</td>
+      {% else %}
+      <td colspan="2" class="empty">пример — у первых текстов</td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+<div class="sticky-bottom">
+  <a class="btn" href="{{ back }}">Вернуться без правки</a>
+  <form method="post" action="{{ target }}">
+    {% include "_csrf.html" %}
+    {% for name, value in fields %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    <input type="hidden" name="version" value="{{ preview.version }}">
+    <button class="primary">{% if target.endswith("/undo") %}Отменить правку{% else %}Применить правку{% endif %}</button>
+  </form>
+</div>
+{% endblock %}

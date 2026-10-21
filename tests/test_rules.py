@@ -142,6 +142,17 @@ def test_phone_with_any_grouping_of_ten_digits():
     assert (T.PHONE, "+7 916 1234567") in found("звоните +7 916 1234567")
 
 
+@pytest.mark.parametrize("text, phone", [
+    ("id:x+7 916 123-45-67", "+7 916 123-45-67"), ("тел+79161234567", "+79161234567"), ("call:x+44 20 7946 0958", "+44 20 7946 0958"),
+])
+def test_phone_with_a_plus_is_found_right_after_a_letter(text, phone):
+    """Аудит 21.10.2026: «+» сам отделяет номер, и буква перед ним не мешает — а «Abc+7 916 123-45-67» после «пароль:»
+    давал <SECRET_1> 916 123-45-67: секрет кончался на «+7», и десять цифр номера оставались открытыми. Перед «8»
+    буква по-прежнему мешает: «x8…» — часть обозначения, а не телефон."""
+    assert (T.PHONE, phone) in found(text)
+    assert T.PHONE not in types("модель x89161234567")
+
+
 def test_lone_eight_before_a_date_is_not_a_phone():
     assert T.PHONE not in types("pid 8 2024-10-14 12:00:01 запуск")
 
