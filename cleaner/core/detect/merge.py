@@ -212,13 +212,18 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
             whole = [senior, *(s for s in group if (s.start, s.end) == (start, end))]
             type_ = min(whole, key=lambda s: (-STRICTNESS.get(policies.get(s.type), 0), _rank(s))).type
         ruled, mail = (), False
-        found = [s for s in group if s.source != "manual" and s.type in (*_NAME_TYPES, EntityType.EMAIL)]
-        addresses = [(s.start, s.end) for s in found if s.type is EntityType.EMAIL]
         # Имя внутри адреса e-mail — его часть, а не поглощённая запись: её политику держит деление адреса (ниже).
-        records = [
-            s.type for s in found
-            if s.type is EntityType.EMAIL or not any(a <= s.start and s.end <= b for a, b in addresses)
-        ]
+        # Группа упорядочена по началу (при равном — длинные раньше), и адрес, внутри которого лежит имя, уже пройден:
+        # один проход, а не сверка каждого имени с каждым адресом цепочки.
+        records, reach = [], -1
+        for s in group:
+            if s.source == "manual" or s.type not in (*_NAME_TYPES, EntityType.EMAIL):
+                continue
+            if s.type is EntityType.EMAIL:
+                records.append(s.type)
+                reach = max(reach, s.end)
+            elif reach < s.end:
+                records.append(s.type)
         if senior.source == "manual" and not kept and records:
             ruled = tuple((s.start, s.end, s.type) for s in group if s.source == "manual")
             mail = EntityType.EMAIL in records
