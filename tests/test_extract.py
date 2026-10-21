@@ -167,6 +167,35 @@ def test_logo_on_a_text_page_is_not_recognised():
     assert (ocr.calls, result.ocr_pages, result.doubtful_pages, result.text) == ([], (), (), f"## {HEADER}")
 
 
+# Тело страницы поверх изображения: восемь строк, 494 непробельных знака; порог для картинки 562×600 пт — 225.
+BODY = "\n".join(f"Line {n}: invoice 2026-{n:03d} for Petrov Test, kontora-test.ru, total {n * 100} rub" for n in range(8))
+
+
+@pytest.mark.parametrize("invisible", [True, False])
+def test_page_whose_layer_covers_the_image_is_not_recognised_again(invisible):
+    """Уже распознанный скан (невидимый слой поверх растра) и бланк с подложкой (видимый текст поверх картинки):
+    слой покрывает изображение, распознавать страницу заново — 72 с без выигрыша. Заголовок вне картинки не мешает."""
+    documents, ocr = LayerDocuments(), Ocr()
+    result = Extractor(documents, ocr).extract("scan.pdf", make_pdf([(HEADER, 600, BODY)], invisible=invisible))
+    assert (documents.calls, ocr.calls, result.ocr_pages, result.doubtful_pages) == ([("pdf", [1])], [], (), ())
+
+
+def test_stamp_over_a_scan_does_not_count_as_its_layer():
+    """Номер входящего поверх скана — десяток знаков внутри изображения на всю страницу: тело не распознано."""
+    ocr = Ocr()
+    result = Extractor(LayerDocuments(), ocr).extract("scan.pdf", make_pdf([(HEADER, 600, "Incoming No 17/2026")]))
+    assert len(ocr.calls) == 1 and result.ocr_pages == (1,)
+
+
+def test_user_can_ask_to_recognise_an_already_recognised_scan():
+    """Слой распознавания сканера бывает плохим: отметка при загрузке распознаёт и такую страницу."""
+    ocr = Ocr()
+    result = Extractor(LayerDocuments(), ocr).extract(
+        "scan.pdf", make_pdf([(HEADER, 600, BODY)], invisible=True), ocr_all=True,
+    )
+    assert len(ocr.calls) == 1 and result.ocr_pages == (1,)
+
+
 @pytest.mark.parametrize("error", [
     CompletionError("unavailable", "локальная модель недоступна"), DetectorError("ключ шлюза не задан"),
 ])
