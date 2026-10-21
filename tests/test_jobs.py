@@ -11,6 +11,10 @@ from cleaner.storage.repo import Item
 from cleaner.web.app import FILE_WORKERS, create_app
 from cleaner.web.jobs import INTERRUPTED, WORKERS, Jobs, shutdown
 
+# Предел ожидания заданий в настоящих пулах — страховка от зависания, а не замер: под нагрузкой машины очистка в потоке
+# шла дольше секунды, и тест падал по TimeoutError без ошибки в коде (аудит 21.10.2026).
+GUARD = 10
+
 
 def blocking_job():
     """Задание, которое идёт, пока тест его не отпустит."""
@@ -62,9 +66,9 @@ def test_pasted_text_is_cleaned_while_scans_hold_every_file_thread(repo, clock, 
     try:
         for name in reading:
             service.add_file(chat_id, user, name, b"%PDF-1.7")
-        assert all(event.wait(1) for event in reading.values())        # все потоки разбора файлов заняты
+        assert all(event.wait(GUARD) for event in reading.values())        # все потоки разбора файлов заняты
         text = service.add_input(chat_id, user, "почта a@x.example")
-        shared.futures[0].result(timeout=1)
+        shared.futures[0].result(timeout=GUARD)
         assert repo.item(chat_id, text.id).sanitized == "почта <EMAIL_1>"
     finally:
         release.set()
@@ -80,15 +84,15 @@ def test_only_file_extraction_goes_to_the_file_pool(repo, clock, engines, chat):
     service = create_app(repo, clock, secure_cookies=False, engines=engines, jobs=Jobs(shared), files=Jobs(files)).state.service
     try:
         letter = service.add_file(chat_id, user, "letter.eml", b"From: a@x.example\n\nbody")
-        files.futures[0].result(timeout=1)
+        files.futures[0].result(timeout=GUARD)
         text = service.add_input(chat_id, user, "почта b@x.example")
-        shared.futures[0].result(timeout=1)
+        shared.futures[0].result(timeout=GUARD)
         service.retry(chat_id, user, letter.id)
-        shared.futures[1].result(timeout=1)
+        shared.futures[1].result(timeout=GUARD)
         service.check_risk(chat_id, user, text.id)
-        shared.futures[2].result(timeout=1)
+        shared.futures[2].result(timeout=GUARD)
         service.ask_local(chat_id, user)
-        shared.futures[3].result(timeout=1)
+        shared.futures[3].result(timeout=GUARD)
         assert (len(files.futures), len(shared.futures)) == (1, 4)
         assert [repo.item(chat_id, i.id).sanitized for i in (letter, text)] == ["Документ: почта <EMAIL_1>", "почта <EMAIL_2>"]
     finally:
@@ -155,7 +159,7 @@ def test_service_stop_closes_every_pool_before_waiting_for_any():
     stopping = threading.Thread(target=shutdown, args=pools)
     stopping.start()
     try:
-        assert files.stopped.wait(1)                 # общий пул ещё занят, а пул файлов уже закрыт
+        assert files.stopped.wait(GUARD)                 # общий пул ещё занят, а пул файлов уже закрыт
     finally:
         scan_release.set()
         release.set()
