@@ -85,8 +85,10 @@ class ChatView:
 
 
 def _spans(result: SanitizeResult) -> list[dict]:
+    # Признак подтверждённого формата — только там, где он есть: spans хранятся открыто и на каждый фрагмент.
     return [
         {"start": s.start, "end": s.end, "entity_id": s.entity_id, "surrogate": s.surrogate, "sources": list(s.sources)}
+        | ({"validated": True} if s.validated else {})
         for s in result.spans
     ]
 

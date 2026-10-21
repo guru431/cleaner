@@ -14,7 +14,7 @@ def test_overlapping_fragments_become_one_with_the_senior_type():
         Span(9, 19, T.DOMAIN, "infra"),
         Span(2, 8, T.ACCOUNT, "dict"),
     ]
-    assert merge("i.ivanov@contoso.ru", spans, CTX) == [MergedSpan(0, 19, T.EMAIL, ("rules", "dict", "infra"))]
+    assert merge("i.ivanov@contoso.ru", spans, CTX) == [MergedSpan(0, 19, T.EMAIL, ("rules", "dict", "infra"), validated=True)]
 
 
 def test_secret_outranks_everything_except_a_manual_rule():
