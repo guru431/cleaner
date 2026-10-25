@@ -16,7 +16,8 @@ pip сам считает по машине, где запущен (Windows, Pyt
 Версия, выложенная на PyPI меньше MIN_AGE_DAYS дней назад, не принимается: скомпрометированный релиз
 замечают не в первый день (инцидент с LiteLLM, SEC-14). Файлы машины разработки отсекают такие версии уже
 при разрешении (uv --exclude-newer), кроме torch: индекс его сборок без CUDA не публикует время выкладки.
-Здесь проверка повторяется по версиям на PyPI — для torch она единственная. Отказ называет пакет —
+Здесь проверка повторяется по версиям на PyPI — для torch она единственная. certifi карантина не проходит
+(AGE_EXEMPT) ни здесь, ни в uv (--exclude-newer-package certifi=false). Отказ называет пакет —
 закрепите в .in предыдущую версию (`пакет<версия`) и пересоберите файлы.
 """
 from __future__ import annotations
@@ -46,6 +47,10 @@ SERVER = {
 _PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==(\S+)")
 _HASH = re.compile(r"--hash=(sha256:[0-9a-f]{64})")
 MIN_AGE_DAYS = 14
+# Без карантина: свежая версия набора корневых сертификатов отзывает доверие, и две недели ожидания держали бы
+# отозванные корни доверенными (certifi 2026.10.19 удалил корни eMudhra с опубликованными ключами; решение
+# владельца 2026-10-25). Риск подменённого релиза для этого пакета принят сознательно.
+AGE_EXEMPT = {"certifi"}
 # pip в отдельном процессе с маркерами сервера: packaging берёт окружение из default_environment() при каждой проверке.
 _PIP_WITH_SERVER_MARKERS = (
     "import json, sys\n"
@@ -139,6 +144,8 @@ def too_young(
     """Пакеты, версия которых выложена меньше MIN_AGE_DAYS дней назад. Сборка torch «+cpu» — по версии без «+cpu»."""
     young = []
     for name in names:
+        if name.lower() in AGE_EXEMPT:
+            continue
         version = pins[name][0].split("+")[0]
         when = published(name, version)
         if when is not None and now - when < timedelta(days=MIN_AGE_DAYS):

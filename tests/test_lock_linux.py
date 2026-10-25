@@ -21,3 +21,10 @@ def test_versions_published_less_than_two_weeks_ago_are_refused():
 def test_a_version_exactly_two_weeks_old_is_taken():
     pins = {"pytest": ("9.1.1", [])}
     assert lock_linux.too_young(pins, ["pytest"], NOW, lambda *_: NOW - timedelta(days=14)) == []
+
+
+def test_a_fresh_ca_bundle_is_not_held_back():
+    """certifi: свежая версия отзывает доверие к корням, и две недели ожидания держали бы их доверенными."""
+    pins = {"certifi": ("2026.10.23", []), "truststore": ("0.10.5", [])}
+    young = lock_linux.too_young(pins, ["certifi", "truststore"], NOW, lambda *_: NOW - timedelta(days=2))
+    assert young == ["truststore==0.10.5 (13.10.2026)"]
