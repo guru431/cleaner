@@ -138,11 +138,13 @@ def _extraction(item: Item) -> str:
     meta = item.meta
     if meta.get("kind") != "pdf" or not meta.get("pages"):
         return ""
-    ocr = set(meta.get("ocr_pages", []))
-    layer = [number for number in range(1, meta["pages"] + 1) if number not in ocr]
+    ocr, failed = set(meta.get("ocr_pages", [])), sorted(meta.get("failed_pages", []))
+    layer = [number for number in range(1, meta["pages"] + 1) if number not in ocr and number not in failed]
     parts = [f"распознаванием — {_pages(sorted(ocr))}"] if ocr else []
     if layer:
         parts.append(f"из слоя текста файла — {_pages(layer)}")
+    if failed:
+        parts.append(f"не распознаны — {_pages(failed)}")
     text = f"PDF, страниц — {meta['pages']}: {'; '.join(parts)}."
     if layer and not meta.get("ocr_all"):
         text += (" Если в оригинале не хватает текста с картинок или слой текста нечитаем — загрузите файл ещё раз "
@@ -163,6 +165,11 @@ def _warnings(item: Item) -> list[str]:
         warnings.append(
             f"Извлечено частично. На страницах {_pages(item.meta['unread_pages'])} распознавание не нашло текста: "
             "их содержимое в очищенный текст не попало."
+        )
+    if item.meta.get("failed_pages"):
+        warnings.append(
+            f"Извлечено частично. Страницы {_pages(item.meta['failed_pages'])} распознать не удалось: их содержимое в "
+            "очищенный текст не попало. Загрузите файл ещё раз или сверьте эти страницы с файлом."
         )
     if item.meta.get("doubtful_pages"):
         warnings.append(

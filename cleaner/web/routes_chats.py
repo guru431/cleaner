@@ -29,7 +29,7 @@ _LISTED_PAGES = 5           # больше — в заголовке ленты 
 def partial_extraction(meta: dict[str, object]) -> str:
     """Что из файла не попало в текст или могло не попасть — для «извлечено частично» в ленте. Только номера
     страниц и число листов из meta (FR-11.2)."""
-    pages = sorted(set(meta.get("unread_pages", [])) | set(meta.get("doubtful_pages", [])))
+    pages = sorted(set(meta.get("unread_pages", [])) | set(meta.get("doubtful_pages", [])) | set(meta.get("failed_pages", [])))
     parts = []
     if pages:
         parts.append(f"страниц — {len(pages)}" if len(pages) > _LISTED_PAGES else

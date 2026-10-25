@@ -263,6 +263,38 @@ def test_pictures_of_office_files_are_counted():
     assert extract("t.docx", package({"word/document.xml": DOCX.format(para("x"))})).images == 0
 
 
+def test_scan_page_refused_by_recognition_is_left_out_and_the_rest_is_kept():
+    """Ревью 24.10.2026, решение владельца 25.10.2026: отказ распознавания одной страницы скана (ответ обрезан, изображение
+    не принято) терял весь файл, хотя остальные страницы распознаны. Страница — в failed_pages («извлечено частично»)."""
+    class Truncated(Ocr):
+        def __call__(self, image, mime):
+            self.calls.append(mime)
+            if len(self.calls) == 1:
+                raise CompletionError("ocr_truncated", "обрезано")
+            return "Скан: почта scan@x.example"
+
+    result = Extractor(Documents(), Truncated()).extract("scan.pdf", make_pdf([None, TEXT_PAGE, None]))
+    assert result.text == "страница 2: почта doc@x.example\n\nСкан: почта scan@x.example"
+    assert (result.ocr_pages, result.unread_pages, result.failed_pages) == ((3,), (), (1,))
+
+
+@pytest.mark.parametrize("error", [
+    CompletionError("unavailable", "локальная модель недоступна"), CompletionError("auth", "шлюз отклонил ключ (401)"),
+    DetectorError("ключ шлюза не задан"),
+])
+def test_scan_page_fails_the_file_when_recognition_is_down(error):
+    """Недоступное целиком распознавание — не отказ страницы: файл отказывает с причиной, а не отдаёт текст без сканов."""
+    with pytest.raises((ExtractError, DetectorError)):
+        Extractor(Documents(), Ocr(error=error)).extract("scan.pdf", make_pdf([TEXT_PAGE, None]))
+
+
+def test_scan_whose_every_page_was_refused_fails_with_the_reason():
+    """Текста не дала ни одна страница — причина отказа, а не «в файле не найден текст»."""
+    ocr = Ocr(error=CompletionError("ocr_truncated", "распознанный текст страницы обрезан"))
+    with pytest.raises(ExtractError, match="Распознавание текста не выполнено: распознанный текст страницы обрезан"):
+        Extractor(Documents(), ocr).extract("scan.pdf", make_pdf([None, None]))
+
+
 def test_recognition_failure_stops_extraction_with_a_reason():
     ocr = Ocr(error=CompletionError("unavailable", "локальная модель недоступна"))
     with pytest.raises(ExtractError, match="Распознавание текста не выполнено: локальная модель недоступна"):

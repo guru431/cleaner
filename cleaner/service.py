@@ -523,6 +523,8 @@ class ChatService:
             meta["ocr_pages"] = list(extracted.ocr_pages)
         if extracted.unread_pages:
             meta["unread_pages"] = list(extracted.unread_pages)
+        if extracted.failed_pages:
+            meta["failed_pages"] = list(extracted.failed_pages)
         if extracted.hidden_sheets:
             meta["hidden_sheets"] = extracted.hidden_sheets      # только число: имена листов — данные пользователя
         if extracted.doubtful_pages:

@@ -239,16 +239,18 @@ def test_partial_extraction_is_shown_in_the_feed_and_on_the_review(ivan, repo):
     state, version = repo.load_state(chat_id)
     layers = ["ner", "llm"]
     scan = Item(uuid.uuid4().hex, 0, "input", "Сотрудник", "Сотрудник", source="file", meta={
-        "kind": "pdf", "pages": 6, "ocr_pages": [1, 2, 3, 4], "unread_pages": [2], "doubtful_pages": [5], "layers": layers,
+        "kind": "pdf", "pages": 7, "ocr_pages": [1, 2, 3, 4], "unread_pages": [2], "doubtful_pages": [5],
+        "failed_pages": [7], "layers": layers,
     })
     deck = Item(uuid.uuid4().hex, 0, "input", "Сотрудник", "Сотрудник", source="file",
                 meta={"kind": "pptx", "images": 3, "layers": layers})
     repo.commit_chat(chat_id, state, version, [scan, deck])
     feed = ivan.get(f"/chats/{chat_id}").text
-    assert feed.count("извлечено частично") == 1 and "извлечено частично: страницы 2, 5" in feed
+    assert feed.count("извлечено частично") == 1 and "извлечено частично: страницы 2, 5, 7" in feed
     review = ivan.get(f"/chats/{chat_id}/items/{scan.id}").text
-    assert "PDF, страниц — 6: распознаванием — 1–4; из слоя текста файла — 5, 6." in review
+    assert "PDF, страниц — 7: распознаванием — 1–4; из слоя текста файла — 5, 6; не распознаны — 7." in review
     assert "Извлечено частично. На страницах 2 распознавание не нашло текста" in review
+    assert "Извлечено частично. Страницы 7 распознать не удалось: их содержимое в очищенный текст не попало" in review
     assert "Извлечено частично. На страницах 5 изображение занимает большую часть страницы" in review
     review = ivan.get(f"/chats/{chat_id}/items/{deck.id}").text
     assert "Встроенных изображений в документе — 3: текст на них не распознаётся" in review

@@ -78,6 +78,11 @@ class ExtractError(Exception):
     """Текст не извлечён. Сообщение показывается пользователю: в нём нет содержимого файла (FR-2.9)."""
 
 
+class _PageRefused(ExtractError):
+    """Распознавание отказало на этой странице, а не недоступно целиком: у изображения — отказ файла, у страницы скана
+    PDF — страница без текста (Extracted.failed_pages)."""
+
+
 @dataclass(frozen=True)
 class Extracted:
     text: str
@@ -85,6 +90,7 @@ class Extracted:
     pages: int = 0
     ocr_pages: tuple[int, ...] = ()        # страницы, текст которых получен распознаванием (FR-2.5)
     unread_pages: tuple[int, ...] = ()     # на них распознавание не нашло ни одного знака
+    failed_pages: tuple[int, ...] = ()     # страницы скана PDF, распознавание которых отказало: их текста нет
     hidden_sheets: int = 0                 # скрытые листы книги: Docling кладёт их в невидимый слой, их текста нет
     doubtful_pages: tuple[int, ...] = ()   # крупное изображение не распознано: взят только слой текста страницы
     images: int = 0                        # встроенные изображения DOCX, XLSX и PPTX: их текст не распознаётся
@@ -519,14 +525,16 @@ class Extractor:
         return result
 
     def _page(self, image: bytes, mime: str, number: int) -> tuple[str, tuple[int, ...]]:
+        """_PageRefused — отказ этой страницы; недоступное целиком распознавание (_OCR_DOWN) — ExtractError."""
         if len(image) > _OCR_LIMIT:
-            raise ExtractError("Изображение больше 20 МБ: распознавание его не примет")
+            raise _PageRefused("Изображение больше 20 МБ: распознавание его не примет")
         try:
             return self.ocr(image, mime), ()
         except CompletionError as exc:
             if exc.code == "ocr_empty":
                 return "", (number,)
-            raise ExtractError(f"Распознавание текста не выполнено: {exc}") from None
+            error = ExtractError if exc.code in _OCR_DOWN else _PageRefused
+            raise error(f"Распознавание текста не выполнено: {exc}") from None
 
     def _image(self, data: bytes, progress: Progress) -> Extracted:
         progress(0, 1)
@@ -557,13 +565,23 @@ class Extractor:
         texts = self.documents.pdf_pages(data, text_pages) if text_pages else {}
         unread: list[int] = []
         doubtful: list[int] = []
+        failed: list[int] = []
+        refused: _PageRefused | None = None
         blank: list[int] = []           # распознавание не дало текста: страница не из распознанных
 
         down = False            # недоступно целиком — у остальных страниц со слоем его не ждать (тайм-аут на каждой)
         for done, number in enumerate(ocr_pages):
             progress(done, len(ocr_pages))
             if kinds[number - 1] == "scan":
-                texts[number], missed = self._page(_render(data, number), "image/png", number)
+                # Отказ одной страницы (ответ обрезан, изображение не принято) не теряет распознанные: страница — в
+                # failed_pages (решение владельца 25.10.2026). Недоступное целиком распознавание файл по-прежнему отклоняет.
+                try:
+                    texts[number], missed = self._page(_render(data, number), "image/png", number)
+                except _PageRefused as exc:
+                    failed.append(number)
+                    blank.append(number)
+                    refused = refused or exc
+                    continue
                 unread += missed
                 continue
             recognised, down = (None, True) if down else self._over_layer(data, number)
@@ -578,7 +596,10 @@ class Extractor:
         if ocr_pages:
             progress(len(ocr_pages), len(ocr_pages))
         pages = [texts.get(number, "").strip() for number in range(1, len(kinds) + 1)]
+        text = "\n\n".join(page for page in pages if page)
+        if refused is not None and not text:
+            raise ExtractError(str(refused))        # причина отказа полезнее, чем «в файле не найден текст»
         return Extracted(
-            "\n\n".join(page for page in pages if page), "pdf", len(kinds),
-            tuple(number for number in ocr_pages if number not in blank), tuple(unread), doubtful_pages=tuple(doubtful),
+            text, "pdf", len(kinds), tuple(number for number in ocr_pages if number not in blank), tuple(unread),
+            doubtful_pages=tuple(doubtful), failed_pages=tuple(failed),
         )
