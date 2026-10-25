@@ -137,7 +137,10 @@ document.querySelectorAll("[data-poll]").forEach((element) => {
   const field = element.dataset.pollField || "status";
   const check = () => {
     fetch(element.dataset.poll, { credentials: "same-origin", cache: "no-store" })
-      .then((response) => (response.ok ? response.json() : null))
+      // Элемента или чата больше нет, сеанс кончился (переход на вход) — ждать нечего: перезагрузка покажет, что стало.
+      // Иначе вкладка на удалённом элементе опрашивала бы службу вечно. Сеть и ответ 5xx — временное, опрос идёт дальше.
+      .then((response) => (response.redirected || (response.status >= 400 && response.status < 500)
+        ? { [field]: "gone" } : response.ok ? response.json() : null))
       .then((state) => {
         if (!state) { setTimeout(check, 5000); return; }
         const progress = element.querySelector("[data-progress]");

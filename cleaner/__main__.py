@@ -9,7 +9,7 @@ import shutil
 import sqlite3
 import sys
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import timedelta, timezone
 from pathlib import Path
 
@@ -104,9 +104,17 @@ def cmd_init(args: argparse.Namespace) -> int:
     cfg.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     key = crypto.new_key()
     _write_private(env_file, f"{crypto.key_line(key)}\n".encode("ascii"))     # ключ — раньше базы: потерять его хуже
-    with _repository(cfg, key, create=True) as repo:
-        user_id = repo.create_user(args.admin, password_hash, "admin")
-        repo.audit("user_created", target=user_id, role="admin", by="init")
+    try:
+        with _repository(cfg, key, create=True) as repo:
+            user_id = repo.create_user(args.admin, password_hash, "admin")
+            repo.audit("user_created", target=user_id, role="admin", by="init")
+    except BaseException:
+        # База не создана — не остаётся ни её, ни ключа (оба файла создал этот вызов, данных в базе нет): иначе повторный
+        # init упирался бы в «файл ключа уже есть».
+        for path in (cfg.db_path, Path(f"{cfg.db_path}-wal"), Path(f"{cfg.db_path}-shm"), env_file):
+            with suppress(OSError):
+                path.unlink(missing_ok=True)
+        raise
     print(f"База создана: {cfg.db_path}")
     print(f"Главный ключ записан в {env_file}. Сохраните копию: python -m cleaner key export <файл>")
     return 0

@@ -2,6 +2,7 @@
 
 Очистка не ограничена по времени, поэтому одна такая вставка заняла бы обработчик на минуту.
 """
+import itertools
 import re
 import time
 
@@ -151,6 +152,21 @@ def test_new_replacements_are_checked_against_the_text_once(name, type_):
     assert time.perf_counter() - started < 0.5
 
 
+def test_many_new_people_in_one_text_are_resolved_in_linear_time():
+    """Ревью 24.10.2026: новое имя сверялось с каждым написанием и каждым человеком чата — 2000 разных людей в одном
+    тексте (список сотрудников) разбирались 40 с. Имена латиницей: pymorphy их не разбирает, замеряется сопоставление."""
+    first = ["John", "Peter", "Mary", "Anna", "Paul", "Kate", "Mark", "Lena", "Oleg", "Igor"]
+    surnames = ["".join(parts).capitalize() for parts in itertools.product(["ba", "ve", "go", "du", "zi", "ko", "lo", "mu"], repeat=4)]
+    text = ", ".join(f"{surname} {first[n % 10]}" for n, surname in enumerate(surnames))
+    spans = [MergedSpan(m.start(), m.end(), T.PERSON, ("ner",)) for m in re.finditer(r"\w+ \w+", text)]
+    state = ChatState(chat_id="long", net_key=bytes(32))
+    resolver = Resolver(state, Settings(), text, load_builtin().generic_labels)
+    started = time.perf_counter()
+    resolver.run(text, spans)
+    assert time.perf_counter() - started < 1
+    assert len(state.entities) == len(surnames) == 4096
+
+
 def test_run_of_eights_gives_no_phones():
     """FINDINGS P2 «false … PHONE, CARD …»: «8 8 8 …» давал тысячи ложных телефонов, очистка шла две секунды."""
     assert rules.detect("8 " * 50000, DetectContext(Settings())) == []
@@ -267,8 +283,11 @@ def test_restore_is_fast_on_many_tags_arguments_and_bare_links(text):
 
 
 @pytest.mark.parametrize(
-    "text", ['href="' * 20000, "](" * 30000, "url(" * 25000, "@import " * 12000, "[a]: <\n" * 15000],
-    ids=["attributes", "markdown", "css_url", "import", "definitions"],
+    "text", [
+        'href="' * 20000, "](" * 30000, "url(" * 25000, "@import " * 12000, "[a]: <\n" * 15000,
+        "u\\72 l( " * 12000, "@\\69mport " * 10000,
+    ],
+    ids=["attributes", "markdown", "css_url", "import", "definitions", "escaped_css_url", "escaped_import"],
 )
 def test_stream_restore_is_fast_on_many_unclosed_link_openers(text):
     """Обзор этапа 3: поиск незакрытой ссылки в показываемом префиксе линеен."""

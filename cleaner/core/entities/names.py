@@ -146,6 +146,27 @@ def compatible(mention: tuple[Word, ...], entity: Entity) -> bool:
     return "conflict" not in outcomes and "match" in outcomes
 
 
+def entity_keys(entity: Entity) -> set[str]:
+    """Ключи сущности для отбора кандидатов в compatible (word_keys): «=часть», «.инициал», «-роль», которой у неё нет, и
+    «-.» — нет ни имени, ни отчества. У сущности без частей (до этапа 2 их соберёт _ensure) ключ один — пустая строка."""
+    if not entity.parts and not entity.words:
+        return {""}
+    keys = {"=" + value for value in (*entity.parts.values(), *entity.words)}
+    keys |= {"." + entity.parts[role][0] for role in ("first", "middle") if entity.parts.get(role)}
+    keys |= {"-" + role for _, role in _ROLES if role not in entity.parts}
+    if not entity.parts.get("first") and not entity.parts.get("middle"):
+        keys.add("-.")
+    return keys
+
+
+def word_keys(word: Word) -> set[str]:
+    """Ключи сущностей, которым слово упоминания не противоречит (_outcome — match или new): сущность, совместимая с
+    упоминанием, есть среди сущностей с ключами каждого его слова."""
+    if word.initial:
+        return {"", "." + word.initial, "-."}
+    return {"", *("=" + value for _, value in word.options), *("-" + role for role, _ in word.options if role != "word")}
+
+
 def rank(mention: tuple[Word, ...]) -> int:
     """Полнота написания; именительный падеж важнее полноты (раздел 5.9)."""
     full = [word for word in mention if not word.initial]

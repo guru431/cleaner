@@ -1082,15 +1082,16 @@ def originals(state: ChatState, settings: Settings) -> Callable[[str], str]:
 _TOKEN_CHAR = re.compile(r"[\w.:/<>\[\]&;\\-]")
 _HOLD = 512
 # Начало ссылки, цель которой может быть ещё не дописана: атрибут с адресом, цель и определение ссылки Markdown,
-# url()/image-set()/src() и @import в CSS. Пока ссылка не закрыта, нельзя решить, наша ли она (FR-7.8), —
-# показ останавливается перед ней, а не восстанавливает метку внутри будущей посторонней ссылки.
+# url()/image-set()/src() и @import в CSS — в любой записи, как в _LINK («u\72l(», «@\69mport»). Пока ссылка не
+# закрыта, нельзя решить, наша ли она (FR-7.8), — показ останавливается перед ней, а не восстанавливает метку внутри
+# будущей посторонней ссылки.
 _LINK_OPENER = re.compile(
     r"(?<![\w-])(?:href|src|srcset|action|formaction|poster|data|background|cite|ping|style|content|srcdoc)"
     r"\s*=\s*(?P<quote>[\"'])"
     r"|\]\("
     r"|(?m:^)[ ]{0,3}\[[^\]\r\n]+\]:[ \t]*(?:\r?\n[ \t]*)?<"
-    r"|(?:url|image-set|src)\("
-    r"|@import",
+    rf"|(?:{_URL}|{_SET})\("
+    rf"|(?P<imp>{_IMPORT})",
     re.IGNORECASE,
 )
 
@@ -1100,7 +1101,7 @@ def _unclosed_link(text: str) -> int:
     от своего начала — время пропорционально их длине; на первой незакрытой поиск кончается."""
     for m in _LINK_OPENER.finditer(text):
         token = m.group()
-        closer = m.group("quote") or (">" if token.endswith("<") else ";" if token.lower() == "@import" else ")")
+        closer = m.group("quote") or (">" if token.endswith("<") else ";" if m.group("imp") else ")")
         if text.find(closer, m.end()) < 0:
             return m.start()
     return len(text)

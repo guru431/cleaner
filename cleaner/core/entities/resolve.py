@@ -132,6 +132,8 @@ class Resolver:
         self._text_names: set[str] | None = None
         self._text_labels: set[str] | None = None
         self._searched: set[str] | None = None      # написания сущностей чата — при первом слиянии находок (_remember)
+        self._spellings: dict[str, list[Entity]] | None = None      # написания людей — при первом новом имени (_spelled)
+        self._name_keys: dict[str, dict[str, Entity]] | None = None     # части имён людей — так же (_fitting)
         self._runs: dict[str, bool] = {}            # сущности людей: слияние ли это находок длиннее имени (_run)
 
     @staticmethod
@@ -189,7 +191,7 @@ class Resolver:
         """Искомые написания: значение — или написания находок, слитых в него (MergedSpan.forms). Написание находки, уже
         искомое в чате (известное значение другой сущности), не повторяется: оно и так найдётся."""
         if searchable and value not in entity.forms:
-            entity.forms.append(value)
+            self._add_form(entity, value)
         if not forms:
             return
         if self._searched is None:
@@ -197,7 +199,23 @@ class Resolver:
         for form in forms:
             if form not in self._searched:
                 self._searched.add(form)
-                entity.forms.append(form)
+                self._add_form(entity, form)
+
+    def _add_form(self, entity: Entity, form: str) -> None:
+        entity.forms.append(form)
+        if entity.type is T.PERSON and self._spellings is not None:
+            self._spellings.setdefault(normalize(form), []).append(entity)
+
+    def _spelled(self, folded: str) -> list[Entity]:
+        """Люди чата с этим написанием (без учёта регистра и невидимых знаков), первым — получивший его раньше. Собираются
+        один раз на проход: сверка с каждым написанием чата на каждое новое имя была квадратичной."""
+        if self._spellings is None:
+            self._spellings = {}
+            for entity in self.state.entities.values():
+                if entity.type is T.PERSON:
+                    for form in entity.forms:
+                        self._spellings.setdefault(normalize(form), []).append(entity)
+        return self._spellings.get(folded, [])
 
     def _issue(self, entity: Entity, slot: str, make: Callable[[], str]) -> str:
         """Замена сущности для данного вида записи: выдаётся один раз и запоминается."""
@@ -268,16 +286,9 @@ class Resolver:
         if entity is None:
             # Написание, уже отнесённое к сущности, за ней и остаётся: иначе на следующем проходе (5.10) или в
             # следующем тексте появившийся тёзка сделал бы его неоднозначным и выдал новую метку.
-            folded = normalize(value)
-            entity = next((
-                e for e in self.state.entities.values()
-                if e.type is T.PERSON and not self._run(e) and any(normalize(form) == folded for form in e.forms)
-            ), None)
+            entity = next((e for e in self._spelled(normalize(value)) if not self._run(e)), None)
         if entity is None and mention:
-            fitting = [
-                e for e in self.state.entities.values()
-                if e.type is T.PERSON and e.forms and not self._run(e) and names.compatible(mention, e)
-            ]
+            fitting = [e for e in self._fitting(mention) if e.forms and not self._run(e) and names.compatible(mention, e)]
             if len(fitting) == 1:
                 entity = fitting[0]
                 self.index[(T.PERSON, key)] = entity
@@ -287,7 +298,33 @@ class Resolver:
             self._remember(entity, value, searchable, forms)
         if not run:
             names.absorb(entity, mention, value)
+        if self._name_keys is not None:
+            self._index_name(entity)
         return entity
+
+    def _fitting(self, mention: tuple[names.Word, ...]) -> list[Entity]:
+        """Люди чата, которым не противоречит самое редкое слово упоминания (обычно фамилия): совместимый с упоминанием
+        (names.compatible) не противоречит ни одному. Части собираются один раз на проход, как и написания (_spelled):
+        сверка с каждым человеком чата была квадратичной — 2000 разных людей в тексте разбирались 40 с."""
+        if self._name_keys is None:
+            self._name_keys = {}
+            for entity in self.state.entities.values():
+                if entity.type is T.PERSON:
+                    self._index_name(entity)
+        rarest = min(
+            (names.word_keys(word) for word in mention),
+            key=lambda keys: sum(len(self._name_keys.get(key, ())) for key in keys),
+        )
+        found: dict[str, Entity] = {}
+        for key in rarest:
+            found.update(self._name_keys.get(key, {}))
+        return list(found.values())
+
+    def _index_name(self, entity: Entity) -> None:
+        """Части имени только прибавляются (names.absorb): ключ прежней недостающей части остаётся лишним, а не неверным —
+        кандидатов проверяет names.compatible."""
+        for key in names.entity_keys(entity):
+            self._name_keys.setdefault(key, {})[entity.id] = entity
 
     def _run(self, entity: Entity) -> bool:
         """Сущность слияния находок длиннее имени (_person): ключ длиннее четырёх слов, а целиком значение не искомо —

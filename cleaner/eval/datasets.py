@@ -12,10 +12,13 @@ from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
-from cleaner.core.detect.ner import ADDRESS_GAP
+from cleaner.core.detect.merge import adjacent_name_parts
+from cleaner.core.detect.ner import ADDRESS_GAP, ADDRESS_GAP_MAX
 
 # Версия преобразования разметки: другой номер — другие сущности, и замер с прежним несопоставим.
 # 1 — каждое упоминание отдельной сущностью; 2 — одинаковое значение одного типа в примере — одна сущность (QA-2).
+# Правила 25.10.2026 (I-метка после O начинает новый фрагмент, части имени через точку сводятся только после инициала)
+# номер не меняют: снимки всех трёх наборов с ними совпали байт в байт.
 CONVERTER = 2
 
 # Метка набора -> тип ТЗ или часть: person — часть имени, street — улица, дом или весь адрес, place — город, регион, страна.
@@ -32,13 +35,14 @@ LABELS = {
     # Токен — секрет по FR-4.1. Адрес целиком и CVC типа в ТЗ не имеют и не измеряются.
     "TOKEN": "SECRET",
 }
-_NAME_GAP = re.compile(r"[ \t]+|\.[ \t]*")
 
 
 def bio_to_spans(
     tokens: Sequence[str], tags: Sequence[str], text: str | None = None,
 ) -> tuple[str, list[tuple[int, int, str]]] | None:
-    """Токены с метками BIO -> (текст, [(начало, конец, метка)]). Без текста он собирается через пробел."""
+    """Токены с метками BIO -> (текст, [(начало, конец, метка)]). Без текста он собирается через пробел. I-метка
+    продолжает только фрагмент предыдущего токена; после O или другой метки она начинает новый, как в conlleval: иначе
+    «Иванов/I-PER и/O Петров/I-PER» было бы одним человеком вместе с «и» (ревью 24.10.2026)."""
     offsets: list[tuple[int, int]] = []
     if text is None:
         position = 0
@@ -55,14 +59,17 @@ def bio_to_spans(
             offsets.append((found, found + len(token)))
             position = found + len(token)
     spans: list[list] = []
+    inside = None                   # метка фрагмента, которым кончился предыдущий токен
     for (start, end), tag in zip(offsets, tags):
         if tag == "O" or "-" not in tag:
+            inside = None
             continue
         prefix, label = tag.split("-", 1)
-        if prefix == "I" and spans and spans[-1][2] == label and spans[-1][1] <= start:
+        if prefix == "I" and inside == label:
             spans[-1][1] = end
         else:
             spans.append([start, end, label])
+        inside = label
     return text, [(start, end, label) for start, end, label in spans]
 
 
@@ -79,8 +86,11 @@ def convert(text: str, spans: Sequence[tuple[int, int, str]], unmapped: Counter)
         last = groups[-1] if groups else None
         gap = text[last[1]:start] if last else ""
         joinable = last is not None and (
-            (kind == "person" == last[2] and (not gap or _NAME_GAP.fullmatch(gap)))
-            or (kind in ("street", "place") and last[2] in ("street", "place") and len(gap) <= 40 and ADDRESS_GAP.fullmatch(gap))
+            (kind == "person" == last[2] and adjacent_name_parts(text, last[0], last[1], start))
+            or (
+                kind in ("street", "place") and last[2] in ("street", "place")
+                and len(gap) <= ADDRESS_GAP_MAX and ADDRESS_GAP.fullmatch(gap)
+            )
         )
         if joinable:
             last[1] = max(last[1], end)

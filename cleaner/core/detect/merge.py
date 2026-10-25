@@ -63,12 +63,13 @@ _INITIALS_AFTER = re.compile(r"[ \t]+([А-ЯЁA-Z]\.(?:[ \t]?[А-ЯЁA-Z]\.)?)")
 _INITIALS_BEFORE = re.compile(r"(?<![^\W\d_])([А-ЯЁA-Z]\.(?:[ \t]?[А-ЯЁA-Z]\.)?)[ \t]*$")
 
 
-def _adjacent(text: str, previous: MergedSpan, span: MergedSpan) -> bool:
-    """Между частями — только пробелы; «точка с пробелом» — только после инициала («И. Иванов»), а не в конце предложения."""
-    gap = text[previous.end:span.start]
+def adjacent_name_parts(text: str, previous_start: int, previous_end: int, start: int) -> bool:
+    """Между частями — только пробелы; «точка с пробелом» — только после инициала («И. Иванов»), а не в конце предложения.
+    Так же сводит части имени эталон открытых наборов (eval.datasets)."""
+    gap = text[previous_end:start]
     if not gap or _NAME_GAP.fullmatch(gap):
         return True
-    return bool(_INITIAL_GAP.fullmatch(gap)) and _LONE_LETTER.search(text, previous.start, previous.end) is not None
+    return bool(_INITIAL_GAP.fullmatch(gap)) and _LONE_LETTER.search(text, previous_start, previous_end) is not None
 
 
 def _with_initials(text: str, span: MergedSpan, floor: int, ceiling: int) -> MergedSpan:
@@ -106,7 +107,10 @@ def _join_names(text: str, spans: list[MergedSpan]) -> list[MergedSpan]:
             span = _with_initials(text, span, out[-1].end if out else 0, ceiling)
             previous = out[-1] if out else None
             count = max(1, len(text[span.start:span.end].split()))
-            if previous is not None and previous.type is EntityType.PERSON and _adjacent(text, previous, span):
+            if (
+                previous is not None and previous.type is EntityType.PERSON
+                and adjacent_name_parts(text, previous.start, previous.end, span.start)
+            ):
                 run.append(span)
                 words += count
                 if listed:

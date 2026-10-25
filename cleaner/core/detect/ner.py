@@ -32,7 +32,7 @@ ADDRESS_GAP = re.compile(
     r"пл|площадь|д|дом|корп|к|стр|строение|кв|квартира|оф|офис|обл|область|р-н|район|пос|пгт|с|дер|мкр)\b)*",
     re.IGNORECASE,
 )
-_ADDRESS_GAP_MAX = 40
+ADDRESS_GAP_MAX = 40
 # Адрес GLiNER — адрес и без улицы: открытые наборы размечают адресом и место («в Москве», «на Мойке»), и правило
 # русской модели «город сам не скрывается» снизило бы полноту «Организаций и почтовых адресов» на hivetrace с 0,886
 # до 0,858. Кроме находки с числом, которое не похоже на дом: «location address» GLiNER называет и «1С». Дом — число
@@ -204,7 +204,7 @@ def _addresses(text: str, parts: list[Found]) -> list[tuple[int, int, float]]:
     groups: list[list[Found]] = []
     for part in sorted(parts, key=lambda f: f.start):
         gap = text[groups[-1][-1].end:part.start] if groups else ""
-        if groups and len(gap) <= _ADDRESS_GAP_MAX and ADDRESS_GAP.fullmatch(gap):
+        if groups and len(gap) <= ADDRESS_GAP_MAX and ADDRESS_GAP.fullmatch(gap):
             groups[-1].append(part)
         else:
             groups.append([part])

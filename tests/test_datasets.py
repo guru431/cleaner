@@ -42,6 +42,21 @@ def test_set_labels_with_a_tz_type_are_measured():
     assert unmapped == Counter({"CVC": 1})
 
 
+def test_an_inside_tag_after_an_outside_one_starts_a_new_span():
+    """Ревью 24.10.2026: I-метка продлевала фрагмент через O — два человека и «и» между ними были одним PERSON."""
+    text, spans = bio_to_spans(["Иванов", "и", "Петров", "Пётр"], ["I-PER", "O", "I-PER", "I-PER"])
+    assert [text[start:end] for start, end, _ in spans] == ["Иванов", "Петров Пётр"]
+
+
+def test_name_parts_join_across_a_dot_only_after_an_initial():
+    """Ревью 24.10.2026: точка между частями имени — конец предложения, если перед ней не инициал (как merge в слое 4)."""
+    text = "Был Иванов. Петров ушёл, а И. Сидоров остался"
+    spans = [(text.index(value), text.index(value) + len(value), "LAST_NAME") for value in ("Иванов", "Петров", "Сидоров")]
+    spans.append((text.index("И."), text.index("И.") + 1, "FIRST_NAME"))
+    record = convert(text, spans, Counter())
+    assert [text[s["start"]:s["end"]] for s in record["spans"]] == ["Иванов", "Петров", "И. Сидоров"]
+
+
 def test_tokens_missing_from_the_text_skip_the_example():
     assert bio_to_spans(["нет"], ["O"], "совсем другое") is None
 

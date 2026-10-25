@@ -86,10 +86,11 @@ else
     bad "слушает: ${listeners:-ничего}"
 fi
 headers=$(curl -s -D - -o /dev/null -m 5 --cacert "$CERT" "https://${HOST_IP}:${PORT}/login" || true)
-if [[ "$headers" == "HTTP/"*" 200"* ]]; then
+status_line=${headers%%$'\r'*}      # код — только из строки статуса: « 200» бывает и в заголовке (Content-Length: 2003)
+if [[ "$status_line" =~ ^HTTP/[0-9.]+\ 200( |$) ]]; then
     ok "страница входа отвечает 200, сертификат совпадает с $CERT"
 else
-    bad "страница входа не открылась по HTTPS: ${headers%%$'\r'*}"
+    bad "страница входа не открылась по HTTPS: ${status_line}"
 fi
 if grep -qi "^content-security-policy: default-src 'self'" <<< "$headers"; then ok "заголовок CSP на месте"; else bad "нет заголовка CSP"; fi
 if grep -qi '^strict-transport-security: max-age=' <<< "$headers"; then ok "заголовок HSTS на месте"; else bad "нет заголовка HSTS"; fi

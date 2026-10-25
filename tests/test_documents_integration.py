@@ -20,8 +20,11 @@ DOCLING_OWN_DEPRECATIONS = (
     "ignore:`force_full_page_ocr` is deprecated:DeprecationWarning",
     "ignore:This field is deprecated. Use `generate_page_images=True`:DeprecationWarning",
 )
+# Предел 30 с из pytest.ini — не для этого модуля: первый тест импортирует docling и transformers, а на загруженной
+# workstation холодный импорт шёл 33 с (25.10.2026), и pytest-timeout обрывал весь полный прогон.
 pytestmark = [
     pytest.mark.integration, pytest.mark.filterwarnings("error::DeprecationWarning", *DOCLING_OWN_DEPRECATIONS),
+    pytest.mark.timeout(120),
 ]
 CANARY = "petrov.check@kontora-test.ru"
 LINE = f"Сотрудник Петров Иван, почта {CANARY}, узел srv-check-01."

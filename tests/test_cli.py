@@ -52,6 +52,24 @@ def test_init_creates_the_database_the_key_and_the_admin(home, clock):
     assert main(again) == 1 and not (home / "other.env").exists()
 
 
+def test_init_that_failed_to_create_the_database_leaves_nothing_behind(home, monkeypatch, clock):
+    """Ревью 24.10.2026: ключ пишется раньше базы, и сбой её создания оставлял файл ключа — повторный init упирался в
+    «файл ключа уже есть». Неудачный init не оставляет ни ключа, ни базы: им нечего защищать."""
+    def full_disk(*args):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    create_user = Repository.create_user
+    monkeypatch.setattr(Repository, "create_user", full_disk)
+    args = ["init", "--admin", "boss", "--env-file", str(home / "cleaner.env"), "--password-file", str(home / "secret.txt")]
+    assert main(args) == 1
+    assert not (home / "cleaner.env").exists() and list((home / "data").iterdir()) == []
+    monkeypatch.setattr(Repository, "create_user", create_user)
+    key = init(home)
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    assert [u.login for u in repo.users()] == ["boss"]
+    repo.conn.close()
+
+
 def test_users_key_export_import_and_backup(home, monkeypatch, clock):
     key = init(home)
     secret = str(home / "secret.txt")
