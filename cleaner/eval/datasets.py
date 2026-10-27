@@ -12,14 +12,16 @@ from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
-from cleaner.core.detect.merge import adjacent_name_parts
+from cleaner.core.detect.merge import NAME_WORDS, adjacent_name_parts
 from cleaner.core.detect.ner import ADDRESS_GAP, ADDRESS_GAP_MAX
 
 # Версия преобразования разметки: другой номер — другие сущности, и замер с прежним несопоставим.
 # 1 — каждое упоминание отдельной сущностью; 2 — одинаковое значение одного типа в примере — одна сущность (QA-2).
 # Правила 25.10.2026 (I-метка после O начинает новый фрагмент, части имени через точку сводятся только после инициала)
-# номер не меняют: снимки всех трёх наборов с ними совпали байт в байт.
-CONVERTER = 2
+# номер не меняют: снимки всех трёх наборов с ними совпали байт в байт. 3 — ряд частей имени длиннее NAME_WORDS слов —
+# список людей, как в слое 4 (ревью 26.10.2026): в pii_benchmark так разошёлся один пример из 2139, hivetrace и jayguard
+# совпали байт в байт.
+CONVERTER = 3
 
 # Метка набора -> тип ТЗ или часть: person — часть имени, street — улица, дом или весь адрес, place — город, регион, страна.
 LABELS = {
@@ -75,6 +77,7 @@ def bio_to_spans(
 
 def convert(text: str, spans: Sequence[tuple[int, int, str]], unmapped: Counter) -> dict:
     """Части имени рядом — один фрагмент PERSON; части адреса — один ADDRESS, если есть улица или дом (как слой 4).
+    Имя, как в слое 4 (merge._join_names), — не длиннее NAME_WORDS слов: ряд длиннее — список людей, части врозь.
 
     Упоминания одного значения одного типа в разных местах примера — одна сущность: по QA-2 она защищена, только
     если скрыты все. Значение сравнивается без учёта регистра и пробелов; разные формы имени («Иванов», «Иванову»)
@@ -82,15 +85,31 @@ def convert(text: str, spans: Sequence[tuple[int, int, str]], unmapped: Counter)
     unmapped.update(label for _, _, label in spans if label not in LABELS)
     items = sorted((start, end, LABELS[label]) for start, end, label in spans if label in LABELS)
     groups: list[list] = []                          # [начало, конец, вид, есть ли улица или дом]
+    run: list[tuple[int, int]] = []                  # части ряда имени, которым кончается groups
+    words, listed = 0, False                         # слов в ряду; ряд длиннее имени — его части в groups по отдельности
     for start, end, kind in items:
         last = groups[-1] if groups else None
         gap = text[last[1]:start] if last else ""
-        joinable = last is not None and (
-            (kind == "person" == last[2] and adjacent_name_parts(text, last[0], last[1], start))
-            or (
-                kind in ("street", "place") and last[2] in ("street", "place")
-                and len(gap) <= ADDRESS_GAP_MAX and ADDRESS_GAP.fullmatch(gap)
-            )
+        count = max(1, len(text[start:end].split()))
+        if (
+            kind == "person" and last is not None and last[2] == "person"
+            and adjacent_name_parts(text, last[0], last[1], start)
+        ):
+            run.append((start, end))
+            words += count
+            if listed:
+                groups.append([start, end, kind, False])
+            elif words <= NAME_WORDS:
+                last[1] = max(last[1], end)
+            else:
+                listed = True
+                groups[-1:] = [[s, e, kind, False] for s, e in run]
+            continue
+        if kind == "person":
+            run, words, listed = [(start, end)], count, False
+        joinable = (
+            last is not None and kind in ("street", "place") and last[2] in ("street", "place")
+            and len(gap) <= ADDRESS_GAP_MAX and ADDRESS_GAP.fullmatch(gap)
         )
         if joinable:
             last[1] = max(last[1], end)

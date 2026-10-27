@@ -350,10 +350,12 @@ def update_provider(request: Request, provider_id: str, form: dict[str, str] = D
         raise HTTPException(404, "Подключение не найдено")
     provider, key = _provider_form(form, provider_id)
     # Ключ уходит туда, куда указывает адрес: без нового ключа сменой адреса его можно было бы увести на свой узел
-    # кнопкой «Проверить соединение» (FR-8.10).
-    moved = (urlsplit(provider.base_url).hostname, urlsplit(provider.base_url).port) != (
-        urlsplit(old.base_url).hostname, urlsplit(old.base_url).port,
-    ) or provider.auth_style != old.auth_style
+    # кнопкой «Проверить соединение» (FR-8.10). Схема — тоже: у адреса без порта она задаёт порт (443 или 80).
+    new, before = urlsplit(provider.base_url), urlsplit(old.base_url)
+    moved = (
+        (new.scheme, new.hostname, new.port) != (before.scheme, before.hostname, before.port)
+        or provider.auth_style != old.auth_style
+    )
     if moved and key is None:
         raise HTTPException(400, "Адрес или способ передачи ключа изменился: укажите ключ заново")
     repo_of(request).update_provider(provider, key)

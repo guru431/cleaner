@@ -229,6 +229,18 @@ def test_answer_longer_than_the_text_limit_is_cut(repo, chat, provider):
     assert stored.status == "partial" and len(stored.original) <= 66 and "длиннее 60 знаков" in stored.meta["error"]
 
 
+def test_answer_over_the_limit_is_not_read_further_by_the_service_itself(repo, chat, provider):
+    """Ревью 26.10.2026: на пределе чтение кончает сама служба, а не только проверка остановки в egress."""
+
+    def deaf(ctx, connection, state, settings, *, cancel=None, outcome=None, transport=None, on_open=None):
+        yield from ["слово "] * 50                 # остановку не проверяет
+
+    service = ready(repo, chat, provider, deaf, max_text_chars=60)
+    send(service, chat)
+    stored = answer(repo, chat)
+    assert stored.status == "partial" and len(stored.original) <= 66
+
+
 def test_service_stop_saves_running_answers_as_partial_with_its_own_reason(repo, chat, provider):
     jobs = []
     service = ready(repo, chat, provider, FakeCloud("Часть. ", "Ещё."), send_submit=lambda fn, *args: jobs.append((fn, args)))

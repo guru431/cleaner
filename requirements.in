@@ -13,6 +13,10 @@ docling-slim[format-pdf,format-office,format-email,format-html,convert-core,mode
 docling-ibm-models[opencv-python-headless]
 gliner
 transformers
+# 0.23.2 режет длинный текст на окна неверно: за первым окном rubert видит лишь перекрытие, остаток текста теряется
+# (tests/test_ner.py; pii_benchmark: FIRST_NAME 0,896 -> 0,862, LAST_NAME 0,825 -> 0,788; замер 27.10.2026).
+# Карантин 14 дней откатил на неё 15.10, нижняя граница не даёт откатить снова.
+tokenizers>=0.23.3
 # сборка torch без CUDA: с PyPI на Linux она тянет пакеты NVIDIA на несколько гигабайт; 2.14.1+cpu
 # новее 2.14.1 по PEP 440, поэтому резолвер берёт её на обеих платформах
 --extra-index-url https://download.pytorch.org/whl/cpu

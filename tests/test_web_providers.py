@@ -68,6 +68,15 @@ def test_moving_a_connection_needs_the_key_again(boss, repo):
     assert boss.post(f"/settings/providers/{provider.id}", **fields(base_url="https://collector.example/x", api_key="sk-new-1111")).status_code == 303
 
 
+def test_changing_the_scheme_needs_the_key_again(boss, repo):
+    """Ревью 26.10.2026: https://127.0.0.1 и http://127.0.0.1 — одинаковые узел и порт (None), но порты 443 и 80, то есть
+    другая служба на той же машине; ключ ушёл бы ей открытым текстом."""
+    boss.post("/settings/providers", **fields(base_url="https://127.0.0.1/v1"))
+    [provider] = repo.providers()
+    assert boss.post(f"/settings/providers/{provider.id}", **fields(base_url="http://127.0.0.1/v1", api_key="")).status_code == 400
+    assert repo.provider(provider.id).base_url == "https://127.0.0.1/v1"
+
+
 def test_check_shows_the_answer_or_the_providers_message(boss, repo, app, monkeypatch):
     boss.post("/settings/providers", **fields())
     [provider] = repo.providers()

@@ -38,6 +38,8 @@ set -a; . data/cleaner.env; set +a          # главный ключ — в о�
 ```bash
 # Файлы машины разработки: uv (стоит в .venv, uv==0.12.21) не берёт версии моложе 14 дней; кэш — на D:
 # (кэш по умолчанию на C: переполнял диск). Обновить пакет — дописать --upgrade-package <имя>.
+# На workstation диска D: нет: --cache-dir — временный каталог, а --custom-compile-command "<эта же команда с D:/uv-cache>"
+# держит шапку файлов прежней. Нет .venv/Scripts/uv.exe — .venv/Scripts/python.exe -m pip install uv==0.12.21.
 # certifi — без карантина (набор корней: свежая версия отзывает доверие), см. AGE_EXEMPT в lock_linux.py.
 for f in requirements requirements-dev; do .venv/Scripts/uv.exe pip compile $f.in --generate-hashes --emit-index-url \
   --python .venv/Scripts/python.exe --index https://pypi.org/simple --index-strategy unsafe-best-match \

@@ -132,6 +132,16 @@ PREV_VENV=""
 PREV_UNIT=""
 DB_BACKUP=""
 SCHEMA_BEFORE=""
+STOPPED=0
+# Работающая служба останавливается до замены окружения и кода: её путь к пакету — $APP/cleaner, и после замены
+# ленивые импорты брали бы новые модули вперемешку с уже загруженными старыми, до самого перезапуска.
+stop_service() {
+    if [[ $STOPPED -eq 0 ]] && systemctl is-active --quiet cleaner.service; then
+        STOPPED=1
+        systemctl stop cleaner.service
+        log "служба остановлена до замены файлов"
+    fi
+}
 schema_version() {  # номер схемы базы; читается от cleaner, чтобы файлы журнала WAL не стали чужими
     runuser -u cleaner -- python3 -c \
         'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA user_version").fetchone()[0])' \
@@ -156,7 +166,7 @@ rollback() {
     if [[ $FIRST_INSTALL -eq 1 ]]; then
         systemctl disable --now cleaner.service >/dev/null 2>&1 || true
         log "первая установка не удалась: служба остановлена, ключ и база не тронуты"
-    elif [[ $swapped -eq 1 ]]; then
+    elif [[ $swapped -eq 1 || $STOPPED -eq 1 ]]; then
         systemctl restart cleaner.service || true
         log "прежняя версия возвращена"
     else
@@ -177,6 +187,7 @@ if ! cmp -s "$SRC/requirements-linux.txt" "$APP/.venv/requirements-linux.txt"; t
     cp "$SRC/requirements-linux.txt" "$APP/.venv.new/requirements-linux.txt"
     if [[ -d "$APP/.venv" ]]; then
         rm -rf "$APP/.venv.prev"
+        stop_service
         mv "$APP/.venv" "$APP/.venv.prev"
         PREV_VENV="$APP/.venv.prev"
     fi
@@ -198,6 +209,7 @@ chown -R root:cleaner "$APP/cleaner.new"
 find "$APP/cleaner.new" -type d -exec chmod 0750 {} +
 find "$APP/cleaner.new" -type f -exec chmod 0640 {} +
 if [[ -d "$APP/cleaner" ]]; then
+    stop_service
     PREV_CODE="$APP/cleaner.bak-$STAMP"
     mv "$APP/cleaner" "$PREV_CODE"
 fi

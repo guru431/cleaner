@@ -1,6 +1,7 @@
 """Проверка начала этапа 4: соблюдает ли модель за шлюзом схему JSON слоя 5 (раздел 19 спецификации).
 
   CLEANER_GATEWAY_KEY=… python scripts/checks/llm_schema_check.py http://example:30000/v1 qwen-27b qwen-27b-fast
+Типы и схема ответа — слоя 5 (cleaner.core.detect.llm): своих копий у проверки нет.
 """
 from __future__ import annotations
 
@@ -11,17 +12,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-TYPES = ["PERSON", "ORG", "ADDRESS", "SECRET", "ACCOUNT", "HOST", "DOMAIN", "IP", "EMAIL", "PHONE", "TERM"]
-SCHEMA = {
-    "type": "object",
-    "properties": {"items": {"type": "array", "items": {
-        "type": "object",
-        "properties": {"text": {"type": "string"}, "type": {"type": "string", "enum": TYPES}},
-        "required": ["text", "type"], "additionalProperties": False,
-    }}},
-    "required": ["items"], "additionalProperties": False,
-}
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from cleaner.core.detect.llm import SCHEMA, TYPES  # noqa: E402
+
 TEXT = (
     "Пользователь <PERSON_1> сообщил, что на host-3.domain-1.example не входит в почту. "
     "Пароль от общего ящика он записал на стикере: sunflower77. Руководитель проекта — Сидоров."
@@ -29,7 +25,7 @@ TEXT = (
 PROMPT = (
     "Найди в тексте строки, которые ещё выдают человека, организацию, учётные данные или внутреннюю инфраструктуру. "
     "Замены вида <PERSON_1>, host-3, domain-1.example не трогай. Выпиши каждую строку дословно. "
-    'Ответ — только JSON: {"items": [{"text": "…", "type": "PERSON|ORG|ADDRESS|SECRET|ACCOUNT|HOST|DOMAIN|IP|EMAIL|PHONE|TERM"}]}.'
+    'Ответ — только JSON: {"items": [{"text": "…", "type": "' + "|".join(TYPES) + '"}]}.'
 )
 
 
@@ -66,6 +62,8 @@ def ask(base: str, key: str, model: str, schema: bool) -> tuple[bool, str, float
 
 
 def main() -> None:
+    if len(sys.argv) < 3:
+        sys.exit(__doc__)
     base, models = sys.argv[1], sys.argv[2:]
     key = os.environ["CLEANER_GATEWAY_KEY"]
     for model in models:

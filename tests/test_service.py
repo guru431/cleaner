@@ -5,6 +5,7 @@ import threading
 import pytest
 
 from cleaner.core import leakcheck, risk
+from cleaner.core import restore as restore_module
 from cleaner.core.detect import infra
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.leakcheck import Leak
@@ -89,6 +90,34 @@ def test_answer_is_restored_in_the_view(repo, chat):
     first, second = service.view(chat_id).items
     assert isinstance(first, InputView) and first.deliverable
     assert isinstance(second, AnswerView) and second.result.text == "Ответьте на a@x.example"
+
+
+def test_answers_of_a_chat_share_one_restorer(repo, chat, monkeypatch):
+    """Ревью 26.10.2026: восстановление собирается по всей таблице чата (на 12 000 заменах — 33 мс) — один раз на вид чата
+    и на запрос локальной модели, а не на каждый ответ; счётчики у каждого ответа свои."""
+    user, chat_id = chat
+    service = ChatService(repo)
+    service.add_input(chat_id, user, "почта a@x.example и b@x.example")
+    service.add_answer(chat_id, user, "Ответ про <EMAIL_1>")
+    service.add_answer(chat_id, user, "Ответ про <EMAIL_2> и <EMAIL_9>")
+    service.add_input(chat_id, user, "Спасибо")
+    built = []
+
+    class Counted(restore_module._Restorer):
+        def __init__(self, *args):
+            built.append(1)
+            super().__init__(*args)
+
+    monkeypatch.setattr(restore_module, "_Restorer", Counted)
+    answers = [e.result for e in service.view(chat_id).items if isinstance(e, AnswerView)]
+    assert [(r.text, r.counters["restored"], r.counters["unknown"]) for r in answers] == [
+        ("Ответ про a@x.example", 1, 0), ("Ответ про b@x.example и <EMAIL_9>", 1, 1),
+    ]
+    assert built == [1]
+    state, _ = repo.load_state(chat_id)
+    messages = ChatService._local_messages(state, repo.settings(), repo.items(chat_id))
+    assert messages[1]["content"] == "Ответ про a@x.example\n\nОтвет про b@x.example и <EMAIL_9>"
+    assert built == [1, 1]
 
 
 def in_request(service: ChatService, chat_id: str) -> list[int | None]:

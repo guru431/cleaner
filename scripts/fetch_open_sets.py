@@ -77,4 +77,6 @@ def main(out: Path) -> None:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
     main(Path(sys.argv[1]))

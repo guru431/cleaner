@@ -57,6 +57,22 @@ def test_name_parts_join_across_a_dot_only_after_an_initial():
     assert [text[s["start"]:s["end"]] for s in record["spans"]] == ["Иванов", "Петров", "И. Сидоров"]
 
 
+def test_a_run_of_name_parts_longer_than_a_name_stays_apart():
+    """Ревью 26.10.2026: слой 4 сводит в одно имя не больше NAME_WORDS слов, а ряд длиннее считает списком людей
+    (merge._join_names); эталон склеивал любой ряд, и пять фамилий подряд были у него одной сущностью."""
+    text = "Пришли Иванов Петров Сидоров Кузнецов Смирнов, а Ильхам Гейдар оглы Алиев ждал"
+    values = ["Иванов", "Петров", "Сидоров", "Кузнецов", "Смирнов", "Ильхам", "Гейдар", "оглы", "Алиев"]
+    spans, position = [], 0
+    for value in values:
+        start = text.index(value, position)
+        spans.append((start, start + len(value), "LAST_NAME"))
+        position = start + len(value)
+    record = convert(text, spans, Counter())
+    assert [(text[s["start"]:s["end"]], s["entity"]) for s in record["spans"]] == [
+        ("Иванов", 0), ("Петров", 1), ("Сидоров", 2), ("Кузнецов", 3), ("Смирнов", 4), ("Ильхам Гейдар оглы Алиев", 5),
+    ]
+
+
 def test_tokens_missing_from_the_text_skip_the_example():
     assert bio_to_spans(["нет"], ["O"], "совсем другое") is None
 

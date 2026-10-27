@@ -238,3 +238,20 @@ def test_findings_of_both_models_add_up():
     text = "Иванов и John Smith"
     layer = NerLayer([Tagger(Found(0, 6, "LAST_NAME", 0.9)), Tagger(Found(9, 19, "name", 0.9))])
     assert [text[s.start:s.end] for s in layer.detect(text)] == ["Иванов", "John Smith"]
+
+
+def test_tokenizer_windows_of_the_russian_model_cover_the_whole_text():
+    """rubert читает длинный текст окнами по 512 токенов с перекрытием 128 (ner_models.RubertTagger), а режет окна
+    библиотека tokenizers. В 0.23.2 за первым окном шло одно окно из перекрытия, и остаток текста модель не видела
+    (27.10.2026: на pii_benchmark полнота FIRST_NAME 0,896 -> 0,862, LAST_NAME 0,825 -> 0,788); 0.23.3 режет верно."""
+    from tokenizers import Tokenizer, models, pre_tokenizers, processors
+
+    words = [f"w{n}" for n in range(60)]
+    vocab = {token: index for index, token in enumerate(["[UNK]", "[CLS]", "[SEP]", *words])}
+    tokenizer = Tokenizer(models.WordPiece(vocab, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    tokenizer.post_processor = processors.TemplateProcessing(single="[CLS] $A [SEP]", special_tokens=[("[CLS]", 1), ("[SEP]", 2)])
+    tokenizer.enable_truncation(max_length=16, stride=4)
+    encoding = tokenizer.encode(" ".join(words))
+    seen = {word for window in (encoding, *encoding.overflowing) for word in window.word_ids if word is not None}
+    assert seen == set(range(len(words)))

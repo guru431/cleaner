@@ -24,7 +24,9 @@ class Jobs:
     def __init__(self, executor: Executor | None = None, stop_wait: float = STOP_WAIT):
         self._executor = executor or ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="cleaner-job")
         self._stop_wait = stop_wait
-        self._pending: set[Future] = set()      # add и discard атомарны под GIL: отдельный замок не нужен
+        # add, discard и копия set(...) в shutdown атомарны под GIL (копия множества идёт в C без обхода на Python):
+        # отдельный замок не нужен.
+        self._pending: set[Future] = set()
 
     def submit(self, fn: Callable[..., None], *args: object) -> None:
         future = self._executor.submit(_run, fn, args)

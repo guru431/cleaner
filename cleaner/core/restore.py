@@ -1045,6 +1045,20 @@ def restore(state: ChatState, answer: str, settings: Settings) -> RestoreResult:
     return _restore(_Restorer(state, settings), answer)
 
 
+def restore_answers(state: ChatState, settings: Settings) -> Callable[[str], RestoreResult]:
+    """restore для нескольких ответов одного чата (вид чата, запрос локальной модели): таблица чата между ними не
+    меняется, и _Restorer собирается при первом ответе, один на все, — на 12 000 заменах сборка стоит 33 мс на ответ."""
+    built: _Restorer | None = None
+
+    def run(answer: str) -> RestoreResult:
+        nonlocal built
+        if built is None:
+            built = _Restorer(state, settings)
+        return _restore(built, answer)
+
+    return run
+
+
 def _restore(restorer: _Restorer, answer: str) -> RestoreResult:
     """Восстановление готовым _Restorer: от прежнего ответа остаются только сведения о таблице чата."""
     restorer.counters = dict.fromkeys(restorer.counters, 0)
@@ -1147,4 +1161,6 @@ class StreamRestorer:
         return self._shown
 
     def finish(self) -> RestoreResult:
-        return restore(self.state, self.text, self.settings)
+        if self._restorer is None:
+            self._restorer = _Restorer(self.state, self.settings)
+        return _restore(self._restorer, self.text)

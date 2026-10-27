@@ -21,7 +21,7 @@ from cleaner.core.match import normalize
 from cleaner.core.pipeline import (
     Layers, NotSendable, Outgoing, OutgoingContext, SanitizeResult, Turn, build_outgoing, probe_context, sanitize,
 )
-from cleaner.core.restore import RestoreResult, restore
+from cleaner.core.restore import RestoreResult, restore, restore_answers
 from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
 from cleaner.egress import ProviderError, cloud
 from cleaner.storage.codec import state_to_json
@@ -692,6 +692,7 @@ class ChatService:
         # точная запись любых полей, и новых тоже (repr, например, обрезает длинное выражение re.Pattern).
         inputs = hashlib.sha256(state_to_json(state)).digest() + hashlib.sha256(pickle.dumps(settings)).digest()
         views: list[InputView | AnswerView] = []
+        restore_answer = restore_answers(state, settings)
         items = self.repo.items(chat_id)
         for item, in_request in zip(items, _in_request(items)):
             if item_id is not None and item.id != item_id:
@@ -715,7 +716,7 @@ class ChatService:
                 # настоящий адрес в выданной подсети иначе приняли бы за выведенный (FR-7.6).
                 views.append(AnswerView(item, RestoreResult(item.original, [], {})))
             else:
-                result = restore(state, item.original, settings)
+                result = restore_answer(item.original)
                 result.counters["in_request"] = item.meta.get("in_request", in_request)    # у ответа облака — с отправки
                 views.append(AnswerView(item, result))
         return ChatView(state, settings, views)
@@ -872,6 +873,7 @@ class ChatService:
                 live.append(piece)
                 if live.size() > self.max_text_chars:
                     live.stop(f"Ответ длиннее {self.max_text_chars} знаков: дальше он не читается")
+                    break
             if live.cancel.is_set():
                 error = live.reason or _STOPPED
             elif outcome.get("truncated"):
@@ -928,6 +930,7 @@ class ChatService:
     def _local_messages(state: ChatState, settings: Settings, items: list[Item]) -> list[dict[str, str]]:
         """FR-9.4: локальной модели — оригиналы; ответы облака — восстановленными, локальные — как есть."""
         system, messages = [], []
+        restore_answer = restore_answers(state, settings)
         for item in items:
             if item.kind == "input":
                 if not item.original:
@@ -937,7 +940,7 @@ class ChatService:
                     continue
                 role, text = "user", item.original
             elif item.original and item.status in ("done", "partial"):
-                text = item.original if item.source == "local" else restore(state, item.original, settings).text
+                text = item.original if item.source == "local" else restore_answer(item.original).text
                 role = "assistant"
             else:
                 continue

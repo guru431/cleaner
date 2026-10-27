@@ -225,6 +225,17 @@ def test_server_dependencies_take_torch_without_cuda():
     assert not [name for name in pins if name.startswith(("nvidia-", "cuda-")) or name == "triton"]
 
 
+def test_installer_stops_the_service_before_it_replaces_the_code_and_rollback_starts_it_again():
+    """Ревью 26.10.2026: служба, работающая над подменённым каталогом, лениво импортировала бы новые модули вперемешку
+    со старыми — до перезапуска шли ещё копия базы и самопроверка."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    for swap in ('mv "$APP/.venv" "$APP/.venv.prev"', 'mv "$APP/cleaner" "$PREV_CODE"'):
+        preceding = text[:text.index(swap)].splitlines()[-3:]
+        assert "stop_service" in [line.strip() for line in preceding], swap
+    rollback = text[text.index("rollback() {"):text.index("trap 'rollback")]
+    assert "$STOPPED -eq 1" in rollback
+
+
 def test_installer_copies_the_database_before_the_new_version_and_rollback_restores_it():
     """Обзор плана 2+4, I-4: новая версия мигрирует схему при старте, а прежний код базу новой версии не откроет.
     Копия снимается до перезапуска службы, откат возвращает её, если схема успела измениться."""
