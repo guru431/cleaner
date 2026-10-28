@@ -2,6 +2,7 @@
 SEC-13): провайдер получает только собранное pipeline, заголовки из списка и ключ подключения."""
 import json
 
+import httpx
 import pytest
 
 from cleaner.core.pipeline import AgentOutgoing, build_agent_outgoing, sanitize
@@ -114,8 +115,14 @@ def test_redirect_is_not_followed(state, settings):
         assert len(stub.requests) == 1
 
 
-def test_connection_error_is_a_provider_error_without_the_key(state, settings):
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ReadTimeout])
+def test_connection_error_is_a_provider_error_without_the_key(state, settings, error):
+    """Сеть подменена: отказ соединения с закрытым портом на Windows ждёт повторов около двух секунд."""
+    def fail(request: httpx.Request) -> httpx.Response:
+        raise error(f"не удалось, ключ {KEY}", request=request)
+
     out, _ = outgoing(state, settings)
     with pytest.raises(ProviderError) as caught:
-        egress.forward(out, connection("http://127.0.0.1:1"), state, settings)
-    assert KEY not in str(caught.value) and KEY not in repr(caught.value) and not isinstance(caught.value, egress.ProviderTimeout)
+        egress.forward(out, connection("http://127.0.0.1:1"), state, settings, transport=httpx.MockTransport(fail))
+    assert KEY not in str(caught.value) and KEY not in repr(caught.value)
+    assert isinstance(caught.value, egress.ProviderTimeout) is (error is httpx.ReadTimeout)
