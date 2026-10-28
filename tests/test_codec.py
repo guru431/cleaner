@@ -28,6 +28,14 @@ def test_state_after_sanitizing_survives_the_round_trip(state):
     assert codec.state_from_json(codec.state_to_json(state)) == state
 
 
+def test_written_mode_is_stored_and_old_records_read_as_ordinary(state):
+    state.written = True
+    assert codec.state_from_json(codec.state_to_json(state)).written is True
+    data = json.loads(codec.state_to_json(state))
+    del data["written"]         # запись чата до плана 5Б
+    assert codec.state_from_json(json.dumps(data).encode("utf-8")).written is False
+
+
 def test_rules_stored_without_bounds_are_read_as_rules_searched_anywhere(state):
     """Правило до 15.10.2026 хранилось тройкой: чат читается без миграции, правило ищется, как искалось."""
     state.rules += [ChatRule("mask", "Заря", T.TERM), ChatRule("unmask", "a@x.example")]

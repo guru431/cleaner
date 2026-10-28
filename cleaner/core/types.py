@@ -112,6 +112,7 @@ class ChatState:
     foreign_labels: set[str] = field(default_factory=set)            # строки вида метки, пришедшие извне
     counters: dict[str, int] = field(default_factory=dict)
     net6: dict[str, int] = field(default_factory=dict)               # подсеть /64 -> её номер
+    written: bool = False      # режим написаний (чат шлюза): каждое написание — своя замена, восстанавливается точно
 
 
 @dataclass(frozen=True)
