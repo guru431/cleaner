@@ -201,6 +201,22 @@ def test_text_limits_are_json_errors(api):
     assert responses[0].json()["error"]["message"] == "Пустой текст"
 
 
+def test_strings_that_are_not_utf_8_are_422_not_500(api, repo):
+    """Ревью 5А: «\\ud800» — допустимый JSON, но не текст: строка без пары не кодируется в UTF-8 для шифрования."""
+    program = api()
+    chat_id = chat(program)
+    item_id = clean(program, chat_id).json()["item_id"]
+    for path, body in (
+        ("/api/v1/chats", '{"title": "Отчёт \\ud800"}'),
+        (f"/api/v1/chats/{chat_id}/texts", '{"text": "abc \\ud800 def"}'),
+        (f"/api/v1/chats/{chat_id}/restore", '{"text": "Ответ \\udfff"}'),
+        (f"/api/v1/chats/{chat_id}/rules", f'{{"action": "mask", "value": "x\\ud800", "type": "TERM", "item_id": "{item_id}"}}'),
+    ):
+        response = program.post(path, content=body.encode("utf-8"), headers={"Content-Type": "application/json"})
+        assert (response.status_code, response.json()["error"]["code"]) == (422, 422), path
+    assert repo.audit_events("error") == []
+
+
 def test_wait_out_of_range_is_422(api):
     program = api()
     chat_id = chat(program)

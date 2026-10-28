@@ -10,7 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from cleaner.core.types import ChatState, EntityType
 from cleaner.service import EditRefused, InputView, TextTooLong
@@ -24,22 +24,37 @@ _WORKING = ("queued", "running")
 _POLL = 0.2                 # как часто маршрут texts смотрит, готов ли текст, пока ждёт wait секунд
 
 
-class ChatIn(BaseModel):
+class Body(BaseModel):
+    """Тело запроса программы. Строка с «\\ud800» без пары — допустимый JSON, но не текст: её не закодировать в UTF-8
+    для шифрования и базы. Отказ — 422, как у неверного тела, а не внутренняя ошибка."""
+
+    @field_validator("*")
+    @classmethod
+    def _utf_8(cls, value: object) -> object:
+        if isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("строка не в UTF-8") from None
+        return value
+
+
+class ChatIn(Body):
     title: str = ""
     label_style: Literal["angle", "square"] = "angle"
     layers: dict[Literal["ner", "llm"], bool] = {}
 
 
-class TextIn(BaseModel):
+class TextIn(Body):
     text: str
     wait: int = Field(30, ge=0, le=60)
 
 
-class AnswerIn(BaseModel):
+class AnswerIn(Body):
     text: str
 
 
-class RuleIn(BaseModel):
+class RuleIn(Body):
     action: Literal["mask", "unmask"]
     value: str
     item_id: str = ""           # mask: текст, в котором есть фрагмент, — как выделение на экране проверки
