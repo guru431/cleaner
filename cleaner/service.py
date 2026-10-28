@@ -48,7 +48,8 @@ UNDOABLE = {
 _EXAMPLES = 5                       # примеров «было → станет» в предпросмотре
 _EXAMPLE_CONTEXT, _EXAMPLE_WIDTH = 40, 120
 _RISK_IDLE = ("", "done", "failed", "interrupted")     # состояния проверки риска, из которых её можно запустить
-INPUT_SOURCES = ("paste", "instruction")                # вставленный текст и инструкция пользователя для модели (FR-8.5)
+# Вставленный текст, инструкция пользователя для модели (FR-8.5) и текст, присланный программой по /api/v1 (FR-13.3).
+INPUT_SOURCES = ("paste", "instruction", "program")
 LOCAL_ANSWER_TOKENS = 4096
 _SEND_INTERNAL = "Внутренняя ошибка отправки"
 _STOPPED = "Остановлено"

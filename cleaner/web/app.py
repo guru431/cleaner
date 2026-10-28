@@ -57,8 +57,8 @@ class BodyLimit:
         self.limit = limit
 
     def _limit(self, scope: Scope) -> int:
-        """У загрузки файла свой предел — max_file_mb (FR-2.2); у остальных запросов — общий."""
-        if scope["path"].endswith("/upload"):
+        """У загрузки файла (страница и /api/v1) свой предел — max_file_mb (FR-2.2); у остальных запросов — общий."""
+        if scope["path"].endswith(("/upload", "/files")):
             return scope["app"].state.max_file_bytes + _UPLOAD_HEADROOM
         return self.limit
 

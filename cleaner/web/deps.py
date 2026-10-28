@@ -149,14 +149,15 @@ class Upload:
     ocr_all: bool = False       # отметка «Распознать текст на всех страницах PDF»
 
 
-async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)) -> Upload:
-    """Файл из формы multipart с токеном формы. Предел — max_file_mb (FR-2.2); Cleaner файл на диск не пишет (FR-2.7)."""
+async def _read_upload(request: Request, csrf: str | None) -> Upload:
+    """Файл из формы multipart. Предел — max_file_mb (FR-2.2); Cleaner файл на диск не пишет (FR-2.7).
+    csrf — токен формы страницы; у программы его нет (None), её открывает ключ доступа."""
     limit = request.app.state.max_file_bytes
     too_large = f"Файл больше {limit // (1024 * 1024)} МБ"
     if int(request.headers.get("content-length") or 0) > limit + _UPLOAD_OVERHEAD:
         raise HTTPException(413, too_large)
     form = await request.form(max_files=1, max_fields=4)
-    if not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), viewer.session.csrf.encode("utf-8")):
+    if csrf is not None and not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), csrf.encode("utf-8")):
         raise HTTPException(403, "Форма устарела — обновите страницу")
     upload = form.get("file")
     if not isinstance(upload, UploadFile) or not upload.filename:
@@ -166,6 +167,16 @@ async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)) -> 
     if len(data) > limit:
         raise HTTPException(413, too_large)
     return Upload(upload.filename, data, form.get("ocr") == "all")
+
+
+async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)) -> Upload:
+    """Файл из формы страницы — с токеном формы."""
+    return await _read_upload(request, viewer.session.csrf)
+
+
+async def get_api_upload(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Upload:
+    """Файл программы: поле file и необязательное ocr=all. Ключ проверяется раньше, чем читается тело."""
+    return await _read_upload(request, None)
 
 
 def page(request: Request, name: str, viewer: Viewer | None, status_code: int = 200, **context: object) -> HTMLResponse:
