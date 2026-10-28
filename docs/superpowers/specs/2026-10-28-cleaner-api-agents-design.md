@@ -308,17 +308,19 @@ JSON, ключ — `X-Cleaner-Key` (любой ключ, `upstream` не нуж�
 | `POST /api/v1/chats` `{title?, label_style?, layers?}` | новый чат | `{id}` |
 | `GET /api/v1/chats` | чаты владельца ключа | `[{id, title, updated_at}]` |
 | `DELETE /api/v1/chats/{id}` | удалить (FR-1.4, без подтверждения — вызов и есть подтверждение) | 204 |
-| `POST /api/v1/chats/{id}/texts` `{text, wait?}` | очистить текст | 200 `{item_id, status, sanitized, replacements[{start,end,type,replacement}], warnings[], blocked_types[], deliverable}` или 202 `{item_id, status}`, если не уложилось в `wait` (по умолчанию 30 с) |
+| `POST /api/v1/chats/{id}/texts` `{text, wait?}` | очистить текст | 200 `{item_id, status, deliverable, sanitized, replacements[{start,end,type,replacement}], notices[{code,start,end}], leaks, blocked}` (позиции — в исходном тексте; `sanitized` — только при `deliverable`) или 202 `{item_id, status}`, если не уложилось в `wait` (0–60 с, по умолчанию 30) |
 | `POST /api/v1/chats/{id}/files` (multipart) | очистить файл (FR-2.2…2.9) | 202 `{item_id}` |
 | `GET /api/v1/chats/{id}/items/{item_id}` | состояние и результат | как у `texts` |
-| `POST /api/v1/chats/{id}/restore` `{text}` | восстановить ответ модели (FR-7) и сохранить его элементом чата | `{restored, counters, unknown[], foreign_links}` |
-| `GET /api/v1/chats/{id}/entities` | таблица соответствий (FR-1.6) | `[{replacement, type, original, count}]` |
-| `POST /api/v1/chats/{id}/rules` `{action: mask\|unmask, value, type?}` | правка распознавания (FR-6.2, 6.3) | `{changed_items}` |
+| `POST /api/v1/chats/{id}/restore` `{text}` | восстановить ответ модели (FR-7) и сохранить его элементом чата | `{item_id, restored, counters, unknown[]}` |
+| `GET /api/v1/chats/{id}/entities` | таблица соответствий (FR-1.6) | `[{id, type, replacements[], original, forms[], count}]` |
+| `POST /api/v1/chats/{id}/rules` `{action: mask, item_id, value, type}` или `{action: unmask, value}` | правка распознавания (FR-6.2, 6.3); назначить замену можно только фрагменту, который есть в тексте `item_id` — как выделение на экране проверки | `{changed}` — сколько текстов изменилось |
 
 - Тот же порядок, что в интерфейсе: очистка — задание в общем пуле, `deliverable` — по SEC-2 и FR-4.2; невыдаваемый результат приходит без `sanitized`.
 - Проект, которому нужен разговор с моделью, а не только очистка, ходит в шлюз (`/agent/openai/v1/chat/completions` с ключом, у которого есть `upstream`) — это и есть «API для других проектов» в самом удобном виде: в SDK меняется только адрес.
-- Ошибки — `{"error": {"code", "message"}}` с кодами 400/401/404/409/413/422.
-- События журнала — как у тех же действий в интерфейсе, с признаком `via: api`.
+- Ключ — заголовком `X-Cleaner-Key` или `Authorization: Bearer ck_…`.
+- Ошибки — `{"error": {"code", "message"}}` с кодами 400/401/404/413/422/429; значения из запроса в сообщение не попадают.
+- Текст из API — элемент чата с `source = 'program'`: в ленте «Текст из программы», в журнале очистки — тот же признак. Создание и удаление чата — события с `via: api`.
+- Ключи выпускает и команда `cleaner apikey add <логин> --name <имя>` (ключ печатается один раз), `apikey list`, `apikey disable <id>` — для проектов, которые заводятся сценарием (моё решение).
 
 ## 16. Веб-интерфейс
 
@@ -381,13 +383,14 @@ JSON, ключ — `X-Cleaner-Key` (любой ключ, `upstream` не нуж�
 
 ## 22. Порядок работ
 
-| Часть | Что | Зависит от |
+Четыре плана, каждый пишется перед своей частью и кончается установкой на example и example и своей приёмкой (решение владельца 28.10.2026):
+
+| План | Что | Зависит от |
 |---|---|---|
-| 5А | ключи, `/api/v1`, страница «Ключи» (G1) | — |
-| 5Б | проверки раздела 18, режим написаний (раздел 11), журнал отправленного, шлюз Anthropic с подключением Cleaner, восстановление потока, чат шлюза в интерфейсе | 5А |
-| 5В | Chat Completions и Responses с подключением Cleaner | 5Б |
-| 5Г | подписки Claude и ChatGPT | 5Б, 5В |
-| 5Д | установка на example и example, режимы `claude-switch`, фрагменты Codex и OpenCode, приёмка | 5Г |
+| 5А | ключи, `/api/v1`, страница «Ключи», команда `apikey` (G1); приёмка AC-5.8 | — |
+| 5Б | сначала проверки раздела 18, затем режим написаний (раздел 11), журнал отправленного, шлюз Anthropic с подключением Cleaner, восстановление потока, чат шлюза в интерфейсе, режим `cleaner` в `claude-switch` | 5А |
+| 5В | Chat Completions и Responses, протокол `responses` у подключений, подписки Claude и ChatGPT, настройки Codex и OpenCode | 5Б |
+| 5Г | замеры скорости на серверах (раздел 13, проверка 5 раздела 18), полная приёмка AC-5.1…5.10 | 5В |
 
 5А полезна сама по себе и не ждёт остального.
 
