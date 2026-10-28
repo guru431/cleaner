@@ -34,6 +34,9 @@ _CHECKPOINT_ATTEMPTS = 3            # каждая попытка сама жд�
 # Слои 4 и 5 по умолчанию для чатов без явного решения (FR-3.8). Слой 4 включён по умолчанию;
 # слой 5 — после замера задачи 23 (раздел 19 спецификации).
 DEFAULT_LAYERS = {"ner": True, "llm": False}
+# Слои 4 и 5 для ключа шлюза — выключены, пока не включены явно (решение владельца 4, спецификация 2026-10-28).
+KEY_LAYERS = {"ner": False, "llm": False}
+_IN_CHUNK = 500         # отпечатков в одном запросе IN: предел переменных SQLite
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,35 @@ class Chat:
     user_id: str
     title: str
     updated_at: str
+    kind: str = "chat"         # chat | agent (чат шлюза, спецификация 2026-10-28, 6.3)
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
+class Conversation:
+    """Разговор агента (6.3): запросы с одной историей; id — HMAC отпечатка первого сообщения пользователя."""
+
+    id: str
+    chat_id: str
+    key_id: str
+    session: str
+    first_seen: str
+    last_seen: str
+    requests: int
+
+
+@dataclass(frozen=True)
+class LedgerEntry:
+    """Запись журнала отправленного (7.2): блок со стороны агента (local) и как он ушёл провайдеру или пришёл от него
+    (wire) — JSON блока. withheld — причина удержания (7.4) или ""; counts — замены по типам."""
+
+    conversation: str
+    direction: str             # in — блок агента; out — блок модели
+    digest: str
+    local: str
+    wire: str
+    withheld: str = ""
+    counts: dict[str, int] = field(default_factory=dict, hash=False)
 
 
 @dataclass
@@ -153,6 +185,10 @@ class ApiKey:
     disabled: bool
     created_at: str
     last_used_at: str          # "" — не использовался
+    upstream: str | None = None                # None — только /api/v1; "provider:<id>" — шлюз к подключению (6.1)
+    models: tuple[str, ...] = ()               # разрешённые модели подключения; пусто — все
+    layers: dict[str, bool] = field(default_factory=lambda: dict(KEY_LAYERS), hash=False)     # слои 4 и 5 шлюза
+    chat_id: str | None = None                 # текущий чат шлюза
 
 
 class Repository:
@@ -265,33 +301,36 @@ class Repository:
             raise KeyError(chat_id)
         return crypto.unseal(self.master, row["dek_wrapped"], f"chat-dek:{chat_id}")
 
-    def create_chat(self, user_id: str, title: str, label_style: str = "angle") -> str:
+    def create_chat(self, user_id: str, title: str, label_style: str = "angle", kind: str = "chat") -> str:
+        """kind="agent" — чат шлюза: состояние в режиме написаний (спецификация 2026-10-28, 6.3, 11)."""
         chat_id = uuid.uuid4().hex
         dek = crypto.new_key()
-        state = ChatState(chat_id=chat_id, net_key=os.urandom(32), label_style=label_style)
+        state = ChatState(chat_id=chat_id, net_key=os.urandom(32), label_style=label_style, written=kind == "agent")
         now = self._now()
         self._run(
-            "INSERT INTO chats(id, user_id, title_enc, dek_wrapped, state_enc, version, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+            "INSERT INTO chats(id, user_id, title_enc, dek_wrapped, state_enc, version, created_at, updated_at, kind) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
             chat_id, user_id,
             self._enc(dek, title, f"chats.title:{chat_id}"),
             crypto.seal(self.master, dek, f"chat-dek:{chat_id}"),
             crypto.seal(dek, state_to_json(state), f"chats.state:{chat_id}"),
-            now, now,
+            now, now, kind,
         )
         return chat_id
 
+    _CHAT_COLUMNS = "id, user_id, title_enc, updated_at, kind, created_at"
+
     def _chat(self, row: sqlite3.Row) -> Chat:
         title = self._dec(self._dek(row["id"]), row["title_enc"], f"chats.title:{row['id']}")
-        return Chat(row["id"], row["user_id"], title, row["updated_at"])
+        return Chat(row["id"], row["user_id"], title, row["updated_at"], row["kind"], row["created_at"])
 
     def chat(self, chat_id: str) -> Chat | None:
-        row = self._one("SELECT id, user_id, title_enc, updated_at FROM chats WHERE id = ?", chat_id)
+        row = self._one(f"SELECT {self._CHAT_COLUMNS} FROM chats WHERE id = ?", chat_id)
         return None if row is None else self._chat(row)
 
     def chats(self, user_id: str) -> list[Chat]:
         rows = self._all(
-            "SELECT id, user_id, title_enc, updated_at FROM chats WHERE user_id = ? ORDER BY updated_at DESC, id",
+            f"SELECT {self._CHAT_COLUMNS} FROM chats WHERE user_id = ? ORDER BY updated_at DESC, id",
             user_id,
         )
         return [self._chat(row) for row in rows]
@@ -406,9 +445,9 @@ class Repository:
 
     def commit_chat(
         self, chat_id: str, state: ChatState, version: int,
-        new_items: Iterable[Item] = (), updated_items: Iterable[Item] = (),
+        new_items: Iterable[Item] = (), updated_items: Iterable[Item] = (), ledger: Iterable[LedgerEntry] = (),
     ) -> None:
-        """Состояние и элементы — одной транзакцией. StaleState, если чат успели изменить.
+        """Состояние, элементы и записи журнала отправленного — одной транзакцией. StaleState, если чат успели изменить.
 
         Если очищенный текст элемента изменился, догадки проверки риска стираются, а идущая проверка
         отменяется вместе с её заданием: они о прежнем тексте (FR-9.3). Так же снимается отметка
@@ -424,6 +463,7 @@ class Repository:
             )
             if cursor.rowcount != 1:
                 raise StaleState(chat_id)
+            self._insert_ledger(key, ledger, now)
             seq = self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM items WHERE chat_id = ?", (chat_id,)).fetchone()[0]
             for item in new_items:
                 seq += 1
@@ -690,15 +730,27 @@ class Repository:
         return ApiKey(
             row["id"], row["user_id"], self._dec(self.global_key, row["name_enc"], f"api_keys.name:{row['id']}"),
             row["tail"], bool(row["disabled"]), row["created_at"], row["last_used_at"] or "",
+            row["upstream"], tuple(json.loads(row["models"])), KEY_LAYERS | json.loads(row["layers"]), row["chat_id"],
         )
 
-    def add_api_key(self, user_id: str, name: str, token_hash: str, tail: str) -> str:
+    def add_api_key(
+        self, user_id: str, name: str, token_hash: str, tail: str,
+        upstream: str | None = None, models: tuple[str, ...] = (), layers: dict[str, bool] | None = None,
+    ) -> str:
+        """Доступ к модели (upstream, models) задаётся при создании и не меняется: другой доступ — новый ключ."""
         key_id = uuid.uuid4().hex
         self._run(
-            "INSERT INTO api_keys(id, user_id, name_enc, token_hash, tail, disabled, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+            "INSERT INTO api_keys(id, user_id, name_enc, token_hash, tail, disabled, created_at, upstream, models, layers) "
+            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
             key_id, user_id, self._enc(self.global_key, name, f"api_keys.name:{key_id}"), token_hash, tail, self._now(),
+            upstream, json.dumps(list(models), ensure_ascii=False),
+            json.dumps({name_: bool((layers or KEY_LAYERS).get(name_, False)) for name_ in KEY_LAYERS}),
         )
         return key_id
+
+    def set_key_chat(self, key_id: str, chat_id: str | None) -> None:
+        """Текущий чат шлюза ключа; None — следующий новый разговор начнёт новый чат («Начать заново»)."""
+        self._run("UPDATE api_keys SET chat_id = ? WHERE id = ?", chat_id, key_id)
 
     def api_key_by_hash(self, token_hash: str) -> ApiKey | None:
         return self._api_key(self._one("SELECT * FROM api_keys WHERE token_hash = ?", token_hash))
@@ -720,6 +772,126 @@ class Repository:
 
     def touch_api_key(self, key_id: str) -> None:
         self._run("UPDATE api_keys SET last_used_at = ? WHERE id = ?", self._now(), key_id)
+
+    # --- разговоры агентов и журнал отправленного (спецификация 2026-10-28, 6.3, 7) -------------
+
+    @staticmethod
+    def _conversation(row: sqlite3.Row | None) -> Conversation | None:
+        if row is None:
+            return None
+        return Conversation(
+            row["id"], row["chat_id"], row["key_id"], row["session"], row["first_seen"], row["last_seen"], row["requests"],
+        )
+
+    def conversation(self, conv_id: str) -> Conversation | None:
+        return self._conversation(self._one("SELECT * FROM agent_conversations WHERE id = ?", conv_id))
+
+    def add_conversation(self, conv_id: str, chat_id: str, key_id: str, session: str) -> Conversation:
+        """Новый разговор в чате; уже записанный (параллельный запрос успел первым) остаётся в своём чате."""
+        now = self._now()
+        with self.lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO agent_conversations(id, chat_id, key_id, session, first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (conv_id, chat_id, key_id, session, now, now),
+            )
+            return self._conversation(
+                self.conn.execute("SELECT * FROM agent_conversations WHERE id = ?", (conv_id,)).fetchone()
+            )
+
+    def touch_conversation(self, conv_id: str, session: str) -> None:
+        """Запрос разговора: время и счётчик; сессия агента записывается первая увиденная — для просмотра."""
+        self._run(
+            "UPDATE agent_conversations SET last_seen = ?, requests = requests + 1, "
+            "session = CASE WHEN session = '' THEN ? ELSE session END WHERE id = ?",
+            self._now(), session, conv_id,
+        )
+
+    @staticmethod
+    def _ledger_aad(column: str, conversation: str, direction: str, digest: str) -> str:
+        return f"agent_ledger.{column}:{conversation}:{direction}:{digest}"
+
+    def _insert_ledger(self, key: bytes, entries: Iterable[LedgerEntry], now: str) -> None:
+        """Под замком и в транзакции вызывающего. INSERT OR IGNORE: блок, записанный параллельным запросом, остаётся
+        первым — его вид уже ушёл провайдеру."""
+        for e in entries:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO agent_ledger(conversation, direction, digest, local_enc, wire_enc, withheld, counts, "
+                "first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    e.conversation, e.direction, e.digest,
+                    self._enc(key, e.local, self._ledger_aad("local", e.conversation, e.direction, e.digest)),
+                    self._enc(key, e.wire, self._ledger_aad("wire", e.conversation, e.direction, e.digest)),
+                    e.withheld, json.dumps(e.counts), now, now,
+                ),
+            )
+
+    def add_ledger(self, chat_id: str, entries: Iterable[LedgerEntry]) -> None:
+        """Записи без состояния чата — блоки ответа модели (out) по концу потока."""
+        key = self._dek(chat_id)
+        with self.lock, transaction(self.conn):
+            self._insert_ledger(key, entries, self._now())
+
+    def _ledger_entry(self, row: sqlite3.Row, key: bytes) -> LedgerEntry:
+        conversation, direction, digest = row["conversation"], row["direction"], row["digest"]
+        return LedgerEntry(
+            conversation, direction, digest,
+            self._dec(key, row["local_enc"], self._ledger_aad("local", conversation, direction, digest)),
+            self._dec(key, row["wire_enc"], self._ledger_aad("wire", conversation, direction, digest)),
+            row["withheld"], json.loads(row["counts"]),
+        )
+
+    def ledger_get(self, chat_id: str, conversation: str, direction: str, digests: list[str]) -> dict[str, LedgerEntry]:
+        """Записанные блоки разговора по отпечаткам; расшифровываются только найденные."""
+        key = self._dek(chat_id)
+        found: dict[str, LedgerEntry] = {}
+        unique = list(dict.fromkeys(digests))
+        for start in range(0, len(unique), _IN_CHUNK):
+            chunk = unique[start:start + _IN_CHUNK]
+            rows = self._all(
+                f"SELECT * FROM agent_ledger WHERE conversation = ? AND direction = ? AND digest IN ({', '.join('?' * len(chunk))})",
+                conversation, direction, *chunk,
+            )
+            for row in rows:
+                found[row["digest"]] = self._ledger_entry(row, key)
+        return found
+
+    def touch_ledger(self, chat_id: str, conversation: str, direction: str, digests: list[str]) -> None:
+        """Повторённые блоки — время последнего повтора (для просмотра)."""
+        unique = list(dict.fromkeys(digests))
+        now = self._now()
+        with self.lock, transaction(self.conn):
+            for start in range(0, len(unique), _IN_CHUNK):
+                chunk = unique[start:start + _IN_CHUNK]
+                self.conn.execute(
+                    f"UPDATE agent_ledger SET last_seen = ? WHERE conversation = ? AND direction = ? "
+                    f"AND digest IN ({', '.join('?' * len(chunk))})",
+                    (now, conversation, direction, *chunk),
+                )
+
+    def ledger_page(self, chat_id: str, offset: int, limit: int) -> list[tuple[LedgerEntry, str]]:
+        """Записи журнала чата шлюза — новые первыми — и время первой записи каждой."""
+        key = self._dek(chat_id)
+        rows = self._all(
+            "SELECT l.* FROM agent_ledger l JOIN agent_conversations c ON c.id = l.conversation WHERE c.chat_id = ? "
+            "ORDER BY l.first_seen DESC, l.rowid DESC LIMIT ? OFFSET ?",
+            chat_id, limit, offset,
+        )
+        return [(self._ledger_entry(row, key), row["first_seen"]) for row in rows]
+
+    def prune_agent(self, before: str) -> int:
+        """Разговоры без запросов с before удаляются с журналом (каскадом, 7.3); чаты шлюза без разговоров, которые не
+        текущие ни у одного ключа, — как удаление чата (контрольная точка WAL). Число удалённых чатов."""
+        with self.lock, transaction(self.conn):
+            self.conn.execute("DELETE FROM agent_conversations WHERE last_seen < ?", (before,))
+            orphans = [row["id"] for row in self.conn.execute(
+                "SELECT id FROM chats WHERE kind = 'agent' "
+                "AND NOT EXISTS (SELECT 1 FROM agent_conversations c WHERE c.chat_id = chats.id) "
+                "AND NOT EXISTS (SELECT 1 FROM api_keys k WHERE k.chat_id = chats.id)"
+            ).fetchall()]
+        for chat_id in orphans:
+            self.delete_chat(chat_id)
+        return len(orphans)
 
     # --- настройки в базе ---------------------------------------------------------
 
