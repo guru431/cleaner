@@ -14,6 +14,11 @@
   шаг сценария не расходуется; без `"stream": true` — ответ JSON.
 - `POST /v1/messages/count_tokens` — 404 (агент считает сам); `HEAD /api/hello` — 204; остальное — 404.
 
+Подстановки в строках шага — из результатов инструментов в запросе, начиная с последнего: `{{line:<начало>}}` — строка,
+которая так начинается (без номера строки, который ставит Read у Claude Code), `{{re:<выражение>}}` — первое совпадение.
+Так сценарий «прочитать файл → правка» берёт строку файла в том виде, в каком её увидела модель за шлюзом. В
+`partial_json` подставленное экранируется для JSON. Подставить нечего — строка остаётся как есть.
+
 Только стандартная библиотека: заглушка идёт и системным python3 сервера. Сеть — только 127.0.0.1.
 """
 from __future__ import annotations
@@ -22,6 +27,7 @@ import argparse
 import gzip
 import itertools
 import json
+import re
 import threading
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,6 +54,65 @@ def _plain(text: str, stream: bool) -> tuple[str, bytes]:
         {"type": "message_stop"},
     ]
     return "text/event-stream", sse(events)
+
+
+_SUBSTITUTION = re.compile(r"\{\{(line|re):(.+?)\}\}")
+_LINE_NUMBER = re.compile(r"^\s*\d+\t")
+
+
+def _results(request: dict) -> list[str]:
+    """Тексты результатов инструментов в запросе, последний — первым."""
+    texts = []
+    for message in request.get("messages") or ():
+        for block in message.get("content") if isinstance(message.get("content"), list) else ():
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                content = block.get("content")
+                parts = [content] if isinstance(content, str) else [
+                    part.get("text", "") for part in content or () if isinstance(part, dict)
+                ]
+                texts.append("\n".join(parts))
+    return texts[::-1]
+
+
+def _find(kind: str, argument: str, results: list[str]) -> str | None:
+    for text in results:
+        if kind == "re":
+            m = re.search(argument, text)
+            if m:
+                return m.group()
+            continue
+        for line in text.splitlines():
+            line = _LINE_NUMBER.sub("", line)
+            if line.startswith(argument):
+                return line
+    return None
+
+
+def render(step: list[dict], request: dict) -> list[dict]:
+    """Шаг сценария с подстановками из запроса (см. описание модуля)."""
+    results = _results(request)
+
+    def walk(value: object, key: str = "") -> object:
+        if isinstance(value, str):
+            def substitute(m: re.Match[str]) -> str:
+                argument = m.group(2)
+                if key == "partial_json":       # подстановка стоит внутри строки JSON — и её аргумент экранирован
+                    try:
+                        argument = json.loads(f'"{argument}"')
+                    except ValueError:
+                        pass
+                found = _find(m.group(1), argument, results)
+                if found is None:
+                    return m.group()
+                return json.dumps(found, ensure_ascii=False)[1:-1] if key == "partial_json" else found
+            return _SUBSTITUTION.sub(substitute, value)
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        if isinstance(value, dict):
+            return {name: walk(item, name) for name, item in value.items()}
+        return value
+
+    return walk(step)
 
 
 def sse(events: list[dict]) -> bytes:
@@ -122,7 +187,7 @@ def make_handler(out: Path, steps: list[list[dict]]) -> type[BaseHTTPRequestHand
             with lock:
                 step = next(cycle)
             self._record(body, step)
-            self._send(200, "text/event-stream", sse(steps[step]))
+            self._send(200, "text/event-stream", sse(render(steps[step], request)))
 
     return Handler
 
