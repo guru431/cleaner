@@ -20,7 +20,9 @@ from cleaner.clock import Clock
 from cleaner.egress import cloud
 from cleaner.service import ChatService
 from cleaner.storage.repo import Repository
-from cleaner.web import auth, routes_api, routes_auth, routes_chats, routes_review, routes_send, routes_settings
+from cleaner.web import (
+    auth, routes_api, routes_auth, routes_chats, routes_keys, routes_review, routes_send, routes_settings,
+)
 from cleaner.web.deps import MAX_BODY_BYTES, LoginRequired, page
 from cleaner.web.jobs import INTERRUPTED, Jobs, shutdown
 
@@ -146,6 +148,7 @@ def create_app(
     app.include_router(routes_review.router)
     app.include_router(routes_send.router)
     app.include_router(routes_settings.router)
+    app.include_router(routes_keys.router)
     app.include_router(routes_api.router)
 
     @app.exception_handler(LoginRequired)
