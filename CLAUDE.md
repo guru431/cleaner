@@ -35,6 +35,8 @@ CLEANER_API_KEY=ck_… .venv/Scripts/python.exe scripts/api_smoke.py --url http:
 
 Без `--config` и `CLEANER_CONFIG` действуют настройки по умолчанию: адрес 127.0.0.1, данные в `data/` (каталог в `.gitignore`).
 
+Claude Code через шлюз агентов (план 5Б) на машине разработки: подключение с протоколом Anthropic на странице «Настройки → Облачные подключения», ключ шлюза к нему — на странице «Ключи» (доступ к модели) или `cleaner apikey add dev --name agent --provider <id подключения> --model <модель>` с главным ключом в окружении (ключ печатается один раз). Затем в проекте, где работает агент, — `claude-switch.ps1 cleaner` (мастер в `claude-bundle`): `CLEANER_URL` (`http://127.0.0.1:5464` без TLS или `https://…` с сертификатом), `CLEANER_KEY`, `CLEANER_CA_FILE` (сертификат службы для Node), `CLEANER_MODEL` — в окружении или в `.env` переключателя; ключ — и через `-KeyHelper`. Записи настоящих запросов агента — `scripts/agent_capture.py` (заглушка Anthropic, только стандартная библиотека), их разбор и итоги проверок — спецификация 2026-10-28, раздел 18.
+
 ## Установка на example
 
 Сервер описан в `D:\vsc\vLLM` (его правила действуют и здесь); установщик, юнит и проверка — в `deploy/`. Доступ с build-host (сеть `example/19`): `ssh -i ~/.ssh/example -p 34012 example@example`; с workstation — по WireGuard через debian: `ssh -i ~/.ssh/studio_deploy_key -p 34012 deploy@example` (ключ `example` там только в профиле `Services` на build-host). У `example` и `deploy` sudo без пароля; команды ниже — с любым из адресов.
