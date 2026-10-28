@@ -36,6 +36,9 @@ _BUSY = "Чат меняли одновременно, текст не обра�
 _IN_PROGRESS = "текст ещё обрабатывается"
 _CHANGED = "Чат изменился после предпросмотра: правка не применена — проверьте её последствия ещё раз"
 _NOTHING_TO_UNDO = "Отменять нечего: последнюю правку уже отменили или правок не было"
+# Чат шлюза (спецификация 2026-10-28, раздел 11): обе правки свели бы разные написания к одному, и агент записал бы в
+# файл не то, что там было.
+_WRITTEN = "в чате агента разные написания — разные замены: объединять и менять значение нельзя"
 _UNDO_STALE = (
     "Отменить последнюю правку нельзя: после неё в чате записано новое — текст, ответ, отправка, очистка заново. "
     "Снимок до правки этого не содержит, и отмена потеряла бы новые замены. Измените правило заново"
@@ -1180,6 +1183,8 @@ class ChatService:
             raise EditRefused("выберите две разные сущности")
 
         def change(state: ChatState, items: list[Item]) -> None:
+            if state.written:
+                raise EditRefused(_WRITTEN)
             if state.entities[keep_id].type is not state.entities[drop_id].type:
                 raise EditRefused("объединять можно только сущности одного типа")
             ops.merge_entities(state, keep_id, drop_id)
@@ -1190,7 +1195,13 @@ class ChatService:
         cleaned = value.strip()
         if not cleaned:
             raise EditRefused("пустое значение")
-        self._edit(chat_id, user_id, "restore_value", lambda state, items: ops.set_restore_value(state, entity_id, cleaned))
+
+        def change(state: ChatState, items: list[Item]) -> None:
+            if state.written:
+                raise EditRefused(_WRITTEN)
+            ops.set_restore_value(state, entity_id, cleaned)
+
+        self._edit(chat_id, user_id, "restore_value", change)
 
     # --- эталонный набор (FR-6.10, QA-1) --------------------------------------------------
 

@@ -81,6 +81,14 @@ def test_ac_1_11_only_the_login_page_is_open_without_a_session(app, browser):
                 assert response.status_code in (401, 429), (method, path)
                 assert response.json()["error"]["code"] == response.status_code, (method, path)
                 continue
+            if path.startswith("/agent/"):
+                # Шлюз агентов (план 5Б): проверка связи — без ключа (9.1), остальное — отказ в виде Anthropic.
+                if path.endswith("/api/hello"):
+                    assert response.status_code == 204, (method, path)
+                    continue
+                assert response.status_code in (401, 429), (method, path)
+                assert response.json()["type"] == "error", (method, path)
+                continue
             assert (response.status_code, response.headers.get("location")) == (303, "/login"), (method, path)
 
 

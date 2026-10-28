@@ -15,7 +15,9 @@ from pydantic import BaseModel, Field, field_validator
 from cleaner.core.types import ChatState, EntityType
 from cleaner.service import EditRefused, InputView, TextTooLong
 from cleaner.web import render
-from cleaner.web.deps import ApiCaller, Upload, api_chat, get_api_caller, get_api_upload, repo_of, service_of
+from cleaner.web.deps import (
+    ApiCaller, Upload, api_chat, api_writable_chat, get_api_caller, get_api_upload, repo_of, service_of,
+)
 from cleaner.web.routes_chats import input_view
 
 router = APIRouter(prefix="/api/v1")
@@ -130,7 +132,7 @@ def delete_chat(request: Request, chat_id: str, caller: ApiCaller = Depends(get_
 async def add_text(request: Request, chat_id: str, body: TextIn, caller: ApiCaller = Depends(get_api_caller)) -> Response:
     """Очистка — то же задание в общем пуле, что у страницы. Маршрут ждёт его до wait секунд в цикле событий, не
     занимая поток пула; не дождался — 202 и опрос GET …/items/{item_id}."""
-    await run_in_threadpool(api_chat, request, chat_id, caller)
+    await run_in_threadpool(api_writable_chat, request, chat_id, caller)
     if not body.text.strip():
         raise HTTPException(422, "Пустой текст")
     try:
@@ -154,7 +156,7 @@ def add_file(
     request: Request, chat_id: str, upload: Upload = Depends(get_api_upload), caller: ApiCaller = Depends(get_api_caller),
 ) -> Response:
     """Файл — в очередь разбора (FR-2.2…2.9); результат — опросом GET …/items/{item_id}."""
-    api_chat(request, chat_id, caller)
+    api_writable_chat(request, chat_id, caller)
     try:
         item = service_of(request).add_file(chat_id, caller.user.id, upload.filename, upload.data, upload.ocr_all)
     except KeyError:
@@ -172,7 +174,7 @@ def item(request: Request, chat_id: str, item_id: str, caller: ApiCaller = Depen
 @router.post("/chats/{chat_id}/restore")
 def restore(request: Request, chat_id: str, body: AnswerIn, caller: ApiCaller = Depends(get_api_caller)) -> Response:
     """Ответ модели — элементом чата, как вставленный на странице (FR-7); в ответе — восстановленный текст."""
-    api_chat(request, chat_id, caller)
+    api_writable_chat(request, chat_id, caller)
     if not body.text.strip():
         raise HTTPException(422, "Пустой текст")
     service = service_of(request)
@@ -216,7 +218,7 @@ def entities(request: Request, chat_id: str, caller: ApiCaller = Depends(get_api
 def rules(request: Request, chat_id: str, body: RuleIn, caller: ApiCaller = Depends(get_api_caller)) -> Response:
     """Правка распознавания во всём чате (FR-6.2, 6.3) — как на странице: предпросмотр, затем правка для его версии
     чата; changed — сколько входных текстов изменилось. Замену назначают только фрагменту текста item_id."""
-    api_chat(request, chat_id, caller)
+    api_writable_chat(request, chat_id, caller)
     service = service_of(request)
     user_id = caller.user.id
     if body.action == "mask":

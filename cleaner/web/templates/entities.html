@@ -32,6 +32,9 @@
   </nav>
   {% endif %}
 </form>
+{% if chat.kind == "agent" %}
+<p class="sub">Чат шлюза агентов: правки действуют на следующие запросы агента, уже отправленные блоки идущих разговоров не меняются. Разные написания одного значения — разные замены: присоединить замену и задать значение при восстановлении здесь нельзя.</p>
+{% endif %}
 <section class="panel">
   <table class="grid">
     <thead><tr><th>Замена</th><th>Тип</th><th>Оригинал</th><th class="num">Вхождений</th><th>Действия</th></tr></thead>
@@ -55,12 +58,14 @@
               <select name="type" aria-label="Тип">{% for code, name in types.items() %}<option value="{{ code.value }}"{% if code == r.type %} selected{% endif %}>{{ name }}</option>{% endfor %}</select>
               <button>Сменить тип…</button>
             </form>
+            {% if chat.kind != "agent" %}
             <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/restore-value">
               {% include "_csrf.html" %}{{ back_field() }}
               <input name="value" value="{{ r.restore_value }}" required aria-label="Значение при восстановлении">
               <button>Подставлять при восстановлении</button>
             </form>
-            {% if r.peers %}
+            {% endif %}
+            {% if r.peers and chat.kind != "agent" %}
             <form method="post" action="/chats/{{ chat.id }}/entities/merge/preview">
               {% include "_csrf.html" %}{{ back_field() }}
               <input type="hidden" name="keep" value="{{ r.id }}">

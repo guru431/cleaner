@@ -795,6 +795,11 @@ class Repository:
             row["id"], row["chat_id"], row["key_id"], row["session"], row["first_seen"], row["last_seen"], row["requests"],
         )
 
+    def chat_conversations(self, chat_id: str) -> list[Conversation]:
+        """Разговоры чата шлюза — для его страницы; новые первыми."""
+        rows = self._all("SELECT * FROM agent_conversations WHERE chat_id = ? ORDER BY last_seen DESC, id", chat_id)
+        return [self._conversation(row) for row in rows]
+
     def conversation(self, conv_id: str) -> Conversation | None:
         return self._conversation(self._one("SELECT * FROM agent_conversations WHERE id = ?", conv_id))
 

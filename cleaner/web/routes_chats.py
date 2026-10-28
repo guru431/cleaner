@@ -1,18 +1,25 @@
 """Чаты: список с поиском, лента, ввод текста и ответа модели, состояние обработки, скачивание."""
 from __future__ import annotations
 
+import bisect
 import hashlib
 import ipaddress
+import json
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from cleaner.core import leakcheck
+from cleaner.core.agent import walk
+from cleaner.core.types import ChatState, EntityType, Settings
 from cleaner.engines import local_settings
 from cleaner.service import LOCAL_PENDING, AnswerView, ChatView, EditRefused, InputView, TextTooLong, local_pending
 from cleaner.storage.repo import Chat, Item
 from cleaner.web import render
-from cleaner.web.deps import Upload, Viewer, get_form, get_upload, get_viewer, own_chat, page, repo_of, service_of
+from cleaner.web.deps import (
+    Upload, Viewer, get_form, get_upload, get_viewer, own_chat, page, repo_of, service_of, writable_chat,
+)
 
 router = APIRouter()
 _TITLE = 200
@@ -179,9 +186,81 @@ def create_chat(request: Request, form: dict[str, str] = Depends(get_form), view
     return RedirectResponse(f"/chats/{chat_id}", status_code=303)
 
 
+LEDGER_PAGE = 50
+BLOCK_NAMES = {
+    "text": "текст", "tool_result": "результат инструмента", "tool_use": "вызов инструмента", "image": "изображение",
+    "document": "документ",
+}
+
+
+def _block_name(node: object) -> str:
+    if isinstance(node, dict) and "input_schema" in node:
+        return "описание инструмента"
+    kind = node.get("type") if isinstance(node, dict) else None
+    return BLOCK_NAMES.get(kind, str(kind) if kind else "блок")
+
+
+def _type_name(value: str) -> str:
+    try:
+        return render.TYPE_NAMES[EntityType(value)]
+    except (ValueError, KeyError):
+        return value
+
+
+def _opened(nodes: list[object], state: ChatState, settings: Settings) -> list[bool]:
+    """В каких блоках известное значение открыто (FR-6.8, спецификация 2026-10-28, 7.3): одна проверка утечек на все
+    строки страницы — таблица чата собирается один раз, — находки разносятся по блокам по позиции."""
+    texts, starts, position = [], [], 0
+    for node in nodes:
+        text = "\n\n".join(walk.strings_of(node))
+        starts.append(position)
+        texts.append(text)
+        position += len(text) + 2
+    found = [False] * len(nodes)
+    for leak in leakcheck.check("\n\n".join(texts), state, settings) if texts else ():
+        found[bisect.bisect_right(starts, leak.start) - 1] = True
+    return found
+
+
+def _agent_chat(request: Request, chat: Chat, viewer: Viewer, q: str) -> Response:
+    """Чат шлюза: журнал отправленного по LEDGER_PAGE записей, новые первыми; запись — блок у агента и у провайдера
+    рядом, только для чтения (спецификация 2026-10-28, раздел 16)."""
+    repo = repo_of(request)
+    raw = request.query_params.get("offset", "0")
+    offset = int(raw) if raw.isdigit() and len(raw) < 9 else 0
+    shown = repo.ledger_page(chat.id, offset, LEDGER_PAGE)
+    conversations = {c.id: c for c in repo.chat_conversations(chat.id)}
+    keys = [repo.api_key(key_id) for key_id in dict.fromkeys(c.key_id for c in conversations.values())]
+    state, _ = repo.load_state(chat.id)
+    nodes = [(json.loads(entry.local), json.loads(entry.wire)) for entry, _ in shown]
+    opened = _opened([wire if not entry.withheld else {} for (entry, _), (_, wire) in zip(shown, nodes)], state, repo.settings())
+    rows = []
+    for (entry, first_seen), (local, wire), open_here in zip(shown, nodes, opened):
+        conversation = conversations.get(entry.conversation)
+        rows.append({
+            "time": first_seen, "conversation": entry.conversation[:8], "session": conversation.session if conversation else "",
+            "direction": "агент → модель" if entry.direction == "in" else "модель → агент", "kind": _block_name(local),
+            "size": len(entry.local), "withheld": REASON_NAMES.get(entry.withheld, entry.withheld), "open": open_here,
+            "counts": ", ".join(f"{_type_name(type_)}: {count}" for type_, count in sorted(entry.counts.items())),
+            "local": render.highlight(json.dumps(local, ensure_ascii=False, indent=1), []),
+            "wire": render.highlight(json.dumps(wire, ensure_ascii=False, indent=1), []),
+        })
+    return page(
+        request, "agent_chat.html", viewer, chat=chat, chats=chat_list(request, viewer, q), q=q, rows=rows,
+        opened=sum(opened), keys=", ".join(key.name for key in keys if key), conversations=len(conversations),
+        offset=offset, more=len(shown) == LEDGER_PAGE, step=LEDGER_PAGE,
+    )
+
+
+# Причины удержания блока (7.4) — для журнала отправленного; значения не показываются.
+REASON_NAMES = {"media": "изображение или файл", "blocked": "значение типа с «блокировать»", "failed": "очистка не выполнена"}
+
+
 @router.get("/chats/{chat_id}")
 def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depends(get_viewer)) -> Response:
     chat = own_chat(request, chat_id, viewer)
+    if chat.kind == "agent":
+        return _agent_chat(request, chat, viewer, q)
     view = service_of(request).view(chat_id)
     provider_id, model = repo_of(request).chat_provider(chat_id)
     return page(
@@ -217,7 +296,7 @@ def delete(request: Request, chat_id: str, form: dict[str, str] = Depends(get_fo
 
 @router.post("/chats/{chat_id}/input")
 def add_input(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    own_chat(request, chat_id, viewer)
+    writable_chat(request, chat_id, viewer)
     text = form.get("text", "")
     if not text.strip():
         raise HTTPException(400, "Вставьте текст")
@@ -232,14 +311,14 @@ def add_input(request: Request, chat_id: str, form: dict[str, str] = Depends(get
 
 @router.post("/chats/{chat_id}/upload")
 def upload(request: Request, chat_id: str, upload: Upload = Depends(get_upload), viewer: Viewer = Depends(get_viewer)) -> Response:
-    own_chat(request, chat_id, viewer)
+    writable_chat(request, chat_id, viewer)
     item = service_of(request).add_file(chat_id, viewer.user.id, upload.filename, upload.data, upload.ocr_all)
     return RedirectResponse(f"/chats/{chat_id}/items/{item.id}", status_code=303)
 
 
 @router.post("/chats/{chat_id}/answer")
 def add_answer(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    own_chat(request, chat_id, viewer)
+    writable_chat(request, chat_id, viewer)
     answer = form.get("answer", "")
     if not answer.strip():
         raise HTTPException(400, "Вставьте ответ модели")
@@ -288,7 +367,7 @@ def mark_reviewed(request: Request, chat_id: str, item_id: str, form: dict[str, 
 @router.post("/chats/{chat_id}/layers")
 def set_layer(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
     """FR-3.8: слои 4 и 5 отключаются для чата явным действием; действует на следующие очистки."""
-    own_chat(request, chat_id, viewer)
+    writable_chat(request, chat_id, viewer)
     try:
         service_of(request).set_layer(chat_id, viewer.user.id, form.get("layer", ""), form.get("enabled") == "yes")
     except EditRefused as exc:

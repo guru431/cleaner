@@ -13,7 +13,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from cleaner.core.restore import StreamRestorer
 from cleaner.service import EditRefused, Preview
 from cleaner.web import render
-from cleaner.web.deps import Viewer, get_form, get_viewer, own_chat, page, repo_of, service_of
+from cleaner.web.deps import Viewer, get_form, get_viewer, own_chat, page, repo_of, service_of, writable_chat
 
 router = APIRouter()
 _TICK = 1.0           # как часто поток ответа показывает новые фрагменты, секунды: каждый показ — восстановление префикса
@@ -22,7 +22,7 @@ _TICK = 1.0           # как часто поток ответа показыв
 @router.post("/chats/{chat_id}/provider")
 def choose(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
     """FR-8.3: подключение и модель чата; пустой выбор — ручной режим."""
-    own_chat(request, chat_id, viewer)
+    writable_chat(request, chat_id, viewer)
     provider_id, _, model = form.get("choice", "").partition("|")
     try:
         service_of(request).set_provider(chat_id, provider_id or None, model)
@@ -87,7 +87,7 @@ def _request(preview: Preview) -> dict[str, object]:
 def confirm(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer)) -> Response:
     """FR-8.4: экран подтверждения показывает ровно то, что уйдёт, и что в запрос не вошло. Состав можно сократить
     (раздел 10.1): отправка — только кнопкой после пересборки, с отпечатком этого состава."""
-    chat = own_chat(request, chat_id, viewer)
+    chat = writable_chat(request, chat_id, viewer)
     try:
         preview = service_of(request).outgoing(chat_id, _exclude(request))
     except EditRefused as exc:
@@ -106,7 +106,7 @@ def manual(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer))
     """Перенос вручную (сценарий 5.1): весь очищенный диалог одним текстом с ролями и служебной инструкцией — тот же
     запрос и та же проверка утечек, что у отправки по API (SEC-2). При находке или блокировке копирования нет; нет его
     и когда сборка выдала бы новые замены (stale): страница предлагает очистить тексты чата заново."""
-    chat = own_chat(request, chat_id, viewer)
+    chat = writable_chat(request, chat_id, viewer)
     try:
         preview = service_of(request).manual(chat_id, _exclude(request))
     except EditRefused as exc:
@@ -124,7 +124,7 @@ def manual(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer))
 
 @router.post("/chats/{chat_id}/send")
 def send(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    own_chat(request, chat_id, viewer)
+    writable_chat(request, chat_id, viewer)
     exclude = frozenset(_numbers(form.get("exclude", "").split(",")))
     try:
         item = service_of(request).send(chat_id, viewer.user.id, form.get("digest", ""), exclude)
@@ -180,7 +180,7 @@ def stop(request: Request, chat_id: str, item_id: str, form: dict[str, str] = De
 def ask_local(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
     """FR-9.4: вопрос локальной модели вместо облачной — без очистки: оригиналы уходят только по адресу локальной модели
     (петлевой, частный или доверенный, SEC-12), не облаку."""
-    own_chat(request, chat_id, viewer)
+    writable_chat(request, chat_id, viewer)
     try:
         item = service_of(request).ask_local(chat_id, viewer.user.id)
     except EditRefused as exc:

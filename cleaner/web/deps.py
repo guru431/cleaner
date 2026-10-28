@@ -65,6 +65,18 @@ def own_chat(request: Request, chat_id: str, viewer: Viewer) -> Chat:
     return chat
 
 
+AGENT_READ_ONLY = "Чат агента только для просмотра: в него пишет шлюз, правки распознавания — в таблице соответствий"
+
+
+def writable_chat(request: Request, chat_id: str, viewer: Viewer) -> Chat:
+    """Чат вошедшего пользователя, в который пишет он сам. Чат шлюза пишет только шлюз (спецификация 2026-10-28, 16):
+    ввод, ответ, отправка, слои и подключение в нём — отказ 400."""
+    chat = own_chat(request, chat_id, viewer)
+    if chat.kind == "agent":
+        raise HTTPException(400, AGENT_READ_ONLY)
+    return chat
+
+
 def get_viewer(request: Request) -> Viewer:
     repo = repo_of(request)
     token = request.cookies.get(SESSION_COOKIE, "")
@@ -128,6 +140,14 @@ def api_chat(request: Request, chat_id: str, caller: ApiCaller) -> Chat:
     chat = repo_of(request).chat(chat_id)
     if chat is None or chat.user_id != caller.user.id:
         raise HTTPException(404, "Чат не найден")
+    return chat
+
+
+def api_writable_chat(request: Request, chat_id: str, caller: ApiCaller) -> Chat:
+    """Чат владельца ключа для текстов, ответов и правил; в чат шлюза их не добавить — 409."""
+    chat = api_chat(request, chat_id, caller)
+    if chat.kind == "agent":
+        raise HTTPException(409, AGENT_READ_ONLY)
     return chat
 
 
