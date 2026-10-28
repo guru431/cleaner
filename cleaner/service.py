@@ -25,7 +25,7 @@ from cleaner.core.restore import RestoreResult, restore, restore_answers
 from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
 from cleaner.egress import ProviderError, cloud
 from cleaner.storage.codec import state_to_json
-from cleaner.storage.repo import Item, Provider, Repository, StaleState
+from cleaner.storage.repo import CheckpointBusy, Item, Provider, Repository, StaleState
 
 log = logging.getLogger("cleaner.service")
 
@@ -920,6 +920,18 @@ class ChatService:
             live = self.live.get(item.id) if item.kind == "answer" and item.source == "api" else None
             if live is not None:
                 live.stop("Чат удалён")
+
+    def delete_chat(self, chat_id: str, user_id: str, via: str | None = None) -> None:
+        """FR-1.4: идущие ответы облака прерываются, чтобы поток провайдера не читался впустую, затем чат удаляется.
+        via — откуда удалён (api), для журнала."""
+        self.stop_chat(chat_id)
+        try:
+            self.repo.delete_chat(chat_id)
+        except CheckpointBusy as exc:
+            # Удаление состоялось; копии страниц в журнале WAL сотрёт следующая контрольная точка — администратору в журнал.
+            log.error("удаление чата: %s", type(exc).__name__)
+            self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="delete")
+        self.repo.audit("chat_deleted", user_id, chat_id, **({"via": via} if via else {}))
 
     def check_provider(self, provider: Provider, model: str) -> str:
         """FR-8.2: проверочный запрос без данных пользователя. ProviderError — отказ провайдера."""

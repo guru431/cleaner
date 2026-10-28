@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import logging
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -11,11 +10,10 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from cleaner.engines import local_settings
 from cleaner.service import LOCAL_PENDING, AnswerView, ChatView, EditRefused, InputView, TextTooLong, local_pending
-from cleaner.storage.repo import Chat, CheckpointBusy, Item
+from cleaner.storage.repo import Chat, Item
 from cleaner.web import render
 from cleaner.web.deps import Upload, Viewer, get_form, get_upload, get_viewer, own_chat, page, repo_of, service_of
 
-log = logging.getLogger("cleaner.web")
 router = APIRouter()
 _TITLE = 200
 LAYER_NAMES = {"ner": "Слой 4 — модели распознавания имён", "llm": "Слой 5 — локальная модель"}
@@ -213,15 +211,7 @@ def delete(request: Request, chat_id: str, form: dict[str, str] = Depends(get_fo
     own_chat(request, chat_id, viewer)
     if form.get("confirm") != "yes":
         raise HTTPException(400, "Подтвердите удаление")          # FR-1.4
-    repo = repo_of(request)
-    service_of(request).stop_chat(chat_id)          # идущие ответы облака — прервать, а не дочитывать впустую
-    try:
-        repo.delete_chat(chat_id)
-    except CheckpointBusy as exc:
-        # Удаление состоялось; копии страниц в журнале WAL сотрёт следующая контрольная точка — администратору в журнал.
-        log.error("удаление чата: %s", type(exc).__name__)
-        repo.audit("error", viewer.user.id, chat_id, kind=type(exc).__name__, stage="delete")
-    repo.audit("chat_deleted", viewer.user.id, chat_id)
+    service_of(request).delete_chat(chat_id, viewer.user.id)
     return RedirectResponse("/chats", status_code=303)
 
 

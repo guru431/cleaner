@@ -62,6 +62,14 @@ def new_token() -> str:
     return secrets.token_urlsafe(32)        # 256 бит
 
 
+API_KEY_PREFIX = "ck_"
+
+
+def new_api_key() -> str:
+    """Ключ доступа программы (FR-13.1): приставка и 256 бит, 46 знаков. В базе — token_hash и последние четыре знака."""
+    return API_KEY_PREFIX + secrets.token_urlsafe(32)
+
+
 def token_hash(token: str) -> str:
     """В базе хранится только хэш токена: копия базы не даёт войти."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
@@ -12,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile
 
 from cleaner.service import ChatService
-from cleaner.storage.repo import Chat, Repository, Session, User
+from cleaner.storage.repo import ApiKey, Chat, Repository, Session, User
 from cleaner.web import auth
 
 SESSION_COOKIE = "cleaner_session"
@@ -74,6 +75,52 @@ def get_viewer(request: Request) -> Viewer:
         raise LoginRequired()
     repo.touch_session(session.token_hash)
     return Viewer(user, session)
+
+
+@dataclass(frozen=True)
+class ApiCaller:
+    """Программа с действующим ключом доступа (FR-13.1) и его владелец."""
+
+    user: User
+    key: ApiKey
+
+
+def _presented_key(request: Request) -> str:
+    key = request.headers.get("x-cleaner-key")
+    if key is None:
+        scheme, _, value = request.headers.get("authorization", "").strip().partition(" ")
+        key = value if scheme.lower() == "bearer" else ""
+    return key.strip()
+
+
+def get_api_caller(request: Request) -> ApiCaller:
+    """Ключ из X-Cleaner-Key или Authorization: Bearer; cookie сессии /api/v1 не открывает. После пяти неверных
+    ключей с одного адреса — нарастающая пауза, как у входа; в паузе ключ не проверяется. Ключ отозван или его
+    владелец отключён — тот же отказ, что у неизвестного (спецификация 2026-10-28, раздел 6.1)."""
+    throttle: auth.Throttle = request.app.state.key_throttle
+    host = request.client.host if request.client else ""
+    wait = throttle.wait(host)
+    if wait > 0:
+        raise HTTPException(429, "Слишком много неверных ключей", headers={"Retry-After": str(math.ceil(wait))})
+    repo = repo_of(request)
+    presented = _presented_key(request)
+    key = repo.api_key_by_hash(auth.token_hash(presented)) if presented.startswith(auth.API_KEY_PREFIX) else None
+    user = repo.user(key.user_id) if key is not None and not key.disabled else None
+    if key is None or user is None or user.disabled:
+        throttle.failed(host)
+        repo.audit("api_auth_failed")          # без адреса и ключа: присланное — не для журнала (FR-11.2)
+        raise HTTPException(401, "Нужен действующий ключ доступа")
+    throttle.succeeded(host)
+    repo.touch_api_key(key.id)
+    return ApiCaller(user, key)
+
+
+def api_chat(request: Request, chat_id: str, caller: ApiCaller) -> Chat:
+    """Чат владельца ключа. Чужой и несуществующий неотличимы — 404 (FR-1.5)."""
+    chat = repo_of(request).chat(chat_id)
+    if chat is None or chat.user_id != caller.user.id:
+        raise HTTPException(404, "Чат не найден")
+    return chat
 
 
 def get_admin(viewer: Viewer = Depends(get_viewer)) -> Viewer:

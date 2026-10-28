@@ -336,6 +336,42 @@ def boss(browser) -> Browser:
     return b
 
 
+class Api:
+    """Программа для тестов /api/v1: свой клиент без cookie, ключ — заголовком X-Cleaner-Key."""
+
+    def __init__(self, client: TestClient, key: str, user_id: str = "", key_id: str = ""):
+        self.client = client
+        self.key = key
+        self.user_id = user_id
+        self.key_id = key_id
+
+    def _headers(self, headers: dict[str, str] | None) -> dict[str, str]:
+        return {"X-Cleaner-Key": self.key, **(headers or {})}
+
+    def get(self, path: str, headers: dict[str, str] | None = None):
+        return self.client.get(path, headers=self._headers(headers))
+
+    def post(self, path: str, json=None, headers: dict[str, str] | None = None, **extra):
+        return self.client.post(path, json=json, headers=self._headers(headers), **extra)
+
+    def delete(self, path: str, headers: dict[str, str] | None = None):
+        return self.client.delete(path, headers=self._headers(headers))
+
+
+@pytest.fixture
+def api(browser, repo):
+    """Программа с ключом пользователя login; учётная запись создаётся, если её нет."""
+
+    def make(login: str = "ivan", role: str = "user") -> Api:
+        user = repo.user_by_login(login)
+        user_id = user.id if user else repo.create_user(login, auth.hash_password(TEST_PASSWORD), role)
+        key = auth.new_api_key()
+        key_id = repo.add_api_key(user_id, f"тест {login}", auth.token_hash(key), key[-4:])
+        return Api(browser().client, key, user_id, key_id)
+
+    return make
+
+
 @pytest.fixture
 def no_network(monkeypatch):
     """Любая попытка соединения — ошибка: работа без сети проверяется фактом (NFR-2), а не настройкой."""
