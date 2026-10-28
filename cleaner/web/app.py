@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from cleaner.agent_service import AgentService
 from cleaner.clock import Clock
 from cleaner.egress import cloud
 from cleaner.service import ChatService
@@ -45,6 +46,9 @@ SEND_WORKERS = 4
 # Распознавание сканов ждёт шлюз, а не процессор; запросов распознавания одновременно столько же, сколько было
 # при общем пуле, — служба OCR сервера держит ограниченную очередь.
 FILE_WORKERS = 2
+# Шлюз агентов — свой пул (спецификация 2026-10-28, раздел 13): запросы агентов не ждут за очисткой текстов интерфейса и
+# отправками чата, и наоборот. Поток держится и всё время ответа провайдера.
+AGENT_WORKERS = 8
 
 
 _UPLOAD_HEADROOM = 1024 * 1024      # поля формы и заголовки частей multipart сверх самого файла
@@ -114,10 +118,12 @@ def create_app(
         repo, max_text_chars, engines, submit=jobs.submit, send_submit=sends.submit, cloud_send=cloud_send or cloud.send,
         file_submit=files.submit,
     )
+    agent_pool = ThreadPoolExecutor(max_workers=AGENT_WORKERS, thread_name_prefix="cleaner-agent")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
+        agent_pool.shutdown(wait=False, cancel_futures=True)       # ответы агентам рвутся с остановкой; агент повторит
         # Остановка: соединение с базой закрывается после этого (__main__). Недождавшиеся задания помечаются
         # здесь, пока оно открыто, — а не случайной ошибкой записи в закрытую базу и пометкой при следующем старте.
         # Их потоки процесс не ждёт: по SIGTERM uvicorn сразу после этого повторяет сигнал, и процесс кончается,
@@ -137,6 +143,8 @@ def create_app(
     app.state.unfinished_jobs = 0                    # сколько заданий остановка не дождалась (lifespan)
     app.state.max_file_bytes = max_file_mb * 1024 * 1024
     app.state.service = service
+    app.state.agent = AgentService(repo, engines, clock)
+    app.state.agent_pool = agent_pool
     app.state.throttle = auth.Throttle(clock)
     app.state.key_throttle = auth.Throttle(clock)            # неверные ключи доступа — по адресу клиента
     app.state.secure_cookies = secure_cookies

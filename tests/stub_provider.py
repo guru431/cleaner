@@ -50,9 +50,11 @@ class StubProvider:
             return events + [{"type": "message_stop"}], ""
         return None
 
-    def _step(self) -> dict:
+    def _step(self, body: dict) -> dict:
+        """Шаг — и функция тела запроса: ответ модели с заменами, которые выдал шлюз."""
         with self.lock:
             step = self.script.pop(0)
+        step = step(body) if callable(step) else step
         return {"events": step} if isinstance(step, list) else step
 
     def _handler(stub) -> type[BaseHTTPRequestHandler]:
@@ -75,7 +77,7 @@ class StubProvider:
                 stub.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
                 route = self.path.split("?")[0]
                 if stub.script and route.endswith("/v1/messages"):
-                    self._scripted(stub._step())
+                    self._scripted(stub._step(body))
                     return
                 if not body.get("stream"):
                     self._json(200, {"choices": [{"message": {"content": "".join(stub.pieces)}, "finish_reason": "stop"}]})

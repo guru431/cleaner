@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from cleaner.clock import Clock
+from cleaner.core.agent import ledger
 from cleaner.core.types import ChatState, CustomPattern, DictEntry, EntityType, Policy, Settings, default_policies
 from cleaner.storage import crypto
 from cleaner.storage.codec import state_from_json, state_to_json
@@ -358,6 +359,17 @@ class Repository:
             if not busy:
                 return
         raise CheckpointBusy(chat_id)
+
+    def chat_version(self, chat_id: str) -> int:
+        """Версия состояния без расшифровки: по ней шлюз узнаёт, годится ли состояние, которое он держит в памяти."""
+        row = self._one("SELECT version FROM chats WHERE id = ?", chat_id)
+        if row is None:
+            raise KeyError(chat_id)
+        return row["version"]
+
+    def chat_secret(self, chat_id: str) -> bytes:
+        """Ключ отпечатков блоков журнала отправленного — выведен из ключа чата (спецификация 2026-10-28, 7.2)."""
+        return ledger.chat_secret(self._dek(chat_id))
 
     def load_state(self, chat_id: str) -> tuple[ChatState, int]:
         row = self._one("SELECT state_enc, version FROM chats WHERE id = ?", chat_id)

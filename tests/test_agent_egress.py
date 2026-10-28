@@ -16,6 +16,7 @@ AGENT_HEADERS = {
     "accept": "application/json", "x-claude-code-session-id": "s-1", "x-claude-code-agent-id": "a-1",
     "authorization": "Bearer ck_agent_key", "x-api-key": "ck_agent_key", "x-cleaner-key": "ck_agent_key",
     "user-agent": "claude-cli/2.1.270", "x-stainless-os": "Windows", "cookie": "session=1",
+    "x-claude-code-parent-agent-id": "агент",          # не ASCII: заголовком HTTP не отправить — отбрасывается
 }
 EVENTS = [
     {"type": "message_start", "message": {"id": "msg_1", "content": []}},

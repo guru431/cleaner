@@ -103,15 +103,15 @@ def first_user(body: dict) -> object:
     return None
 
 
-def _strings_of(value: object) -> Iterator[str]:
+def strings_of(value: object) -> Iterator[str]:
     if isinstance(value, str):
         yield value
     elif isinstance(value, list):
         for item in value:
-            yield from _strings_of(item)
+            yield from strings_of(item)
     elif isinstance(value, dict):
         for item in value.values():
-            yield from _strings_of(item)
+            yield from strings_of(item)
 
 
 def structural(body: dict) -> list[str]:
@@ -126,7 +126,7 @@ def structural(body: dict) -> list[str]:
                 out.append(block["name"])
     for key, value in body.items():
         if key in PARAMS:
-            out += _strings_of(value)
+            out += strings_of(value)
     return out
 
 

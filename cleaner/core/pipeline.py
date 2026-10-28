@@ -534,7 +534,10 @@ def build_agent_outgoing(
     state: ChatState, settings: Settings, *, chat_id: str, provider_id: str, path: str, query: str,
     headers: Mapping[str, str], body: dict, checked: list[str],
 ) -> tuple[AgentOutgoing, list[Leak]]:
-    kept = tuple((name.lower(), value) for name, value in headers.items() if name.lower() in AGENT_HEADERS)
+    # Значение не из ASCII заголовком HTTP не отправить — такой заголовок отбрасывается, а не роняет запрос.
+    kept = tuple(
+        (name.lower(), value) for name, value in headers.items() if name.lower() in AGENT_HEADERS and value.isascii()
+    )
     raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     out = AgentOutgoing(chat_id, provider_id, path, query, kept, raw, tuple(checked))
     return out, checked_leaks(out.checked, state, settings)
