@@ -14,6 +14,7 @@ from datetime import timedelta, timezone
 from pathlib import Path
 
 from cleaner import config
+from cleaner.agent_service import gateway_access
 from cleaner.clock import SystemClock
 from cleaner.config import Config
 from cleaner.core.detect.base import DetectorError
@@ -178,7 +179,8 @@ API_KEY_NAME = 100          # как у страницы «Ключи»
 
 def cmd_apikey(args: argparse.Namespace) -> int:
     """Ключи доступа программ (FR-13.1) для проектов, которые заводятся сценарием. add печатает только ключ, одной
-    строкой и один раз; list — строка на ключ: id, логин, имя, последние четыре знака, active | disabled."""
+    строкой и один раз; --provider (и --model) — ключ шлюза агентов к подключению, с теми же проверками, что у страницы
+    «Ключи». list — строка на ключ: id, логин, имя, последние четыре знака, active | disabled, доступ (provider:<id> или -)."""
     with _repository(_config(args)) as repo:
         if args.action == "add":
             user = repo.user_by_login(args.target)
@@ -187,15 +189,16 @@ def cmd_apikey(args: argparse.Namespace) -> int:
             name = (args.name or "").strip()
             if not 1 <= len(name) <= API_KEY_NAME:
                 raise ValueError(f"имя ключа (--name) — от 1 до {API_KEY_NAME} знаков")
+            upstream, models = gateway_access(repo, args.provider, tuple(args.model)) if args.provider else (None, ())
             key = auth.new_api_key()
-            key_id = repo.add_api_key(user.id, name, auth.token_hash(key), key[-4:])
+            key_id = repo.add_api_key(user.id, name, auth.token_hash(key), key[-4:], upstream, models)
             repo.audit("key_created", user.id, id=key_id, by="cli")
             print(key)
         elif args.action == "list":
             logins = {user.id: user.login for user in repo.users()}
             for key in repo.api_keys():
                 state = "disabled" if key.disabled else "active"
-                print("\t".join((key.id, logins.get(key.user_id, "?"), key.name, f"…{key.tail}", state)))
+                print("\t".join((key.id, logins.get(key.user_id, "?"), key.name, f"…{key.tail}", state, key.upstream or "-")))
         else:
             key = repo.api_key(args.target)
             if key is None or not repo.disable_api_key(key.id):
@@ -320,6 +323,8 @@ def main(argv: list[str] | None = None) -> int:
     apikey.add_argument("action", choices=("add", "list", "disable"))
     apikey.add_argument("target", nargs="?", default="", help="add: логин владельца ключа; disable: id ключа из list")
     apikey.add_argument("--name", help="add: для какой программы ключ")
+    apikey.add_argument("--provider", default="", help="add: id подключения — ключ шлюза агентов к его модели")
+    apikey.add_argument("--model", action="append", default=[], help="add: разрешённая модель подключения (можно несколько; нет — все)")
 
     key = commands.add_parser("key", help="выгрузка и загрузка главного ключа")
     key.add_argument("action", choices=("export", "import"))
