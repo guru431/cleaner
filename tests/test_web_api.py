@@ -246,3 +246,71 @@ def test_program_text_is_labelled_in_the_feed(ivan, api):
     chat_id = chat(program)
     clean(program, chat_id)
     assert "Текст из программы" in ivan.get(f"/chats/{chat_id}").text
+
+
+# --- восстановление, таблица соответствий, правки (задача 4) ---------------------------------
+
+
+def test_restore_returns_originals_and_unknown_labels(api, repo):
+    program = api()
+    chat_id = chat(program)
+    clean(program, chat_id)
+    response = program.post(f"/api/v1/chats/{chat_id}/restore", json={"text": "Ответ: <EMAIL_1>, а также <PERSON_99>"})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert "i.ivanov@contoso.ru" in result["restored"] and result["unknown"] == ["<PERSON_99>"]
+    assert (result["counters"]["restored"], result["counters"]["unknown"]) == (1, 1)
+    assert [(i.id, i.kind) for i in repo.items(chat_id)][-1] == (result["item_id"], "answer")
+
+
+def test_restore_limits_are_json_errors(api):
+    program = api()
+    chat_id = chat(program)
+    responses = [
+        program.post(f"/api/v1/chats/{chat_id}/restore", json={"text": " "}),
+        program.post(f"/api/v1/chats/{chat_id}/restore", json={"text": "я" * 500_001}),
+    ]
+    assert [(r.status_code, r.json()["error"]["code"]) for r in responses] == [(422, 422), (413, 413)]
+
+
+def test_entities_list_replacements_originals_and_counts(api):
+    program = api()
+    chat_id = chat(program)
+    clean(program, chat_id, "Пишите i.ivanov@contoso.ru, копия — i.ivanov@contoso.ru")
+    entities = program.get(f"/api/v1/chats/{chat_id}/entities").json()
+    [email] = [e for e in entities if e["type"] == "EMAIL"]
+    assert "<EMAIL_1>" in email["replacements"] and email["original"] == "i.ivanov@contoso.ru" and email["count"] == 2
+    assert set(email) == {"id", "type", "replacements", "original", "forms", "count"}
+
+
+def test_mask_and_unmask_change_the_texts(api):
+    program = api()
+    chat_id = chat(program)
+    item_id = clean(program, chat_id).json()["item_id"]
+    rules = f"/api/v1/chats/{chat_id}/rules"
+    masked = program.post(rules, json={"action": "mask", "value": "Заря-Восток", "type": "TERM", "item_id": item_id})
+    assert masked.json() == {"changed": 1}
+    assert "<TERM_1>" in program.get(f"/api/v1/chats/{chat_id}/items/{item_id}").json()["sanitized"]
+    assert program.post(rules, json={"action": "unmask", "value": "i.ivanov@contoso.ru"}).json() == {"changed": 1}
+    assert "i.ivanov@contoso.ru" in program.get(f"/api/v1/chats/{chat_id}/items/{item_id}").json()["sanitized"]
+
+
+def test_bad_rules_are_422(api):
+    program = api()
+    chat_id, other = chat(program), chat(program)
+    item_id = clean(program, chat_id).json()["item_id"]
+    foreign = clean(program, other).json()["item_id"]
+    rules = f"/api/v1/chats/{chat_id}/rules"
+    for body in (
+        {"action": "mask", "value": "Лето-Сириус", "type": "TERM", "item_id": item_id},
+        {"action": "mask", "value": "Заря-Восток", "type": "NOPE", "item_id": item_id},
+        {"action": "mask", "value": "Заря-Восток", "type": "TERM"},
+        {"action": "mask", "value": " ", "type": "TERM", "item_id": item_id},
+        {"action": "unmask", "value": ""},
+        {"action": "hide", "value": "Заря-Восток"},
+    ):
+        response = program.post(rules, json=body)
+        assert (response.status_code, response.json()["error"]["code"]) == (422, 422), body
+        assert "Лето-Сириус" not in response.text
+    refused = program.post(rules, json={"action": "mask", "value": "Заря-Восток", "type": "TERM", "item_id": foreign})
+    assert refused.status_code == 422 and refused.json()["error"]["message"] == "выделите фрагмент текста"
