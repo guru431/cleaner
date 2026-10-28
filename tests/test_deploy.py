@@ -236,6 +236,17 @@ def test_installer_stops_the_service_before_it_replaces_the_code_and_rollback_st
     assert "$STOPPED -eq 1" in rollback
 
 
+def test_installer_issues_a_certificate_claude_code_trusts():
+    """Приёмка 5Б, 28.10.2026: Claude Code (Bun, BoringSSL) берёт самоподписанный сертификат из NODE_EXTRA_CA_CERTS, только
+    если в keyUsage есть keyCertSign; Node и curl принимают и без него. Выпущенный раньше сертификат меняется только по
+    явному CLEANER_REISSUE_CERT=1 — прежний остаётся рядом."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    command = text[text.index("openssl req -x509"):text.index('fail "сертификат не выпущен')]
+    assert '-addext "keyUsage=digitalSignature,keyEncipherment,keyCertSign"' in command
+    reissue = text[text.index("CLEANER_REISSUE_CERT"):text.index("openssl req -x509")]
+    assert 'mv "$TLS/cert.pem" "$TLS/cert.pem.prev-$STAMP"' in reissue and 'mv "$TLS/key.pem" "$TLS/key.pem.prev-$STAMP"' in reissue
+
+
 def test_installer_copies_the_database_before_the_new_version_and_rollback_restores_it():
     """Обзор плана 2+4, I-4: новая версия мигрирует схему при старте, а прежний код базу новой версии не откроет.
     Копия снимается до перезапуска службы, откат возвращает её, если схема успела измениться."""
