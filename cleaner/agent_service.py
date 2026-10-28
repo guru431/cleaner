@@ -107,6 +107,8 @@ def _placeholder(unit: walk.Unit, reason: str) -> object:
     text = ledger.placeholder(reason)
     if unit.kind == "tool_result":
         return dict(unit.node, content=text)
+    if unit.kind == "tool_use":
+        return dict(unit.node, input={"cleaner": text})      # вызов остаётся вызовом: на его id ссылается результат
     if unit.kind == "tool_def":
         return dict(unit.node, description=text, input_schema={"type": "object"})
     return {"type": "text", "text": text}

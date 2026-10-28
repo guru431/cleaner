@@ -95,11 +95,19 @@ class AnthropicStream:
         type_ = event.get("type")
         index = event.get("index")
         if type_ == "content_block_start":
+            # Совместимый провайдер присылает текст и аргументы вызова и в самом начале блока: агенту начало уходит
+            # пустым, а присланное — как дельты, восстановленными (аргументы — в конце блока, _close).
             block = event.get("content_block") or {}
             if block.get("type") == "text":
-                self.blocks[index] = _Block("text", block, restorer=DeltaRestorer(self.state, self.settings, self._restore_text))
-            elif block.get("type") == "tool_use":
+                opened = _Block("text", block, restorer=DeltaRestorer(self.state, self.settings, self._restore_text))
+                self.blocks[index] = opened
+                initial = block.get("text") or ""
+                start = dict(event, content_block=dict(block, text="")) if initial else event
+                opened.parts.append(initial)
+                return [start, *self._text_delta(opened, index, opened.restorer.feed(initial))]
+            if block.get("type") == "tool_use":
                 self.blocks[index] = _Block("tool_use", block)
+                return [dict(event, content_block=dict(block, input={}))] if block.get("input") else [event]
             return [event]
         block = self.blocks.get(index) if type_ in ("content_block_delta", "content_block_stop") else None
         if block is None:
@@ -130,9 +138,9 @@ class AnthropicStream:
             return out
         raw = "".join(block.parts)
         if not raw:
-            arguments = block.start.get("input", {})
+            arguments = block.start.get("input") or {}
             restored = self._restore_input(arguments)
-            out = []
+            out = [self._json_delta(index, json.dumps(restored, ensure_ascii=False))] if arguments else []
         else:
             try:
                 arguments = json.loads(raw)

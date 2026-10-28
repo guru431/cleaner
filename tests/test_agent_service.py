@@ -158,6 +158,25 @@ def test_blocked_media_and_failed_blocks_are_withheld(repo, engines, clock, stub
     assert repo.audit_events("agent_withheld")[0].details["reasons"] == {"media": 1, "blocked": 1, "failed": 1}
 
 
+def test_withheld_tool_call_keeps_its_pair_with_the_result(gw, monkeypatch):
+    """Удержанный вызов инструмента из истории остаётся вызовом с тем же id: результат инструмента ссылается на него, и
+    блок text на его месте провайдер отклонил бы."""
+    sanitize = agent_service.pipeline.sanitize
+
+    def failing(state, text, *args, **kwargs):
+        if "СБОЙ" in text:
+            raise RuntimeError("очистка упала")
+        return sanitize(state, text, *args, **kwargs)
+
+    monkeypatch.setattr(agent_service.pipeline, "sanitize", failing)
+    gw.stub.script.append(model_turn("Дальше"))
+    call = {"type": "tool_use", "id": "toolu_7", "name": "Bash", "input": {"command": "echo СБОЙ"}}
+    gw.send(body(TASK, assistant(call), tool_result("toolu_7", "ok")))
+    sent = gw.stub.requests[0]["body"]["messages"][2]["content"]
+    assert sent == [{"type": "tool_use", "id": "toolu_7", "name": "Bash",
+                     "input": {"cleaner": ledger.placeholder(ledger.REASONS["failed"])}}]
+
+
 def test_parallel_requests_share_replacements(gw, repo):
     gw.stub.script += [model_turn("Раз"), model_turn("Два")]
     tasks = ("Первый: узел srv-dc01.corp.contoso.ru", "Второй: узел srv-dc01.corp.contoso.ru")

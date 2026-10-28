@@ -113,6 +113,34 @@ def test_tool_input_is_sent_once_restored_exactly(chat):
     }
 
 
+def test_input_and_text_sent_whole_in_the_block_start_are_restored(chat):
+    """Совместимый провайдер может прислать аргументы вызова целиком в content_block_start, без дельт, а текст — сразу в
+    начале блока: агент собрал бы их как есть, с заменами, и записал бы в файл подмену (анти-цель 1)."""
+    state, settings = chat
+    masked = fake(chat, "srv-dc01.corp.contoso.ru")
+    stream = AnthropicStream(state, settings)
+    out = run(stream, [
+        message_start(),
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": f"Узел {masked} "}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": f"ping {masked}"}}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": ""}},
+        {"type": "content_block_stop", "index": 1},
+    ])
+    assert masked not in json.dumps(out, ensure_ascii=False)
+    assert out[1]["content_block"] == {"type": "text", "text": ""}
+    assert "".join(texts(out)) == "Узел srv-dc01.corp.contoso.ru "
+    starts = [e for e in out if e["type"] == "content_block_start"]
+    assert starts[1]["content_block"]["input"] == {}
+    [arguments] = [e["delta"]["partial_json"] for e in out if e.get("delta", {}).get("type") == "input_json_delta"]
+    assert json.loads(arguments) == {"command": "ping srv-dc01.corp.contoso.ru"}
+    assert [wire for _, wire in stream.pairs] == [
+        {"type": "text", "text": f"Узел {masked} "},
+        {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": f"ping {masked}"}},
+    ]
+
+
 def test_secret_stays_a_label_in_text_but_is_restored_in_tool_input(chat):
     state, settings = chat
     secret = fake(chat, "password=Hunter2Hunter2")
