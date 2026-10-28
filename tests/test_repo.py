@@ -7,6 +7,7 @@ from cleaner.core.types import EntityType as T
 from cleaner.core.types import Policy
 from cleaner.storage import crypto, db
 from cleaner.storage.repo import CheckpointBusy, Item, Provider, Repository, StaleState
+from cleaner.web import auth
 
 
 def new_chat(repo, title="Чат"):
@@ -289,6 +290,51 @@ def test_update_without_a_key_keeps_the_old_one(repo):
     with pytest.raises(KeyError):
         repo.update_provider(provider(id="нет"), None)
     assert repo.delete_provider(provider_id) and not repo.delete_provider(provider_id) and repo.providers() == []
+
+
+def test_api_key_is_stored_as_hash_with_encrypted_name(tmp_path, repo):
+    """SEC-17 на уровне хранилища: ключ — хэшем, имя — шифртекстом."""
+    user = repo.create_user("ivan", "hash", "user")
+    key = "ck_KanareykaZx81QwErTy0123456789abcdefghijkl"
+    repo.add_api_key(user, "Сборка отчётов", auth.token_hash(key), key[-4:])
+    repo.conn.execute("PRAGMA wal_checkpoint(FULL)")
+    raw = raw_database(tmp_path)
+    assert "Сборка отчётов".encode("utf-8") not in raw and key.encode("ascii") not in raw
+    stored = repo.api_key_by_hash(auth.token_hash(key))
+    assert (stored.user_id, stored.name, stored.tail, stored.disabled, stored.last_used_at) == (
+        user, "Сборка отчётов", "ijkl", False, "",
+    )
+    assert repo.api_key_by_hash(auth.token_hash(key + "x")) is None
+
+
+def test_api_keys_are_listed_by_owner_or_all_newest_first(repo, clock):
+    ivan = repo.create_user("ivan", "hash", "user")
+    petr = repo.create_user("petr", "hash", "user")
+    first = repo.add_api_key(ivan, "первый", "h1", "aaaa")
+    clock.advance(minutes=1)
+    second = repo.add_api_key(petr, "второй", "h2", "bbbb")
+    clock.advance(minutes=1)
+    third = repo.add_api_key(ivan, "третий", "h3", "cccc")
+    assert [k.id for k in repo.api_keys(ivan)] == [third, first]
+    assert [k.id for k in repo.api_keys()] == [third, second, first]
+    assert repo.api_key(second).name == "второй" and repo.api_key("нет") is None
+
+
+def test_disabled_key_stays_but_is_marked(repo):
+    user = repo.create_user("ivan", "hash", "user")
+    key_id = repo.add_api_key(user, "ключ", "h1", "aaaa")
+    assert repo.disable_api_key(key_id)
+    assert repo.api_key(key_id).disabled and repo.api_key_by_hash("h1").disabled
+    assert not repo.disable_api_key("нет")
+
+
+def test_touch_records_last_use(repo, clock):
+    user = repo.create_user("ivan", "hash", "user")
+    key_id = repo.add_api_key(user, "ключ", "h1", "aaaa")
+    assert repo.api_key(key_id).last_used_at == ""
+    clock.advance(minutes=3)
+    repo.touch_api_key(key_id)
+    assert repo.api_key(key_id).last_used_at == clock.now().isoformat(timespec="seconds")
 
 
 def test_chat_remembers_provider_and_model(repo):

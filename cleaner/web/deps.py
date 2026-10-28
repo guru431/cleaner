@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
@@ -12,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile
 
 from cleaner.service import ChatService
-from cleaner.storage.repo import Chat, Repository, Session, User
+from cleaner.storage.repo import ApiKey, Chat, Repository, Session, User
 from cleaner.web import auth
 
 SESSION_COOKIE = "cleaner_session"
@@ -76,6 +77,52 @@ def get_viewer(request: Request) -> Viewer:
     return Viewer(user, session)
 
 
+@dataclass(frozen=True)
+class ApiCaller:
+    """Программа с действующим ключом доступа (FR-13.1) и его владелец."""
+
+    user: User
+    key: ApiKey
+
+
+def _presented_key(request: Request) -> str:
+    key = request.headers.get("x-cleaner-key")
+    if key is None:
+        scheme, _, value = request.headers.get("authorization", "").strip().partition(" ")
+        key = value if scheme.lower() == "bearer" else ""
+    return key.strip()
+
+
+def get_api_caller(request: Request) -> ApiCaller:
+    """Ключ из X-Cleaner-Key или Authorization: Bearer; cookie сессии /api/v1 не открывает. После пяти неверных
+    ключей с одного адреса — нарастающая пауза, как у входа; в паузе ключ не проверяется. Ключ отозван или его
+    владелец отключён — тот же отказ, что у неизвестного (спецификация 2026-10-28, раздел 6.1)."""
+    throttle: auth.Throttle = request.app.state.key_throttle
+    host = request.client.host if request.client else ""
+    wait = throttle.wait(host)
+    if wait > 0:
+        raise HTTPException(429, "Слишком много неверных ключей", headers={"Retry-After": str(math.ceil(wait))})
+    repo = repo_of(request)
+    presented = _presented_key(request)
+    key = repo.api_key_by_hash(auth.token_hash(presented)) if presented.startswith(auth.API_KEY_PREFIX) else None
+    user = repo.user(key.user_id) if key is not None and not key.disabled else None
+    if key is None or user is None or user.disabled:
+        throttle.failed(host)
+        repo.audit("api_auth_failed")          # без адреса и ключа: присланное — не для журнала (FR-11.2)
+        raise HTTPException(401, "Нужен действующий ключ доступа")
+    throttle.succeeded(host)
+    repo.touch_api_key(key.id)
+    return ApiCaller(user, key)
+
+
+def api_chat(request: Request, chat_id: str, caller: ApiCaller) -> Chat:
+    """Чат владельца ключа. Чужой и несуществующий неотличимы — 404 (FR-1.5)."""
+    chat = repo_of(request).chat(chat_id)
+    if chat is None or chat.user_id != caller.user.id:
+        raise HTTPException(404, "Чат не найден")
+    return chat
+
+
 def get_admin(viewer: Viewer = Depends(get_viewer)) -> Viewer:
     if not viewer.is_admin:
         raise HTTPException(403, "Раздел доступен только администратору")
@@ -102,14 +149,15 @@ class Upload:
     ocr_all: bool = False       # отметка «Распознать текст на всех страницах PDF»
 
 
-async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)) -> Upload:
-    """Файл из формы multipart с токеном формы. Предел — max_file_mb (FR-2.2); Cleaner файл на диск не пишет (FR-2.7)."""
+async def _read_upload(request: Request, csrf: str | None) -> Upload:
+    """Файл из формы multipart. Предел — max_file_mb (FR-2.2); Cleaner файл на диск не пишет (FR-2.7).
+    csrf — токен формы страницы; у программы его нет (None), её открывает ключ доступа."""
     limit = request.app.state.max_file_bytes
     too_large = f"Файл больше {limit // (1024 * 1024)} МБ"
     if int(request.headers.get("content-length") or 0) > limit + _UPLOAD_OVERHEAD:
         raise HTTPException(413, too_large)
     form = await request.form(max_files=1, max_fields=4)
-    if not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), viewer.session.csrf.encode("utf-8")):
+    if csrf is not None and not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), csrf.encode("utf-8")):
         raise HTTPException(403, "Форма устарела — обновите страницу")
     upload = form.get("file")
     if not isinstance(upload, UploadFile) or not upload.filename:
@@ -119,6 +167,16 @@ async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)) -> 
     if len(data) > limit:
         raise HTTPException(413, too_large)
     return Upload(upload.filename, data, form.get("ocr") == "all")
+
+
+async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)) -> Upload:
+    """Файл из формы страницы — с токеном формы."""
+    return await _read_upload(request, viewer.session.csrf)
+
+
+async def get_api_upload(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Upload:
+    """Файл программы: поле file и необязательное ocr=all. Ключ проверяется раньше, чем читается тело."""
+    return await _read_upload(request, None)
 
 
 def page(request: Request, name: str, viewer: Viewer | None, status_code: int = 200, **context: object) -> HTMLResponse:

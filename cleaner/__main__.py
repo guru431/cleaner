@@ -173,6 +173,37 @@ def cmd_user(args: argparse.Namespace) -> int:
     return 0
 
 
+API_KEY_NAME = 100          # как у страницы «Ключи»
+
+
+def cmd_apikey(args: argparse.Namespace) -> int:
+    """Ключи доступа программ (FR-13.1) для проектов, которые заводятся сценарием. add печатает только ключ, одной
+    строкой и один раз; list — строка на ключ: id, логин, имя, последние четыре знака, active | disabled."""
+    with _repository(_config(args)) as repo:
+        if args.action == "add":
+            user = repo.user_by_login(args.target)
+            if user is None:
+                raise ValueError(f"нет пользователя {args.target}")
+            name = (args.name or "").strip()
+            if not 1 <= len(name) <= API_KEY_NAME:
+                raise ValueError(f"имя ключа (--name) — от 1 до {API_KEY_NAME} знаков")
+            key = auth.new_api_key()
+            key_id = repo.add_api_key(user.id, name, auth.token_hash(key), key[-4:])
+            repo.audit("key_created", user.id, id=key_id, by="cli")
+            print(key)
+        elif args.action == "list":
+            logins = {user.id: user.login for user in repo.users()}
+            for key in repo.api_keys():
+                state = "disabled" if key.disabled else "active"
+                print("\t".join((key.id, logins.get(key.user_id, "?"), key.name, f"…{key.tail}", state)))
+        else:
+            key = repo.api_key(args.target)
+            if key is None or not repo.disable_api_key(key.id):
+                raise ValueError(f"нет ключа {args.target}")
+            repo.audit("key_disabled", key.user_id, id=key.id, by="cli")
+    return 0
+
+
 def cmd_key(args: argparse.Namespace) -> int:
     passphrase = _secret(args.passphrase_file, "Пароль файла ключа: ")
     if args.action == "export":
@@ -285,6 +316,11 @@ def main(argv: list[str] | None = None) -> int:
     user.add_argument("--role", choices=("admin", "user"), default="user")
     user.add_argument("--password-file", help="пароль — первой строкой файла")
 
+    apikey = commands.add_parser("apikey", help="ключи доступа программ к /api/v1")
+    apikey.add_argument("action", choices=("add", "list", "disable"))
+    apikey.add_argument("target", nargs="?", default="", help="add: логин владельца ключа; disable: id ключа из list")
+    apikey.add_argument("--name", help="add: для какой программы ключ")
+
     key = commands.add_parser("key", help="выгрузка и загрузка главного ключа")
     key.add_argument("action", choices=("export", "import"))
     key.add_argument("file", help="файл ключа, защищённый паролем")
@@ -319,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         return selfcheck.run(print)
     handlers = {
         "init": cmd_init, "serve": cmd_serve, "user": cmd_user, "key": cmd_key, "backup": cmd_backup, "models": cmd_models,
-        "eval": cmd_eval,
+        "eval": cmd_eval, "apikey": cmd_apikey,
     }
     try:
         return handlers[args.command](args)

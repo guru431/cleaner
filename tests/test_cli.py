@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import socket
 import sqlite3
 import subprocess
@@ -88,6 +89,34 @@ def test_users_key_export_import_and_backup(home, monkeypatch, clock):
     assert {(u.login, u.disabled) for u in copy.users()} == {("boss", False), ("ivan", True)}
     copy.conn.close()
     assert main(["backup", str(home / "copy.db")]) == 1                           # существующий файл не трогается
+
+
+def test_apikey_add_list_disable(home, monkeypatch, capsys, clock):
+    """FR-13.1: ключ выпускается командой для проектов, которые заводятся сценарием; печатается один раз."""
+    key = init(home)
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    capsys.readouterr()
+    assert main(["apikey", "add", "boss", "--name", "ci"]) == 0
+    issued = capsys.readouterr().out
+    assert re.fullmatch(r"ck_[A-Za-z0-9_-]{43}\n", issued)
+    issued = issued.strip()
+    assert main(["apikey", "list"]) == 0
+    listing = capsys.readouterr().out
+    [line] = listing.splitlines()
+    key_id, login, name, tail, status = line.split("\t")
+    assert (login, name, tail, status) == ("boss", "ci", f"…{issued[-4:]}", "active") and issued not in listing
+    assert main(["apikey", "disable", key_id]) == 0
+    assert main(["apikey", "list"]) == 0
+    assert capsys.readouterr().out.rstrip("\n").split("\t")[-1] == "disabled"
+    assert main(["apikey", "add", "nobody", "--name", "x"]) == 1
+    assert main(["apikey", "disable", "нет"]) == 1
+    assert main(["apikey", "add", "boss", "--name", " "]) == 1
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    assert [(e.event, e.details) for e in repo.audit_events(limit=2)] == [
+        ("key_disabled", {"id": key_id, "by": "cli"}), ("key_created", {"id": key_id, "by": "cli"}),
+    ]
+    assert issued.encode("ascii") not in b"".join(p.read_bytes() for p in (home / "data").glob("cleaner.db*"))
+    repo.conn.close()
 
 
 def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monkeypatch):

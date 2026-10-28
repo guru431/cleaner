@@ -57,7 +57,7 @@
       {% if e.kind == "input" %}
       {% set polling = e.status in ("queued", "running") %}
       <header class="panel-head"{% if polling %} data-poll="/chats/{{ chat.id }}/items/{{ e.id }}/status"{% endif %}>
-        <span class="title">{% if e.source == "file" %}Файл{% elif e.source == "instruction" %}Инструкция для модели{% else %}Текст{% endif %} {{ e.seq }}</span>
+        <span class="title">{% if e.source == "file" %}Файл{% elif e.source == "instruction" %}Инструкция для модели{% elif e.source == "program" %}Текст из программы{% else %}Текст{% endif %} {{ e.seq }}</span>
         {% if polling %}
         <span class="state">{% if e.status == "queued" %}В очереди{% else %}Обрабатывается{% endif %}… <span data-progress>{{ e.progress }}</span></span>
         {% elif e.status == "done" %}

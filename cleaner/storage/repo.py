@@ -142,6 +142,19 @@ class Provider:
         return f"Provider(id={self.id!r}, name={self.name!r}, protocol={self.protocol!r}, base_url={self.base_url!r})"
 
 
+@dataclass(frozen=True)
+class ApiKey:
+    """Ключ доступа программы (FR-13.1). Самого ключа здесь нет: в базе только его хэш и последние четыре знака."""
+
+    id: str
+    user_id: str
+    name: str
+    tail: str
+    disabled: bool
+    created_at: str
+    last_used_at: str          # "" — не использовался
+
+
 class Repository:
     def __init__(self, conn: sqlite3.Connection, master_key: bytes, clock: Clock):
         self.conn = conn
@@ -668,6 +681,45 @@ class Repository:
     def set_chat_provider(self, chat_id: str, provider_id: str | None, model: str) -> None:
         if self._run("UPDATE chats SET provider_id = ?, model = ? WHERE id = ?", provider_id, model, chat_id) != 1:
             raise KeyError(chat_id)
+
+    # --- ключи доступа программ (FR-13.1) ------------------------------------------
+
+    def _api_key(self, row: sqlite3.Row | None) -> ApiKey | None:
+        if row is None:
+            return None
+        return ApiKey(
+            row["id"], row["user_id"], self._dec(self.global_key, row["name_enc"], f"api_keys.name:{row['id']}"),
+            row["tail"], bool(row["disabled"]), row["created_at"], row["last_used_at"] or "",
+        )
+
+    def add_api_key(self, user_id: str, name: str, token_hash: str, tail: str) -> str:
+        key_id = uuid.uuid4().hex
+        self._run(
+            "INSERT INTO api_keys(id, user_id, name_enc, token_hash, tail, disabled, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+            key_id, user_id, self._enc(self.global_key, name, f"api_keys.name:{key_id}"), token_hash, tail, self._now(),
+        )
+        return key_id
+
+    def api_key_by_hash(self, token_hash: str) -> ApiKey | None:
+        return self._api_key(self._one("SELECT * FROM api_keys WHERE token_hash = ?", token_hash))
+
+    def api_key(self, key_id: str) -> ApiKey | None:
+        return self._api_key(self._one("SELECT * FROM api_keys WHERE id = ?", key_id))
+
+    def api_keys(self, user_id: str | None = None) -> list[ApiKey]:
+        """Ключи пользователя, None — всех; новые первыми."""
+        if user_id is None:
+            rows = self._all("SELECT * FROM api_keys ORDER BY created_at DESC, id")
+        else:
+            rows = self._all("SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at DESC, id", user_id)
+        return [self._api_key(row) for row in rows]
+
+    def disable_api_key(self, key_id: str) -> bool:
+        """Отзыв насовсем: включить отозванный ключ нельзя, выпускается новый."""
+        return self._run("UPDATE api_keys SET disabled = 1 WHERE id = ?", key_id) == 1
+
+    def touch_api_key(self, key_id: str) -> None:
+        self._run("UPDATE api_keys SET last_used_at = ? WHERE id = ?", self._now(), key_id)
 
     # --- настройки в базе ---------------------------------------------------------
 

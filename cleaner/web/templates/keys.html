@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Ключи — Cleaner{% endblock %}
+{% block main %}
+<h1>Ключи доступа</h1>
+<p class="lead">Ключ открывает программе API Cleaner от вашего имени: она создаёт чаты, очищает и восстанавливает тексты, а чаты видны здесь, в списке чатов. Ключ показывается один раз. Отключённый ключ снова не включается — выпустите новый.</p>
+{% if issued %}
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Ключ показан один раз</h2></header>
+  <div class="panel-body">
+    <p class="flash warn">Скопируйте ключ сейчас: после ухода со страницы его не показать — Cleaner хранит только отпечаток.</p>
+    <pre class="text mono">{{ issued }}</pre>
+    <p class="sub">Проверка из командной строки:</p>
+    <pre class="text mono">curl -H "X-Cleaner-Key: {{ issued }}" {{ endpoint }}</pre>
+  </div>
+</section>
+{% endif %}
+<section class="panel">
+  <table class="grid">
+    <thead><tr><th>Имя</th>{% if viewer.is_admin %}<th>Владелец</th>{% endif %}<th>Ключ</th><th>Создан</th><th>Последний запрос</th><th>Состояние</th><th></th></tr></thead>
+    <tbody>
+    {% for k in keys %}
+    <tr>
+      <td>{{ k.name }}</td>
+      {% if viewer.is_admin %}<td>{{ logins.get(k.user_id, "?") }}</td>{% endif %}
+      <td class="mono">…{{ k.tail }}</td>
+      <td class="nowrap">{{ k.created_at | local(tz) }}</td>
+      <td class="nowrap">{{ k.last_used_at | local(tz) if k.last_used_at else "—" }}</td>
+      <td>{% if k.disabled %}<span class="badge bad">отключён</span>{% else %}<span class="badge good">действует</span>{% endif %}</td>
+      <td class="actions">
+        {% if not k.disabled %}
+        <form method="post" action="/keys/{{ k.id }}/disable">
+          {% include "_csrf.html" %}
+          <button class="danger">Отключить</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td class="empty" colspan="{{ 7 if viewer.is_admin else 6 }}">Ключей нет</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Новый ключ</h2></header>
+  <div class="panel-body">
+    <form method="post" action="/keys" class="form">
+      {% include "_csrf.html" %}
+      <label class="field"><span>Имя</span><span class="control">
+        <input name="name" maxlength="100" autocomplete="off" required>
+        <small class="hint">Для какой программы — чтобы потом найти и отключить ключ</small>
+      </span></label>
+      <div class="buttons"><button class="primary">Выпустить</button></div>
+    </form>
+  </div>
+</section>
+{% endblock %}

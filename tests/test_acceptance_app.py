@@ -76,18 +76,25 @@ def test_ac_1_11_only_the_login_page_is_open_without_a_session(app, browser):
         concrete = re.sub(r"\{[^}]+\}", "0" * 32, path)
         for method in sorted((route.methods or set()) - {"HEAD"}):
             response = anonymous.client.request(method, concrete)
+            if path.startswith("/api/"):
+                # Программам — отказ JSON без ключа; после пяти отказов с адреса — пауза (план 5А).
+                assert response.status_code in (401, 429), (method, path)
+                assert response.json()["error"]["code"] == response.status_code, (method, path)
+                continue
             assert (response.status_code, response.headers.get("location")) == (303, "/login"), (method, path)
 
 
-def test_ac_1_11_one_user_cannot_reach_another_users_chat(app, browser, repo):
+def test_ac_1_11_one_user_cannot_reach_another_users_chat(app, browser, repo, api):
     """Каждый маршрут с чатом в адресе — из списка маршрутов приложения, так что новый проверяется сам
     (обзор плана 2+4, m-11). Чужой — администратор: маршруты только для администраторов тоже доходят до
-    проверки владельца. Поля запросов верные: без проверки владельца каждый из них изменил бы чат Анны."""
+    проверки владельца. Поля запросов верные: без проверки владельца каждый из них изменил бы чат Анны.
+    Маршруты /api/v1 — ключом Бориса, тела — JSON с теми же полями (план 5А)."""
     anna, boris = browser(), browser()
     anna.user("anna")
     anna.login("anna")
     boris.user("boris", "admin")
     boris.login("boris")
+    program = api("boris")
     chat_id = anna.chat()
     anna.post(f"/chats/{chat_id}/input", text="почта a@x.example")
     item_id = repo.items(chat_id)[0].id
@@ -96,6 +103,7 @@ def test_ac_1_11_one_user_cannot_reach_another_users_chat(app, browser, repo):
     fields = {
         "text": "x", "answer": "x", "title": "x", "item_id": item_id, "value": "a@x.example", "type": "TERM",
         "list": "never", "layer": "ner", "enabled": "no", "keep": entity.id, "drop": entity.id, "confirm": "yes",
+        "action": "mask",
     }
     checked = set()
     for route in iter_route_contexts(app.routes):
@@ -103,7 +111,14 @@ def test_ac_1_11_one_user_cannot_reach_another_users_chat(app, browser, repo):
             continue
         path = re.sub(r"\{([^}]+)\}", lambda m: ids[m.group(1)], route.path)      # KeyError — новый вид id: дополните ids
         for method in sorted((route.methods or set()) - {"HEAD"}):
-            if method == "GET":
+            if path.startswith("/api/"):
+                if path.endswith("/files"):
+                    response = program.post(path, files={"file": ("письмо.txt", "почта b@x.example".encode("utf-8"))})
+                else:
+                    response = program.client.request(
+                        method, path, json=None if method == "GET" else fields, headers={"X-Cleaner-Key": program.key},
+                    )
+            elif method == "GET":
                 response = boris.get(path)
             elif path.endswith("/upload"):
                 response = boris.upload(path, "письмо.txt", "почта b@x.example".encode("utf-8"))
@@ -113,6 +128,7 @@ def test_ac_1_11_one_user_cannot_reach_another_users_chat(app, browser, repo):
             checked.add(route.path)
     item_routes = {f"/chats/{{chat_id}}/items/{{item_id}}/{name}" for name in ("status", "retry", "risk", "gold")}
     assert item_routes | {"/chats/{chat_id}/layers", "/chats/{chat_id}/upload", "/chats/{chat_id}/delete"} <= checked
+    assert "/api/v1/chats/{chat_id}" in checked
     assert "Консультация" not in boris.get("/chats").text
     [item] = repo.items(chat_id)
     assert (item.sanitized, item.status, item.risk_status) == ("почта <EMAIL_1>", "done", "")

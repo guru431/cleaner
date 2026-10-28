@@ -12,11 +12,13 @@
 <body>
 {% from "_ui.html" import theme_toggle, view_menu %}
 {% if viewer %}
-{% set section = "settings" if request.url.path.startswith("/settings") else "chats" %}
+{% set path = request.url.path %}
+{% set section = "settings" if path.startswith("/settings") else "keys" if path.startswith("/keys") else "chats" %}
 <header class="top">
   <a class="brand" href="/chats">Cleaner</a>
   <nav class="sections">
     <a href="/chats"{% if section == "chats" %} class="on" aria-current="true"{% endif %}>Чаты</a>
+    <a href="/keys"{% if section == "keys" %} class="on" aria-current="true"{% endif %}>Ключи</a>
     {% if viewer.is_admin %}<a href="/settings"{% if section == "settings" %} class="on" aria-current="true"{% endif %}>Настройки</a>{% endif %}
   </nav>
   <span class="who">{{ viewer.user.login }}</span>
