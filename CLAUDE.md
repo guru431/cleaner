@@ -25,6 +25,10 @@ set -a; . data/cleaner.env; set +a          # главный ключ — в о�
 # eval и с --jsonl открывает базу — из неё берутся словарь, шаблоны и политики.
 .venv/Scripts/python.exe scripts/fetch_open_sets.py data/open-sets
 .venv/Scripts/python.exe -m cleaner eval --jsonl data/open-sets/hivetrace.jsonl --layers 1-3 1-4
+# Ключ доступа к /api/v1 для своих скриптов (тоже с главным ключом в окружении; печатается один раз) и проверка API
+# запущенной службы — ключ только в переменной окружения, не в аргументах:
+.venv/Scripts/python.exe -m cleaner apikey add dev --name local
+CLEANER_API_KEY=ck_… .venv/Scripts/python.exe scripts/api_smoke.py --url http://127.0.0.1:5464
 ```
 
 Слой 5, проверка риска и распознавание сканов ходят в шлюз сервера (`http://example:30000/v1`, адрес задаётся на странице «Настройки → Локальная модель»). Ключ — строкой `CLEANER_GATEWAY_KEY=…` в `data/cleaner.env`, которую дописывает владелец (ключ `cleaner-dev`, `sudo ai-ctl gateway-key create cleaner-dev`); в репозиторий и в вывод сессии он не попадает.
