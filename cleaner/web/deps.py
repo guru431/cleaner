@@ -21,6 +21,9 @@ IDLE = timedelta(hours=8)
 # Предел тела запроса (app.BodyLimit) и одного поля формы: 500 000 знаков даже четырёхбайтных —
 # около 6 МБ в закодированной форме. У Starlette поле формы по умолчанию не больше 1 МБ.
 MAX_BODY_BYTES = 8 * 1024 * 1024
+# Тело запроса агента (спецификация 2026-10-28, 8.2): вся история разговора с прочитанными файлами — и до, и после
+# распаковки. Постоянная, а не настройка agent_max_body_mb: менять её пока некому.
+AGENT_BODY_BYTES = 32 * 1024 * 1024
 
 templates = Jinja2Templates(directory=Path(__file__).with_name("templates"))
 
@@ -86,11 +89,16 @@ class ApiCaller:
 
 
 def _presented_key(request: Request) -> str:
-    key = request.headers.get("x-cleaner-key")
-    if key is None:
-        scheme, _, value = request.headers.get("authorization", "").strip().partition(" ")
-        key = value if scheme.lower() == "bearer" else ""
-    return key.strip()
+    """X-Cleaner-Key, иначе Authorization: Bearer, иначе x-api-key (так ключ передаёт Claude Code и SDK Anthropic, 6.1).
+    Из нескольких — первый вида ck_…: у агента с подпиской в Authorization — его собственный токен."""
+    scheme, _, bearer = request.headers.get("authorization", "").strip().partition(" ")
+    presented = [
+        value.strip() for value in (
+            request.headers.get("x-cleaner-key"), bearer if scheme.lower() == "bearer" else None,
+            request.headers.get("x-api-key"),
+        ) if value is not None
+    ]
+    return next((value for value in presented if value.startswith(auth.API_KEY_PREFIX)), presented[0] if presented else "")
 
 
 def get_api_caller(request: Request) -> ApiCaller:

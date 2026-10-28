@@ -76,6 +76,9 @@ class StubProvider:
                 body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))))
                 stub.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
                 route = self.path.split("?")[0]
+                if route.endswith("/count_tokens"):
+                    self._json(404, {"type": "error", "error": {"type": "not_found_error", "message": "Not found"}})
+                    return
                 if stub.script and route.endswith("/v1/messages"):
                     self._scripted(stub._step(body))
                     return
