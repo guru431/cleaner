@@ -1120,6 +1120,17 @@ _LINK_OPENER = re.compile(
 )
 
 
+def safe_cut(text: str) -> int:
+    """Где в потоке замена не может оборваться: после последнего пробельного знака (запись замены пробелов не
+    содержит); хвост без пробелов длиннее 512 знаков (минифицированный JSON) — после последнего знака, который не
+    входит ни в одну запись замены."""
+    end = max(text.rfind(" "), text.rfind("\n"), text.rfind("\t"), text.rfind("\r")) + 1
+    if len(text) - end > _HOLD:
+        tail = text[end:]
+        end += max((i + 1 for i, ch in enumerate(tail) if not _TOKEN_CHAR.match(ch)), default=0)
+    return end
+
+
 def _unclosed_link(text: str) -> int:
     """Начало первой незакрытой ссылки в text или len(text). Закрытые проверяются поиском закрывающего знака
     от своего начала — время пропорционально их длине; на первой незакрытой поиск кончается."""
@@ -1152,16 +1163,9 @@ class StreamRestorer:
         self._shown = ""
         self._restorer: _Restorer | None = None
 
-    def _safe_end(self) -> int:
-        end = max(self.text.rfind(" "), self.text.rfind("\n"), self.text.rfind("\t"), self.text.rfind("\r")) + 1
-        if len(self.text) - end > _HOLD:
-            tail = self.text[end:]
-            end += max((i + 1 for i, ch in enumerate(tail) if not _TOKEN_CHAR.match(ch)), default=0)
-        return end
-
     def feed(self, chunk: str) -> str:
         self.text += chunk
-        cut = self._safe_end()
+        cut = safe_cut(self.text)
         cut = _unclosed_link(self.text[:cut])
         if cut != self._cut:
             self._cut = cut
