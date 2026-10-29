@@ -1,5 +1,6 @@
 """Шлюз для агентов (спецификация 2026-10-28, раздел 8): ключ → чат шлюза → блоки по журналу отправленного или очистка →
-провайдер → восстановленный поток → журнал. Протокол — Anthropic Messages, доступ — по подключению Cleaner (план 5Б).
+провайдер → восстановленный поток → журнал. Всё, что зависит от протокола агента, — объект протокола
+(core/agent/protocol.py); доступ — по подключению Cleaner.
 
 Тело запроса, ответ модели, ключ подключения и ключ Cleaner не попадают ни в журнал событий, ни в сообщения об ошибках
 (SEC-11, FR-11.2): туда — идентификаторы, числа и коды."""
@@ -16,7 +17,7 @@ from typing import Any
 from cleaner.clock import Clock
 from cleaner.core import pipeline
 from cleaner.core.agent import ledger, walk
-from cleaner.core.agent.stream import AnthropicStream
+from cleaner.core.agent.protocol import PROTOCOLS, GatewayProtocol, ProtocolStream
 from cleaner.core.detect import dictionary
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.types import ChatState, Policy, Settings
@@ -27,7 +28,6 @@ AGENT_CHAT_DAYS = 30            # текущий чат ключа сменяе�
 AGENT_CHAT_ENTITIES = 20_000
 LEDGER_DAYS = 30                # разговор без запросов удаляется с журналом (7.3)
 ATTEMPTS = 3                    # повторы при правке чата в интерфейсе посреди запроса (8.7)
-PROTOCOL = "anthropic"
 PRUNE_EVERY = timedelta(hours=1)
 STATE_CACHE = 8                 # состояний чатов в памяти (раздел 13: загрузка 20 000 сущностей — 161 мс)
 _BODY_BYTES = 32 * 1024 * 1024  # ответ без потока и ошибка провайдера
@@ -38,8 +38,8 @@ _RETRY = {"retry-after": "10"}
 class AgentCall:
     key: ApiKey
     user: User
-    protocol: str                       # anthropic
-    path: str                           # /v1/messages | /v1/messages/count_tokens
+    protocol: str                       # ключ PROTOCOLS: anthropic
+    path: str                           # путь у провайдера: /v1/messages | /v1/messages/count_tokens
     query: str
     headers: Mapping[str, str]
     body: dict
@@ -102,32 +102,20 @@ def _snapshot(state: ChatState) -> ChatState:
     )
 
 
-def _placeholder(unit: walk.Unit, reason: str) -> object:
-    """Пометка удержанного блока того же вида (7.4): у результата инструмента — его содержимым."""
-    text = ledger.placeholder(reason)
-    if unit.kind == "tool_result":
-        return dict(unit.node, content=text)
-    if unit.kind == "tool_use":
-        return dict(unit.node, input={"cleaner": text})      # вызов остаётся вызовом: на его id ссылается результат
-    if unit.kind == "tool_def":
-        return dict(unit.node, description=text, input_schema={"type": "object"})
-    return {"type": "text", "text": text}
-
-
 def _json(node: object) -> str:
     return json.dumps(node, ensure_ascii=False, separators=(",", ":"))
 
 
-def _sse(event: dict) -> bytes:
-    return f"event: {event.get('type', 'message')}\ndata: {_json(event)}\n\n".encode("utf-8")
+GATEWAY_PROTOCOLS = frozenset(proto.provider_protocol for proto in PROTOCOLS.values())   # протоколы подключений шлюза
 
 
 def gateway_access(repo: Repository, provider_id: str, models: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
-    """Доступ ключа шлюза: включённое подключение с протоколом Anthropic и модели из его списка. ValueError с причиной."""
+    """Доступ ключа шлюза: включённое подключение с протоколом, на котором говорит шлюз, и модели из его списка.
+    ValueError с причиной."""
     provider = repo.provider(provider_id)
     if provider is None or not provider.enabled:
         raise ValueError("подключение не найдено или выключено")
-    if provider.protocol != PROTOCOL:
+    if provider.protocol not in GATEWAY_PROTOCOLS:
         raise ValueError("шлюз для агентов пока работает только с подключениями по протоколу Anthropic")
     unknown = [model for model in models if model not in provider.models]
     if unknown:
@@ -191,7 +179,7 @@ class AgentService:
 
     # --- запрос ------------------------------------------------------------------------
 
-    def _provider(self, call: AgentCall) -> Provider:
+    def _provider(self, call: AgentCall, proto: GatewayProtocol) -> Provider:
         upstream = call.key.upstream
         if not upstream:
             raise AgentRefused(403, "permission_error", "Cleaner: у ключа нет доступа к модели — он только для /api/v1")
@@ -203,7 +191,7 @@ class AgentService:
         allowed = call.key.models or provider.models
         if allowed and model not in allowed:
             raise AgentRefused(400, "invalid_request_error", "Cleaner: эта модель ключу не разрешена")
-        if provider.protocol != PROTOCOL or call.protocol != PROTOCOL:
+        if provider.protocol != proto.provider_protocol:
             raise AgentRefused(400, "invalid_request_error", "Cleaner: протокол агента и подключения не совпадает")
         return provider
 
@@ -244,32 +232,34 @@ class AgentService:
 
     def handle(self, call: AgentCall) -> AgentReply:
         self._prune()
-        provider = self._provider(call)
+        proto = PROTOCOLS[call.protocol]
+        provider = self._provider(call, proto)
         conv_id = ledger.conversation_id(
-            ledger.conversation_secret(self.repo.global_key), call.key.id, walk.first_user(call.body),
+            ledger.conversation_secret(self.repo.global_key), call.key.id, proto.first_user(call.body),
         )
-        session = str(call.headers.get("x-claude-code-session-id", ""))[:200]
+        session = str(call.headers.get(proto.session_header, "") if proto.session_header else "")[:200]
         layers = self._layers(call.key)
         chat_id = self._chat(call.key, conv_id, session)
         settings = self.repo.settings()
         with self._lock(chat_id):
-            prepared = self._prepare(call, chat_id, conv_id, provider, settings, layers)
+            prepared = self._prepare(call, proto, chat_id, conv_id, provider, settings, layers)
         self.repo.touch_conversation(conv_id, session)
         for direction, digests in prepared.repeated.items():
             if digests:
                 self.repo.touch_ledger(chat_id, conv_id, direction, digests)
         if prepared.withheld:
             self.repo.audit("agent_withheld", call.user.id, chat_id, key=call.key.id, reasons=dict(prepared.withheld))
-        return self._send(call, chat_id, conv_id, provider, prepared)
+        return self._send(call, proto, chat_id, conv_id, provider, prepared)
 
     def _prepare(
-        self, call: AgentCall, chat_id: str, conv_id: str, provider: Provider, settings: Settings, layers: pipeline.Layers,
+        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, provider: Provider, settings: Settings,
+        layers: pipeline.Layers,
     ) -> _Prepared:
         """Шаги 5–7 раздела 8 под замком чата; StaleState — повтор до ATTEMPTS раз."""
         for _ in range(ATTEMPTS):
             state, version = self._load(chat_id)
             try:
-                prepared, entries = self._clean(call, chat_id, conv_id, provider, state, settings, layers)
+                prepared, entries = self._clean(call, proto, chat_id, conv_id, provider, state, settings, layers)
             except _LayerDown:
                 self._remember(chat_id, version, None)
                 raise AgentRefused(503, "overloaded_error", "Cleaner: локальная модель недоступна", _RETRY) from None
@@ -291,23 +281,23 @@ class AgentService:
         raise AgentRefused(503, "overloaded_error", "Cleaner: чат шлюза меняют в интерфейсе, повторите запрос", _RETRY)
 
     def _clean(
-        self, call: AgentCall, chat_id: str, conv_id: str, provider: Provider, state: ChatState, settings: Settings,
-        layers: pipeline.Layers,
+        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, provider: Provider, state: ChatState,
+        settings: Settings, layers: pipeline.Layers,
     ) -> tuple[_Prepared, list[LedgerEntry]]:
         secret = self.repo.chat_secret(chat_id)
-        units = walk.anthropic_units(call.body)
-        digests = {unit.path: ledger.block_digest(secret, PROTOCOL, unit.role, unit.kind, unit.node) for unit in units}
+        units = proto.units(call.body)
+        digests = {unit.path: ledger.block_digest(secret, proto.name, unit.role, unit.kind, unit.node) for unit in units}
         groups: dict[str, list[walk.Unit]] = {"in": [], "out": []}
         for unit in units:
             if unit.kind != "opaque":       # рассуждения и блоки провайдера — как есть (7.2.3)
-                groups["out" if unit.role == "assistant" and unit.kind in ("text", "tool_use") else "in"].append(unit)
+                groups["out" if proto.is_model_block(unit) else "in"].append(unit)
         known = {
             direction: self.repo.ledger_get(chat_id, conv_id, direction, [digests[u.path] for u in group])
             for direction, group in groups.items()
         }
         replaced: dict[walk.Path, object] = {}
         entries: list[LedgerEntry] = []
-        structural = walk.structural(call.body)
+        structural = proto.structural(call.body)
         checked = list(structural)
         result = _Prepared(secret=secret, settings=settings, repeated={"in": [], "out": []})
         for direction, group in groups.items():
@@ -318,7 +308,7 @@ class AgentService:
                     replaced[unit.path] = json.loads(entry.wire)
                     result.repeated[direction].append(digest)
                     continue
-                node, withheld, counts = self._new(unit, direction, state, settings, layers)
+                node, withheld, counts = self._new(proto, unit, direction, state, settings, layers)
                 replaced[unit.path] = node
                 checked += walk.strings_of(node)
                 entries.append(LedgerEntry(conv_id, direction, digest, _json(unit.node), _json(node), withheld, counts))
@@ -326,16 +316,10 @@ class AgentService:
                 result.replaced.update(counts)
                 if withheld:
                     result.withheld[withheld] += 1
-        body = walk.rebuild(call.body, replaced)
-        instruction = pipeline.system_prompt(state.label_style)
-        system = body.get("system")
-        if isinstance(system, list):
-            body["system"] = [*system, {"type": "text", "text": instruction}]
-        else:
-            body["system"] = f"{system}\n\n{instruction}" if system else instruction
+        body = proto.add_instruction(proto.rebuild(call.body, replaced), pipeline.system_prompt(state.label_style))
         out, leaks = pipeline.build_agent_outgoing(
             state, settings, chat_id=chat_id, provider_id=provider.id, path=call.path, query=call.query,
-            headers=call.headers, body=body, checked=checked,
+            headers=call.headers, allowed=proto.headers, prefixes=proto.header_prefixes, body=body, checked=checked,
         )
         if leaks:
             in_service = bool(pipeline.checked_leaks(structural, state, settings))
@@ -352,12 +336,13 @@ class AgentService:
         return result, entries
 
     def _new(
-        self, unit: walk.Unit, direction: str, state: ChatState, settings: Settings, layers: pipeline.Layers,
+        self, proto: GatewayProtocol, unit: walk.Unit, direction: str, state: ChatState, settings: Settings,
+        layers: pipeline.Layers,
     ) -> tuple[object, str, dict[str, int]]:
         """Новый блок: очищенный узел, причина удержания ("" — нет) и замены по типам. Блок агента — слоями ключа; блок
         модели, которого нет в журнале, — как ответ модели в чате: известные значения, словарь и правила (FR-8.11)."""
         if unit.kind == "media":
-            return _placeholder(unit, ledger.REASONS["media"]), "media", {}
+            return proto.placeholder(unit, ledger.REASONS["media"]), "media", {}
         blocked: list[str] = []
         counts: Counter = Counter()
 
@@ -376,20 +361,22 @@ class AgentService:
             return found.sanitized
 
         try:
-            node = walk.sanitize_unit(unit, clean)
+            node = proto.sanitize_unit(unit, clean)
         except _LayerDown:
             raise
         except Exception:
-            return _placeholder(unit, ledger.REASONS["failed"]), "failed", {}
+            return proto.placeholder(unit, ledger.REASONS["failed"]), "failed", {}
         if blocked:
-            return _placeholder(unit, ledger.REASONS["blocked"].format(type=blocked[0])), "blocked", {}
-        if walk.contains_media(unit):
+            return proto.placeholder(unit, ledger.REASONS["blocked"].format(type=blocked[0])), "blocked", {}
+        if proto.contains_media(unit):
             return node, "media", dict(counts)
         return node, "", dict(counts)
 
     # --- отправка и ответ ---------------------------------------------------------------
 
-    def _send(self, call: AgentCall, chat_id: str, conv_id: str, provider: Provider, prepared: _Prepared) -> AgentReply:
+    def _send(
+        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, provider: Provider, prepared: _Prepared,
+    ) -> AgentReply:
         connection = cloud.Connection(
             provider.protocol, provider.base_url, provider.auth_style, provider.api_key, provider.max_tokens,
             provider.extra_body,
@@ -400,7 +387,7 @@ class AgentService:
             "replaced": dict(prepared.replaced),
         }
         try:
-            upstream = self.forward(prepared.out, connection, prepared.state, prepared.settings)
+            upstream = self.forward(prepared.out, connection, prepared.state, prepared.settings, passed=proto.passed_back)
         except cloud.LeakDetected as exc:
             self.repo.audit("agent_refused", call.user.id, chat_id, key=call.key.id, reason="leak_egress", count=exc.count)
             raise AgentRefused(
@@ -420,30 +407,33 @@ class AgentService:
                 upstream.close()
             self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=upstream.status)
             return AgentReply(upstream.status, dict(upstream.headers), body=raw)
-        stream = AnthropicStream(prepared.state, prepared.settings)
+        stream = proto.stream(prepared.state, prepared.settings)
         if not call.body.get("stream"):
             try:
                 raw = upstream.read(_BODY_BYTES)
             finally:
                 upstream.close()
             try:
-                message = stream.complete(json.loads(raw))
+                reply = json.loads(raw)
+                message = stream.complete(reply)
             except (ValueError, AttributeError):
                 self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=502)
                 raise AgentRefused(502, "api_error", "Cleaner: провайдер прислал не JSON") from None
-            self._record(chat_id, conv_id, prepared, stream)
-            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=upstream.status)
+            self._record(proto, chat_id, conv_id, prepared, stream)
+            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=upstream.status, usage=proto.usage(reply))
             return AgentReply(upstream.status, {"content-type": "application/json"}, body=_json(message).encode("utf-8"))
         headers = {"content-type": "text/event-stream", "cache-control": "no-cache"}
-        if "request-id" in upstream.headers:
-            headers["request-id"] = upstream.headers["request-id"]
-        return AgentReply(200, headers, events=self._events(call, chat_id, conv_id, prepared, upstream, stream, audit))
+        headers.update((name, value) for name, value in upstream.headers.items() if name not in ("content-type", "retry-after"))
+        return AgentReply(200, headers, events=self._events(call, proto, chat_id, conv_id, prepared, upstream, stream, audit))
 
-    def _record(self, chat_id: str, conv_id: str, prepared: _Prepared, stream: AnthropicStream) -> None:
+    def _record(
+        self, proto: GatewayProtocol, chat_id: str, conv_id: str, prepared: _Prepared, stream: ProtocolStream,
+    ) -> None:
         """Пары «отдано агенту — пришло от модели» — журнал out (7.2.2), своей транзакцией."""
         entries = [
             LedgerEntry(
-                conv_id, "out", ledger.block_digest(prepared.secret, PROTOCOL, "assistant", local["type"], local),
+                conv_id, "out",
+                ledger.block_digest(prepared.secret, proto.name, "assistant", proto.model_kind(local), local),
                 _json(local), _json(wire),
             )
             for local, wire in stream.pairs
@@ -452,11 +442,13 @@ class AgentService:
             self.repo.add_ledger(chat_id, entries)
 
     def _events(
-        self, call: AgentCall, chat_id: str, conv_id: str, prepared: _Prepared, upstream: egress.Upstream,
-        stream: AnthropicStream, audit: dict,
+        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, prepared: _Prepared,
+        upstream: egress.Upstream, stream: ProtocolStream, audit: dict,
     ) -> Iterator[bytes]:
-        """События агенту по мере прихода; обрыв — уже восстановленная часть и событие error (раздел 12)."""
+        """События агенту по мере прихода; обрыв — уже восстановленная часть и событие error (раздел 12). usage —
+        последние числа провайдера по каждому имени: у Anthropic message_delta несёт нарастающий итог."""
         finished = failed = False
+        usage: dict[str, int] = {}
         try:
             for line in upstream.lines():
                 if not line.startswith("data:"):
@@ -467,18 +459,22 @@ class AgentService:
                     continue
                 if not isinstance(event, dict):
                     continue
-                finished = finished or event.get("type") == "message_stop"
-                failed = failed or event.get("type") == "error"
+                finished = finished or stream.finished(event)
+                failed = failed or event.get("type") == "error" or "error" in event
+                usage.update(proto.usage(event))
                 for out in stream.feed(event):
-                    yield _sse(out)
+                    yield proto.sse(out)
         except ProviderError:
             pass
         finally:
             upstream.close()
-            self._record(chat_id, conv_id, prepared, stream)
-            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished)
-        if not finished:
-            for out in stream.cut():
-                yield _sse(out)
-            if not failed:
-                yield _sse({"type": "error", "error": {"type": "api_error", "message": "Cleaner: поток ответа провайдера оборвался"}})
+            self._record(proto, chat_id, conv_id, prepared, stream)
+            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished, usage=usage)
+        if finished:
+            if end := proto.end():
+                yield end
+            return
+        for out in stream.cut():
+            yield proto.sse(out)
+        if not failed:
+            yield proto.sse(proto.error_event("Cleaner: поток ответа провайдера оборвался"))

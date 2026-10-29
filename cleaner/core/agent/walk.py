@@ -185,6 +185,34 @@ def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
     return copy.deepcopy(node)          # непрозрачный и удерживаемый — как есть
 
 
+def is_model_block(unit: Unit) -> bool:
+    """Блок модели в истории — ищется в журнале out по тому, что шлюз отдал агенту (7.2.2)."""
+    return unit.role == "assistant" and unit.kind in ("text", "tool_use")
+
+
+def placeholder(unit: Unit, reason: str) -> object:
+    """Пометка удержанного блока того же вида (7.4): у результата инструмента — его содержимым."""
+    text = ledger.placeholder(reason)
+    if unit.kind == "tool_result":
+        return dict(unit.node, content=text)
+    if unit.kind == "tool_use":
+        return dict(unit.node, input={"cleaner": text})      # вызов остаётся вызовом: на его id ссылается результат
+    if unit.kind == "tool_def":
+        return dict(unit.node, description=text, input_schema={"type": "object"})
+    return {"type": "text", "text": text}
+
+
+def add_instruction(body: dict, text: str) -> dict:
+    """Служебная инструкция — последним блоком system (8.8); строка system дополняется через пустую строку. body — уже
+    новое тело (rebuild)."""
+    system = body.get("system")
+    if isinstance(system, list):
+        body["system"] = [*system, {"type": "text", "text": text}]
+    else:
+        body["system"] = f"{system}\n\n{text}" if system else text
+    return body
+
+
 def rebuild(body: dict, replaced: dict[Path, object]) -> dict:
     """Новое тело: узлы по путям заменены, у блоков — cache_control из присланного тела; строковое содержимое остаётся
     строкой. Присланное тело не меняется: копируются только контейнеры на путях замен."""

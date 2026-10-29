@@ -17,7 +17,7 @@ from cleaner.egress import ProviderError
 from cleaner.egress.cloud import Connection, LeakDetected, _headers, check_url
 
 _TIMEOUT = httpx.Timeout(30.0, read=300.0)          # агент с рассуждениями молчит минутами до первого слова
-_PASSED = ("content-type", "request-id", "retry-after")      # заголовки провайдера, которые уходят агенту
+_PASSED = ("content-type", "request-id", "retry-after")      # заголовки провайдера агенту, если протокол не задал свои
 
 
 class ProviderTimeout(ProviderError):
@@ -30,12 +30,12 @@ class ProviderTimeout(ProviderError):
 class Upstream:
     """Ответ провайдера: код, разрешённые заголовки и тело — строками потока или байтами."""
 
-    def __init__(self, client: httpx.Client, response: httpx.Response, key: str):
+    def __init__(self, client: httpx.Client, response: httpx.Response, key: str, passed: tuple[str, ...] = _PASSED):
         self._client = client
         self._response = response
         self._key = key.encode("utf-8")
         self.status = response.status_code
-        self.headers = {name: response.headers[name] for name in _PASSED if name in response.headers}
+        self.headers = {name: response.headers[name] for name in passed if name in response.headers}
 
     def lines(self) -> Iterator[str]:
         try:
@@ -68,8 +68,9 @@ class Upstream:
 
 def forward(
     out: AgentOutgoing, connection: Connection, state: ChatState, settings: Settings, *,
-    transport: httpx.BaseTransport | None = None,
+    passed: tuple[str, ...] = _PASSED, transport: httpx.BaseTransport | None = None,
 ) -> Upstream:
+    """passed — заголовки ответа провайдера, которые уходят агенту (по протоколу)."""
     if not isinstance(out, AgentOutgoing):
         raise TypeError("egress.forward принимает только AgentOutgoing, собранный pipeline")
     leaks = checked_leaks(out.checked, state, settings)
@@ -91,4 +92,4 @@ def forward(
         response.close()
         client.close()
         raise ProviderError("провайдер ответил переадресацией — она не выполняется", status=response.status_code)
-    return Upstream(client, response, connection.api_key)
+    return Upstream(client, response, connection.api_key, passed)

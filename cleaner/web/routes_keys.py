@@ -8,7 +8,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
-from cleaner.agent_service import PROTOCOL, gateway_access
+from cleaner.agent_service import GATEWAY_PROTOCOLS, gateway_access
 from cleaner.storage.repo import ApiKey
 from cleaner.web import auth
 from cleaner.web.deps import Viewer, get_form, get_viewer, page, repo_of
@@ -40,7 +40,7 @@ def _page(request: Request, viewer: Viewer, issued: str = "", issued_key: ApiKey
         else f"{names.get(key.upstream, 'подключение удалено')}: {', '.join(key.models) or 'все модели'}"
         for key in keys
     }
-    gateway = [p for p in providers if p.enabled and p.protocol == PROTOCOL]
+    gateway = [p for p in providers if p.enabled and p.protocol in GATEWAY_PROTOCOLS]
     settings = ""
     if issued and issued_key is not None and issued_key.upstream:
         provider = next(p for p in providers if f"provider:{p.id}" == issued_key.upstream)

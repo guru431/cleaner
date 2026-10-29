@@ -4,6 +4,7 @@
 import json
 import re
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -157,7 +158,8 @@ def test_ac_5_9_planted_original_never_leaves(gateway, stub, monkeypatch):
     agent = gateway("Проверь srv-dc01.corp.contoso.ru")
     agent.turn()
     build = agent_service.pipeline.build_agent_outgoing
-    monkeypatch.setattr(agent_service.walk, "sanitize_unit", lambda unit, clean: unit.node)
+    anthropic = agent_service.PROTOCOLS["anthropic"]
+    monkeypatch.setitem(agent_service.PROTOCOLS, "anthropic", replace(anthropic, sanitize_unit=lambda unit, clean: unit.node))
     monkeypatch.setattr(agent_service.pipeline, "build_agent_outgoing", lambda *a, **k: (build(*a, **k)[0], []))
     response = agent.client.post("/agent/anthropic/v1/messages", content=json.dumps(body("Снова srv-dc01.corp.contoso.ru")).encode(),
                                  headers={"x-api-key": agent.key, "content-type": "application/json"})

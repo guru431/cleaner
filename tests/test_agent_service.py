@@ -3,6 +3,7 @@ Cleaner, заглушка провайдера на петле. Тела — з�
 import json
 import re
 import threading
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -234,7 +235,8 @@ def test_planted_original_is_caught_in_egress(gw, repo, monkeypatch):
     gw.stub.script += [model_turn("Готово"), model_turn("Не дойдёт")]
     gw.send(body(TASK))
     build = agent_service.pipeline.build_agent_outgoing
-    monkeypatch.setattr(agent_service.walk, "sanitize_unit", lambda unit, clean: unit.node)
+    anthropic = agent_service.PROTOCOLS["anthropic"]
+    monkeypatch.setitem(agent_service.PROTOCOLS, "anthropic", replace(anthropic, sanitize_unit=lambda unit, clean: unit.node))
     monkeypatch.setattr(agent_service.pipeline, "build_agent_outgoing", lambda *a, **k: (build(*a, **k)[0], []))
     with pytest.raises(AgentRefused) as refused:
         gw.call(body("Снова srv-dc01.corp.contoso.ru"))

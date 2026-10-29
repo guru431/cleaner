@@ -510,18 +510,11 @@ class AgentOutgoing:
 
     chat_id: str
     provider_id: str
-    path: str                                   # /v1/messages | /v1/messages/count_tokens
+    path: str                                   # путь у провайдера: /v1/messages, /chat/completions, /responses…
     query: str
-    headers: tuple[tuple[str, str], ...]
+    headers: tuple[tuple[str, str], ...] = field(repr=False)        # бывает токен подписки агента
     body: bytes
     checked: tuple[str, ...]
-
-
-# Заголовки агента, которые уходят провайдеру (9.1); остальные отбрасываются — ключи агента и X-Cleaner-Key тоже.
-AGENT_HEADERS = frozenset({
-    "anthropic-version", "anthropic-beta", "content-type", "accept",
-    "x-claude-code-session-id", "x-claude-code-agent-id", "x-claude-code-parent-agent-id",
-})
 
 
 def checked_leaks(checked: list[str] | tuple[str, ...], state: ChatState, settings: Settings) -> list[Leak]:
@@ -532,11 +525,14 @@ def checked_leaks(checked: list[str] | tuple[str, ...], state: ChatState, settin
 
 def build_agent_outgoing(
     state: ChatState, settings: Settings, *, chat_id: str, provider_id: str, path: str, query: str,
-    headers: Mapping[str, str], body: dict, checked: list[str],
+    headers: Mapping[str, str], allowed: frozenset[str], prefixes: tuple[str, ...] = (), body: dict, checked: list[str],
 ) -> tuple[AgentOutgoing, list[Leak]]:
-    # Значение не из ASCII заголовком HTTP не отправить — такой заголовок отбрасывается, а не роняет запрос.
+    """Заголовки агента — только из списка протокола (allowed) и с его началами имён (prefixes); остальные отбрасываются,
+    ключи агента и X-Cleaner-Key тоже. Значение не из ASCII заголовком HTTP не отправить — такой заголовок отбрасывается,
+    а не роняет запрос."""
     kept = tuple(
-        (name.lower(), value) for name, value in headers.items() if name.lower() in AGENT_HEADERS and value.isascii()
+        (name.lower(), value) for name, value in headers.items()
+        if (name.lower() in allowed or name.lower().startswith(prefixes)) and value.isascii()
     )
     raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     out = AgentOutgoing(chat_id, provider_id, path, query, kept, raw, tuple(checked))

@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from cleaner.core.agent.protocol import PROTOCOLS
 from cleaner.core.pipeline import AgentOutgoing, build_agent_outgoing, sanitize
 from cleaner.egress import ProviderError
 from cleaner.egress import forward as egress
@@ -32,7 +33,7 @@ def outgoing(state, settings, checked=(), path="/v1/messages", query="beta=true"
     body = {"model": "m-1", "stream": True, "messages": [{"role": "user", "content": "вопрос"}]}
     return build_agent_outgoing(
         state, settings, chat_id=state.chat_id, provider_id="p1", path=path, query=query, headers=AGENT_HEADERS,
-        body=body, checked=list(checked),
+        allowed=PROTOCOLS["anthropic"].headers, body=body, checked=list(checked),
     )
 
 

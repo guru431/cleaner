@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from cleaner.core.restore import originals, safe_cut
@@ -47,6 +47,41 @@ class DeltaRestorer:
     def finish(self) -> str:
         piece, self.sent = self.text[self.sent:], len(self.text)
         return self.original(piece) if piece else ""
+
+
+def usage_numbers(usage: object, names: Mapping[str, str]) -> dict[str, int]:
+    """Числа usage провайдера под короткими именами журнала; имя вида «a.b» — вложенное поле. Строки и прочее — прочь:
+    в журнал событий идут только числа."""
+    out = {}
+    for name, short in names.items():
+        value = usage
+        for step in name.split("."):
+            value = value.get(step) if isinstance(value, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            out[short] = value
+    return out
+
+
+_ANTHROPIC_USAGE = {
+    "input_tokens": "input", "output_tokens": "output", "cache_read_input_tokens": "cache_read",
+    "cache_creation_input_tokens": "cache_write",
+}
+
+
+def anthropic_usage(event: dict) -> dict[str, int]:
+    """usage из message_start, message_delta (нарастающий итог) или ответа без потока."""
+    message = event.get("message")
+    found = event.get("usage") or (message.get("usage") if isinstance(message, dict) else None)
+    return usage_numbers(found, _ANTHROPIC_USAGE)
+
+
+def anthropic_sse(event: dict) -> bytes:
+    data = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event.get('type', 'message')}\ndata: {data}\n\n".encode("utf-8")
+
+
+def anthropic_error(message: str) -> dict:
+    return {"type": "error", "error": {"type": "api_error", "message": message}}
 
 
 def _map_strings(value: object, fn: Callable[[str], str]) -> object:
@@ -90,6 +125,10 @@ class AnthropicStream:
         if self._exact is None:
             self._exact = originals(self.state, self.settings, exact=True)
         return _map_strings(value, self._exact)
+
+    @staticmethod
+    def finished(event: dict) -> bool:
+        return event.get("type") == "message_stop"
 
     def feed(self, event: dict) -> list[dict]:
         type_ = event.get("type")
