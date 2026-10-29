@@ -9,7 +9,7 @@ from cleaner.core.types import ChatRule, ChatState, Entity, EntityType, Surrogat
 # Список сверяется с полями ChatState тестом: новое поле без сериализации — красный тест.
 FIELDS = (
     "chat_id", "net_key", "label_style", "entities", "surrogates", "issued", "rules",
-    "key_alias", "foreign_labels", "counters", "net6",
+    "key_alias", "foreign_labels", "counters", "net6", "written",
 )
 
 
@@ -33,6 +33,7 @@ def state_to_json(state: ChatState) -> bytes:
         "foreign_labels": sorted(state.foreign_labels),
         "counters": state.counters,
         "net6": state.net6,
+        "written": state.written,
     }
     return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
@@ -62,4 +63,5 @@ def state_from_json(raw: bytes) -> ChatState:
         foreign_labels=set(data["foreign_labels"]),
         counters={key: int(value) for key, value in data["counters"].items()},
         net6={key: int(value) for key, value in data["net6"].items()},
+        written=bool(data.get("written", False)),       # чаты до плана 5Б — обычные
     )

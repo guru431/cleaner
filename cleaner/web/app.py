@@ -16,14 +16,15 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from cleaner.agent_service import AgentRefused, AgentService
 from cleaner.clock import Clock
 from cleaner.egress import cloud
 from cleaner.service import ChatService
 from cleaner.storage.repo import Repository
 from cleaner.web import (
-    auth, routes_api, routes_auth, routes_chats, routes_keys, routes_review, routes_send, routes_settings,
+    auth, routes_agent, routes_api, routes_auth, routes_chats, routes_keys, routes_review, routes_send, routes_settings,
 )
-from cleaner.web.deps import MAX_BODY_BYTES, LoginRequired, page
+from cleaner.web.deps import AGENT_BODY_BYTES, MAX_BODY_BYTES, LoginRequired, page
 from cleaner.web.jobs import INTERRUPTED, Jobs, shutdown
 
 log = logging.getLogger("cleaner.web")
@@ -45,6 +46,9 @@ SEND_WORKERS = 4
 # Распознавание сканов ждёт шлюз, а не процессор; запросов распознавания одновременно столько же, сколько было
 # при общем пуле, — служба OCR сервера держит ограниченную очередь.
 FILE_WORKERS = 2
+# Шлюз агентов — свой пул (спецификация 2026-10-28, раздел 13): запросы агентов не ждут за очисткой текстов интерфейса и
+# отправками чата, и наоборот. Поток держится и всё время ответа провайдера.
+AGENT_WORKERS = 8
 
 
 _UPLOAD_HEADROOM = 1024 * 1024      # поля формы и заголовки частей multipart сверх самого файла
@@ -59,7 +63,10 @@ class BodyLimit:
         self.limit = limit
 
     def _limit(self, scope: Scope) -> int:
-        """У загрузки файла (страница и /api/v1) свой предел — max_file_mb (FR-2.2); у остальных запросов — общий."""
+        """У загрузки файла (страница и /api/v1) свой предел — max_file_mb (FR-2.2); у шлюза агентов — 32 МиБ (вся
+        история разговора); у остальных запросов — общий."""
+        if scope["path"].startswith("/agent/"):
+            return AGENT_BODY_BYTES
         if scope["path"].endswith(("/upload", "/files")):
             return scope["app"].state.max_file_bytes + _UPLOAD_HEADROOM
         return self.limit
@@ -91,6 +98,25 @@ def _json_error(code: int, message: str, headers: dict[str, str] | None = None) 
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=code, headers=headers)
 
 
+def _for_agent(request: Request) -> bool:
+    """Запрос агента: ошибки — в виде протокола Anthropic (спецификация 2026-10-28, раздел 12)."""
+    return request.url.path.startswith("/agent/anthropic/")
+
+
+_AGENT_KINDS = {
+    400: "invalid_request_error", 401: "authentication_error", 403: "permission_error", 404: "not_found_error",
+    413: "request_too_large", 415: "invalid_request_error", 429: "rate_limit_error", 503: "overloaded_error",
+}
+
+
+def _agent_error(code: int, message: str, headers: dict[str, str] | None = None, kind: str = "") -> Response:
+    """Сообщение начинается с «Cleaner:» — агент показывает его пользователю, и видно, кто отказал."""
+    if not message.startswith("Cleaner:"):
+        message = f"Cleaner: {message[:1].lower()}{message[1:]}"
+    error = {"type": kind or _AGENT_KINDS.get(code, "api_error"), "message": message}
+    return JSONResponse({"type": "error", "error": error}, status_code=code, headers=headers)
+
+
 def _interrupt(repo: Repository) -> None:
     """Всё, что осталось в очереди или в работе, — отказ «прервано» с кнопкой повтора (NFR-6)."""
     interrupted = repo.fail_interrupted(INTERRUPTED)
@@ -114,10 +140,12 @@ def create_app(
         repo, max_text_chars, engines, submit=jobs.submit, send_submit=sends.submit, cloud_send=cloud_send or cloud.send,
         file_submit=files.submit,
     )
+    agent_pool = ThreadPoolExecutor(max_workers=AGENT_WORKERS, thread_name_prefix="cleaner-agent")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
+        agent_pool.shutdown(wait=False, cancel_futures=True)       # ответы агентам рвутся с остановкой; агент повторит
         # Остановка: соединение с базой закрывается после этого (__main__). Недождавшиеся задания помечаются
         # здесь, пока оно открыто, — а не случайной ошибкой записи в закрытую базу и пометкой при следующем старте.
         # Их потоки процесс не ждёт: по SIGTERM uvicorn сразу после этого повторяет сигнал, и процесс кончается,
@@ -137,6 +165,8 @@ def create_app(
     app.state.unfinished_jobs = 0                    # сколько заданий остановка не дождалась (lifespan)
     app.state.max_file_bytes = max_file_mb * 1024 * 1024
     app.state.service = service
+    app.state.agent = AgentService(repo, engines, clock)
+    app.state.agent_pool = agent_pool
     app.state.throttle = auth.Throttle(clock)
     app.state.key_throttle = auth.Throttle(clock)            # неверные ключи доступа — по адресу клиента
     app.state.secure_cookies = secure_cookies
@@ -150,13 +180,22 @@ def create_app(
     app.include_router(routes_settings.router)
     app.include_router(routes_keys.router)
     app.include_router(routes_api.router)
+    app.include_router(routes_agent.router)
 
     @app.exception_handler(LoginRequired)
     async def to_login(request: Request, exc: LoginRequired) -> Response:
         return RedirectResponse("/login", status_code=303)
 
+    @app.exception_handler(AgentRefused)
+    async def agent_refused(request: Request, exc: AgentRefused) -> Response:
+        return _agent_error(exc.status, exc.message, exc.headers, exc.kind)
+
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        if _for_agent(request):
+            standard = exc.detail == HTTPStatus(exc.status_code).phrase
+            message = _STATUS_TEXT.get(exc.status_code, exc.detail) if standard else exc.detail
+            return _agent_error(exc.status_code, message, exc.headers)
         if _for_program(request):
             # Своё сообщение маршрута («Чат не найден») — как есть; стандартное английское Starlette — по-русски.
             standard = exc.detail == HTTPStatus(exc.status_code).phrase
@@ -168,6 +207,8 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def bad_request(request: Request, exc: RequestValidationError) -> Response:
         # Стандартный ответ FastAPI повторяет присланные значения — здесь их нет.
+        if _for_agent(request):
+            return _agent_error(400, "Неверный запрос")
         if _for_program(request):
             return _json_error(422, "Неверный запрос")
         return page(request, "error.html", None, status_code=400, code=400, message="Неверный запрос")
@@ -183,7 +224,9 @@ def create_app(
             # Только вид ошибки и путь: в тексте исключения может оказаться текст пользователя (SEC-11).
             log.error("ошибка %s при %s %s", type(exc).__name__, request.method, request.url.path)
             repo.audit("error", kind=type(exc).__name__, path=request.url.path)
-            if _for_program(request):
+            if _for_agent(request):
+                response = _agent_error(500, "внутренняя ошибка, запрос не отправлен")
+            elif _for_program(request):
                 response = _json_error(500, _INTERNAL)
             else:
                 response = page(request, "error.html", None, status_code=500, code=500, message=_INTERNAL)

@@ -44,6 +44,18 @@ def test_outgoing_context_is_built_only_by_the_pipeline():
     assert builders and set(builders) == {"core/pipeline.py"}
 
 
+def test_only_pipeline_builds_agent_outgoing():
+    """SEC-1 для шлюза агентов: запрос к провайдеру собирает только ядро, у egress.forward другого входа нет."""
+    builders = []
+    for path in PACKAGE.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                if name == "AgentOutgoing":
+                    builders.append(path.relative_to(PACKAGE).as_posix())
+    assert builders and set(builders) == {"core/pipeline.py"}
+
+
 def test_fast_suite_refuses_connections_beyond_loopback():
     """Сторож из conftest.py: внешний адрес и имя для DNS — отказ, петля — работает."""
     with pytest.raises(OSError, match="запрещено"):

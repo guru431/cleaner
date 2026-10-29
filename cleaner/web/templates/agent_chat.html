@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "_ui.html" import icon %}
+{% block title %}{{ chat.title }} — Cleaner{% endblock %}
+{% block main_class %}split{% endblock %}
+{% block main %}
+{% include "_sidebar.html" %}
+<section class="work chat">
+  <header class="chat-head">
+    <h1 title="{{ chat.title }}">{{ chat.title }}</h1>
+    <span class="spacer"></span>
+    <a href="/chats/{{ chat.id }}/entities">Таблица замен</a>
+    <details class="menu">
+      <summary class="btn" title="Ещё" aria-label="Ещё">{{ icon("more") }}</summary>
+      <div class="pop">
+        <form method="post" action="/chats/{{ chat.id }}/delete">
+          {% include "_csrf.html" %}
+          <label class="check"><input type="checkbox" name="confirm" value="yes" required> Удалить чат безвозвратно, вместе с журналом отправленного, таблицей замен и ключом</label>
+          <button class="danger">Удалить</button>
+        </form>
+      </div>
+    </details>
+  </header>
+  <p class="sub">Чат шлюза агентов — только для просмотра. Ключ: {{ keys or "—" }}. Создан {{ chat.created_at | local(tz) }}. Разговоров: {{ conversations }}.</p>
+  <p class="sub">Таблица замен общая для всех разговоров ключа; <a href="/chats/{{ chat.id }}/entities">правки распознавания</a> — правки действуют на следующие запросы агента. Уже отправленные блоки повторяются дословно, пока идёт их разговор.</p>
+  <section class="panel">
+    <header class="panel-head"><h2 class="title">Журнал отправленного</h2></header>
+    <div class="panel-body">
+      <p class="{{ 'flash warn' if opened else 'sub' }}">В показанных записях известные значения открыты в {{ opened }} {{ "блоке" if opened == 1 else "блоках" }}{% if opened %}: значение ушло открытым до правила, а разговор повторяет блок дословно{% endif %}.</p>
+      <table class="grid">
+        <thead><tr><th>Время</th><th>Разговор</th><th>Направление</th><th>Блок</th><th>Знаков</th><th>Замены</th><th></th></tr></thead>
+        <tbody>
+        {% for r in rows %}
+        <tr>
+          <td class="nowrap">{{ r.time | local(tz) }}</td>
+          <td class="mono" title="{{ r.session }}">{{ r.conversation }}</td>
+          <td>{{ r.direction }}</td>
+          <td>{{ r.kind }}{% if r.withheld %} <span class="badge bad">удержан: {{ r.withheld }}</span>{% endif %}{% if r.open %} <span class="badge warn">открыто значение</span>{% endif %}</td>
+          <td>{{ r.size }}</td>
+          <td>{{ r.counts or "—" }}</td>
+          <td>
+            <details>
+              <summary>Показать</summary>
+              <div class="compare">
+                <div><p class="sub">У агента</p><pre class="text">{{ r.local }}</pre></div>
+                <div><p class="sub">У провайдера</p><pre class="text">{{ r.wire }}</pre></div>
+              </div>
+            </details>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td class="empty" colspan="7">Агент ещё ничего не отправлял</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="buttons">
+        {% if offset %}<a class="btn" href="?offset={{ [offset - step, 0] | max }}">Новее</a>{% endif %}
+        {% if more %}<a class="btn" href="?offset={{ offset + step }}">Старше</a>{% endif %}
+      </p>
+    </div>
+  </section>
+</section>
+{% endblock %}

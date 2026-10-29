@@ -6,7 +6,7 @@ import bisect
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from types import ModuleType
 from typing import Protocol
@@ -500,6 +500,47 @@ def build_outgoing(
         for leak in leakcheck.check(message.text, state, settings)
     ]
     return Outgoing(context, leaks, blocked, skipped)
+
+
+@dataclass(frozen=True)
+class AgentOutgoing:
+    """Запрос шлюза агентов к провайдеру (спецификация 2026-10-28, раздел 5). Создаётся только в этом модуле (SEC-1): у
+    egress.forward другого входа нет. checked — новые и служебные строки: их egress проверяет на утечки ещё раз (SEC-2);
+    блоки, повторённые из журнала отправленного, не проверяются (7.3)."""
+
+    chat_id: str
+    provider_id: str
+    path: str                                   # /v1/messages | /v1/messages/count_tokens
+    query: str
+    headers: tuple[tuple[str, str], ...]
+    body: bytes
+    checked: tuple[str, ...]
+
+
+# Заголовки агента, которые уходят провайдеру (9.1); остальные отбрасываются — ключи агента и X-Cleaner-Key тоже.
+AGENT_HEADERS = frozenset({
+    "anthropic-version", "anthropic-beta", "content-type", "accept",
+    "x-claude-code-session-id", "x-claude-code-agent-id", "x-claude-code-parent-agent-id",
+})
+
+
+def checked_leaks(checked: list[str] | tuple[str, ...], state: ChatState, settings: Settings) -> list[Leak]:
+    """Утечки в строках одним проходом: таблица чата собирается один раз, а не на каждую строку. Разделитель — пустая
+    строка: написание через перевод строки не тянется, и находки на стыке строк не бывает."""
+    return leakcheck.check("\n\n".join(checked), state, settings) if checked else []
+
+
+def build_agent_outgoing(
+    state: ChatState, settings: Settings, *, chat_id: str, provider_id: str, path: str, query: str,
+    headers: Mapping[str, str], body: dict, checked: list[str],
+) -> tuple[AgentOutgoing, list[Leak]]:
+    # Значение не из ASCII заголовком HTTP не отправить — такой заголовок отбрасывается, а не роняет запрос.
+    kept = tuple(
+        (name.lower(), value) for name, value in headers.items() if name.lower() in AGENT_HEADERS and value.isascii()
+    )
+    raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    out = AgentOutgoing(chat_id, provider_id, path, query, kept, raw, tuple(checked))
+    return out, checked_leaks(out.checked, state, settings)
 
 
 def probe_context(provider_id: str, model: str) -> OutgoingContext:

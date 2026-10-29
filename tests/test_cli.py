@@ -15,7 +15,7 @@ from argon2 import PasswordHasher
 from cleaner import __main__ as cli
 from cleaner.__main__ import main
 from cleaner.storage import crypto, db
-from cleaner.storage.repo import Repository
+from cleaner.storage.repo import Provider, Repository
 from cleaner.web import auth
 
 
@@ -103,11 +103,12 @@ def test_apikey_add_list_disable(home, monkeypatch, capsys, clock):
     assert main(["apikey", "list"]) == 0
     listing = capsys.readouterr().out
     [line] = listing.splitlines()
-    key_id, login, name, tail, status = line.split("\t")
-    assert (login, name, tail, status) == ("boss", "ci", f"…{issued[-4:]}", "active") and issued not in listing
+    key_id, login, name, tail, status, upstream = line.split("\t")
+    assert (login, name, tail, status, upstream) == ("boss", "ci", f"…{issued[-4:]}", "active", "-")
+    assert issued not in listing
     assert main(["apikey", "disable", key_id]) == 0
     assert main(["apikey", "list"]) == 0
-    assert capsys.readouterr().out.rstrip("\n").split("\t")[-1] == "disabled"
+    assert capsys.readouterr().out.rstrip("\n").split("\t")[-2] == "disabled"
     assert main(["apikey", "add", "nobody", "--name", "x"]) == 1
     assert main(["apikey", "disable", "нет"]) == 1
     assert main(["apikey", "add", "boss", "--name", " "]) == 1
@@ -116,6 +117,27 @@ def test_apikey_add_list_disable(home, monkeypatch, capsys, clock):
         ("key_disabled", {"id": key_id, "by": "cli"}), ("key_created", {"id": key_id, "by": "cli"}),
     ]
     assert issued.encode("ascii") not in b"".join(p.read_bytes() for p in (home / "data").glob("cleaner.db*"))
+    repo.conn.close()
+
+
+def test_apikey_add_gateway_key(home, monkeypatch, capsys, clock):
+    """Ключ шлюза агентов командой: подключение и модели проверяются, как в форме страницы «Ключи»."""
+    key = init(home)
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    anthropic = repo.add_provider(Provider("", "Заглушка", "anthropic", "http://127.0.0.1:9", "x-api-key", "sk-1", ("m-1", "m-2")))
+    openai = repo.add_provider(Provider("", "OpenAI", "openai", "https://llm.example/v1", "bearer", "sk-2", ("g-1",)))
+    repo.conn.close()
+    capsys.readouterr()
+    for extra in (["--provider", "нет"], ["--provider", openai], ["--provider", anthropic, "--model", "m-9"]):
+        assert main(["apikey", "add", "boss", "--name", "агент", *extra]) == 1, extra
+    assert main(["apikey", "add", "boss", "--name", "агент", "--provider", anthropic, "--model", "m-2"]) == 0
+    assert re.fullmatch(r"ck_[A-Za-z0-9_-]{43}\n", capsys.readouterr().out)
+    assert main(["apikey", "list"]) == 0
+    assert capsys.readouterr().out.rstrip("\n").split("\t")[-1] == f"provider:{anthropic}"
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    [stored] = repo.api_keys()
+    assert (stored.upstream, stored.models) == (f"provider:{anthropic}", ("m-2",))
     repo.conn.close()
 
 

@@ -8,7 +8,7 @@ import ipaddress
 import re
 import unicodedata
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html.entities import html5 as _ENTITIES
 
 from cleaner.core import surrogates
@@ -542,12 +542,14 @@ class _Restorer:
         self.tags: tuple[str, list[tuple[int, int]], list[int]] | None = None    # ответ и участки вне тегов
         self.base = False           # в ответе есть <base>: адреса без узла разрешаются против его узла
 
-    def run(self, pieces: list[Piece], links: bool) -> list[Piece]:
+    def run(self, pieces: list[Piece], links: bool, tolerant: bool = True) -> list[Piece]:
+        """tolerant — восстанавливать и искажённые записи меток (FR-7.3); без него — только точные."""
         if links:
             pieces = _split(pieces, _LINK, self._link)
             pieces = _split(pieces, _WORD, self._prose)
         pieces = _split(pieces, self.exact, self._exact)
-        pieces = _split(pieces, _TOLERANT, self._label)
+        if tolerant:
+            pieces = _split(pieces, _TOLERANT, self._label)
         pieces = _split(pieces, _IPV4, self._derived_ip)
         pieces = _split(pieces, _MAC, self._mac)
         return self._fuzzy(pieces) if links else pieces
@@ -1075,18 +1077,26 @@ def _restore(restorer: _Restorer, answer: str) -> RestoreResult:
     return RestoreResult("".join(parts), segments, restorer.counters)
 
 
-def originals(state: ChatState, settings: Settings) -> Callable[[str], str]:
+def originals(state: ChatState, settings: Settings, exact: bool = False) -> Callable[[str], str]:
     """Значение с выданными заменами внутри — с их оригиналами, как в ответе, но без проверки ссылок: это значение из
     текста пользователя, а не ответ модели. Так конвейер узнаёт, какой адрес написан с заменой внутри (pipeline._outside).
     Восстановление собирается при первом значении, одно на очистку: собранное заново для каждого значения, оно проходило
-    бы всю таблицу чата, и тысячи таких адресов в тексте давали бы квадратичное время."""
+    бы всю таблицу чата, и тысячи таких адресов в тексте давали бы квадратичное время.
+
+    exact — аргументы вызова инструмента агента (спецификация 2026-10-28, 10.3): только точные записи замен, без
+    искажённых меток («PERSON_1» в коде бывает настоящим именем), а «скрывать без восстановления» восстанавливается —
+    файл и команда остаются на машине агента (решение владельца 2)."""
     restorer: _Restorer | None = None
+    if exact:
+        settings = replace(settings, policies={
+            type_: Policy.MASK if policy is Policy.HIDE else policy for type_, policy in settings.policies.items()
+        })
 
     def original(value: str) -> str:
         nonlocal restorer
         if restorer is None:
             restorer = _Restorer(state, settings)
-        return "".join(piece for piece, _, _ in restorer.run([(value, None, value)], links=False))
+        return "".join(piece for piece, _, _ in restorer.run([(value, None, value)], links=False, tolerant=not exact))
 
     return original
 
@@ -1108,6 +1118,17 @@ _LINK_OPENER = re.compile(
     rf"|(?P<imp>{_IMPORT})",
     re.IGNORECASE,
 )
+
+
+def safe_cut(text: str) -> int:
+    """Где в потоке замена не может оборваться: после последнего пробельного знака (запись замены пробелов не
+    содержит); хвост без пробелов длиннее 512 знаков (минифицированный JSON) — после последнего знака, который не
+    входит ни в одну запись замены."""
+    end = max(text.rfind(" "), text.rfind("\n"), text.rfind("\t"), text.rfind("\r")) + 1
+    if len(text) - end > _HOLD:
+        tail = text[end:]
+        end += max((i + 1 for i, ch in enumerate(tail) if not _TOKEN_CHAR.match(ch)), default=0)
+    return end
 
 
 def _unclosed_link(text: str) -> int:
@@ -1142,16 +1163,9 @@ class StreamRestorer:
         self._shown = ""
         self._restorer: _Restorer | None = None
 
-    def _safe_end(self) -> int:
-        end = max(self.text.rfind(" "), self.text.rfind("\n"), self.text.rfind("\t"), self.text.rfind("\r")) + 1
-        if len(self.text) - end > _HOLD:
-            tail = self.text[end:]
-            end += max((i + 1 for i, ch in enumerate(tail) if not _TOKEN_CHAR.match(ch)), default=0)
-        return end
-
     def feed(self, chunk: str) -> str:
         self.text += chunk
-        cut = self._safe_end()
+        cut = safe_cut(self.text)
         cut = _unclosed_link(self.text[:cut])
         if cut != self._cut:
             self._cut = cut

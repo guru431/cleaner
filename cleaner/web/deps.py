@@ -21,6 +21,9 @@ IDLE = timedelta(hours=8)
 # Предел тела запроса (app.BodyLimit) и одного поля формы: 500 000 знаков даже четырёхбайтных —
 # около 6 МБ в закодированной форме. У Starlette поле формы по умолчанию не больше 1 МБ.
 MAX_BODY_BYTES = 8 * 1024 * 1024
+# Тело запроса агента (спецификация 2026-10-28, 8.2): вся история разговора с прочитанными файлами — и до, и после
+# распаковки. Постоянная, а не настройка agent_max_body_mb: менять её пока некому.
+AGENT_BODY_BYTES = 32 * 1024 * 1024
 
 templates = Jinja2Templates(directory=Path(__file__).with_name("templates"))
 
@@ -62,6 +65,18 @@ def own_chat(request: Request, chat_id: str, viewer: Viewer) -> Chat:
     return chat
 
 
+AGENT_READ_ONLY = "Чат агента только для просмотра: в него пишет шлюз, правки распознавания — в таблице соответствий"
+
+
+def writable_chat(request: Request, chat_id: str, viewer: Viewer) -> Chat:
+    """Чат вошедшего пользователя, в который пишет он сам. Чат шлюза пишет только шлюз (спецификация 2026-10-28, 16):
+    ввод, ответ, отправка, слои и подключение в нём — отказ 400."""
+    chat = own_chat(request, chat_id, viewer)
+    if chat.kind == "agent":
+        raise HTTPException(400, AGENT_READ_ONLY)
+    return chat
+
+
 def get_viewer(request: Request) -> Viewer:
     repo = repo_of(request)
     token = request.cookies.get(SESSION_COOKIE, "")
@@ -86,11 +101,16 @@ class ApiCaller:
 
 
 def _presented_key(request: Request) -> str:
-    key = request.headers.get("x-cleaner-key")
-    if key is None:
-        scheme, _, value = request.headers.get("authorization", "").strip().partition(" ")
-        key = value if scheme.lower() == "bearer" else ""
-    return key.strip()
+    """X-Cleaner-Key, иначе Authorization: Bearer, иначе x-api-key (так ключ передаёт Claude Code и SDK Anthropic, 6.1).
+    Из нескольких — первый вида ck_…: у агента с подпиской в Authorization — его собственный токен."""
+    scheme, _, bearer = request.headers.get("authorization", "").strip().partition(" ")
+    presented = [
+        value.strip() for value in (
+            request.headers.get("x-cleaner-key"), bearer if scheme.lower() == "bearer" else None,
+            request.headers.get("x-api-key"),
+        ) if value is not None
+    ]
+    return next((value for value in presented if value.startswith(auth.API_KEY_PREFIX)), presented[0] if presented else "")
 
 
 def get_api_caller(request: Request) -> ApiCaller:
@@ -120,6 +140,14 @@ def api_chat(request: Request, chat_id: str, caller: ApiCaller) -> Chat:
     chat = repo_of(request).chat(chat_id)
     if chat is None or chat.user_id != caller.user.id:
         raise HTTPException(404, "Чат не найден")
+    return chat
+
+
+def api_writable_chat(request: Request, chat_id: str, caller: ApiCaller) -> Chat:
+    """Чат владельца ключа для текстов, ответов и правил; в чат шлюза их не добавить — 409."""
+    chat = api_chat(request, chat_id, caller)
+    if chat.kind == "agent":
+        raise HTTPException(409, AGENT_READ_ONLY)
     return chat
 
 

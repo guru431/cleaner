@@ -98,17 +98,20 @@ class Resolver:
         self.text_lower = text.lower()
         self.generic = generic_labels
         self.index = {(e.type, e.key): e for e in state.entities.values()}
+        # Режим написаний (чат шлюза, спецификация 2026-10-28, раздел 11): ключ сущности — точное написание, без сведения
+        # регистра, формата и вариантов словаря; восстановление каждой замены возвращает строку, как она была в тексте.
+        self.written = state.written
         # До 15.10.2026 нормализация оставляла невидимые знаки (мягкий перенос, пробел нулевой ширины, ударение), и
         # ключ сущности из такого значения хранится с ними, а у адреса — с пробелом на их месте. Сегодняшний ключ того
         # же значения другой, и сущность получила бы новую метку. Поэтому её написание с невидимыми знаками ведёт к
         # ней и по сегодняшнему ключу: так находится и сущность, в которую значение влито объединением, — написания
         # влитой переходят к ней. Ключ, уже занятый другой сущностью, остаётся за той.
-        for entity in state.entities.values():
+        for entity in () if self.written else state.entities.values():
             for form in entity.forms:
                 if has_invisible(form):
                     self.index.setdefault((entity.type, canonical_key(entity.type, form)), entity)
         self.alias: dict[tuple[EntityType, str], str] = {}
-        for entry in settings.always:
+        for entry in () if self.written else settings.always:
             key = self._dictionary_key(entry.type, entry.value)
             for form in (entry.value, *entry.aliases):
                 self.alias[(entry.type, normalize(form))] = key
@@ -267,6 +270,9 @@ class Resolver:
     def _labelled(
         self, type_: EntityType, value: str, origin: str, searchable: bool = True, forms: tuple[str, ...] = (),
     ) -> tuple[Entity, str]:
+        if self.written:
+            # Имя человека тоже не сводится с другими упоминаниями: каждая форма — своя метка.
+            return (entity := self._entity(type_, value, value, origin, searchable, forms)), self._label(entity)
         key = self.alias.get((type_, normalize(value))) or canonical_key(type_, value)
         if type_ is T.PERSON:
             entity = self._person(key, value, origin, searchable, forms)
@@ -342,6 +348,9 @@ class Resolver:
         try:
             canonical = _ip_text(value)
         except ValueError:
+            return None
+        if self.written and hostmap.dotted(value) != canonical:
+            # Подмена в той же записи совпала бы с подменой канонической: адрес в своей записи — метка (_labelled).
             return None
         ip = netmap.parse(canonical)[0]
         # IPv6 восстанавливается в записи из текста, где адрес встретился впервые, как и остальные сущности;
@@ -449,7 +458,7 @@ class Resolver:
     def _part(self, label: str, origin: str, leading: bool, standalone: bool = False) -> tuple[Entity, str]:
         """Одна часть имени узла. Искомой становится только отдельная или «похожая на имя узла» часть."""
         searchable = standalone or (leading and re.search(r"[\d-]", label) is not None)
-        key = self.alias.get((T.HOST, normalize(label))) or label.lower()
+        key = label if self.written else self.alias.get((T.HOST, normalize(label))) or label.lower()
         entity = self._entity(T.HOST, key, label, origin, searchable)
 
         def make() -> str:
@@ -462,7 +471,7 @@ class Resolver:
         return entity, hostmap.mirror_case(label, self._issue(entity, "name", make))
 
     def _netbios(self, value: str, origin: str) -> tuple[Entity, str]:
-        key = self.alias.get((T.DOMAIN, normalize(value))) or value.lower()
+        key = value if self.written else self.alias.get((T.DOMAIN, normalize(value))) or value.lower()
         entity = self._entity(T.DOMAIN, key, value, origin)
 
         def make() -> str:
@@ -485,7 +494,7 @@ class Resolver:
         return (T.HOST, first) if first else (T.DOMAIN, registrable)
 
     def _dns(self, registrable: str, origin: str) -> tuple[Entity, str]:
-        key = self.alias.get((T.DOMAIN, normalize(registrable))) or registrable.lower()
+        key = registrable if self.written else self.alias.get((T.DOMAIN, normalize(registrable))) or registrable.lower()
         domain = self._entity(T.DOMAIN, key, registrable, origin)
 
         def make() -> str:

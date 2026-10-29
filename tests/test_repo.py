@@ -1,12 +1,13 @@
 import uuid
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Policy
 from cleaner.storage import crypto, db
-from cleaner.storage.repo import CheckpointBusy, Item, Provider, Repository, StaleState
+from cleaner.storage.repo import CheckpointBusy, Item, LedgerEntry, Provider, Repository, StaleState
 from cleaner.web import auth
 
 
@@ -344,6 +345,117 @@ def test_chat_remembers_provider_and_model(repo):
     assert repo.chat_provider(chat) == ("p1", "m-1")
     with pytest.raises(KeyError):
         repo.set_chat_provider("нет", "p1", "m-1")
+
+
+def test_gateway_key_keeps_access_models_layers_and_chat(repo):
+    user = repo.create_user("ivan", "hash", "user")
+    plain = repo.api_key(repo.add_api_key(user, "скрипт", "h1", "aaaa"))
+    assert (plain.upstream, plain.models, plain.layers, plain.chat_id) == (None, (), {"ner": False, "llm": False}, None)
+    key_id = repo.add_api_key(
+        user, "агент", "h2", "bbbb", upstream="provider:p1", models=("m-1", "m-2"), layers={"ner": True, "llm": False},
+    )
+    chat = repo.create_chat(user, "Агент", kind="agent")
+    repo.set_key_chat(key_id, chat)
+    key = repo.api_key_by_hash("h2")
+    assert (key.upstream, key.models, key.layers, key.chat_id) == ("provider:p1", ("m-1", "m-2"), {"ner": True, "llm": False}, chat)
+    repo.delete_chat(chat)
+    assert repo.api_key(key_id).chat_id is None
+    repo.set_key_chat(key_id, None)
+
+
+def test_agent_chat_starts_in_written_mode(repo, clock):
+    user = repo.create_user("ivan", "hash", "user")
+    agent = repo.create_chat(user, "Агент", kind="agent")
+    plain = repo.create_chat(user, "Чат")
+    assert repo.load_state(agent)[0].written and not repo.load_state(plain)[0].written
+    assert (repo.chat(agent).kind, repo.chat(plain).kind) == ("agent", "chat")
+    assert repo.chat(agent).created_at == clock.now().isoformat(timespec="seconds")
+
+
+def gateway(repo):
+    user = repo.create_user("ivan", "hash", "user")
+    key_id = repo.add_api_key(user, "агент", "h1", "aaaa", upstream="provider:p1")
+    return user, key_id, repo.create_chat(user, "Агент", kind="agent")
+
+
+def test_conversation_is_added_once_and_touched(repo, clock):
+    user, key_id, chat = gateway(repo)
+    assert repo.conversation("c1") is None
+    first = repo.add_conversation("c1", chat, key_id, "")
+    assert (first.chat_id, first.key_id, first.session, first.requests) == (chat, key_id, "", 0)
+    clock.advance(minutes=5)
+    assert repo.add_conversation("c1", "другой", key_id, "s-2") == first       # уже есть — прежний
+    repo.touch_conversation("c1", "s-1")
+    repo.touch_conversation("c1", "s-2")
+    stored = repo.conversation("c1")
+    assert (stored.session, stored.requests, stored.first_seen) == ("s-1", 2, first.first_seen)
+    assert stored.last_seen == clock.now().isoformat(timespec="seconds")
+
+
+def entry(digest, local="агент Zx91", wire="провайдер Qq77", direction="in", conversation="c1"):
+    return LedgerEntry(conversation, direction, digest, local, wire, "", {"EMAIL": 1})
+
+
+def test_ledger_is_written_with_the_chat_state_and_encrypted(tmp_path, repo):
+    user, key_id, chat = gateway(repo)
+    repo.add_conversation("c1", chat, key_id, "")
+    state, version = repo.load_state(chat)
+    repo.commit_chat(chat, state, version, ledger=[entry("d1")])
+    with pytest.raises(StaleState):
+        repo.commit_chat(chat, state, version, ledger=[entry("d2")])
+    found = repo.ledger_get(chat, "c1", "in", ["d1", "d2", "d3"])
+    assert list(found) == ["d1"] and found["d1"] == entry("d1")
+    assert repo.ledger_get(chat, "c1", "out", ["d1"]) == {}
+    repo.add_ledger(chat, [entry("d4", direction="out", local="отдано Ee33", wire="пришло Rr22")])
+    assert repo.ledger_get(chat, "c1", "out", ["d4"])["d4"].wire == "пришло Rr22"
+    repo.conn.execute("PRAGMA wal_checkpoint(FULL)")
+    raw = raw_database(tmp_path)
+    for secret in ("Zx91", "Qq77", "Ee33", "Rr22"):
+        assert secret.encode("utf-8") not in raw, secret
+
+
+def test_parallel_ledger_insert_keeps_the_first(repo, clock):
+    """Блок, который записал параллельный запрос, остаётся первым: его вид уже ушёл провайдеру."""
+    user, key_id, chat = gateway(repo)
+    repo.add_conversation("c1", chat, key_id, "")
+    state, version = repo.load_state(chat)
+    repo.commit_chat(chat, state, version, ledger=[entry("d1", wire="первый")])
+    clock.advance(minutes=1)
+    repo.commit_chat(chat, state, version + 1, ledger=[entry("d1", wire="второй")])
+    repo.add_ledger(chat, [entry("d1", wire="третий")])
+    assert repo.ledger_get(chat, "c1", "in", ["d1"])["d1"].wire == "первый"
+    clock.advance(minutes=1)
+    repo.touch_ledger(chat, "c1", "in", ["d1"])
+    [(stored, first_seen)] = repo.ledger_page(chat, 0, 50)
+    assert stored.wire == "первый" and first_seen < clock.now().isoformat(timespec="seconds")
+
+
+def test_ledger_page_lists_newest_first_across_conversations(repo, clock):
+    user, key_id, chat = gateway(repo)
+    for conversation in ("c1", "c2"):
+        repo.add_conversation(conversation, chat, key_id, "")
+    for number, conversation in enumerate(("c1", "c2", "c1")):
+        clock.advance(minutes=1)
+        repo.add_ledger(chat, [entry(f"d{number}", conversation=conversation)])
+    page = repo.ledger_page(chat, 0, 2)
+    assert [(e.conversation, e.digest) for e, _ in page] == [("c1", "d2"), ("c2", "d1")]
+    assert [e.digest for e, _ in repo.ledger_page(chat, 2, 2)] == ["d0"]
+
+
+def test_prune_removes_old_conversations_and_orphan_agent_chats(repo, clock):
+    user, key_id, current = gateway(repo)
+    repo.set_key_chat(key_id, current)
+    old = repo.create_chat(user, "Агент, прежний", kind="agent")
+    plain = repo.create_chat(user, "Обычный")
+    repo.add_conversation("c-old", old, key_id, "")
+    repo.add_conversation("c-current", current, key_id, "")
+    repo.add_ledger(old, [entry("d1", conversation="c-old")])
+    clock.advance(days=31)
+    repo.add_conversation("c-fresh", current, key_id, "")
+    assert repo.prune_agent((clock.now() - timedelta(days=30)).isoformat(timespec="seconds")) == 1
+    assert repo.chat(old) is None and repo.chat(current) is not None and repo.chat(plain) is not None
+    assert repo.conversation("c-old") is None and repo.conversation("c-current") is None
+    assert repo.conversation("c-fresh") is not None
 
 
 def test_finish_answer_writes_text_status_and_meta(repo):

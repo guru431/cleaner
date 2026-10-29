@@ -106,6 +106,13 @@ fi
 # Общий сертификат сервера (/etc/ai-services/tls/dashboard.*) не годится: его ключ
 # читает только группа aidash, а в SAN нет example. Отпечаток в документы не
 # выписывается — его печатают этот установщик и check-cleaner.sh.
+# CLEANER_REISSUE_CERT=1 — выпустить заново (новый отпечаток: браузеры и агенты принимают его снова); прежний остаётся
+# рядом. Нужен сертификатам до 28.10.2026: без keyCertSign их не принимает Claude Code (Bun) — шлюз агентов, план 5Б.
+if [[ "${CLEANER_REISSUE_CERT:-0}" == "1" && -s "$TLS/cert.pem" ]]; then
+    mv "$TLS/cert.pem" "$TLS/cert.pem.prev-$STAMP"
+    mv "$TLS/key.pem" "$TLS/key.pem.prev-$STAMP"
+    log "сертификат будет выпущен заново (CLEANER_REISSUE_CERT=1); прежний — $TLS/cert.pem.prev-$STAMP"
+fi
 if [[ ! -s "$TLS/cert.pem" || ! -s "$TLS/key.pem" ]]; then
     # Вывод openssl (точки генерации ключа) показывается, только если выпуск не удался.
     if ! out=$(
@@ -114,7 +121,7 @@ if [[ ! -s "$TLS/cert.pem" || ! -s "$TLS/key.pem" ]]; then
             -keyout "$TLS/key.pem" -out "$TLS/cert.pem" \
             -subj "/CN=${CERT_NAME} Cleaner" \
             -addext "subjectAltName=IP:${HOST_IP},DNS:${CERT_NAME}" \
-            -addext "keyUsage=digitalSignature,keyEncipherment" \
+            -addext "keyUsage=digitalSignature,keyEncipherment,keyCertSign" \
             -addext "extendedKeyUsage=serverAuth" 2>&1
     ); then
         echo "$out" >&2
