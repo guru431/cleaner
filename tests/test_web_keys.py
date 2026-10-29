@@ -108,6 +108,60 @@ def test_gateway_key_page_shows_the_claude_code_settings_once(ivan, repo):
     assert key not in ivan.get("/keys").text and "DeepSeek: все модели" in ivan.get("/keys").text
 
 
+def test_admin_sees_subscriptions_user_does_not(ivan, boss, repo):
+    providers(repo, "https://llm.example/v1")
+    for name in ("Подписка Claude (Claude Code)", "Подписка ChatGPT (Codex)"):
+        assert name in boss.get("/keys").text and name not in ivan.get("/keys").text
+    form = ivan.get("/keys").text
+    assert "DeepSeek (Anthropic)" in form and "OpenAI (OpenAI Chat Completions)" in form
+
+
+def test_subscription_form_from_a_user_is_400(ivan, repo):
+    for access in ("claude-subscription", "chatgpt-subscription"):
+        assert ivan.post("/keys", name="агент", provider=access).status_code == 400
+    assert repo.api_keys() == []
+
+
+def test_each_access_shows_its_agent_settings_once(boss, repo):
+    """Блок «Ключ показан один раз» — готовая настройка агента по виду доступа (раздел 14): Claude Code по ключу и по
+    подписке, Codex по ключу Responses и по подписке ChatGPT, OpenCode и SDK OpenAI по ключу Chat Completions."""
+    anthropic = repo.add_provider(Provider("", "DeepSeek", "anthropic", "https://llm.example/anthropic", "x-api-key", "sk-1", ("m-1",)))
+    openai = repo.add_provider(Provider("", "Go", "openai", "https://llm.example/v1", "bearer", "sk-2", ("g-1",)))
+    responses = repo.add_provider(Provider("", "OpenAI", "responses", "https://api.example/v1", "bearer", "sk-3", ("gpt-5.5",)))
+    cases = {
+        anthropic: ['"ANTHROPIC_AUTH_TOKEN": "{key}"', '"ANTHROPIC_BASE_URL": "http://testserver/agent/anthropic"'],
+        "claude-subscription": ['"ANTHROPIC_CUSTOM_HEADERS": "X-Cleaner-Key: {key}"', "claude-switch.ps1 cleaner-sub",
+                                '"ANTHROPIC_BASE_URL": "http://testserver/agent/anthropic"'],
+        responses: ['base_url = "http://testserver/agent/openai/v1"', 'wire_api = "responses"', 'env_key = "CLEANER_KEY"',
+                    '$env:CLEANER_KEY = "{key}"', "CODEX_CA_CERTIFICATE", 'model = "gpt-5.5"'],
+        "chatgpt-subscription": ["requires_openai_auth = true", 'env_http_headers = { "X-Cleaner-Key" = "CLEANER_KEY" }',
+                                 '$env:CLEANER_KEY = "{key}"'],
+        openai: ['"npm": "@ai-sdk/openai-compatible"', '"baseURL": "http://testserver/agent/openai/v1"',
+                 '"X-Cleaner-Key": "{key}"', '"model": "cleaner/g-1"', 'OpenAI(base_url="http://testserver/agent/openai/v1"'],
+    }
+    for access, lines in cases.items():
+        response = boss.post("/keys", name=f"агент {access}", provider=access)
+        assert response.status_code == 200, response.text
+        key = KEY.search(response.text).group(0)
+        shown = html.unescape(response.text)
+        for line in lines:
+            assert line.replace("{key}", key) in shown, (access, line)
+        snippets = "".join(re.findall(r'<pre class="text mono">(.*?)</pre>', shown, re.S))
+        assert ("ANTHROPIC_AUTH_TOKEN" in snippets) is (access == anthropic)
+        assert ("requires_openai_auth" in snippets) is (access == "chatgpt-subscription")
+        assert key not in boss.get("/keys").text
+    names = {key.name: key.upstream for key in repo.api_keys()}
+    assert names["агент claude-subscription"] == "claude-subscription"
+    page = boss.get("/keys").text
+    assert "Подписка Claude: все модели" in page and "Подписка ChatGPT: все модели" in page
+
+
+def test_subscription_models_are_free_text(boss, repo):
+    response = boss.post("/keys", name="агент", provider="chatgpt-subscription", sub_models="gpt-6.1-sol, gpt-5.5,,gpt-5.5")
+    assert response.status_code == 200
+    assert repo.api_keys()[0].models == ("gpt-6.1-sol", "gpt-5.5")
+
+
 def test_restart_starts_a_new_chat_for_new_conversations(ivan, repo):
     with StubProvider([model_turn("Раз"), model_turn("Два"), model_turn("Три")]) as stub:
         ids = providers(repo, stub.url)

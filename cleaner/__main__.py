@@ -179,8 +179,10 @@ API_KEY_NAME = 100          # как у страницы «Ключи»
 
 def cmd_apikey(args: argparse.Namespace) -> int:
     """Ключи доступа программ (FR-13.1) для проектов, которые заводятся сценарием. add печатает только ключ, одной
-    строкой и один раз; --provider (и --model) — ключ шлюза агентов к подключению, с теми же проверками, что у страницы
-    «Ключи». list — строка на ключ: id, логин, имя, последние четыре знака, active | disabled, доступ (provider:<id> или -)."""
+    строкой и один раз; --provider (и --model) — ключ шлюза агентов к подключению, --subscription claude|chatgpt — по
+    подписке (только администратору), с теми же проверками, что у страницы «Ключи». list — строка на ключ: id, логин,
+    имя, последние четыре знака, active | disabled, доступ (provider:<id>, claude-subscription, chatgpt-subscription
+    или -)."""
     with _repository(_config(args)) as repo:
         if args.action == "add":
             user = repo.user_by_login(args.target)
@@ -189,8 +191,11 @@ def cmd_apikey(args: argparse.Namespace) -> int:
             name = (args.name or "").strip()
             if not 1 <= len(name) <= API_KEY_NAME:
                 raise ValueError(f"имя ключа (--name) — от 1 до {API_KEY_NAME} знаков")
+            if args.provider and args.subscription:
+                raise ValueError("--provider и --subscription вместе не задаются: у ключа один доступ к модели")
+            access = f"{args.subscription}-subscription" if args.subscription else args.provider
             upstream, models = (
-                gateway_access(repo, args.provider, tuple(args.model), admin=user.role == "admin") if args.provider else (None, ())
+                gateway_access(repo, access, tuple(args.model), admin=user.role == "admin") if access else (None, ())
             )
             key = auth.new_api_key()
             key_id = repo.add_api_key(user.id, name, auth.token_hash(key), key[-4:], upstream, models)
@@ -326,7 +331,10 @@ def main(argv: list[str] | None = None) -> int:
     apikey.add_argument("target", nargs="?", default="", help="add: логин владельца ключа; disable: id ключа из list")
     apikey.add_argument("--name", help="add: для какой программы ключ")
     apikey.add_argument("--provider", default="", help="add: id подключения — ключ шлюза агентов к его модели")
-    apikey.add_argument("--model", action="append", default=[], help="add: разрешённая модель подключения (можно несколько; нет — все)")
+    apikey.add_argument(
+        "--subscription", choices=("claude", "chatgpt"), help="add: ключ шлюза по подписке агента — только администратору",
+    )
+    apikey.add_argument("--model", action="append", default=[], help="add: разрешённая модель подключения или подписки (можно несколько; нет — все)")
 
     key = commands.add_parser("key", help="выгрузка и загрузка главного ключа")
     key.add_argument("action", choices=("export", "import"))

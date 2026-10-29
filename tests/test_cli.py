@@ -120,6 +120,22 @@ def test_apikey_add_list_disable(home, monkeypatch, capsys, clock):
     repo.conn.close()
 
 
+def test_apikey_add_subscription_needs_an_admin(home, monkeypatch, capsys, clock):
+    """Ключ с подпиской — только у администратора (SEC-20), и командой тоже."""
+    key = init(home)
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    repo.create_user("ivan", auth.hash_password("пароль-для-тестов"), "user")
+    repo.conn.close()
+    capsys.readouterr()
+    assert main(["apikey", "add", "ivan", "--name", "агент", "--subscription", "claude"]) == 1
+    assert main(["apikey", "add", "boss", "--name", "агент", "--subscription", "chatgpt", "--model", "gpt-6.1-sol"]) == 0
+    assert re.fullmatch(r"ck_[A-Za-z0-9_-]{43}\n", capsys.readouterr().out)
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    [stored] = repo.api_keys()
+    assert (stored.upstream, stored.models) == ("chatgpt-subscription", ("gpt-6.1-sol",))
+
+
 def test_apikey_add_gateway_key(home, monkeypatch, capsys, clock):
     """Ключ шлюза агентов командой: подключение и модели проверяются, как в форме страницы «Ключи»."""
     key = init(home)
