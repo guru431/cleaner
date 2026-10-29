@@ -113,6 +113,7 @@
 - Неверный ключ — 401 в виде протокола, нарастающая пауза по адресу клиента (как `Throttle` входа), событие `api_auth_failed` в журнале.
 - Сделано планом 5А (28.10.2026), с двумя отличиями от написанного выше. Таблица `api_keys` в схеме версии 7 — без столбцов шлюза (`upstream`, `models`, `layers`, `chat_id`): их добавит миграция плана 5Б вместе с кодом, который их читает. Ключ отзывается насовсем («Отключить»): включить отозванный нельзя, выпускается новый — хранить у отозванного нечего, кроме хэша. Отказ из-за паузы (429) ключ не проверяет и в журнал не пишется.
 - План 5Б (28.10.2026): столбцы шлюза — в схеме версии 8. Доступ ключа к модели (`upstream`, `models`) задаётся при создании и не меняется: другой доступ — новый ключ. Из нескольких присланных ключей (`X-Cleaner-Key`, `Bearer`, `x-api-key`) берётся первый вида `ck_…` — у агента с подпиской в `Authorization` его собственный токен; это действует и для `/api/v1`. Проверка «подключение включено, протокол Anthropic, модели из его списка» — общая для формы и команды (`agent_service.gateway_access`).
+- План 5В (29.10.2026): `gateway_access(repo, access, models, admin=…)` принимает подключение любого протокола шлюза (Anthropic, OpenAI Chat Completions, OpenAI Responses) и подписку — только при `admin`; модели подписки — свободным списком (пусто — все). У формы подписки и поле моделей видит только администратор, команда — `apikey add … --subscription claude|chatgpt`. Роль владельца проверяется и при каждом запросе по подписке.
 
 ### 6.2. Чаты API
 
@@ -215,6 +216,7 @@ API Anthropic сверяет подпись блока рассуждений с
 - Текст: `messages[].content` (строка или части `text`), `tool_calls[].function.arguments` в истории (строка JSON — разбирается, очищаются значения; по правилу 7.2.2), сообщения `tool`, `tools[].function.description` и `parameters`.
 - Непрозрачное: `reasoning_content` (DeepSeek и подобные), `id`, `tool_call_id`.
 - `GET /v1/models` — как выше.
+- Как сделано планом 5В (29.10.2026, `core/agent/chat.py`): результат инструмента — сообщение `tool` целиком; вызов из истории ищется в журнале по разобранным аргументам (AI SDK пишет их заново, проверка 18.1c 5В), а к провайдеру уходит записанная строка модели. Текст — по мере прихода; первая часть вызова (с `id` и именем) — сразу, с пустыми аргументами; аргументы всех вызовов — одной частью перед частью с `finish_reason`, восстановленными точно; часть `usage` после конца и `data: [DONE]` — как пришли. Служебная инструкция — сообщением `system` перед первым сообщением пользователя. Заголовки к провайдеру — `content-type`, `accept`, `x-session-affinity` (сессия OpenCode; она же — сессия для просмотра).
 
 ### 9.3. OpenAI Responses — `/agent/openai/v1/responses`
 
@@ -224,6 +226,13 @@ API Anthropic сверяет подпись блока рассуждений с
 - Текст: `input[]` — `message` (роли `user`, `developer`, `assistant`; части `input_text`, `output_text`), `function_call.arguments` и `custom_tool_call.input` в истории (по правилу 7.2.2), `function_call_output.output`, `custom_tool_call_output.output`, `local_shell_call` (команда), `instructions` (старые версии Codex), `tools[]` (описания и схемы), `additional_tools`.
 - Непрозрачное: `reasoning` (`encrypted_content`, `summary` — это вывод модели), `compaction`/`context_compaction`, `id`, `call_id`, `prompt_cache_key`, `previous_response_id`, `client_metadata`.
 - Заголовки к провайдеру — по списку: `session-id`, `thread-id`, `x-client-request-id`, `originator`, `x-openai-subagent`, `x-codex-*`, `x-oai-attestation`, `openai-beta`, `accept`, `content-type`; для подписки — `authorization`, `chatgpt-account-id`, `x-openai-fedramp`. Обратно агенту — `x-codex-turn-state`, `openai-model`, `x-reasoning-included`, `x-models-etag`, `x-request-id`.
+- Как сделано планом 5В (29.10.2026, `core/agent/responses.py`), с уточнениями по записи Codex 0.163.0 (проверки 18.1a–b 5В):
+  - Элементы модели в истории (`function_call`, `custom_tool_call`, `local_shell_call`, части `output_text`) ищутся в журнале по узлу без `id` и `status` (у части текста — только `type` и `text`): Codex записывает их заново по-своему; при сборке тела эти поля, `annotations` и `logprobs` берутся из элемента, который прислал агент.
+  - `additional_tools` («code mode» моделей `gpt-6.x` и `gpt-5.6-*`) — описания инструментов, как `tools`; пространства имён обходятся вложенно, грамматики `format` (свободные инструменты `apply_patch`, `exec`) — служебные.
+  - `client_metadata` — не непрозрачное, а незнакомое поле: очищается как текст. В нём (и в заголовке `x-codex-turn-metadata`) — рабочие каталоги агента: открытым такой путь унёс бы учётную запись профиля (SEC-2), а проверка служебных строк отказывала бы каждому запросу из репозитория в профиле.
+  - Заголовки `x-codex-*` — списком, а не по началу имени: `x-codex-beta-features`, `x-codex-window-id`, `x-codex-turn-state`. Заголовок не очистить, и `x-codex-turn-metadata` не уходит. `x-openai-internal-codex-responses-lite` уходит и при ключе подключения: без него модели «code mode» не поймут `additional_tools`. Для подписки — ещё `user-agent`.
+  - WebSocket Codex у своего провайдера не открывает — обработки 426 нет.
+  - Итоговые объекты (`output_text.done`, `content_part.done`, `output_item.done`, `response.completed`) получают тот же текст, что склейка дельт; `function_call_arguments.delta` и `custom_tool_call_input.delta` копятся, патчу перед `done` — одна дельта с восстановленным текстом целиком. Служебная инструкция — сообщением `developer` перед первым сообщением пользователя (у Codex — перед `<environment_context>`).
 
 ### 9.4. Виды доступа
 
@@ -238,6 +247,7 @@ API Anthropic сверяет подпись блока рассуждений с
 - Подключению Cleaner токен агента не пересылается никогда (агент с входом claude.ai шлёт свой OAuth и при ключе Cleaner в `X-Cleaner-Key`).
 - Подписка Codex: агент настраивается с `requires_openai_auth = true` и без `env_key` (иначе Codex шлёт ключ из окружения вместо токена ChatGPT).
 - Выход наружу — тот же порт 443 (SEC-15); новых правил `cleaner_egress` не нужно.
+- Как сделано планом 5В (29.10.2026): адреса — `agent_service.SUBSCRIPTIONS`; подменить их можно только аргументом `subscription_urls` конструктора `AgentService` в тестах. Подключение подписки — `cloud.Connection(…, "passthrough", "", 0)`: ключа подключения нет, к провайдеру уходит `Authorization` агента и заголовки подписки протокола (Anthropic — `authorization`, `user-agent`, `x-app`; Responses — `authorization`, `chatgpt-account-id`, `user-agent`, `x-openai-fedramp`). Нет входа агента или в `Authorization` — ключ Cleaner (`ck_…`) — 401: иначе ключ Cleaner ушёл бы провайдеру. Владелец без роли администратора — 403 на каждом запросе. `egress.forward` убирает из тела ошибки провайдера и ключ подключения, и вход агента (целиком и без `Bearer `). `AgentCall` и `AgentOutgoing` не показывают заголовки в `repr`. `GET /v1/models` у ключа с подпиской — 404 (Claude Code и Codex его у шлюза не спрашивают; Codex со входом ChatGPT спрашивает и работает без него, проверка 18.1a 5В). У подключений третий протокол — `responses`: адаптер `egress/protocols/responses.py` работает и в чате интерфейса (отправка, проверка подключения); дополнительные параметры подключения не задают `input`, `instructions`, `previous_response_id` и `conversation`.
 
 ## 10. Восстановление в ответе
 
@@ -298,6 +308,8 @@ API Anthropic сверяет подпись блока рассуждений с
 
 Каждый отказ шлюза — событие журнала с причиной и числами.
 
+Как сделано планом 5В (29.10.2026): под `/agent/openai/` ошибки — `{"error": {"message": "Cleaner: …", "type", "code": null}}`, тип по коду: 400, 405, 413, 415 — `invalid_request_error`, 401 — `authentication_error`, 403 — `permission_error`, 404 — `not_found_error` (и незнакомый путь), 429 — `rate_limit_error`, 5xx — `server_error`. Посреди потока — у Chat Completions часть `data: {"error": …}`, у Responses — событие `error`. Строки 426 нет: WebSocket Codex не открывает (9.3). У подписки: 403 — владелец ключа не администратор, 401 — агент не прислал вход подписки.
+
 ## 13. Скорость (NFR-4, дополнение)
 
 - Запрос, все блоки которого есть в журнале, — добавка шлюза не больше 300 мс (p95) при теле 1 МиБ на сервере; новое содержимое — по нормам NFR-4 для слоёв 1–3 (3 с на 100 000 знаков).
@@ -312,10 +324,11 @@ API Anthropic сверяет подпись блока рассуждений с
 
 - **Claude Code**, ключ подключения Cleaner: режим `cleaner` в `claude-switch.ps1` (мастер в `claude-bundle`, комментарии на английском, адрес и ключ — из `.env`, не из скрипта): `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN=<ck_…>`, `NODE_EXTRA_CA_CERTS=<сертификат Cleaner>`, `CLAUDE_CODE_ATTRIBUTION_HEADER=0`, модели — `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`.
 - **Claude Code**, подписка: режим `cleaner-sub`: `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS="X-Cleaner-Key: <ck_…>"`, `NODE_EXTRA_CA_CERTS`; без `ANTHROPIC_AUTH_TOKEN` и `ANTHROPIC_API_KEY` (они заменяют вход claude.ai).
-- **Codex**: свой провайдер в `~/.codex/config.toml` (раздел 9.3); подписка — `requires_openai_auth = true`, ключ подключения — `env_key`. Доверие сертификату — системное хранилище машины (выясняется в начале этапа, раздел 18).
-- **OpenCode**: `provider.<id>.options.baseURL` и `options.headers` с `X-Cleaner-Key`.
+- **Codex**: свой провайдер в `~/.codex/config.toml` (раздел 9.3); подписка — `requires_openai_auth = true`, ключ подключения — `env_key`. Доверие сертификату — `CODEX_CA_CERTIFICATE` (или `SSL_CERT_FILE`) с файлом сертификата службы; сертификат — самоподписанный с `CA:FALSE`: сертификат УЦ сертификатом сервера rustls не принимает (проверка 18.4 5В).
+- **OpenCode**: `provider.<id>.options.baseURL` и `options.headers` с `X-Cleaner-Key`; сертификат — `NODE_EXTRA_CA_CERTS`.
 - Готовые фрагменты настройки показывает страница ключа после создания.
 - Сертификат Cleaner самоподписанный (раздел 15 основной спецификации); агенту передаётся файл сертификата, а не отключение проверки.
+- Как сделано планом 5В (29.10.2026): страница ключа показывает по виду доступа `settings.local.json` Claude Code (по ключу — как в 5Б; по подписке — `ANTHROPIC_CUSTOM_HEADERS` и ссылка на `claude-switch.ps1 cleaner-sub`), `config.toml` Codex с переменными `CLEANER_KEY` и `CODEX_CA_CERTIFICATE` (для подключения Responses и подписки ChatGPT), `opencode.json` и пример SDK OpenAI (для подключения Chat Completions). Режим `cleaner-sub` в `claude-switch.ps1` убирает и `apiKeyHelper` и переключатель атрибуции, модели не задаёт; `ANTHROPIC_CUSTOM_HEADERS` стал ключом переключателя — другие режимы его снимают.
 
 ## 15. API для проектов — `/api/v1` (FR-13)
 
@@ -523,6 +536,10 @@ Codex 0.163.0 и OpenCode 1.14.39 на Windows, заглушка `scripts/agent_
 11. API-чаты — обычные чаты владельца ключа, видимые в интерфейсе (6.2).
 12. План 5Б: пороги смены чата, срок журнала и предел тела — постоянные, а не настройки (6.3, 7.3, 8); доступ ключа к модели не меняется после выпуска (6.1); в чате шлюза столбец «вхождений» таблицы замен пуст — у чата нет элементов, а журнал считает замены по типам, не по сущностям.
 13. План 5Б: граница выдачи текста в потоке отступает и перед искажённой записью метки с пробелами внутри («< EMAIL _ 1 >», FR-7.3) — иначе склейка дельт отличалась бы от восстановления целого (10.1).
+14. План 5В: всё, что в общем пути шлюза зависит от протокола, — объект протокола (`core/agent/protocol.py`); тела Anthropic от этого не изменились (сверено с выводом 5Б на записях Claude Code).
+15. План 5В: новые блоки запроса очищаются вторым проходом, если первый оставил утечку — значение, найденное в позднем блоке (учётная запись из пути профиля в описании инструмента), в раннем осталось бы открытым, а отказ повторялся бы при каждом повторе агента (состояние при отказе не сохраняется). Найдено на первом ходе OpenCode.
+16. План 5В: значения служебных ключей схемы инструмента (`required`, `type`, `format`, `$ref`, `$schema`) на утечки не проверяются, как и сами имена свойств: пример «/Users/name/» в описании `bash` у OpenCode давал учётную запись «name», а `required: ["name"]` инструмента `skill` — отказ каждому запросу.
+17. План 5В: в событие `agent_send` — вид доступа (`access`) и числа `usage` провайдера (`input`, `output`, `cache_read`, `cache_write`; у Anthropic — последнее значение, `message_delta` несёт нарастающий итог): по ним проверяется чтение кэша промпта (AC-5.2).
 
 ## Приёмка 5А (28.10.2026)
 
