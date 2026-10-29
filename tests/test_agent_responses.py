@@ -310,6 +310,21 @@ def test_unknown_fields_of_items_are_cleaned(gw, stub):
     assert "srv-dc01" not in stub.bodies()
 
 
+def test_code_mode_exec_output_in_json_is_cleaned(gw, stub):
+    """Приёмка 5В по подписке ChatGPT: в «code mode» вывод команды приходит строкой JSON внутри результата exec —
+    «\\r\\n» знаками и «CONTOSO\\\\ivanov» с удвоенной косой. Учётная запись не уходит провайдеру."""
+    stub.script.append([*text_events(0, message("msg_1", "Готово"), []), completed(message("msg_1", "Готово"))])
+    shown = json.dumps({"output": "[database]\r\nhost = srv-db01.corp.contoso.ru\r\nuser = CONTOSO\\ivanov\r\n"})
+    gw.send({"model": "gpt-6.1-sol", "stream": True, "input": [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Прочитай config/app.ini"}]},
+        {"type": "custom_tool_call", "call_id": "call_1", "name": "exec", "input": "text(await tools.exec_command({cmd: 'type config/app.ini'}))"},
+        {"type": "custom_tool_call_output", "call_id": "call_1", "output": [
+            {"type": "input_text", "text": "Script completed\nOutput:\n"}, {"type": "input_text", "text": shown}]},
+    ]})
+    sent = stub.bodies()
+    assert "ivanov" not in sent and "CONTOSO" not in sent and "srv-db01" not in sent
+
+
 def test_turn_metadata_is_cleaned_and_its_header_dropped(gw, stub):
     """x-codex-turn-metadata и client_metadata несут рабочие каталоги агента: заголовок не уходит (его не очистить), поле
     тела очищается как текст."""
