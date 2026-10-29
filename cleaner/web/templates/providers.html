@@ -7,7 +7,7 @@
   </select></label>
   <label class="field"><span>Адрес</span><span class="control">
     <input name="base_url" value="{{ p.base_url if p else '' }}" placeholder="https://api.example.com/v1" required>
-    <small class="hint">Для OpenAI-совместимого — до /chat/completions, для Anthropic-совместимого — до /v1/messages</small>
+    <small class="hint">Для OpenAI-совместимого — до /chat/completions, для OpenAI Responses — до /responses, для Anthropic-совместимого — до /v1/messages</small>
   </span></label>
   <label class="field"><span>Передача ключа</span><select name="auth_style">
     {% for value, label in auth_styles.items() %}<option value="{{ value }}"{% if p and p.auth_style == value %} selected{% endif %}>{{ label }}</option>{% endfor %}

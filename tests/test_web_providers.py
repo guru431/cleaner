@@ -2,6 +2,7 @@
 import pytest
 
 from cleaner.egress import ProviderError
+from tests.stub_provider import StubProvider
 
 KEY = "sk-test-0123456789abcd"
 
@@ -75,6 +76,21 @@ def test_changing_the_scheme_needs_the_key_again(boss, repo):
     [provider] = repo.providers()
     assert boss.post(f"/settings/providers/{provider.id}", **fields(base_url="http://127.0.0.1/v1", api_key="")).status_code == 400
     assert repo.provider(provider.id).base_url == "https://127.0.0.1/v1"
+
+
+def test_responses_connection_can_be_saved_and_checked(boss, repo):
+    """План 5В, задача 5: подключение с протоколом Responses сохраняется и проверяется настоящим запросом (FR-8.2) —
+    к заглушке на петле."""
+    with StubProvider() as stub:
+        stub.pieces = ["гото", "во"]
+        url = f"{stub.url}/v1"
+        assert boss.post("/settings/providers", **fields(protocol="responses", base_url=url, auth_style="bearer")).status_code == 303
+        [provider] = repo.providers()
+        assert provider.protocol == "responses" and "OpenAI Responses" in boss.get("/settings/providers").text
+        page = boss.post(f"/settings/providers/{provider.id}/check", model="m-1").text
+        assert "m-1 ответил: готово" in page
+        [request] = stub.requests
+    assert request["path"] == "/v1/responses" and request["body"]["store"] is False and "input" in request["body"]
 
 
 def test_check_shows_the_answer_or_the_providers_message(boss, repo, app, monkeypatch):

@@ -82,6 +82,37 @@ def test_anthropic_request_and_stream(ctx, state, settings):
     assert body["system"].endswith("Кратко") and [m["role"] for m in body["messages"]] == ["user"]
 
 
+def responses_events(*pieces: str, end: dict | None = None) -> bytes:
+    events = [{"type": "response.created", "response": {"id": "resp_1", "status": "in_progress", "output": []}}]
+    events += [{"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": p}
+               for p in pieces]
+    events.append(end or {"type": "response.completed", "response": {"id": "resp_1", "status": "completed"}})
+    return sse(*events, done=False)
+
+
+def test_responses_adapter_sends_input_and_reads_deltas(ctx, state, settings):
+    """Подключение с протоколом Responses (план 5В, задача 5): OpenAI API, модели OpenCode Go на /v1/responses."""
+    recorder = Recorder(responses_events("Отв", "ет: <EMAIL_1>"))
+    conn = Connection("responses", "https://llm.example/v1", "bearer", KEY, 1024, {"reasoning": {"effort": "low"}})
+    assert run(ctx, conn, recorder, state, settings) == "Ответ: <EMAIL_1>"
+    request = recorder.requests[0]
+    assert str(request.url) == "https://llm.example/v1/responses" and request.headers["authorization"] == f"Bearer {KEY}"
+    body = recorder.json
+    assert (body["model"], body["stream"], body["store"], body["max_output_tokens"]) == ("model-x", True, False, 1024)
+    assert body["reasoning"] == {"effort": "low"}
+    assert [(m["role"], m["content"][-6:]) for m in body["input"]] == [("developer", "Кратко"), ("user", "AIL_1>")]
+    incomplete = {"type": "response.incomplete", "response": {"incomplete_details": {"reason": "max_output_tokens"}}}
+    outcome: dict = {}
+    assert run(probe_context("p", "m"), conn, Recorder(responses_events("Обры", end=incomplete)), outcome=outcome) == "Обры"
+    assert outcome == {"truncated": True}
+    failed = {"type": "response.failed", "response": {"error": {"code": "server_error", "message": "упало"}}}
+    with pytest.raises(ProviderError) as caught:
+        run(probe_context("p", "m"), conn, Recorder(responses_events("x", end=failed)))
+    assert (caught.value.kind, caught.value.detail) == ("server_error", "упало")
+    with pytest.raises(ValueError, match="input"):
+        check_extra_body({"input": [{"role": "user", "content": "в обход очистки"}]})
+
+
 def test_reasoning_is_not_shown():
     openai = sse({"choices": [{"delta": {"reasoning_content": "думаю"}}]}, {"choices": [{"delta": {"content": "итог"}}]})
     assert run(probe_context("p", "m"), connection(), Recorder(openai)) == "итог"

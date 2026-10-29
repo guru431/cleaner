@@ -20,14 +20,16 @@ from cleaner.core import leakcheck
 from cleaner.core.pipeline import OutgoingContext
 from cleaner.core.types import ChatState, Settings
 from cleaner.egress import ProviderError, StreamEnd
-from cleaner.egress.protocols import anthropic, openai, provider_error
+from cleaner.egress.protocols import anthropic, openai, provider_error, responses
 
-PROTOCOLS = {"openai": openai, "anthropic": anthropic}
+PROTOCOLS = {"openai": openai, "anthropic": anthropic, "responses": responses}
 AUTH_STYLES = ("bearer", "x-api-key")
 # Поля, которыми дополнительные параметры подключения могли бы заменить сам запрос или добавить к нему
-# инструменты, файлы и поиск провайдера (FR-8.8).
+# инструменты, файлы и поиск провайдера (FR-8.8). У Responses запрос — input и instructions, а
+# previous_response_id и conversation подтянули бы историю, хранящуюся у провайдера.
 FORBIDDEN_EXTRA = frozenset({
     "model", "messages", "system", "stream", "tools", "tool_choice", "functions", "function_call",
+    "input", "instructions", "previous_response_id", "conversation",
     "attachments", "files", "web_search_options", "mcp_servers", "container",
     # поиск и надстройки маршрутизаторов и провайдеров: OpenRouter, xAI, DashScope
     "plugins", "search_parameters", "enable_search", "web_search", "search_options", "documents", "file_ids",

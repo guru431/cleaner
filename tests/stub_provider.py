@@ -49,6 +49,11 @@ class StubProvider:
             events = [{"type": "message_start", "message": {}}]
             events += [{"type": "content_block_delta", "delta": {"type": "text_delta", "text": p}} for p in self.pieces]
             return events + [{"type": "message_stop"}], ""
+        if path.endswith("/responses"):
+            events = [{"type": "response.created", "response": {"id": "resp_stub", "output": []}}]
+            events += [{"type": "response.output_text.delta", "item_id": "msg_stub", "output_index": 0, "content_index": 0,
+                        "delta": p} for p in self.pieces]
+            return events + [{"type": "response.completed", "response": {"id": "resp_stub", "status": "completed"}}], ""
         return None
 
     def _step(self, body: dict) -> dict:
