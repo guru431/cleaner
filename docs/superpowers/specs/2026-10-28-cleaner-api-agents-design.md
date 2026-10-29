@@ -387,6 +387,72 @@ Claude Code 2.1.270 на Windows, заглушка `scripts/agent_capture.py`, �
 - b — блок `system`, текст которого начинается с `x-anthropic-billing-header:`, — непрозрачный. Сообщения с ролью `system` внутри `messages` — текст агента, как прочие.
 - Проверка 6: загрузка состояния дольше 100 мс — состояние чата шлюза держится в памяти по версии чата (задача 7 плана 5Б). Проверка утечек на 1 МиБ дольше 300 мс, но цель раздела 13 от неё не зависит: повторённые из журнала блоки проверка пропускает (7.3), и на запросе без нового содержимого проверяются только служебные строки; новое содержимое проверяется в пределах NFR-4 (1 с на 825 000 знаков против 3 с на 100 000 для слоёв 1–3).
 
+### Результаты проверок 5В (29.10.2026)
+
+Codex 0.163.0 и OpenCode 1.14.39 на Windows, заглушка `scripts/agent_capture.py` (теперь — три протокола по пути и
+`--headers-only`), вымышленный репозиторий, свежие профили агентов. Записи — `tests/fixtures/agents/codex/`,
+`tests/fixtures/agents/opencode/`; заголовки по подписке — `tests/fixtures/agents/subscriptions/` (настоящие профили
+владельца, только заголовки).
+
+- **a. Codex.** С ключом — только `POST /v1/responses` под `base_url`; с входом ChatGPT (`requires_openai_auth`) — ещё
+  дважды `GET /v1/models?client_version=…`, ответ 404 работе не мешает (Codex пишет ошибку обновления списка моделей и
+  продолжает). Тела не сжаты, WebSocket не открывался. Заголовки: `session-id`, `thread-id`, `x-client-request-id`,
+  `originator`, `user-agent`, `x-codex-beta-features`, `x-codex-window-id`, `x-codex-turn-metadata`, `accept`,
+  `content-type`, у моделей «code mode» — ещё `x-openai-internal-codex-responses-lite: true`. Поля тела: `model`, `stream`,
+  `input`, `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning`, `store: false`,
+  `include: ["reasoning.encrypted_content"]`, `prompt_cache_key` (= сессия), `text`, `client_metadata`; `instructions` нет —
+  базовые инструкции идут первым сообщением `developer`. Набор инструментов — по модели: у `gpt-5.5` поле `tools`
+  (`exec_command` с `cmd`, `apply_patch` — `custom` с грамматикой lark в `format`); у `gpt-6.x` и `gpt-5.6-*`
+  (`tool_mode = code_mode_only`) поля `tools` нет, инструменты — первый элемент `input` вида `additional_tools`
+  (пространства имён с вложенными `tools`), а модель зовёт один `custom`-инструмент `exec` с текстом на JavaScript, из
+  которого вызываются `tools.exec_command(…)` и `tools.apply_patch(…)`. Элементы `input`: `message` (роли `developer`,
+  `user`, `assistant`; части `input_text`, `output_text`), у каждого элемента — `id` (`msg_…`, `fco_…`, `ctco_…`);
+  первое сообщение `user` — `<environment_context>` (рабочий каталог, оболочка, дата, часовой пояс), второе — задача;
+  `reasoning` (`summary`, `encrypted_content`, `content: null`), `function_call` (`id`, `call_id`, `name`, `arguments`,
+  `status`), `function_call_output` (`output` строкой: «Chunk ID / Wall time / Output:» и вывод команды),
+  `custom_tool_call` (`input`), `custom_tool_call_output` (`output` строкой, у `exec` — списком частей `input_text`).
+- **b. История Codex повторяется дословно** — побайтно по JSON от хода к ходу и после `codex exec resume --last`, вместе с
+  первым сообщением `user`, `id` и `status` элементов; `session-id` после возобновления тот же. Элементы модели Codex
+  записывает заново по-своему: другой порядок ключей, у `reasoning` добавлено `content: null`; строка `arguments` — та же,
+  что пришла.
+- **c. OpenCode** (`@ai-sdk/openai-compatible`): только `POST /v1/chat/completions` — служебный запрос названия сессии
+  (без `tools`) и ходы. Заголовки: `x-cleaner-key` (из `options.headers`), `authorization` (из `options.apiKey`),
+  `x-session-affinity` (сессия), `user-agent`, `accept-encoding`. Поля: `model`, `max_tokens`, `tool_choice`, `stream`,
+  `stream_options.include_usage`, `messages`, `tools`. Сообщение `assistant` в истории — `content`, `reasoning_content`
+  (возвращается), `tool_calls`; `tool` — `tool_call_id` и `content` строкой. Вызов с аргументами одной частью принят
+  (проверка 2). `arguments` в истории записаны заново — без пробелов, не той строкой, что пришла.
+- **d. Подписки.** Claude Code с входом claude.ai при `ANTHROPIC_BASE_URL` шлёт свой `authorization: Bearer` (OAuth) и
+  туда, `anthropic-beta` — с `oauth-2025-04-20`, `x-cleaner-key` — из `ANTHROPIC_CUSTOM_HEADERS`; остальное — как в 5Б
+  (`anthropic-version`, `user-agent`, `x-app`, `x-claude-code-session-id`, `x-stainless-*`). Codex с
+  `requires_openai_auth` шлёт `authorization: Bearer` (токен ChatGPT), `chatgpt-account-id`, `originator`, `session-id`,
+  `thread-id`, `x-client-request-id`, `x-codex-*`, `x-openai-internal-codex-responses-lite`, `user-agent`; путь —
+  `/responses` под `base_url`. Ещё Codex из настоящего профиля сам отправил фоновую консолидацию памяти
+  (`request_kind: memory`, тело 1,7 МБ) — обычный запрос Responses: через шлюз она пойдёт очищенной, как ход.
+- **e. Сертификат.** Codex (rustls) берёт частный сертификат из `SSL_CERT_FILE` или `CODEX_CA_CERTIFICATE`, но нынешний
+  сертификат Cleaner не принимает ни так, ни без переменных: он самоподписанный с `CA:TRUE` (так по умолчанию ставит
+  `openssl req -x509` установщика), а webpki не принимает сертификат УЦ сертификатом сервера — соединение молча
+  обрывается после сертификата («Reconnecting... waiting for network»). Проверено локально на трёх вариантах: нынешний —
+  Claude Code и OpenCode принимают, Codex — нет; самоподписанный с `CA:FALSE`, `keyCertSign` и `serverAuth` — принимают
+  все три; цепочка «свой УЦ + сертификат узла» — все три. OpenCode (Bun) без `NODE_EXTRA_CA_CERTS` отвечает
+  «self signed certificate».
+
+Решения по итогам:
+
+- b, c — отпечаток вызова в истории — по каноническому JSON разобранных аргументов (так и задумано): OpenCode пишет их
+  заново. Codex меняет у элементов модели только порядок ключей и пустые поля, глубже — нет: блоки модели находятся в
+  журнале `out` по узлу без `id` и `status` (у части текста — только `type` и `text`).
+- b — отпечаток разговора Responses — по первому сообщению пользователя, как у Anthropic (6.3): после возобновления оно
+  то же; `session-id` записывается для просмотра.
+- a — WebSocket Codex не открывает: обработки 426 нет. `GET /v1/models` у ключа с подпиской — 404 в виде OpenAI (Codex
+  работает без него). `additional_tools` — описания инструментов, как `tools` (грамматики `format` — служебные).
+- c — аргументы вызова Chat Completions отдаются одной частью.
+- d — подписка Claude через шлюз возможна. Заголовки к провайдеру сверх списка подключения: у Anthropic —
+  `authorization`, `user-agent`, `x-app`; у Responses — `authorization`, `chatgpt-account-id`, `user-agent`,
+  `x-openai-fedramp`. `x-openai-internal-codex-responses-lite` уходит и при ключе подключения: без него модели «code mode»
+  не поймут `additional_tools`. `x-stainless-*` не уходят.
+- e — Codex через шлюз требует сертификат службы с `CA:FALSE` (установщик) и `CODEX_CA_CERTIFICATE` (или
+  `SSL_CERT_FILE`) в окружении Codex; системное хранилище не нужно.
+
 ## 19. Вопросы владельцу
 
 Ответы 28.10.2026:

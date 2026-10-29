@@ -1,0 +1,117 @@
+{
+ "claude_code_title": {
+  "method": "POST",
+  "path": "/v1/messages?beta=true",
+  "headers": {
+   "accept": "application/json",
+   "content-type": "application/json",
+   "user-agent": "claude-cli/2.1.270 (external, sdk-cli)",
+   "x-claude-code-session-id": "00000000-0000-4000-8000-000000000001",
+   "x-cleaner-key": "capture",
+   "x-stainless-arch": "x64",
+   "x-stainless-lang": "js",
+   "x-stainless-os": "Windows",
+   "x-stainless-package-version": "0.112.1",
+   "x-stainless-retry-count": "0",
+   "x-stainless-runtime": "node",
+   "x-stainless-runtime-version": "v26.3.0",
+   "x-stainless-timeout": "600",
+   "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01,advisor-tool-2026-03-01,effort-2025-11-24,structured-outputs-2025-12-15",
+   "anthropic-dangerous-direct-browser-access": "true",
+   "anthropic-version": "2023-06-01",
+   "x-app": "cli",
+   "connection": "keep-alive",
+   "accept-encoding": "gzip, deflate, br, zstd",
+   "authorization": "Bearer (108)"
+  }
+ },
+ "claude_code_turn": {
+  "method": "POST",
+  "path": "/v1/messages?beta=true",
+  "headers": {
+   "accept": "application/json",
+   "content-type": "application/json",
+   "user-agent": "claude-cli/2.1.270 (external, sdk-cli)",
+   "x-claude-code-session-id": "00000000-0000-4000-8000-000000000001",
+   "x-cleaner-key": "capture",
+   "x-stainless-arch": "x64",
+   "x-stainless-lang": "js",
+   "x-stainless-os": "Windows",
+   "x-stainless-package-version": "0.112.1",
+   "x-stainless-retry-count": "0",
+   "x-stainless-runtime": "node",
+   "x-stainless-runtime-version": "v26.3.0",
+   "x-stainless-timeout": "600",
+   "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01,advisor-tool-2026-03-01,effort-2025-11-24,afk-mode-2026-01-31,extended-cache-ttl-2025-04-11",
+   "anthropic-dangerous-direct-browser-access": "true",
+   "anthropic-version": "2023-06-01",
+   "x-app": "cli",
+   "connection": "keep-alive",
+   "accept-encoding": "gzip, deflate, br, zstd",
+   "authorization": "Bearer (108)"
+  }
+ },
+ "codex_models_1": {
+  "method": "GET",
+  "path": "/v1/models?client_version=0.163.0",
+  "headers": {
+   "x-cleaner-key": "capture",
+   "chatgpt-account-id": "00000000-0000-4000-8000-000000000002",
+   "originator": "codex_exec",
+   "user-agent": "codex_exec/0.163.0 (Windows 10.0.26200; x86_64) xterm-256color",
+   "accept": "*/*",
+   "authorization": "Bearer (1728)"
+  }
+ },
+ "codex_models_2": {
+  "method": "GET",
+  "path": "/v1/models?client_version=0.163.0",
+  "headers": {
+   "x-cleaner-key": "capture",
+   "chatgpt-account-id": "00000000-0000-4000-8000-000000000002",
+   "originator": "codex_exec",
+   "user-agent": "codex_exec/0.163.0 (Windows 10.0.26200; x86_64) xterm-256color (codex_exec; 0.163.0)",
+   "accept": "*/*",
+   "authorization": "Bearer (1728)"
+  }
+ },
+ "codex_memory": {
+  "method": "POST",
+  "path": "/v1/responses",
+  "headers": {
+   "x-cleaner-key": "capture",
+   "x-codex-window-id": "00000000-0000-4000-8000-000000000003:0",
+   "x-codex-turn-metadata": "{\"request_kind\": \"memory\", \"thread_source\": \"memory_consolidation\", \"turn_trigger\": \"memory_consolidation\"}",
+   "x-openai-internal-codex-responses-lite": "true",
+   "x-client-request-id": "00000000-0000-4000-8000-000000000003",
+   "session-id": "00000000-0000-4000-8000-000000000003",
+   "thread-id": "00000000-0000-4000-8000-000000000003",
+   "accept": "text/event-stream",
+   "content-type": "application/json",
+   "chatgpt-account-id": "00000000-0000-4000-8000-000000000002",
+   "originator": "codex_exec",
+   "user-agent": "codex_exec/0.163.0 (Windows 10.0.26200; x86_64) xterm-256color (codex_exec; 0.163.0)",
+   "authorization": "Bearer (1728)"
+  }
+ },
+ "codex_turn": {
+  "method": "POST",
+  "path": "/v1/responses",
+  "headers": {
+   "x-cleaner-key": "capture",
+   "x-codex-beta-features": "remote_compaction_v2",
+   "x-codex-window-id": "00000000-0000-4000-8000-000000000003:0",
+   "x-codex-turn-metadata": "{\"request_kind\": \"turn\", \"thread_source\": \"user\", \"turn_trigger\": \"exec\"}",
+   "x-openai-internal-codex-responses-lite": "true",
+   "x-client-request-id": "00000000-0000-4000-8000-000000000003",
+   "session-id": "00000000-0000-4000-8000-000000000003",
+   "thread-id": "00000000-0000-4000-8000-000000000003",
+   "accept": "text/event-stream",
+   "content-type": "application/json",
+   "chatgpt-account-id": "00000000-0000-4000-8000-000000000002",
+   "originator": "codex_exec",
+   "user-agent": "codex_exec/0.163.0 (Windows 10.0.26200; x86_64) xterm-256color (codex_exec; 0.163.0)",
+   "authorization": "Bearer (1728)"
+  }
+ }
+}
