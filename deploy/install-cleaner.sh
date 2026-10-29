@@ -107,7 +107,8 @@ fi
 # читает только группа aidash, а в SAN нет example. Отпечаток в документы не
 # выписывается — его печатают этот установщик и check-cleaner.sh.
 # CLEANER_REISSUE_CERT=1 — выпустить заново (новый отпечаток: браузеры и агенты принимают его снова); прежний остаётся
-# рядом. Нужен сертификатам до 28.10.2026: без keyCertSign их не принимает Claude Code (Bun) — шлюз агентов, план 5Б.
+# рядом. Нужен сертификатам до 28.10.2026: без keyCertSign их не принимает Claude Code (Bun) — шлюз агентов, план 5Б;
+# и до 29.10.2026: с CA:TRUE (так openssl выпускает самоподписанный по умолчанию) их не принимает Codex (rustls) — план 5В.
 if [[ "${CLEANER_REISSUE_CERT:-0}" == "1" && -s "$TLS/cert.pem" ]]; then
     mv "$TLS/cert.pem" "$TLS/cert.pem.prev-$STAMP"
     mv "$TLS/key.pem" "$TLS/key.pem.prev-$STAMP"
@@ -121,6 +122,7 @@ if [[ ! -s "$TLS/cert.pem" || ! -s "$TLS/key.pem" ]]; then
             -keyout "$TLS/key.pem" -out "$TLS/cert.pem" \
             -subj "/CN=${CERT_NAME} Cleaner" \
             -addext "subjectAltName=IP:${HOST_IP},DNS:${CERT_NAME}" \
+            -addext "basicConstraints=critical,CA:FALSE" \
             -addext "keyUsage=digitalSignature,keyEncipherment,keyCertSign" \
             -addext "extendedKeyUsage=serverAuth" 2>&1
     ); then

@@ -20,14 +20,17 @@ from cleaner.core import leakcheck
 from cleaner.core.pipeline import OutgoingContext
 from cleaner.core.types import ChatState, Settings
 from cleaner.egress import ProviderError, StreamEnd
-from cleaner.egress.protocols import anthropic, openai, provider_error
+from cleaner.egress.protocols import anthropic, openai, provider_error, responses
 
-PROTOCOLS = {"openai": openai, "anthropic": anthropic}
-AUTH_STYLES = ("bearer", "x-api-key")
+PROTOCOLS = {"openai": openai, "anthropic": anthropic, "responses": responses}
+# passthrough — доступ шлюза по подписке: ключа подключения нет, вход агента уже в заголовках запроса (раздел 9.4).
+AUTH_STYLES = ("bearer", "x-api-key", "passthrough")
 # Поля, которыми дополнительные параметры подключения могли бы заменить сам запрос или добавить к нему
-# инструменты, файлы и поиск провайдера (FR-8.8).
+# инструменты, файлы и поиск провайдера (FR-8.8). У Responses запрос — input и instructions, а
+# previous_response_id и conversation подтянули бы историю, хранящуюся у провайдера.
 FORBIDDEN_EXTRA = frozenset({
     "model", "messages", "system", "stream", "tools", "tool_choice", "functions", "function_call",
+    "input", "instructions", "previous_response_id", "conversation",
     "attachments", "files", "web_search_options", "mcp_servers", "container",
     # поиск и надстройки маршрутизаторов и провайдеров: OpenRouter, xAI, DashScope
     "plugins", "search_parameters", "enable_search", "web_search", "search_options", "documents", "file_ids",
@@ -82,6 +85,8 @@ def check_extra_body(extra: object) -> None:
 
 
 def _headers(connection: Connection) -> dict[str, str]:
+    if connection.auth_style == "passthrough":
+        return {}
     if connection.auth_style == "x-api-key":
         return {"x-api-key": connection.api_key}
     return {"Authorization": f"Bearer {connection.api_key}"}

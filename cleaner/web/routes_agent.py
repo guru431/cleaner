@@ -1,6 +1,7 @@
-"""Шлюз для агентов, протокол Anthropic Messages (спецификация 2026-10-28, разделы 8, 9.1, 12): Claude Code и другие
-агенты задают ANTHROPIC_BASE_URL=https://<cleaner>:5464/agent/anthropic. Открывается только ключом доступа с доступом к
-модели; ошибки — в виде Anthropic (обработчики — app.py)."""
+"""Шлюз для агентов (спецификация 2026-10-28, разделы 8, 9, 12). Anthropic Messages: Claude Code и другие агенты задают
+ANTHROPIC_BASE_URL=https://<cleaner>:5464/agent/anthropic. OpenAI Chat Completions и Responses: OpenCode, Codex, SDK
+OpenAI — base_url https://<cleaner>:5464/agent/openai/v1. Открывается только ключом доступа с доступом к модели;
+ошибки — в виде протокола (обработчики — app.py)."""
 from __future__ import annotations
 
 import asyncio
@@ -12,10 +13,11 @@ from concurrent.futures import Executor
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from cleaner.agent_service import AgentCall, AgentRefused, AgentReply, AgentService
+from cleaner.agent_service import SUBSCRIPTIONS, AgentCall, AgentRefused, AgentReply, AgentService
 from cleaner.web.deps import AGENT_BODY_BYTES, ApiCaller, get_api_caller, repo_of
 
 router = APIRouter(prefix="/agent/anthropic")
+openai_router = APIRouter(prefix="/agent/openai")
 MAX_BODY = AGENT_BODY_BYTES         # и после распаковки (8.2)
 _END = object()
 
@@ -73,10 +75,11 @@ async def _in_pool(pool: Executor, events: Iterator[bytes]) -> AsyncIterator[byt
         await loop.run_in_executor(pool, events.close)
 
 
-async def _handle(request: Request, caller: ApiCaller, path: str) -> Response:
+async def _handle(request: Request, caller: ApiCaller, path: str, protocol: str = "anthropic") -> Response:
+    """path — путь у провайдера: у Anthropic — /v1/… к адресу без /v1, у OpenAI — к base_url, который кончается на /v1."""
     body = await _body(request)
     call = AgentCall(
-        caller.key, caller.user, "anthropic", path, request.url.query, dict(request.headers.items()), body,
+        caller.key, caller.user, protocol, path, request.url.query, dict(request.headers.items()), body,
     )
     pool = request.app.state.agent_pool
     reply: AgentReply = await asyncio.get_running_loop().run_in_executor(pool, _agent(request).handle, call)
@@ -96,14 +99,21 @@ async def count_tokens(request: Request, caller: ApiCaller = Depends(get_api_cal
     return await _handle(request, caller, "/v1/messages/count_tokens")
 
 
-@router.get("/v1/models")
-def models(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Response:
-    """Модели ключа, а если у ключа их нет в списке — все модели подключения."""
+def _model_names(request: Request, caller: ApiCaller) -> list[str]:
+    """Модели ключа, а если у ключа их нет в списке — все модели подключения. У подписки списка нет: Claude Code и Codex
+    его у шлюза не спрашивают (проверки 18.1a 5Б и 5В), а модели подписки знает провайдер."""
+    if caller.key.upstream in SUBSCRIPTIONS:
+        raise AgentRefused(404, "not_found_error", "Cleaner: у ключа с подпиской списка моделей нет")
     kind, _, provider_id = (caller.key.upstream or "").partition(":")
     provider = repo_of(request).provider(provider_id) if kind == "provider" else None
     if provider is None:
         raise AgentRefused(403, "permission_error", "Cleaner: у ключа нет доступа к модели — он только для /api/v1")
-    names = list(caller.key.models or provider.models)
+    return list(caller.key.models or provider.models)
+
+
+@router.get("/v1/models")
+def models(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Response:
+    names = _model_names(request, caller)
     data = [{"type": "model", "id": name, "display_name": name, "created_at": "1970-01-01T00:00:00Z"} for name in names]
     return JSONResponse({
         "data": data, "has_more": False, "first_id": names[0] if names else None, "last_id": names[-1] if names else None,
@@ -114,3 +124,20 @@ def models(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Res
 def hello() -> Response:
     """Проверка связи Claude Code при запуске (HEAD) — без ключа и без обращения к провайдеру."""
     return Response(status_code=204)
+
+
+@openai_router.post("/v1/chat/completions")
+async def chat_completions(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Response:
+    return await _handle(request, caller, "/chat/completions", "chat")
+
+
+@openai_router.post("/v1/responses")
+async def responses(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Response:
+    """Codex — только HTTP с потоком событий: у своего провайдера WebSocket он не открывает (проверка 18.1a 5В)."""
+    return await _handle(request, caller, "/responses", "responses")
+
+
+@openai_router.get("/v1/models")
+def openai_models(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Response:
+    data = [{"id": name, "object": "model", "created": 0, "owned_by": "cleaner"} for name in _model_names(request, caller)]
+    return JSONResponse({"object": "list", "data": data})

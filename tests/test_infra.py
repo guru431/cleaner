@@ -256,6 +256,16 @@ def test_json_escaped_backslashes():
     assert "Users" not in {value for _, value in result}
 
 
+def test_domain_login_before_an_escaped_line_break_in_json():
+    """Приёмка 5В: вывод команды внутри строки JSON (Codex в «code mode» отдаёт результат exec так) — перевод строки
+    записан знаками «\\r\\n», обратная косая между доменом и входом удвоена. Экранирование после входа — не продолжение
+    пути: учётная запись скрывается. «\\\\» после входа — по-прежнему путь."""
+    text = r'{"output": "[database]\r\nhost = srv-db01\r\nuser = CONTOSO\\ivanov\r\n\r\n[report]\r\n"}'
+    assert (T.DOMAIN, "CONTOSO") in found(text) and accounts(text) == {"ivanov"}
+    assert accounts(r'"user": "CONTOSO\\ivanov\n"') == {"ivanov"}
+    assert accounts(r'"path": "CONTOSO\\ivanov\\Desktop"') == set()
+
+
 def test_ipv6_address_followed_by_a_colon():
     assert (T.IP, "2a00:1450:4010::65") in found("Адрес 2a00:1450:4010::65: не отвечает")
 

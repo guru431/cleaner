@@ -1,0 +1,205 @@
+[
+ [
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {
+      "role": "assistant",
+      "reasoning_content": "Нужен инструмент."
+     },
+     "finish_reason": null
+    }
+   ]
+  },
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {
+      "content": "Читаю файл."
+     },
+     "finish_reason": null
+    }
+   ]
+  },
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {
+      "tool_calls": [
+       {
+        "index": 0,
+        "id": "call_cap_1",
+        "type": "function",
+        "function": {
+         "name": "read",
+         "arguments": "{\"filePath\": \"C:\\\\cleaner-capture\\\\contoso-repo\\\\notes.txt\"}"
+        }
+       }
+      ]
+     },
+     "finish_reason": null
+    }
+   ]
+  },
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {},
+     "finish_reason": "tool_calls"
+    }
+   ]
+  }
+ ],
+ [
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {
+      "role": "assistant",
+      "reasoning_content": "Нужен инструмент."
+     },
+     "finish_reason": null
+    }
+   ]
+  },
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {
+      "content": "Правлю."
+     },
+     "finish_reason": null
+    }
+   ]
+  },
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {
+      "tool_calls": [
+       {
+        "index": 0,
+        "id": "call_cap_2",
+        "type": "function",
+        "function": {
+         "name": "edit",
+         "arguments": "{\"filePath\": \"C:\\\\cleaner-capture\\\\contoso-repo\\\\notes.txt\", \"oldString\": \"{{re:Учётная запись: \\\\S+}}\", \"newString\": \"{{re:Учётная запись: \\\\S+}} (проверено)\"}"
+        }
+       }
+      ]
+     },
+     "finish_reason": null
+    }
+   ]
+  },
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {},
+     "finish_reason": "tool_calls"
+    }
+   ]
+  }
+ ],
+ [
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {
+      "role": "assistant",
+      "content": "Готово: строка учёт"
+     },
+     "finish_reason": null
+    }
+   ]
+  },
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {
+      "content": "ной записи отмечена."
+     },
+     "finish_reason": null
+    }
+   ]
+  },
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [
+    {
+     "index": 0,
+     "delta": {},
+     "finish_reason": "stop"
+    }
+   ]
+  },
+  {
+   "id": "chatcmpl-cap",
+   "object": "chat.completion.chunk",
+   "created": 0,
+   "model": "capture-model",
+   "choices": [],
+   "usage": {
+    "prompt_tokens": 1000,
+    "completion_tokens": 20,
+    "total_tokens": 1020,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   }
+  }
+ ]
+]

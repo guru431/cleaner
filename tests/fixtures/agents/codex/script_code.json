@@ -1,0 +1,390 @@
+[
+ [
+  {
+   "type": "response.created",
+   "response": {
+    "id": "resp_cap_1",
+    "object": "response",
+    "status": "in_progress",
+    "output": []
+   }
+  },
+  {
+   "type": "response.output_item.added",
+   "output_index": 0,
+   "item": {
+    "type": "reasoning",
+    "id": "rs_cap_1",
+    "summary": [],
+    "encrypted_content": "gAAAAABcapture-encrypted-reasoning-1"
+   }
+  },
+  {
+   "type": "response.output_item.done",
+   "output_index": 0,
+   "item": {
+    "type": "reasoning",
+    "id": "rs_cap_1",
+    "summary": [
+     {
+      "type": "summary_text",
+      "text": "Нужно прочитать файл."
+     }
+    ],
+    "encrypted_content": "gAAAAABcapture-encrypted-reasoning-1"
+   }
+  },
+  {
+   "type": "response.output_item.added",
+   "output_index": 1,
+   "item": {
+    "type": "message",
+    "id": "msg_cap_1",
+    "role": "assistant",
+    "status": "in_progress",
+    "content": []
+   }
+  },
+  {
+   "type": "response.content_part.added",
+   "item_id": "msg_cap_1",
+   "output_index": 1,
+   "content_index": 0,
+   "part": {
+    "type": "output_text",
+    "text": "",
+    "annotations": []
+   }
+  },
+  {
+   "type": "response.output_text.delta",
+   "item_id": "msg_cap_1",
+   "output_index": 1,
+   "content_index": 0,
+   "delta": "Читаю"
+  },
+  {
+   "type": "response.output_text.delta",
+   "item_id": "msg_cap_1",
+   "output_index": 1,
+   "content_index": 0,
+   "delta": " файл."
+  },
+  {
+   "type": "response.output_text.done",
+   "item_id": "msg_cap_1",
+   "output_index": 1,
+   "content_index": 0,
+   "text": "Читаю файл."
+  },
+  {
+   "type": "response.content_part.done",
+   "item_id": "msg_cap_1",
+   "output_index": 1,
+   "content_index": 0,
+   "part": {
+    "type": "output_text",
+    "text": "Читаю файл.",
+    "annotations": []
+   }
+  },
+  {
+   "type": "response.output_item.done",
+   "output_index": 1,
+   "item": {
+    "type": "message",
+    "id": "msg_cap_1",
+    "role": "assistant",
+    "status": "completed",
+    "content": [
+     {
+      "type": "output_text",
+      "text": "Читаю файл.",
+      "annotations": []
+     }
+    ]
+   }
+  },
+  {
+   "type": "response.output_item.added",
+   "output_index": 2,
+   "item": {
+    "type": "custom_tool_call",
+    "id": "ctc_cap_1",
+    "call_id": "call_cap_1",
+    "name": "exec",
+    "input": "",
+    "status": "in_progress"
+   }
+  },
+  {
+   "type": "response.custom_tool_call_input.delta",
+   "item_id": "ctc_cap_1",
+   "output_index": 2,
+   "delta": "const r = await tools.exec_command({cmd: \"Get-Content -Encoding UTF8 notes.txt\"});\ntext(typeof r === \"string\" ? r : (r.output ?? JSON.stringify(r)));\n"
+  },
+  {
+   "type": "response.custom_tool_call_input.done",
+   "item_id": "ctc_cap_1",
+   "output_index": 2,
+   "input": "const r = await tools.exec_command({cmd: \"Get-Content -Encoding UTF8 notes.txt\"});\ntext(typeof r === \"string\" ? r : (r.output ?? JSON.stringify(r)));\n"
+  },
+  {
+   "type": "response.output_item.done",
+   "output_index": 2,
+   "item": {
+    "type": "custom_tool_call",
+    "id": "ctc_cap_1",
+    "call_id": "call_cap_1",
+    "name": "exec",
+    "input": "const r = await tools.exec_command({cmd: \"Get-Content -Encoding UTF8 notes.txt\"});\ntext(typeof r === \"string\" ? r : (r.output ?? JSON.stringify(r)));\n",
+    "status": "completed"
+   }
+  },
+  {
+   "type": "response.completed",
+   "response": {
+    "id": "resp_cap_1",
+    "object": "response",
+    "status": "completed",
+    "output": [
+     {
+      "type": "reasoning",
+      "id": "rs_cap_1",
+      "summary": [
+       {
+        "type": "summary_text",
+        "text": "Нужно прочитать файл."
+       }
+      ],
+      "encrypted_content": "gAAAAABcapture-encrypted-reasoning-1"
+     },
+     {
+      "type": "message",
+      "id": "msg_cap_1",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+       {
+        "type": "output_text",
+        "text": "Читаю файл.",
+        "annotations": []
+       }
+      ]
+     },
+     {
+      "type": "custom_tool_call",
+      "id": "ctc_cap_1",
+      "call_id": "call_cap_1",
+      "name": "exec",
+      "input": "const r = await tools.exec_command({cmd: \"Get-Content -Encoding UTF8 notes.txt\"});\ntext(typeof r === \"string\" ? r : (r.output ?? JSON.stringify(r)));\n",
+      "status": "completed"
+     }
+    ],
+    "usage": {
+     "input_tokens": 1000,
+     "input_tokens_details": {
+      "cached_tokens": 0
+     },
+     "output_tokens": 20,
+     "output_tokens_details": {
+      "reasoning_tokens": 5
+     },
+     "total_tokens": 1020
+    }
+   }
+  }
+ ],
+ [
+  {
+   "type": "response.created",
+   "response": {
+    "id": "resp_cap_2",
+    "object": "response",
+    "status": "in_progress",
+    "output": []
+   }
+  },
+  {
+   "type": "response.output_item.added",
+   "output_index": 0,
+   "item": {
+    "type": "custom_tool_call",
+    "id": "ctc_cap_2",
+    "call_id": "call_cap_2",
+    "name": "exec",
+    "input": "",
+    "status": "in_progress"
+   }
+  },
+  {
+   "type": "response.custom_tool_call_input.delta",
+   "item_id": "ctc_cap_2",
+   "output_index": 0,
+   "delta": "await tools.apply_patch(String.raw`*** Begin Patch\n*** Update File: notes.txt\n@@\n-{{line:Учётная запись:}}\n+{{line:Учётная запись:}} (проверено)\n*** End Patch\n`);\ntext(\"patched\");\n"
+  },
+  {
+   "type": "response.custom_tool_call_input.done",
+   "item_id": "ctc_cap_2",
+   "output_index": 0,
+   "input": "await tools.apply_patch(String.raw`*** Begin Patch\n*** Update File: notes.txt\n@@\n-{{line:Учётная запись:}}\n+{{line:Учётная запись:}} (проверено)\n*** End Patch\n`);\ntext(\"patched\");\n"
+  },
+  {
+   "type": "response.output_item.done",
+   "output_index": 0,
+   "item": {
+    "type": "custom_tool_call",
+    "id": "ctc_cap_2",
+    "call_id": "call_cap_2",
+    "name": "exec",
+    "input": "await tools.apply_patch(String.raw`*** Begin Patch\n*** Update File: notes.txt\n@@\n-{{line:Учётная запись:}}\n+{{line:Учётная запись:}} (проверено)\n*** End Patch\n`);\ntext(\"patched\");\n",
+    "status": "completed"
+   }
+  },
+  {
+   "type": "response.completed",
+   "response": {
+    "id": "resp_cap_2",
+    "object": "response",
+    "status": "completed",
+    "output": [
+     {
+      "type": "custom_tool_call",
+      "id": "ctc_cap_2",
+      "call_id": "call_cap_2",
+      "name": "exec",
+      "input": "await tools.apply_patch(String.raw`*** Begin Patch\n*** Update File: notes.txt\n@@\n-{{line:Учётная запись:}}\n+{{line:Учётная запись:}} (проверено)\n*** End Patch\n`);\ntext(\"patched\");\n",
+      "status": "completed"
+     }
+    ],
+    "usage": {
+     "input_tokens": 1000,
+     "input_tokens_details": {
+      "cached_tokens": 0
+     },
+     "output_tokens": 20,
+     "output_tokens_details": {
+      "reasoning_tokens": 5
+     },
+     "total_tokens": 1020
+    }
+   }
+  }
+ ],
+ [
+  {
+   "type": "response.created",
+   "response": {
+    "id": "resp_cap_3",
+    "object": "response",
+    "status": "in_progress",
+    "output": []
+   }
+  },
+  {
+   "type": "response.output_item.added",
+   "output_index": 0,
+   "item": {
+    "type": "message",
+    "id": "msg_cap_3",
+    "role": "assistant",
+    "status": "in_progress",
+    "content": []
+   }
+  },
+  {
+   "type": "response.content_part.added",
+   "item_id": "msg_cap_3",
+   "output_index": 0,
+   "content_index": 0,
+   "part": {
+    "type": "output_text",
+    "text": "",
+    "annotations": []
+   }
+  },
+  {
+   "type": "response.output_text.delta",
+   "item_id": "msg_cap_3",
+   "output_index": 0,
+   "content_index": 0,
+   "delta": "Готово: строка учёт"
+  },
+  {
+   "type": "response.output_text.delta",
+   "item_id": "msg_cap_3",
+   "output_index": 0,
+   "content_index": 0,
+   "delta": "ной записи отмечена."
+  },
+  {
+   "type": "response.output_text.done",
+   "item_id": "msg_cap_3",
+   "output_index": 0,
+   "content_index": 0,
+   "text": "Готово: строка учётной записи отмечена."
+  },
+  {
+   "type": "response.content_part.done",
+   "item_id": "msg_cap_3",
+   "output_index": 0,
+   "content_index": 0,
+   "part": {
+    "type": "output_text",
+    "text": "Готово: строка учётной записи отмечена.",
+    "annotations": []
+   }
+  },
+  {
+   "type": "response.output_item.done",
+   "output_index": 0,
+   "item": {
+    "type": "message",
+    "id": "msg_cap_3",
+    "role": "assistant",
+    "status": "completed",
+    "content": [
+     {
+      "type": "output_text",
+      "text": "Готово: строка учётной записи отмечена.",
+      "annotations": []
+     }
+    ]
+   }
+  },
+  {
+   "type": "response.completed",
+   "response": {
+    "id": "resp_cap_3",
+    "object": "response",
+    "status": "completed",
+    "output": [
+     {
+      "type": "message",
+      "id": "msg_cap_3",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+       {
+        "type": "output_text",
+        "text": "Готово: строка учётной записи отмечена.",
+        "annotations": []
+       }
+      ]
+     }
+    ],
+    "usage": {
+     "input_tokens": 1000,
+     "input_tokens_details": {
+      "cached_tokens": 0
+     },
+     "output_tokens": 20,
+     "output_tokens_details": {
+      "reasoning_tokens": 5
+     },
+     "total_tokens": 1020
+    }
+   }
+  }
+ ]
+]

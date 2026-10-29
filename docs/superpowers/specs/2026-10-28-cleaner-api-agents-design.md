@@ -113,6 +113,7 @@
 - Неверный ключ — 401 в виде протокола, нарастающая пауза по адресу клиента (как `Throttle` входа), событие `api_auth_failed` в журнале.
 - Сделано планом 5А (28.10.2026), с двумя отличиями от написанного выше. Таблица `api_keys` в схеме версии 7 — без столбцов шлюза (`upstream`, `models`, `layers`, `chat_id`): их добавит миграция плана 5Б вместе с кодом, который их читает. Ключ отзывается насовсем («Отключить»): включить отозванный нельзя, выпускается новый — хранить у отозванного нечего, кроме хэша. Отказ из-за паузы (429) ключ не проверяет и в журнал не пишется.
 - План 5Б (28.10.2026): столбцы шлюза — в схеме версии 8. Доступ ключа к модели (`upstream`, `models`) задаётся при создании и не меняется: другой доступ — новый ключ. Из нескольких присланных ключей (`X-Cleaner-Key`, `Bearer`, `x-api-key`) берётся первый вида `ck_…` — у агента с подпиской в `Authorization` его собственный токен; это действует и для `/api/v1`. Проверка «подключение включено, протокол Anthropic, модели из его списка» — общая для формы и команды (`agent_service.gateway_access`).
+- План 5В (29.10.2026): `gateway_access(repo, access, models, admin=…)` принимает подключение любого протокола шлюза (Anthropic, OpenAI Chat Completions, OpenAI Responses) и подписку — только при `admin`; модели подписки — свободным списком (пусто — все). У формы подписки и поле моделей видит только администратор, команда — `apikey add … --subscription claude|chatgpt`. Роль владельца проверяется и при каждом запросе по подписке.
 
 ### 6.2. Чаты API
 
@@ -215,6 +216,7 @@ API Anthropic сверяет подпись блока рассуждений с
 - Текст: `messages[].content` (строка или части `text`), `tool_calls[].function.arguments` в истории (строка JSON — разбирается, очищаются значения; по правилу 7.2.2), сообщения `tool`, `tools[].function.description` и `parameters`.
 - Непрозрачное: `reasoning_content` (DeepSeek и подобные), `id`, `tool_call_id`.
 - `GET /v1/models` — как выше.
+- Как сделано планом 5В (29.10.2026, `core/agent/chat.py`): результат инструмента — сообщение `tool` целиком; вызов из истории ищется в журнале по разобранным аргументам (AI SDK пишет их заново, проверка 18.1c 5В), а к провайдеру уходит записанная строка модели. Текст — по мере прихода; первая часть вызова (с `id` и именем) — сразу, с пустыми аргументами; аргументы всех вызовов — одной частью перед частью с `finish_reason`, восстановленными точно; часть `usage` после конца и `data: [DONE]` — как пришли. Служебная инструкция — сообщением `system` перед первым сообщением пользователя. Заголовки к провайдеру — `content-type`, `accept`, `x-session-affinity` (сессия OpenCode; она же — сессия для просмотра).
 
 ### 9.3. OpenAI Responses — `/agent/openai/v1/responses`
 
@@ -224,6 +226,14 @@ API Anthropic сверяет подпись блока рассуждений с
 - Текст: `input[]` — `message` (роли `user`, `developer`, `assistant`; части `input_text`, `output_text`), `function_call.arguments` и `custom_tool_call.input` в истории (по правилу 7.2.2), `function_call_output.output`, `custom_tool_call_output.output`, `local_shell_call` (команда), `instructions` (старые версии Codex), `tools[]` (описания и схемы), `additional_tools`.
 - Непрозрачное: `reasoning` (`encrypted_content`, `summary` — это вывод модели), `compaction`/`context_compaction`, `id`, `call_id`, `prompt_cache_key`, `previous_response_id`, `client_metadata`.
 - Заголовки к провайдеру — по списку: `session-id`, `thread-id`, `x-client-request-id`, `originator`, `x-openai-subagent`, `x-codex-*`, `x-oai-attestation`, `openai-beta`, `accept`, `content-type`; для подписки — `authorization`, `chatgpt-account-id`, `x-openai-fedramp`. Обратно агенту — `x-codex-turn-state`, `openai-model`, `x-reasoning-included`, `x-models-etag`, `x-request-id`.
+- Как сделано планом 5В (29.10.2026, `core/agent/responses.py`), с уточнениями по записи Codex 0.163.0 (проверки 18.1a–b 5В):
+  - Вызовы модели в истории (`function_call`, `custom_tool_call`, `local_shell_call`) ищутся в журнале по узлу без `id` и `status`: Codex записывает их заново по-своему; при сборке тела эти поля берутся из элемента, который прислал агент. Часть `output_text` ищется целиком (с `annotations`). Незнакомые поля сообщения и элемента `additional_tools` — текст (8.3).
+  - Отпечаток разговора (6.3) — по первому сообщению пользователя вместе с его `id`: первое сообщение Codex — `<environment_context>`, одинаковое у сессий в одном каталоге в один день, а `id` у каждой сессии свой и после `resume` тот же (итоговое ревью плана 5В).
+  - `additional_tools` («code mode» моделей `gpt-6.x` и `gpt-5.6-*`) — описания инструментов, как `tools`; пространства имён обходятся вложенно, грамматики `format` (свободные инструменты `apply_patch`, `exec`) — служебные.
+  - `client_metadata` — не непрозрачное, а незнакомое поле: очищается как текст. В нём (и в заголовке `x-codex-turn-metadata`) — рабочие каталоги агента: открытым такой путь унёс бы учётную запись профиля (SEC-2), а проверка служебных строк отказывала бы каждому запросу из репозитория в профиле.
+  - Заголовки `x-codex-*` — списком, а не по началу имени: `x-codex-beta-features`, `x-codex-window-id`, `x-codex-turn-state`. Заголовок не очистить, и `x-codex-turn-metadata` не уходит. `x-openai-internal-codex-responses-lite` уходит и при ключе подключения: без него модели «code mode» не поймут `additional_tools`. Для подписки — ещё `user-agent`.
+  - WebSocket Codex у своего провайдера не открывает — обработки 426 нет.
+  - Итоговые объекты (`output_text.done`, `content_part.done`, `output_item.done`, `response.completed`) получают тот же текст, что склейка дельт; `function_call_arguments.delta` и `custom_tool_call_input.delta` копятся, патчу перед `done` — одна дельта с восстановленным текстом целиком. Служебная инструкция — сообщением `developer` перед первым сообщением пользователя (у Codex — перед `<environment_context>`).
 
 ### 9.4. Виды доступа
 
@@ -238,6 +248,7 @@ API Anthropic сверяет подпись блока рассуждений с
 - Подключению Cleaner токен агента не пересылается никогда (агент с входом claude.ai шлёт свой OAuth и при ключе Cleaner в `X-Cleaner-Key`).
 - Подписка Codex: агент настраивается с `requires_openai_auth = true` и без `env_key` (иначе Codex шлёт ключ из окружения вместо токена ChatGPT).
 - Выход наружу — тот же порт 443 (SEC-15); новых правил `cleaner_egress` не нужно.
+- Как сделано планом 5В (29.10.2026): адреса — `agent_service.SUBSCRIPTIONS`; подменить их можно только аргументом `subscription_urls` конструктора `AgentService` в тестах. Подключение подписки — `cloud.Connection(…, "passthrough", "", 0)`: ключа подключения нет, к провайдеру уходит `Authorization` агента и заголовки подписки протокола (Anthropic — `authorization`, `user-agent`, `x-app`; Responses — `authorization`, `chatgpt-account-id`, `user-agent`, `x-openai-fedramp`). Нет входа агента или в `Authorization` — ключ Cleaner (`ck_…`) — 401: иначе ключ Cleaner ушёл бы провайдеру. Владелец без роли администратора — 403 на каждом запросе. `egress.forward` убирает из тела ошибки провайдера и ключ подключения, и вход агента (целиком и без `Bearer `). `AgentCall` и `AgentOutgoing` не показывают заголовки в `repr`. `GET /v1/models` у ключа с подпиской — 404 (Claude Code и Codex его у шлюза не спрашивают; Codex со входом ChatGPT спрашивает и работает без него, проверка 18.1a 5В). У подключений третий протокол — `responses`: адаптер `egress/protocols/responses.py` работает и в чате интерфейса (отправка, проверка подключения); дополнительные параметры подключения не задают `input`, `instructions`, `previous_response_id` и `conversation`.
 
 ## 10. Восстановление в ответе
 
@@ -298,6 +309,8 @@ API Anthropic сверяет подпись блока рассуждений с
 
 Каждый отказ шлюза — событие журнала с причиной и числами.
 
+Как сделано планом 5В (29.10.2026): под `/agent/openai/` ошибки — `{"error": {"message": "Cleaner: …", "type", "code": null}}`, тип по коду: 400, 405, 413, 415 — `invalid_request_error`, 401 — `authentication_error`, 403 — `permission_error`, 404 — `not_found_error` (и незнакомый путь), 429 — `rate_limit_error`, 5xx — `server_error`. Посреди потока — у Chat Completions часть `data: {"error": …}`, у Responses — событие `error`. Строки 426 нет: WebSocket Codex не открывает (9.3). У подписки: 403 — владелец ключа не администратор, 401 — агент не прислал вход подписки.
+
 ## 13. Скорость (NFR-4, дополнение)
 
 - Запрос, все блоки которого есть в журнале, — добавка шлюза не больше 300 мс (p95) при теле 1 МиБ на сервере; новое содержимое — по нормам NFR-4 для слоёв 1–3 (3 с на 100 000 знаков).
@@ -312,10 +325,11 @@ API Anthropic сверяет подпись блока рассуждений с
 
 - **Claude Code**, ключ подключения Cleaner: режим `cleaner` в `claude-switch.ps1` (мастер в `claude-bundle`, комментарии на английском, адрес и ключ — из `.env`, не из скрипта): `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN=<ck_…>`, `NODE_EXTRA_CA_CERTS=<сертификат Cleaner>`, `CLAUDE_CODE_ATTRIBUTION_HEADER=0`, модели — `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`.
 - **Claude Code**, подписка: режим `cleaner-sub`: `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS="X-Cleaner-Key: <ck_…>"`, `NODE_EXTRA_CA_CERTS`; без `ANTHROPIC_AUTH_TOKEN` и `ANTHROPIC_API_KEY` (они заменяют вход claude.ai).
-- **Codex**: свой провайдер в `~/.codex/config.toml` (раздел 9.3); подписка — `requires_openai_auth = true`, ключ подключения — `env_key`. Доверие сертификату — системное хранилище машины (выясняется в начале этапа, раздел 18).
-- **OpenCode**: `provider.<id>.options.baseURL` и `options.headers` с `X-Cleaner-Key`.
+- **Codex**: свой провайдер в `~/.codex/config.toml` (раздел 9.3); подписка — `requires_openai_auth = true`, ключ подключения — `env_key`. Доверие сертификату — `CODEX_CA_CERTIFICATE` (или `SSL_CERT_FILE`) с файлом сертификата службы; сертификат — самоподписанный с `CA:FALSE`: сертификат УЦ сертификатом сервера rustls не принимает (проверка 18.4 5В).
+- **OpenCode**: `provider.<id>.options.baseURL` и `options.headers` с `X-Cleaner-Key`; сертификат — `NODE_EXTRA_CA_CERTS`.
 - Готовые фрагменты настройки показывает страница ключа после создания.
 - Сертификат Cleaner самоподписанный (раздел 15 основной спецификации); агенту передаётся файл сертификата, а не отключение проверки.
+- Как сделано планом 5В (29.10.2026): страница ключа показывает по виду доступа `settings.local.json` Claude Code (по ключу — как в 5Б; по подписке — `ANTHROPIC_CUSTOM_HEADERS` и ссылка на `claude-switch.ps1 cleaner-sub`), `config.toml` Codex с переменными `CLEANER_KEY` и `CODEX_CA_CERTIFICATE` (для подключения Responses и подписки ChatGPT), `opencode.json` и пример SDK OpenAI (для подключения Chat Completions). Режим `cleaner-sub` в `claude-switch.ps1` убирает и `apiKeyHelper` и переключатель атрибуции, модели не задаёт; `ANTHROPIC_CUSTOM_HEADERS` стал ключом переключателя — другие режимы его снимают.
 
 ## 15. API для проектов — `/api/v1` (FR-13)
 
@@ -387,6 +401,72 @@ Claude Code 2.1.270 на Windows, заглушка `scripts/agent_capture.py`, �
 - b — блок `system`, текст которого начинается с `x-anthropic-billing-header:`, — непрозрачный. Сообщения с ролью `system` внутри `messages` — текст агента, как прочие.
 - Проверка 6: загрузка состояния дольше 100 мс — состояние чата шлюза держится в памяти по версии чата (задача 7 плана 5Б). Проверка утечек на 1 МиБ дольше 300 мс, но цель раздела 13 от неё не зависит: повторённые из журнала блоки проверка пропускает (7.3), и на запросе без нового содержимого проверяются только служебные строки; новое содержимое проверяется в пределах NFR-4 (1 с на 825 000 знаков против 3 с на 100 000 для слоёв 1–3).
 
+### Результаты проверок 5В (29.10.2026)
+
+Codex 0.163.0 и OpenCode 1.14.39 на Windows, заглушка `scripts/agent_capture.py` (теперь — три протокола по пути и
+`--headers-only`), вымышленный репозиторий, свежие профили агентов. Записи — `tests/fixtures/agents/codex/`,
+`tests/fixtures/agents/opencode/`; заголовки по подписке — `tests/fixtures/agents/subscriptions/` (настоящие профили
+владельца, только заголовки).
+
+- **a. Codex.** С ключом — только `POST /v1/responses` под `base_url`; с входом ChatGPT (`requires_openai_auth`) — ещё
+  дважды `GET /v1/models?client_version=…`, ответ 404 работе не мешает (Codex пишет ошибку обновления списка моделей и
+  продолжает). Тела не сжаты, WebSocket не открывался. Заголовки: `session-id`, `thread-id`, `x-client-request-id`,
+  `originator`, `user-agent`, `x-codex-beta-features`, `x-codex-window-id`, `x-codex-turn-metadata`, `accept`,
+  `content-type`, у моделей «code mode» — ещё `x-openai-internal-codex-responses-lite: true`. Поля тела: `model`, `stream`,
+  `input`, `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning`, `store: false`,
+  `include: ["reasoning.encrypted_content"]`, `prompt_cache_key` (= сессия), `text`, `client_metadata`; `instructions` нет —
+  базовые инструкции идут первым сообщением `developer`. Набор инструментов — по модели: у `gpt-5.5` поле `tools`
+  (`exec_command` с `cmd`, `apply_patch` — `custom` с грамматикой lark в `format`); у `gpt-6.x` и `gpt-5.6-*`
+  (`tool_mode = code_mode_only`) поля `tools` нет, инструменты — первый элемент `input` вида `additional_tools`
+  (пространства имён с вложенными `tools`), а модель зовёт один `custom`-инструмент `exec` с текстом на JavaScript, из
+  которого вызываются `tools.exec_command(…)` и `tools.apply_patch(…)`. Элементы `input`: `message` (роли `developer`,
+  `user`, `assistant`; части `input_text`, `output_text`), у каждого элемента — `id` (`msg_…`, `fco_…`, `ctco_…`);
+  первое сообщение `user` — `<environment_context>` (рабочий каталог, оболочка, дата, часовой пояс), второе — задача;
+  `reasoning` (`summary`, `encrypted_content`, `content: null`), `function_call` (`id`, `call_id`, `name`, `arguments`,
+  `status`), `function_call_output` (`output` строкой: «Chunk ID / Wall time / Output:» и вывод команды),
+  `custom_tool_call` (`input`), `custom_tool_call_output` (`output` строкой, у `exec` — списком частей `input_text`).
+- **b. История Codex повторяется дословно** — побайтно по JSON от хода к ходу и после `codex exec resume --last`, вместе с
+  первым сообщением `user`, `id` и `status` элементов; `session-id` после возобновления тот же. Элементы модели Codex
+  записывает заново по-своему: другой порядок ключей, у `reasoning` добавлено `content: null`; строка `arguments` — та же,
+  что пришла.
+- **c. OpenCode** (`@ai-sdk/openai-compatible`): только `POST /v1/chat/completions` — служебный запрос названия сессии
+  (без `tools`) и ходы. Заголовки: `x-cleaner-key` (из `options.headers`), `authorization` (из `options.apiKey`),
+  `x-session-affinity` (сессия), `user-agent`, `accept-encoding`. Поля: `model`, `max_tokens`, `tool_choice`, `stream`,
+  `stream_options.include_usage`, `messages`, `tools`. Сообщение `assistant` в истории — `content`, `reasoning_content`
+  (возвращается), `tool_calls`; `tool` — `tool_call_id` и `content` строкой. Вызов с аргументами одной частью принят
+  (проверка 2). `arguments` в истории записаны заново — без пробелов, не той строкой, что пришла.
+- **d. Подписки.** Claude Code с входом claude.ai при `ANTHROPIC_BASE_URL` шлёт свой `authorization: Bearer` (OAuth) и
+  туда, `anthropic-beta` — с `oauth-2025-04-20`, `x-cleaner-key` — из `ANTHROPIC_CUSTOM_HEADERS`; остальное — как в 5Б
+  (`anthropic-version`, `user-agent`, `x-app`, `x-claude-code-session-id`, `x-stainless-*`). Codex с
+  `requires_openai_auth` шлёт `authorization: Bearer` (токен ChatGPT), `chatgpt-account-id`, `originator`, `session-id`,
+  `thread-id`, `x-client-request-id`, `x-codex-*`, `x-openai-internal-codex-responses-lite`, `user-agent`; путь —
+  `/responses` под `base_url`. Ещё Codex из настоящего профиля сам отправил фоновую консолидацию памяти
+  (`request_kind: memory`, тело 1,7 МБ) — обычный запрос Responses: через шлюз она пойдёт очищенной, как ход.
+- **e. Сертификат.** Codex (rustls) берёт частный сертификат из `SSL_CERT_FILE` или `CODEX_CA_CERTIFICATE`, но нынешний
+  сертификат Cleaner не принимает ни так, ни без переменных: он самоподписанный с `CA:TRUE` (так по умолчанию ставит
+  `openssl req -x509` установщика), а webpki не принимает сертификат УЦ сертификатом сервера — соединение молча
+  обрывается после сертификата («Reconnecting... waiting for network»). Проверено локально на трёх вариантах: нынешний —
+  Claude Code и OpenCode принимают, Codex — нет; самоподписанный с `CA:FALSE`, `keyCertSign` и `serverAuth` — принимают
+  все три; цепочка «свой УЦ + сертификат узла» — все три. OpenCode (Bun) без `NODE_EXTRA_CA_CERTS` отвечает
+  «self signed certificate».
+
+Решения по итогам:
+
+- b, c — отпечаток вызова в истории — по каноническому JSON разобранных аргументов (так и задумано): OpenCode пишет их
+  заново. Codex меняет у элементов модели только порядок ключей и пустые поля, глубже — нет: блоки модели находятся в
+  журнале `out` по узлу без `id` и `status` (у части текста — только `type` и `text`).
+- b — отпечаток разговора Responses — по первому сообщению пользователя, как у Anthropic (6.3): после возобновления оно
+  то же; `session-id` записывается для просмотра.
+- a — WebSocket Codex не открывает: обработки 426 нет. `GET /v1/models` у ключа с подпиской — 404 в виде OpenAI (Codex
+  работает без него). `additional_tools` — описания инструментов, как `tools` (грамматики `format` — служебные).
+- c — аргументы вызова Chat Completions отдаются одной частью.
+- d — подписка Claude через шлюз возможна. Заголовки к провайдеру сверх списка подключения: у Anthropic —
+  `authorization`, `user-agent`, `x-app`; у Responses — `authorization`, `chatgpt-account-id`, `user-agent`,
+  `x-openai-fedramp`. `x-openai-internal-codex-responses-lite` уходит и при ключе подключения: без него модели «code mode»
+  не поймут `additional_tools`. `x-stainless-*` не уходят.
+- e — Codex через шлюз требует сертификат службы с `CA:FALSE` (установщик) и `CODEX_CA_CERTIFICATE` (или
+  `SSL_CERT_FILE`) в окружении Codex; системное хранилище не нужно.
+
 ## 19. Вопросы владельцу
 
 Ответы 28.10.2026:
@@ -429,8 +509,8 @@ Claude Code 2.1.270 на Windows, заглушка `scripts/agent_capture.py`, �
 |---|---|---|
 | 5А | ключи, `/api/v1`, страница «Ключи», команда `apikey` (G1); приёмка AC-5.8 — выполнен 28.10.2026, см. «Приёмка 5А» | — |
 | 5Б | сначала проверки раздела 18, затем режим написаний (раздел 11), журнал отправленного, шлюз Anthropic с подключением Cleaner, восстановление потока, чат шлюза в интерфейсе, режим `cleaner` в `claude-switch` — выполнен 28–29.10.2026, см. «Приёмка 5Б» | 5А |
-| 5В | Chat Completions и Responses, протокол `responses` у подключений, подписки Claude и ChatGPT, настройки Codex и OpenCode | 5Б |
-| 5Г | замеры скорости на серверах (раздел 13, проверка 5 раздела 18), полная приёмка AC-5.1…5.10, и перенесённое из 5Б: AC-5.1 с настоящей моделью по протоколу Anthropic и проверка 3 раздела 18 (подписи рассуждений DeepSeek и MiniMax) — нужен провайдер с балансом | 5В |
+| 5В | Chat Completions и Responses, протокол `responses` у подключений, подписки Claude и ChatGPT, настройки Codex и OpenCode — выполнен 29.10.2026, см. «Приёмка 5В» | 5Б |
+| 5Г | замеры скорости на серверах (раздел 13, проверка 5 раздела 18), полная приёмка AC-5.1…5.10, и перенесённое из 5Б и 5В: AC-5.1 с настоящей моделью по протоколу Anthropic, проверка 3 раздела 18 (подписи рассуждений DeepSeek и MiniMax) и AC-5.3 по ключу подключения с настоящей моделью — нужны провайдеры с балансом | 5В |
 
 5А полезна сама по себе и не ждёт остального.
 
@@ -457,6 +537,10 @@ Claude Code 2.1.270 на Windows, заглушка `scripts/agent_capture.py`, �
 11. API-чаты — обычные чаты владельца ключа, видимые в интерфейсе (6.2).
 12. План 5Б: пороги смены чата, срок журнала и предел тела — постоянные, а не настройки (6.3, 7.3, 8); доступ ключа к модели не меняется после выпуска (6.1); в чате шлюза столбец «вхождений» таблицы замен пуст — у чата нет элементов, а журнал считает замены по типам, не по сущностям.
 13. План 5Б: граница выдачи текста в потоке отступает и перед искажённой записью метки с пробелами внутри («< EMAIL _ 1 >», FR-7.3) — иначе склейка дельт отличалась бы от восстановления целого (10.1).
+14. План 5В: всё, что в общем пути шлюза зависит от протокола, — объект протокола (`core/agent/protocol.py`); тела Anthropic от этого не изменились (сверено с выводом 5Б на записях Claude Code).
+15. План 5В: новые блоки запроса очищаются вторым проходом, если первый оставил утечку — значение, найденное в позднем блоке (учётная запись из пути профиля в описании инструмента), в раннем осталось бы открытым, а отказ повторялся бы при каждом повторе агента (состояние при отказе не сохраняется). Найдено на первом ходе OpenCode.
+16. План 5В: имена обязательных свойств (`required`) и типы (`type`) схемы инструмента на утечки не проверяются, как и сами имена свойств: пример «/Users/name/» в описании `bash` у OpenCode давал учётную запись «name», а `required: ["name"]` инструмента `skill` — отказ каждому запросу. Остальные служебные значения схемы (`format`, `$ref`, `$schema`) проверяются, как в 5Б.
+17. План 5В: в событие `agent_send` — вид доступа (`access`) и числа `usage` провайдера (`input`, `output`, `cache_read`, `cache_write`; у Anthropic — последнее значение, `message_delta` несёт нарастающий итог): по ним проверяется чтение кэша промпта (AC-5.2).
 
 ## Приёмка 5А (28.10.2026)
 
@@ -493,3 +577,31 @@ Claude Code 2.1.270 на Windows, заглушка `scripts/agent_capture.py`, �
 **Найдено при приёмке.** Claude Code работает на Bun, и его BoringSSL принимает самоподписанный сертификат из `NODE_EXTRA_CA_CERTS`, только если в `keyUsage` есть `keyCertSign`; сертификат, который выпускал установщик, — `CA:TRUE` без него, и агент отвечает «SSL certificate verification failed» (Node и curl тот же файл принимают). Проверено локально на трёх вариантах сертификата: проходит только с `keyCertSign`. Установщик теперь выпускает такой (коммит `5974492`), а прежний сертификат меняет только по явному `CLEANER_REISSUE_CERT=1`. Первый прогон приёмки шёл через посредника на петле workstation, который сам ходил в службу по HTTPS с проверкой сертификата. 29.10.2026 по решению владельца сертификаты обоих хостов перевыпущены (`CLEANER_REISSUE_CERT=1`, прежние — `cert.pem.prev-*` рядом; `check-cleaner.sh` — «Всё в порядке» на обоих), и AC-5.1 на заглушке example пройдена ещё раз напрямую: Claude Code по `https://example5464/agent/anthropic`, сертификат — из `NODE_EXTRA_CA_CERTS` режима `cleaner`, те же итоги. Браузеры и клиенты со старым файлом сертификата (`api_smoke.py --cacert`) принимают новый заново.
 
 **AC-5.1 с настоящей моделью** (шаг 4 плана) не выполнена: у DeepSeek и MiniMax нулевой баланс (402), MiniMax через OpenCode Go — 403 (проверка 3, раздел 18). По решению владельца (29.10.2026) она перенесена в план 5Г вместе с проверкой 3 раздела 18. Статус плана 5Б в разделе 22 — выполнен.
+
+## Приёмка 5В (29.10.2026)
+
+Ветка `stage5v`: сначала установлен `7024448` с перевыпуском сертификата на обоих хостах (решение владельца 29.10.2026: установщик выпускает его с `CA:FALSE`, иначе Codex его не принимает, проверка 18.4 5В), затем — исправление `cd7b28e`, найденное приёмкой (ниже). Зависимости, схема (версия 8) и юнит не менялись — окружение прежнее, сверка с эталоном vLLM не нужна.
+
+| Проверка | example | example |
+|---|---|---|
+| Сертификат | перевыпущен (`CLEANER_REISSUE_CERT=1`), `CA:FALSE`, прежний — `cert.pem.prev-*` | так же |
+| Быстрый набор на сервере (Python 3.12) | 2282 теста, два пропущены, 30,2 с | 2282 теста, два пропущены, 37,5 с (тестовые пакеты — колёсами с workstation) |
+| Обход слоёв по длинным рядам (`-m integration`) | 224 случая, 16,4 с | 224 случая, 25,3 с |
+| `check-cleaner.sh` | «Всё в порядке» | «Всё в порядке» |
+| AC-5.2…5.5 на заглушке (`tests/test_acceptance_stage5v.py` в быстром наборе) | пройдены | пройдены |
+| Codex и OpenCode на заглушке | — (клиенты — только `example/19`, workstation туда не ходит) | пройдена |
+| AC-5.2 — Claude Code по подписке владельца | — | пройдена |
+| AC-5.3 — Codex по подписке ChatGPT владельца | — | пройдена (после исправления `cd7b28e`) |
+| AC-5.3 — Codex по ключу с настоящей моделью | — | не выполнена: квота OpenAI API исчерпана — план 5Г |
+
+**Codex и OpenCode на заглушке example.** Две заглушки `scripts/agent_capture.py` на `127.0.0.1` сервера (сценарии Responses и Chat Completions: чтение `notes.txt` → правка строки почты для отчётов из прочитанного → `ping` узла из прочитанного → ответ); подключения к ним (`responses` и `openai`) — на странице подключений под администратором; ключи — `apikey add admin … --provider`. С workstation в вымышленном репозитории с контрольными значениями AC-1.1 и почтой в другом регистре: Codex 0.163.0 (`-m gpt-5.5`, свой провайдер `-c`, ключ — в переменной `CLEANER_KEY`, сертификат — `CODEX_CA_CERTIFICATE`) и OpenCode 1.14.39 (свежие каталоги настроек, `NODE_EXTRA_CA_CERTS`). Итог: `apply_patch` Codex и `edit` OpenCode легли в настоящую строку файла, `ping` ушёл с настоящим именем узла; у заглушек 4 и 5 запросов — ни одного контрольного значения и ни одного ключа Cleaner.
+
+**AC-5.2.** Ключ `apikey add admin --name ac-5-2 --subscription claude`; `claude-switch.ps1 cleaner-sub` (мастер в `claude-bundle`) в вымышленном репозитории; Claude Code 2.1.270 с входом claude.ai владельца (`claude-opus-5`), задача на 11 шагов (чтения, правка адреса в `config/app.ini`, два `ping`, `git status`, `git diff`, Grep, Glob, сводка). Итог: 13 запросов к `api.anthropic.com` через шлюз, все 200, ни одного отказа по подписи рассуждений; в событиях `agent_send` — `usage.cache_read` со второго хода (36 302 → 40 650 токенов), то есть история уходит побайтно той же; правка легла в настоящую строку (`address = 10.1.2.77` → `10.1.2.99`); на странице чата шлюза в колонке «у провайдера» (50 записей журнала) нет ни одного контрольного значения.
+
+**AC-5.3 по подписке ChatGPT.** Ключ `--subscription chatgpt`; `codex exec` с настоящим `~/.codex` (вход ChatGPT, модель `gpt-6.1-sol` — «code mode»), свой провайдер `-c` с `requires_openai_auth = true`, `--disable memories` (фоновая консолидация памяти профиля не нужна приёмке), сертификат — `CODEX_CA_CERTIFICATE`. Итог: 5 запросов к `chatgpt.com/backend-api/codex` через шлюз, все 200, `cache_read` с третьего хода; `apply_patch` заменил ровно строку `host`, `ping` — с настоящим именем узла; `GET /v1/models` Codex получает 404 и продолжает работу.
+
+**Найдено при приёмке.** Первый прогон AC-5.3 по подписке унёс в ChatGPT вымышленную учётную запись `CONTOSO\ivanov`: в «code mode» вывод команды приходит строкой JSON внутри результата `exec` — перевод строки записан знаками `\r\n`, косая между доменом и входом удвоена, — а правило слоя 1 «ДОМЕН\логин» любую косую после входа считало продолжением пути и не находило ничего; раз сущности нет, проверке утечек ловить было нечего. Исправлено в `cd7b28e` (`tests/test_infra.py::test_domain_login_before_an_escaped_line_break_in_json`, `tests/test_agent_responses.py::test_code_mode_exec_output_in_json_is_cleaned`), установлено на оба хоста, повторный прогон с новым ключом — ни одного контрольного значения у провайдера (30 записей). Чат первого прогона хранит этот блок как ушедший (ключ отозван). Ещё: у OpenCode слово «name» становится учётной записью из примера «/Users/name/» в описании `bash` и заменяется в описаниях инструментов (`FINDINGS.md`).
+
+**AC-5.3 по ключу с настоящей моделью** не выполнена: подключение `responses` к `https://api.openai.com/v1` с `OPENAI_API_KEY` из vault (ключ действует, список моделей отдаётся) — на первом же запросе OpenAI ответил «Quota exceeded». Перенесена в план 5Г вместе с AC-5.1 по ключу.
+
+Ключи проверки отозваны (`apikey list` — `disabled`), подключения-заглушки и подключение OpenAI удалены, заглушки на сервере остановлены. Статус плана 5В в разделе 22 — выполнен.

@@ -82,12 +82,15 @@ def test_ac_1_11_only_the_login_page_is_open_without_a_session(app, browser):
                 assert response.json()["error"]["code"] == response.status_code, (method, path)
                 continue
             if path.startswith("/agent/"):
-                # Шлюз агентов (план 5Б): проверка связи — без ключа (9.1), остальное — отказ в виде Anthropic.
+                # Шлюз агентов (планы 5Б, 5В): проверка связи — без ключа (9.1), остальное — отказ в виде протокола.
                 if path.endswith("/api/hello"):
                     assert response.status_code == 204, (method, path)
                     continue
                 assert response.status_code in (401, 429), (method, path)
-                assert response.json()["type"] == "error", (method, path)
+                if path.startswith("/agent/openai/"):
+                    assert response.json()["error"]["type"] in ("authentication_error", "rate_limit_error"), (method, path)
+                else:
+                    assert response.json()["type"] == "error", (method, path)
                 continue
             assert (response.status_code, response.headers.get("location")) == (303, "/login"), (method, path)
 

@@ -82,9 +82,12 @@ _LABEL_BEFORE = re.compile(rf"(?:{_LABEL.pattern})\\{{0,2}}\.$")
 _NAME_PART = re.compile(r"[^.\\]+")         # часть имени через «.», «\.» или «\\.» — и метка
 
 # Перед доменом может стоять двоеточие ключа команды («/user:CONTOSO\ivanov»); обратная косая
-# бывает удвоена (журналы JSON). Имя входа может быть и кириллицей («CORP\иванов»).
+# бывает удвоена (журналы JSON). Имя входа может быть и кириллицей («CORP\иванов»). Косая после входа —
+# продолжение пути, а не учётная запись; в строке JSON (косая удвоена) путь — снова «\\», а одна косая —
+# экранирование: «CONTOSO\\ivanov\r\n» — вывод команды, который Codex отдаёт строкой JSON (приёмка 5В).
 _DOMAIN_LOGIN = re.compile(
-    r"(?<![\w\\./-])(?P<dom>[A-Za-z][A-Za-z0-9-]{1,14})\\{1,2}(?P<login>\w[\w.$-]{0,63})(?![\w\\])"
+    r"(?<![\w\\./-])(?P<dom>[A-Za-z][A-Za-z0-9-]{1,14})"
+    r"(?:\\(?P<login>\w[\w.$-]{0,63})(?![\w\\])|\\\\(?P<jlogin>\w[\w.$-]{0,63})(?!\w|\\\\))"
 )
 # Корни реестра в коротком виде («reg query HKLM\Software /s») — не домены, а раздел за ними — не вход.
 # Длинные («HKEY_LOCAL_MACHINE\…») шаблон домена не берёт: в нём нет «_».
@@ -302,7 +305,8 @@ def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:
     # Имя NetBIOS домена Active Directory обычно — первая часть его имени DNS: «contoso» у «contoso.ru».
     known_domains.update([name.split(".", 1)[0] for name in known_domains if "." in name])
     for m in _DOMAIN_LOGIN.finditer(text):
-        dom, login = m.group("dom"), m.group("login").rstrip(".-")
+        group = "login" if m.group("login") is not None else "jlogin"
+        dom, login = m.group("dom"), m.group(group).rstrip(".-")
         if dom.lower() in builtin or dom.lower() in _REGISTRY_HIVES or not (dom.isupper() or dom.lower() in known_domains):
             continue
         if not login or _FILE_EXT.search(login) or (login[0] in "ntr" and login[1:2].isupper()):
@@ -311,7 +315,7 @@ def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:
             continue        # «DONE\\n», «\d» в шаблоне; написание из одной буквы скрывалось бы во всём чате
         yield Span(m.start("dom"), m.end("dom"), EntityType.DOMAIN, name)
         if login.lower() not in builtin:
-            start = m.start("login")
+            start = m.start(group)
             yield Span(start, start + len(login), EntityType.ACCOUNT, name)
     for m in _PROFILE.finditer(text):
         group = "spaced" if m.group("spaced") else "login"

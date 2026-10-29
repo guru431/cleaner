@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
@@ -23,8 +24,8 @@ PARAMS = frozenset({
     "context_management", "output_config", "service_tier", "container",
 })
 # Значения этих ключей схемы инструмента — не текст: тип, формат, ссылка, имена обязательных свойств, адрес схемы.
-_SCHEMA_KEYS = frozenset({"type", "format", "$ref", "required", "$schema"})
-_OTHER_KEYS = frozenset({"type", "id", "cache_control"})
+SCHEMA_KEYS = frozenset({"type", "format", "$ref", "required", "$schema"})
+OTHER_KEYS = frozenset({"type", "id", "cache_control"})
 
 
 @dataclass(frozen=True)
@@ -35,11 +36,11 @@ class Unit:
     node: object               # блок без cache_control; строковое содержимое — блок text с этой строкой
 
 
-def _bare(block: object) -> object:
+def bare(block: object) -> object:
     return {key: value for key, value in block.items() if key != "cache_control"} if isinstance(block, dict) else block
 
 
-def _media(block: object) -> bool:
+def is_media(block: object) -> bool:
     if not isinstance(block, dict):
         return False
     source = block.get("source")
@@ -47,7 +48,7 @@ def _media(block: object) -> bool:
 
 
 def _kind(block: object) -> str:
-    if _media(block):
+    if is_media(block):
         return "media"
     type_ = block.get("type") if isinstance(block, dict) else None
     if type_ == "text" and isinstance(block.get("text"), str):
@@ -57,16 +58,16 @@ def _kind(block: object) -> str:
     return "opaque" if type_ in OPAQUE else "other"
 
 
-def _text(text: str) -> dict:
+def text_block(text: str) -> dict:
     return {"type": "text", "text": text}
 
 
 def _content(units: list[Unit], path: Path, role: str, content: object) -> None:
     """Строка и список блоков — одинаковые единицы: агент пишет одно и то же сообщение то так, то так (18.1d)."""
     if isinstance(content, str):
-        units.append(Unit(path, role, "text", _text(content)))
+        units.append(Unit(path, role, "text", text_block(content)))
     elif isinstance(content, list):
-        units += [Unit((*path, i), role, _kind(block), _bare(block)) for i, block in enumerate(content)]
+        units += [Unit((*path, i), role, _kind(block), bare(block)) for i, block in enumerate(content)]
     else:
         units.append(Unit(path, role, "other", content))
 
@@ -77,7 +78,7 @@ def anthropic_units(body: dict) -> list[Unit]:
     if isinstance(system, list):
         for i, block in enumerate(system):
             attribution = isinstance(block, dict) and str(block.get("text", "")).startswith(ATTRIBUTION)
-            units.append(Unit(("system", i), "system", "opaque" if attribution else _kind(block), _bare(block)))
+            units.append(Unit(("system", i), "system", "opaque" if attribution else _kind(block), bare(block)))
     elif system is not None:
         _content(units, ("system",), "system", system)
     for i, message in enumerate(body.get("messages") or ()):
@@ -85,7 +86,7 @@ def anthropic_units(body: dict) -> list[Unit]:
             _content(units, ("messages", i, "content"), str(message.get("role", "")), message.get("content"))
         else:
             units.append(Unit(("messages", i), "user", "other", message))
-    units += [Unit(("tools", i), "tools", "tool_def", _bare(tool)) for i, tool in enumerate(body.get("tools") or ())]
+    units += [Unit(("tools", i), "tools", "tool_def", bare(tool)) for i, tool in enumerate(body.get("tools") or ())]
     units += [
         Unit((key,), "params", "other", value) for key, value in body.items()
         if key not in PARAMS and key not in ("model", "system", "messages", "tools")
@@ -98,8 +99,8 @@ def first_user(body: dict) -> object:
     for message in body.get("messages") or ():
         if isinstance(message, dict) and message.get("role") == "user":
             content = message.get("content")
-            blocks = [_text(content)] if isinstance(content, str) else content if isinstance(content, list) else [content]
-            return [_bare(block) for block in blocks]
+            blocks = [text_block(content)] if isinstance(content, str) else content if isinstance(content, list) else [content]
+            return [bare(block) for block in blocks]
     return None
 
 
@@ -130,27 +131,48 @@ def structural(body: dict) -> list[str]:
     return out
 
 
-def _strings(value: object, clean: Callable[[str], str], skip: frozenset[str]) -> object:
+_UNCHECKED_SCHEMA_KEYS = frozenset({"required", "type"})
+
+
+def checked_strings(kind: str, node: object) -> Iterator[str]:
+    """Строки нового узла для проверки утечек. У описания инструмента — без имён обязательных свойств (required) и типов
+    схемы: шлюз их, как и сами имена свойств, не очищает, а совпадение имени свойства с найденной сущностью (учётная
+    запись «name» из примера пути «/Users/name/» в описании bash у OpenCode) отказывало бы каждому запросу агента.
+    Остальные служебные значения схемы (format, $ref, $schema) уходят как есть и проверяются."""
+    if kind != "tool_def":
+        yield from strings_of(node)
+    elif isinstance(node, str):
+        yield node
+    elif isinstance(node, list):
+        for item in node:
+            yield from checked_strings(kind, item)
+    elif isinstance(node, dict):
+        for key, item in node.items():
+            if key not in _UNCHECKED_SCHEMA_KEYS or isinstance(item, dict):
+                yield from checked_strings(kind, item)
+
+
+def strings(value: object, clean: Callable[[str], str], skip: frozenset[str]) -> object:
     """Все строки на любой глубине через clean; ключи не трогаются, значения ключей skip — тоже (кроме объектов: свойство
     схемы по имени «type» — схема, и её описание — текст)."""
     if isinstance(value, str):
         return clean(value)
     if isinstance(value, list):
-        return [_strings(item, clean, skip) for item in value]
+        return [strings(item, clean, skip) for item in value]
     if isinstance(value, dict):
         return {
-            key: item if key in skip and not isinstance(item, dict) else _strings(item, clean, skip)
+            key: item if key in skip and not isinstance(item, dict) else strings(item, clean, skip)
             for key, item in value.items()
         }
     return value
 
 
 def _result_part(part: object, clean: Callable[[str], str]) -> object:
-    if _media(part):
-        return _text(ledger.placeholder(ledger.REASONS["media"]))       # снимок экрана в результате инструмента (7.4)
+    if is_media(part):
+        return text_block(ledger.placeholder(ledger.REASONS["media"]))       # снимок экрана в результате инструмента (7.4)
     if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
         return dict(part, text=clean(part["text"]))
-    return _strings(part, clean, _OTHER_KEYS)
+    return strings(part, clean, OTHER_KEYS)
 
 
 def contains_media(unit: Unit) -> bool:
@@ -158,7 +180,7 @@ def contains_media(unit: Unit) -> bool:
     if unit.kind == "media":
         return True
     content = unit.node.get("content") if unit.kind == "tool_result" and isinstance(unit.node, dict) else None
-    return isinstance(content, list) and any(_media(part) for part in content)
+    return isinstance(content, list) and any(is_media(part) for part in content)
 
 
 def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
@@ -174,20 +196,60 @@ def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
             return dict(node, content=[_result_part(part, clean) for part in content])
         return dict(node)
     if unit.kind == "tool_use":
-        return dict(node, input=_strings(node["input"], clean, frozenset())) if "input" in node else dict(node)
+        return dict(node, input=strings(node["input"], clean, frozenset())) if "input" in node else dict(node)
     if unit.kind == "tool_def":
         return {
-            key: value if key in ("name", "type") else _strings(value, clean, _SCHEMA_KEYS if key == "input_schema" else _OTHER_KEYS)
+            key: value if key in ("name", "type") else strings(value, clean, SCHEMA_KEYS if key == "input_schema" else OTHER_KEYS)
             for key, value in node.items()
         }
     if unit.kind == "other":
-        return _strings(node, clean, _OTHER_KEYS)
+        return strings(node, clean, OTHER_KEYS)
     return copy.deepcopy(node)          # непрозрачный и удерживаемый — как есть
 
 
-def rebuild(body: dict, replaced: dict[Path, object]) -> dict:
-    """Новое тело: узлы по путям заменены, у блоков — cache_control из присланного тела; строковое содержимое остаётся
-    строкой. Присланное тело не меняется: копируются только контейнеры на путях замен."""
+def is_model_block(unit: Unit) -> bool:
+    """Блок модели в истории — ищется в журнале out по тому, что шлюз отдал агенту (7.2.2)."""
+    return unit.role == "assistant" and unit.kind in ("text", "tool_use")
+
+
+def placeholder(unit: Unit, reason: str) -> object:
+    """Пометка удержанного блока того же вида (7.4): у результата инструмента — его содержимым."""
+    text = ledger.placeholder(reason)
+    if unit.kind == "tool_result":
+        return dict(unit.node, content=text)
+    if unit.kind == "tool_use":
+        return dict(unit.node, input={"cleaner": text})      # вызов остаётся вызовом: на его id ссылается результат
+    if unit.kind == "tool_def":
+        return dict(unit.node, description=text, input_schema={"type": "object"})
+    return {"type": "text", "text": text}
+
+
+def add_instruction(body: dict, text: str) -> dict:
+    """Служебная инструкция — последним блоком system (8.8); строка system дополняется через пустую строку. body — уже
+    новое тело (rebuild)."""
+    system = body.get("system")
+    if isinstance(system, list):
+        body["system"] = [*system, {"type": "text", "text": text}]
+    else:
+        body["system"] = f"{system}\n\n{text}" if system else text
+    return body
+
+
+def parsed_arguments(raw: object) -> object:
+    """Аргументы вызова из истории (строка JSON) разобранными — для отпечатка: агент пишет строку заново. Не объект и не
+    список JSON — строка как есть (очищается как текст)."""
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return raw
+        return value if isinstance(value, (dict, list)) else raw
+    return raw
+
+
+def rebuild(body: dict, replaced: dict[Path, object], keep: tuple[str, ...] = ("cache_control",)) -> dict:
+    """Новое тело: узлы по путям заменены, у блоков — поля keep из присланного тела (cache_control); строковое
+    содержимое остаётся строкой. Присланное тело не меняется: копируются только контейнеры на путях замен."""
     out = dict(body)
     copied = {id(out)}
     for path, node in replaced.items():
@@ -204,7 +266,7 @@ def rebuild(body: dict, replaced: dict[Path, object]) -> dict:
             parent[path[-1]] = node["text"]
             continue
         new = dict(node) if isinstance(node, dict) else node
-        if isinstance(old, dict) and "cache_control" in old and isinstance(new, dict):
-            new["cache_control"] = old["cache_control"]
+        if isinstance(old, dict) and isinstance(new, dict):
+            new.update((key, old[key]) for key in keep if key in old)
         parent[path[-1]] = new
     return out

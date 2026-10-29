@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from cleaner.core.restore import originals, safe_cut
@@ -49,14 +49,50 @@ class DeltaRestorer:
         return self.original(piece) if piece else ""
 
 
-def _map_strings(value: object, fn: Callable[[str], str]) -> object:
+def usage_numbers(usage: object, names: Mapping[str, str]) -> dict[str, int]:
+    """Числа usage провайдера под короткими именами журнала; имя вида «a.b» — вложенное поле. Строки и прочее — прочь:
+    в журнал событий идут только числа."""
+    out = {}
+    for name, short in names.items():
+        value = usage
+        for step in name.split("."):
+            value = value.get(step) if isinstance(value, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            out[short] = value
+    return out
+
+
+_ANTHROPIC_USAGE = {
+    "input_tokens": "input", "output_tokens": "output", "cache_read_input_tokens": "cache_read",
+    "cache_creation_input_tokens": "cache_write",
+}
+
+
+def anthropic_usage(event: dict) -> dict[str, int]:
+    """usage из message_start, message_delta (нарастающий итог) или ответа без потока."""
+    message = event.get("message")
+    found = event.get("usage") or (message.get("usage") if isinstance(message, dict) else None)
+    return usage_numbers(found, _ANTHROPIC_USAGE)
+
+
+def named_sse(event: dict) -> bytes:
+    """Событие с именем — «event: <type>» и «data: …» (Anthropic, Responses)."""
+    data = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event.get('type', 'message')}\ndata: {data}\n\n".encode("utf-8")
+
+
+def anthropic_error(message: str) -> dict:
+    return {"type": "error", "error": {"type": "api_error", "message": message}}
+
+
+def map_strings(value: object, fn: Callable[[str], str]) -> object:
     """Строки на любой глубине через fn; ключи объектов не трогаются."""
     if isinstance(value, str):
         return fn(value)
     if isinstance(value, list):
-        return [_map_strings(item, fn) for item in value]
+        return [map_strings(item, fn) for item in value]
     if isinstance(value, dict):
-        return {key: _map_strings(item, fn) for key, item in value.items()}
+        return {key: map_strings(item, fn) for key, item in value.items()}
     return value
 
 
@@ -89,7 +125,11 @@ class AnthropicStream:
     def _restore_input(self, value: object) -> object:
         if self._exact is None:
             self._exact = originals(self.state, self.settings, exact=True)
-        return _map_strings(value, self._exact)
+        return map_strings(value, self._exact)
+
+    @staticmethod
+    def finished(event: dict) -> bool:
+        return event.get("type") == "message_stop"
 
     def feed(self, event: dict) -> list[dict]:
         type_ = event.get("type")

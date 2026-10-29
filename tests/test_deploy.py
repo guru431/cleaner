@@ -247,6 +247,15 @@ def test_installer_issues_a_certificate_claude_code_trusts():
     assert 'mv "$TLS/cert.pem" "$TLS/cert.pem.prev-$STAMP"' in reissue and 'mv "$TLS/key.pem" "$TLS/key.pem.prev-$STAMP"' in reissue
 
 
+def test_installer_issues_a_certificate_codex_trusts():
+    """Проверка 18.4 плана 5В: Codex (rustls, webpki) не принимает сертификатом сервера сертификат УЦ — а `openssl req
+    -x509` без basicConstraints ставит CA:TRUE. Самоподписанный с CA:FALSE, keyCertSign и serverAuth принимают Codex,
+    Claude Code и OpenCode."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    command = text[text.index("openssl req -x509"):text.index('fail "сертификат не выпущен')]
+    assert '-addext "basicConstraints=critical,CA:FALSE"' in command and '-addext "extendedKeyUsage=serverAuth"' in command
+
+
 def test_installer_copies_the_database_before_the_new_version_and_rollback_restores_it():
     """Обзор плана 2+4, I-4: новая версия мигрирует схему при старте, а прежний код базу новой версии не откроет.
     Копия снимается до перезапуска службы, откат возвращает её, если схема успела измениться."""
