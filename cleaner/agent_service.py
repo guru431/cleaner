@@ -22,7 +22,7 @@ from cleaner.core.detect import dictionary
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.types import ChatState, Policy, Settings
 from cleaner.egress import ProviderError, cloud, forward as egress
-from cleaner.storage.repo import ApiKey, CheckpointBusy, LedgerEntry, Provider, Repository, StaleState, User
+from cleaner.storage.repo import ApiKey, CheckpointBusy, LedgerEntry, Repository, StaleState, User
 
 AGENT_CHAT_DAYS = 30            # текущий чат ключа сменяется новым (6.3); постоянные, а не настройки: менять их некому
 AGENT_CHAT_ENTITIES = 20_000
@@ -32,17 +32,33 @@ PRUNE_EVERY = timedelta(hours=1)
 STATE_CACHE = 8                 # состояний чатов в памяти (раздел 13: загрузка 20 000 сущностей — 161 мс)
 _BODY_BYTES = 32 * 1024 * 1024  # ответ без потока и ошибка провайдера
 _RETRY = {"retry-after": "10"}
+_CLEANER_KEY = "ck_"            # начало ключа доступа (web.auth.API_KEY_PREFIX)
+# Доступ по подписке (9.4): протокол и адрес закреплены в коде — ключ Cleaner, попавший к постороннему, не направит
+# чужой токен на произвольный адрес. Настройки, переменной окружения и поля базы для них нет.
+SUBSCRIPTIONS = {
+    "claude-subscription": ("anthropic", "https://api.anthropic.com"),
+    "chatgpt-subscription": ("responses", "https://chatgpt.com/backend-api/codex"),
+}
 
 
 @dataclass(frozen=True)
 class AgentCall:
     key: ApiKey
     user: User
-    protocol: str                       # ключ PROTOCOLS: anthropic
-    path: str                           # путь у провайдера: /v1/messages | /v1/messages/count_tokens
+    protocol: str                       # ключ PROTOCOLS: anthropic | chat | responses
+    path: str                           # путь у провайдера: /v1/messages, /chat/completions, /responses…
     query: str
-    headers: Mapping[str, str]
-    body: dict
+    headers: Mapping[str, str] = field(repr=False)       # бывает токен подписки агента (SEC-18)
+    body: dict = field(repr=False)
+
+
+@dataclass(frozen=True)
+class _Access:
+    """Куда и с чем уходит запрос: подключение Cleaner или подписка агента."""
+
+    id: str                             # id подключения или вид подписки
+    connection: cloud.Connection
+    headers: frozenset[str]             # заголовки агента к провайдеру
 
 
 @dataclass
@@ -109,10 +125,16 @@ def _json(node: object) -> str:
 GATEWAY_PROTOCOLS = frozenset(proto.provider_protocol for proto in PROTOCOLS.values())   # протоколы подключений шлюза
 
 
-def gateway_access(repo: Repository, provider_id: str, models: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
-    """Доступ ключа шлюза: включённое подключение с протоколом, на котором говорит шлюз, и модели из его списка.
-    ValueError с причиной."""
-    provider = repo.provider(provider_id)
+def gateway_access(
+    repo: Repository, access: str, models: tuple[str, ...], *, admin: bool,
+) -> tuple[str, tuple[str, ...]]:
+    """Доступ ключа шлюза: включённое подключение с протоколом, на котором говорит шлюз, и модели из его списка, или
+    подписка — только у администратора (SEC-20), модели любые (пусто — все). ValueError с причиной."""
+    if access in SUBSCRIPTIONS:
+        if not admin:
+            raise ValueError("доступ по подписке — только у администратора")
+        return access, tuple(dict.fromkeys(model for model in models if model))
+    provider = repo.provider(access)
     if provider is None or not provider.enabled:
         raise ValueError("подключение не найдено или выключено")
     if provider.protocol not in GATEWAY_PROTOCOLS:
@@ -124,11 +146,16 @@ def gateway_access(repo: Repository, provider_id: str, models: tuple[str, ...]) 
 
 
 class AgentService:
-    def __init__(self, repo: Repository, engines: Any, clock: Clock, forward: Callable[..., egress.Upstream] = egress.forward):
+    def __init__(
+        self, repo: Repository, engines: Any, clock: Clock, forward: Callable[..., egress.Upstream] = egress.forward,
+        subscription_urls: Mapping[str, str] | None = None,
+    ):
         self.repo = repo
         self.engines = engines          # cleaner.engines.Engines или заглушка тестов; None — без слоёв 4–5
         self.clock = clock
         self.forward = forward
+        # Только для тестов: заглушка вместо закреплённых адресов подписок.
+        self.subscription_urls = {access: url for access, (_, url) in SUBSCRIPTIONS.items()} | dict(subscription_urls or {})
         self._guard = threading.Lock()
         self._locks: dict[str, threading.Lock] = {}
         self._states: OrderedDict[str, tuple[int, ChatState]] = OrderedDict()
@@ -179,10 +206,27 @@ class AgentService:
 
     # --- запрос ------------------------------------------------------------------------
 
-    def _provider(self, call: AgentCall, proto: GatewayProtocol) -> Provider:
+    def _subscription(self, call: AgentCall, proto: GatewayProtocol, access: str) -> _Access:
+        """Подписка (9.4): роль администратора — на момент запроса (SEC-20); вход агента — его Authorization, к провайдеру
+        уходит он, а не ключ подключения."""
+        if call.user.role != "admin":
+            raise AgentRefused(403, "permission_error", "Cleaner: доступ по подписке — только у администратора")
+        if proto.name != SUBSCRIPTIONS[access][0]:
+            raise AgentRefused(400, "invalid_request_error", "Cleaner: протокол агента и подписки не совпадает")
+        login = str(call.headers.get("authorization", "")).partition(" ")[2]
+        if not login or login.startswith(_CLEANER_KEY):         # ключ Cleaner на месте входа ушёл бы провайдеру
+            raise AgentRefused(401, "authentication_error", "Cleaner: агент не прислал вход подписки")
+        if call.key.models and call.body.get("model") not in call.key.models:
+            raise AgentRefused(400, "invalid_request_error", "Cleaner: эта модель ключу не разрешена")
+        connection = cloud.Connection(proto.provider_protocol, self.subscription_urls[access], "passthrough", "", 0)
+        return _Access(access, connection, proto.headers | proto.subscription_headers)
+
+    def _access(self, call: AgentCall, proto: GatewayProtocol) -> _Access:
         upstream = call.key.upstream
         if not upstream:
             raise AgentRefused(403, "permission_error", "Cleaner: у ключа нет доступа к модели — он только для /api/v1")
+        if upstream in SUBSCRIPTIONS:
+            return self._subscription(call, proto, upstream)
         kind, _, provider_id = upstream.partition(":")
         provider = self.repo.provider(provider_id) if kind == "provider" else None
         if provider is None or not provider.enabled:
@@ -193,7 +237,11 @@ class AgentService:
             raise AgentRefused(400, "invalid_request_error", "Cleaner: эта модель ключу не разрешена")
         if provider.protocol != proto.provider_protocol:
             raise AgentRefused(400, "invalid_request_error", "Cleaner: протокол агента и подключения не совпадает")
-        return provider
+        connection = cloud.Connection(
+            provider.protocol, provider.base_url, provider.auth_style, provider.api_key, provider.max_tokens,
+            provider.extra_body,
+        )
+        return _Access(provider.id, connection, proto.headers)     # Authorization и x-api-key агента не уходят никогда
 
     def _layers(self, key: ApiKey) -> pipeline.Layers:
         """Слои 4 и 5 ключа (решение владельца 4): включённый, но недоступный — 503, агент повторит."""
@@ -233,7 +281,7 @@ class AgentService:
     def handle(self, call: AgentCall) -> AgentReply:
         self._prune()
         proto = PROTOCOLS[call.protocol]
-        provider = self._provider(call, proto)
+        access = self._access(call, proto)
         conv_id = ledger.conversation_id(
             ledger.conversation_secret(self.repo.global_key), call.key.id, proto.first_user(call.body),
         )
@@ -242,24 +290,24 @@ class AgentService:
         chat_id = self._chat(call.key, conv_id, session)
         settings = self.repo.settings()
         with self._lock(chat_id):
-            prepared = self._prepare(call, proto, chat_id, conv_id, provider, settings, layers)
+            prepared = self._prepare(call, proto, chat_id, conv_id, access, settings, layers)
         self.repo.touch_conversation(conv_id, session)
         for direction, digests in prepared.repeated.items():
             if digests:
                 self.repo.touch_ledger(chat_id, conv_id, direction, digests)
         if prepared.withheld:
             self.repo.audit("agent_withheld", call.user.id, chat_id, key=call.key.id, reasons=dict(prepared.withheld))
-        return self._send(call, proto, chat_id, conv_id, provider, prepared)
+        return self._send(call, proto, chat_id, conv_id, access, prepared)
 
     def _prepare(
-        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, provider: Provider, settings: Settings,
+        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, access: _Access, settings: Settings,
         layers: pipeline.Layers,
     ) -> _Prepared:
         """Шаги 5–7 раздела 8 под замком чата; StaleState — повтор до ATTEMPTS раз."""
         for _ in range(ATTEMPTS):
             state, version = self._load(chat_id)
             try:
-                prepared, entries = self._clean(call, proto, chat_id, conv_id, provider, state, settings, layers)
+                prepared, entries = self._clean(call, proto, chat_id, conv_id, access, state, settings, layers)
             except _LayerDown:
                 self._remember(chat_id, version, None)
                 raise AgentRefused(503, "overloaded_error", "Cleaner: локальная модель недоступна", _RETRY) from None
@@ -281,7 +329,7 @@ class AgentService:
         raise AgentRefused(503, "overloaded_error", "Cleaner: чат шлюза меняют в интерфейсе, повторите запрос", _RETRY)
 
     def _clean(
-        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, provider: Provider, state: ChatState,
+        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, access: _Access, state: ChatState,
         settings: Settings, layers: pipeline.Layers,
     ) -> tuple[_Prepared, list[LedgerEntry]]:
         secret = self.repo.chat_secret(chat_id)
@@ -327,8 +375,8 @@ class AgentService:
                     result.withheld[withheld] += 1
             body = proto.add_instruction(proto.rebuild(call.body, replaced), pipeline.system_prompt(state.label_style))
             out, leaks = pipeline.build_agent_outgoing(
-                state, settings, chat_id=chat_id, provider_id=provider.id, path=call.path, query=call.query,
-                headers=call.headers, allowed=proto.headers, prefixes=proto.header_prefixes, body=body, checked=checked,
+                state, settings, chat_id=chat_id, provider_id=access.id, path=call.path, query=call.query,
+                headers=call.headers, allowed=access.headers, prefixes=proto.header_prefixes, body=body, checked=checked,
             )
             if not leaks:
                 break
@@ -386,14 +434,11 @@ class AgentService:
     # --- отправка и ответ ---------------------------------------------------------------
 
     def _send(
-        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, provider: Provider, prepared: _Prepared,
+        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, access: _Access, prepared: _Prepared,
     ) -> AgentReply:
-        connection = cloud.Connection(
-            provider.protocol, provider.base_url, provider.auth_style, provider.api_key, provider.max_tokens,
-            provider.extra_body,
-        )
+        connection = access.connection
         audit = {
-            "key": call.key.id, "model": str(call.body.get("model", ""))[:100], "blocks_new": prepared.new,
+            "key": call.key.id, "access": access.id, "model": str(call.body.get("model", ""))[:100], "blocks_new": prepared.new,
             "blocks_repeated": sum(len(d) for d in prepared.repeated.values()), "withheld": sum(prepared.withheld.values()),
             "replaced": dict(prepared.replaced),
         }

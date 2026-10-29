@@ -15,6 +15,7 @@ from cleaner.web.deps import Viewer, get_form, get_viewer, page, repo_of
 
 router = APIRouter()
 NAME_LIMIT = 100
+SUBSCRIPTION_NAMES = {"claude-subscription": "Подписка Claude", "chatgpt-subscription": "Подписка ChatGPT"}
 
 
 def _claude_code(request: Request, key: str, model: str) -> str:
@@ -34,7 +35,7 @@ def _page(request: Request, viewer: Viewer, issued: str = "", issued_key: ApiKey
     keys = repo.api_keys(None if viewer.is_admin else viewer.user.id)
     logins = {user.id: user.login for user in repo.users()} if viewer.is_admin else {}
     providers = repo.providers()
-    names = {f"provider:{p.id}": p.name for p in providers}
+    names = {f"provider:{p.id}": p.name for p in providers} | SUBSCRIPTION_NAMES
     access = {
         key.id: "только API" if not key.upstream
         else f"{names.get(key.upstream, 'подключение удалено')}: {', '.join(key.models) or 'все модели'}"
@@ -42,7 +43,7 @@ def _page(request: Request, viewer: Viewer, issued: str = "", issued_key: ApiKey
     }
     gateway = [p for p in providers if p.enabled and p.protocol in GATEWAY_PROTOCOLS]
     settings = ""
-    if issued and issued_key is not None and issued_key.upstream:
+    if issued and issued_key is not None and issued_key.upstream not in (None, *SUBSCRIPTION_NAMES):
         provider = next(p for p in providers if f"provider:{p.id}" == issued_key.upstream)
         settings = _claude_code(request, issued, (issued_key.models or provider.models or ("",))[0])
     return page(
@@ -69,7 +70,7 @@ def create_key(request: Request, form: dict[str, str] = Depends(get_form), viewe
         prefix = f"m:{provider_id}:"
         wanted = tuple(field[len(prefix):] for field, value in form.items() if field.startswith(prefix) and value)
         try:
-            upstream, models = gateway_access(repo, provider_id, wanted)
+            upstream, models = gateway_access(repo, provider_id, wanted, admin=viewer.is_admin)
         except ValueError as exc:
             raise HTTPException(400, f"Доступ к модели: {exc}") from None
         layers = {"ner": form.get("ner") == "1", "llm": form.get("llm") == "1"}

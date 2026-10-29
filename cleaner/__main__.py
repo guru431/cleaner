@@ -189,7 +189,9 @@ def cmd_apikey(args: argparse.Namespace) -> int:
             name = (args.name or "").strip()
             if not 1 <= len(name) <= API_KEY_NAME:
                 raise ValueError(f"имя ключа (--name) — от 1 до {API_KEY_NAME} знаков")
-            upstream, models = gateway_access(repo, args.provider, tuple(args.model)) if args.provider else (None, ())
+            upstream, models = (
+                gateway_access(repo, args.provider, tuple(args.model), admin=user.role == "admin") if args.provider else (None, ())
+            )
             key = auth.new_api_key()
             key_id = repo.add_api_key(user.id, name, auth.token_hash(key), key[-4:], upstream, models)
             repo.audit("key_created", user.id, id=key_id, by="cli")

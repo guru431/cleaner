@@ -30,10 +30,13 @@ class ProviderTimeout(ProviderError):
 class Upstream:
     """Ответ провайдера: код, разрешённые заголовки и тело — строками потока или байтами."""
 
-    def __init__(self, client: httpx.Client, response: httpx.Response, key: str, passed: tuple[str, ...] = _PASSED):
+    def __init__(
+        self, client: httpx.Client, response: httpx.Response, secrets: tuple[str, ...], passed: tuple[str, ...] = _PASSED,
+    ):
         self._client = client
         self._response = response
-        self._key = key.encode("utf-8")
+        # Длинные первыми: «Bearer <токен>» убирается целиком, а не оставляет «Bearer ***».
+        self._secrets = sorted({secret.encode("utf-8") for secret in secrets if secret}, key=len, reverse=True)
         self.status = response.status_code
         self.headers = {name: response.headers[name] for name in passed if name in response.headers}
 
@@ -46,8 +49,8 @@ class Upstream:
             raise ProviderError("соединение с провайдером оборвалось") from None
 
     def read(self, limit: int) -> bytes:
-        """Тело до limit байт — ответ без потока или ошибка провайдера; ключ подключения, если провайдер его повторил, —
-        прочь."""
+        """Тело до limit байт — ответ без потока или ошибка провайдера; ключ подключения и вход агента по подписке, если
+        провайдер их повторил, — прочь."""
         raw = b""
         try:
             for chunk in self._response.iter_bytes():
@@ -59,7 +62,9 @@ class Upstream:
         except (httpx.HTTPError, httpx.StreamError):
             raise ProviderError("соединение с провайдером оборвалось") from None
         raw = raw[:limit]
-        return raw.replace(self._key, b"***") if self._key else raw
+        for secret in self._secrets:
+            raw = raw.replace(secret, b"***")
+        return raw
 
     def close(self) -> None:
         self._response.close()
@@ -92,4 +97,5 @@ def forward(
         response.close()
         client.close()
         raise ProviderError("провайдер ответил переадресацией — она не выполняется", status=response.status_code)
-    return Upstream(client, response, connection.api_key, passed)
+    agent = dict(out.headers).get("authorization", "")        # вход агента по подписке
+    return Upstream(client, response, (connection.api_key, agent, agent.partition(" ")[2]), passed)

@@ -13,7 +13,7 @@ from concurrent.futures import Executor
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from cleaner.agent_service import AgentCall, AgentRefused, AgentReply, AgentService
+from cleaner.agent_service import SUBSCRIPTIONS, AgentCall, AgentRefused, AgentReply, AgentService
 from cleaner.web.deps import AGENT_BODY_BYTES, ApiCaller, get_api_caller, repo_of
 
 router = APIRouter(prefix="/agent/anthropic")
@@ -100,7 +100,10 @@ async def count_tokens(request: Request, caller: ApiCaller = Depends(get_api_cal
 
 
 def _model_names(request: Request, caller: ApiCaller) -> list[str]:
-    """Модели ключа, а если у ключа их нет в списке — все модели подключения."""
+    """Модели ключа, а если у ключа их нет в списке — все модели подключения. У подписки списка нет: Claude Code и Codex
+    его у шлюза не спрашивают (проверки 18.1a 5Б и 5В), а модели подписки знает провайдер."""
+    if caller.key.upstream in SUBSCRIPTIONS:
+        raise AgentRefused(404, "not_found_error", "Cleaner: у ключа с подпиской списка моделей нет")
     kind, _, provider_id = (caller.key.upstream or "").partition(":")
     provider = repo_of(request).provider(provider_id) if kind == "provider" else None
     if provider is None:
