@@ -109,12 +109,31 @@ _AGENT_KINDS = {
 }
 
 
-def _agent_error(code: int, message: str, headers: dict[str, str] | None = None, kind: str = "") -> Response:
+def _cleaner_message(message: str) -> str:
     """Сообщение начинается с «Cleaner:» — агент показывает его пользователю, и видно, кто отказал."""
-    if not message.startswith("Cleaner:"):
-        message = f"Cleaner: {message[:1].lower()}{message[1:]}"
-    error = {"type": kind or _AGENT_KINDS.get(code, "api_error"), "message": message}
+    return message if message.startswith("Cleaner:") else f"Cleaner: {message[:1].lower()}{message[1:]}"
+
+
+def _agent_error(code: int, message: str, headers: dict[str, str] | None = None, kind: str = "") -> Response:
+    error = {"type": kind or _AGENT_KINDS.get(code, "api_error"), "message": _cleaner_message(message)}
     return JSONResponse({"type": "error", "error": error}, status_code=code, headers=headers)
+
+
+def _for_openai_agent(request: Request) -> bool:
+    """Запрос агента по протоколам OpenAI: ошибки — в виде OpenAI (спецификация 2026-10-28, раздел 12)."""
+    return request.url.path.startswith("/agent/openai/")
+
+
+_OPENAI_KINDS = {
+    400: "invalid_request_error", 401: "authentication_error", 403: "permission_error", 404: "not_found_error",
+    405: "invalid_request_error", 413: "invalid_request_error", 415: "invalid_request_error", 429: "rate_limit_error",
+}
+
+
+def _openai_error(code: int, message: str, headers: dict[str, str] | None = None) -> Response:
+    kind = _OPENAI_KINDS.get(code, "server_error" if code >= 500 else "invalid_request_error")
+    error = {"message": _cleaner_message(message), "type": kind, "code": None}
+    return JSONResponse({"error": error}, status_code=code, headers=headers)
 
 
 def _interrupt(repo: Repository) -> None:
@@ -181,6 +200,7 @@ def create_app(
     app.include_router(routes_keys.router)
     app.include_router(routes_api.router)
     app.include_router(routes_agent.router)
+    app.include_router(routes_agent.openai_router)
 
     @app.exception_handler(LoginRequired)
     async def to_login(request: Request, exc: LoginRequired) -> Response:
@@ -188,13 +208,17 @@ def create_app(
 
     @app.exception_handler(AgentRefused)
     async def agent_refused(request: Request, exc: AgentRefused) -> Response:
+        if _for_openai_agent(request):
+            return _openai_error(exc.status, exc.message, exc.headers)
         return _agent_error(exc.status, exc.message, exc.headers, exc.kind)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
-        if _for_agent(request):
+        if _for_agent(request) or _for_openai_agent(request):
             standard = exc.detail == HTTPStatus(exc.status_code).phrase
             message = _STATUS_TEXT.get(exc.status_code, exc.detail) if standard else exc.detail
+            if _for_openai_agent(request):
+                return _openai_error(exc.status_code, message, exc.headers)
             return _agent_error(exc.status_code, message, exc.headers)
         if _for_program(request):
             # Своё сообщение маршрута («Чат не найден») — как есть; стандартное английское Starlette — по-русски.
@@ -207,6 +231,8 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def bad_request(request: Request, exc: RequestValidationError) -> Response:
         # Стандартный ответ FastAPI повторяет присланные значения — здесь их нет.
+        if _for_openai_agent(request):
+            return _openai_error(400, "Неверный запрос")
         if _for_agent(request):
             return _agent_error(400, "Неверный запрос")
         if _for_program(request):
@@ -224,7 +250,9 @@ def create_app(
             # Только вид ошибки и путь: в тексте исключения может оказаться текст пользователя (SEC-11).
             log.error("ошибка %s при %s %s", type(exc).__name__, request.method, request.url.path)
             repo.audit("error", kind=type(exc).__name__, path=request.url.path)
-            if _for_agent(request):
+            if _for_openai_agent(request):
+                response = _openai_error(500, "внутренняя ошибка, запрос не отправлен")
+            elif _for_agent(request):
                 response = _agent_error(500, "внутренняя ошибка, запрос не отправлен")
             elif _for_program(request):
                 response = _json_error(500, _INTERNAL)
