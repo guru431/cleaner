@@ -2,8 +2,8 @@
 восстановление событий потока.
 
 Codex повторяет историю дословно и после возобновления (проверка 18.1b 5В), но элементы модели записывает заново по-
-своему: блоки модели ищутся в журнале по узлу без id и status (у части текста — только type и text), а эти поля при
-сборке берутся из элемента, который прислал агент. Инструменты бывают и элементом input вида additional_tools
+своему: вызовы ищутся в журнале по узлу без id и status, а эти поля при сборке берутся из элемента, который прислал
+агент. Инструменты бывают и элементом input вида additional_tools
 («code mode» моделей gpt-6.x). Текст отдаётся по мере прихода; итоговые объекты (…done, output_item.done,
 response.completed) получают тот же восстановленный текст, что склейка дельт: Codex кладёт в историю output_item.done.
 Аргументы вызовов и патч копятся и уходят восстановленными точно (10.3); патчу — одна дельта перед done."""
@@ -33,8 +33,10 @@ PARAMS = frozenset({
     "model", "stream", "store", "include", "reasoning", "text", "tool_choice", "parallel_tool_calls", "prompt_cache_key",
     "service_tier", "stream_options", "max_output_tokens", "metadata", "previous_response_id", "truncation", "user",
 })
-KEEP = ("id", "status", "annotations", "logprobs")      # из элемента агента при сборке: в отпечатке их нет
+KEEP = ("id", "status")         # из элемента агента при сборке: в отпечатке их нет
 _ITEM_KEYS = frozenset({"type", "id", "call_id", "status"})
+_MESSAGE_KEYS = frozenset({"type", "id", "role", "content", "status"})
+_TOOLS_ITEM_KEYS = frozenset({"type", "id", "role", "tools"})
 _TOOL_SERVICE = frozenset({"type", "name", "strict", "format"})     # format — грамматика свободного инструмента
 _USAGE = {"input_tokens": "input", "output_tokens": "output", "input_tokens_details.cached_tokens": "cache_read"}
 
@@ -46,10 +48,6 @@ def _part_kind(part: object) -> str:
         if part.get("type") in TEXT_PARTS and isinstance(part.get("text"), str):
             return "text"
     return "other"
-
-
-def _part_node(part: object) -> object:
-    return {"type": part["type"], "text": part["text"]} if _part_kind(part) == "text" else bare(part)
 
 
 def _item_node(item: dict) -> dict:
@@ -83,9 +81,11 @@ def responses_units(body: dict) -> list[Unit]:
             if isinstance(content, str):
                 units.append(Unit((*path, "content"), role, "text", text_block(content)))
             elif isinstance(content, list):
-                units += [Unit((*path, "content", j), role, _part_kind(p), _part_node(p)) for j, p in enumerate(content)]
+                units += [Unit((*path, "content", j), role, _part_kind(p), bare(p)) for j, p in enumerate(content)]
             elif content is not None:
                 units.append(Unit((*path, "content"), role, "other", content))
+            # Незнакомое поле сообщения — текст (8.3): очищается, а не уходит как есть.
+            units += [Unit((*path, key), role, "other", value) for key, value in item.items() if key not in _MESSAGE_KEYS]
         elif kind in CALLS:
             units.append(Unit(path, "assistant", "tool_use", _call_node(item)))
         elif kind in RESULTS:
@@ -94,6 +94,7 @@ def responses_units(body: dict) -> list[Unit]:
             units.append(Unit(path, "assistant", "opaque", item))
         elif kind == "additional_tools":
             units += [Unit((*path, "tools", j), "tools", "tool_def", tool) for j, tool in enumerate(item.get("tools") or ())]
+            units += [Unit((*path, key), "tools", "other", value) for key, value in item.items() if key not in _TOOLS_ITEM_KEYS]
         else:
             units.append(Unit(path, "user", "other", item))
     units += [Unit(("tools", j), "tools", "tool_def", tool) for j, tool in enumerate(body.get("tools") or ())]
@@ -105,8 +106,9 @@ def responses_units(body: dict) -> list[Unit]:
 
 
 def first_user(body: dict) -> object:
-    """Первое сообщение пользователя — для отпечатка разговора (6.3): у Codex — окружение (<environment_context>), оно
-    то же и после возобновления (проверка 18.1b 5В)."""
+    """Первое сообщение пользователя — для отпечатка разговора (6.3). У Codex это окружение (<environment_context>):
+    у сессий в одном каталоге в один день оно одинаково, поэтому в отпечаток входит и id элемента — свой у сессии и тот
+    же после возобновления (проверка 18.1b 5В)."""
     items = body.get("input")
     if isinstance(items, str):
         return [text_block(items)]
@@ -114,7 +116,8 @@ def first_user(body: dict) -> object:
         if isinstance(item, dict) and item.get("role") == "user":
             content = item.get("content")
             blocks = [text_block(content)] if isinstance(content, str) else content if isinstance(content, list) else [content]
-            return [bare(block) for block in blocks]
+            parts = [bare(block) for block in blocks]
+            return {"id": item["id"], "content": parts} if isinstance(item.get("id"), str) else parts
     return None
 
 
@@ -350,7 +353,7 @@ class ResponsesStream:
                     streamed = self.texts.get((item_id, j))
                     text = "".join(streamed.shown) if streamed is not None else self._restore_text(part["text"])
                     content.append(dict(part, text=text))
-                    self.pairs.append(({"type": "output_text", "text": text}, {"type": "output_text", "text": part["text"]}))
+                    self.pairs.append((dict(part, text=text), dict(part)))
                 else:
                     content.append(part)
             restored = dict(item, content=content)

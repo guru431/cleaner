@@ -227,6 +227,20 @@ def test_value_found_in_a_later_block_is_masked_in_the_earlier_ones(gw):
     assert "ivanov_ii" not in gw.stub.bodies()
 
 
+def test_known_value_in_a_schema_format_still_refuses(gw, repo):
+    """Не проверяются на утечки только имена обязательных свойств (required) и типы схемы: остальные служебные значения
+    схемы (format, $ref) уходят как есть — известное значение в них по-прежнему отказ (как в 5Б)."""
+    gw.stub.script.append(model_turn("Готово"))
+    gw.send(body(TASK))
+    request = body("Снова")
+    schema = request["tools"][0]["input_schema"]
+    request["tools"][0] = dict(request["tools"][0], input_schema=dict(schema, properties=dict(
+        schema["properties"], host={"type": "string", "format": "srv-dc01.corp.contoso.ru"})))
+    with pytest.raises(AgentRefused) as refused:
+        gw.call(request)
+    assert refused.value.status == 400 and len(gw.stub.requests) == 1
+
+
 def test_original_in_a_tool_name_refuses_the_request(gw, repo):
     gw.stub.script.append(model_turn("Готово"))
     gw.send(body(TASK))

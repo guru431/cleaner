@@ -146,7 +146,9 @@ def test_provider_key_never_reaches_a_subscription_and_back(subs, stub, repo, en
 
 def test_subscription_needs_the_agents_login(subs, stub):
     without = {name: value for name, value in CLAUDE.items() if name != "authorization"}
-    for headers in (without, dict(CLAUDE, authorization="Bearer ck_" + "a" * 43)):     # ключ Cleaner — не вход подписки
+    cleaner_key = "ck_" + "a" * 43
+    # Ключ Cleaner — не вход подписки, и с лишним пробелом после схемы тоже: иначе он ушёл бы провайдеру.
+    for headers in (without, dict(CLAUDE, authorization=f"Bearer {cleaner_key}"), dict(CLAUDE, authorization=f"Bearer  {cleaner_key}")):
         with pytest.raises(AgentRefused) as refused:
             subs.call("claude-subscription", claude_body(TASK), headers)
         assert (refused.value.status, refused.value.kind) == (401, "authentication_error")

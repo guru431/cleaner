@@ -131,11 +131,14 @@ def structural(body: dict) -> list[str]:
     return out
 
 
+_UNCHECKED_SCHEMA_KEYS = frozenset({"required", "type"})
+
+
 def checked_strings(kind: str, node: object) -> Iterator[str]:
-    """Строки нового узла для проверки утечек. У описания инструмента — без значений служебных ключей схемы (тип, формат,
-    имена обязательных свойств): шлюз их, как и сами имена свойств, не очищает, а совпадение имени свойства с найденной
-    сущностью (учётная запись «name» из примера пути «/Users/name/» в описании bash у OpenCode) отказывало бы каждому
-    запросу агента."""
+    """Строки нового узла для проверки утечек. У описания инструмента — без имён обязательных свойств (required) и типов
+    схемы: шлюз их, как и сами имена свойств, не очищает, а совпадение имени свойства с найденной сущностью (учётная
+    запись «name» из примера пути «/Users/name/» в описании bash у OpenCode) отказывало бы каждому запросу агента.
+    Остальные служебные значения схемы (format, $ref, $schema) уходят как есть и проверяются."""
     if kind != "tool_def":
         yield from strings_of(node)
     elif isinstance(node, str):
@@ -145,7 +148,7 @@ def checked_strings(kind: str, node: object) -> Iterator[str]:
             yield from checked_strings(kind, item)
     elif isinstance(node, dict):
         for key, item in node.items():
-            if key not in SCHEMA_KEYS or isinstance(item, dict):
+            if key not in _UNCHECKED_SCHEMA_KEYS or isinstance(item, dict):
                 yield from checked_strings(kind, item)
 
 

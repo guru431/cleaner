@@ -237,6 +237,14 @@ def test_two_tool_calls_and_usage_after_finish(gw, stub):
     assert gw.repo.audit_events("agent_send")[0].details["usage"] == {"input": 100, "output": 9, "cache_read": 64}
 
 
+def test_done_without_finish_reason_ends_the_stream(gw, stub):
+    """Совместимый провайдер кончает поток «data: [DONE]» без finish_reason: это конец ответа, а не обрыв."""
+    stub.script.append([chunk({"role": "assistant", "content": "Узел srv-dc01"})])
+    parts = received(gw.send(opencode({"role": "user", "content": "Проверь srv-dc01.corp.contoso.ru"})))
+    assert parts[-1] == "[DONE]" and not [p for p in parts if isinstance(p, dict) and "error" in p]
+    assert gw.repo.audit_events("agent_send")[0].details["finished"] is True
+
+
 def test_reasoning_content_passes_untouched(chat, gw, stub):
     state, settings = chat
     thought = "думаю про <HOST_7> и host-1.sub-2.domain-3.example"

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from cleaner.agent_service import AgentCall, AgentService
+from cleaner.core.agent import ledger
 from cleaner.core.agent.protocol import PROTOCOLS
 from cleaner.core.agent.responses import ResponsesStream
 from cleaner.core.pipeline import sanitize
@@ -107,7 +108,7 @@ def test_codex_turn_is_split_into_units():
     assert [units[("input", i, "content", 0)].role for i in (0, 1, 2, 3)] == ["developer", "developer", "user", "user"]
     assert units[("input", 4)].kind == "opaque"                                     # reasoning с encrypted_content
     text = units[("input", 5, "content", 0)]
-    assert RESPONSES.is_model_block(text) and text.node == {"type": "output_text", "text": "Читаю файл."}
+    assert RESPONSES.is_model_block(text) and text.node == {"type": "output_text", "text": "Читаю файл.", "annotations": []}
     call = units[("input", 6)]
     assert RESPONSES.is_model_block(call) and call.node == {
         "type": "function_call", "name": "exec_command", "arguments": {"cmd": "Get-Content -Encoding UTF8 notes.txt"},
@@ -287,6 +288,26 @@ def test_usage_is_read_from_completed(gw, stub, repo):
     stub.script.append([*text_events(0, message("msg_1", "Готово"), []), completed(message("msg_1", "Готово"), cached=1024)])
     gw.send({"model": "gpt-5.5", "stream": True, "input": "Привет"})
     assert repo.audit_events("agent_send")[0].details["usage"] == {"input": 1200, "output": 30, "cache_read": 1024}
+
+
+def test_two_codex_sessions_are_two_conversations_and_resume_is_one():
+    """Первое сообщение user у Codex — <environment_context>: у сессий в одном каталоге в один день оно одинаково. Сессию
+    различает id этого элемента — свой у каждой сессии и тот же после resume (проверка 18.1b 5В)."""
+    secret = bytes(range(32))
+    ids = {name: ledger.conversation_id(secret, "key-1", RESPONSES.first_user(recorded(name)))
+           for name in ("turn1", "resume", "code_turn3")}
+    assert ids["turn1"] == ids["resume"] and ids["turn1"] != ids["code_turn3"]
+
+
+def test_unknown_fields_of_items_are_cleaned(gw, stub):
+    """Незнакомое поле элемента input (у сообщения, у additional_tools) — текст: очищается, а не уходит как есть (8.3)."""
+    stub.script.append([*text_events(0, message("msg_1", "Готово"), []), completed(message("msg_1", "Готово"))])
+    note = "заметка про srv-dc01.corp.contoso.ru"
+    gw.send({"model": "gpt-5.5", "stream": True, "input": [
+        {"type": "additional_tools", "role": "developer", "note": note, "tools": []},
+        {"type": "message", "role": "user", "phase": note, "content": [{"type": "input_text", "text": "Проверь srv-dc01.corp.contoso.ru"}]},
+    ]})
+    assert "srv-dc01" not in stub.bodies()
 
 
 def test_turn_metadata_is_cleaned_and_its_header_dropped(gw, stub):

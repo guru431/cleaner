@@ -213,7 +213,7 @@ class AgentService:
             raise AgentRefused(403, "permission_error", "Cleaner: доступ по подписке — только у администратора")
         if proto.name != SUBSCRIPTIONS[access][0]:
             raise AgentRefused(400, "invalid_request_error", "Cleaner: протокол агента и подписки не совпадает")
-        login = str(call.headers.get("authorization", "")).partition(" ")[2]
+        login = str(call.headers.get("authorization", "")).partition(" ")[2].strip()
         if not login or login.startswith(_CLEANER_KEY):         # ключ Cleaner на месте входа ушёл бы провайдеру
             raise AgentRefused(401, "authentication_error", "Cleaner: агент не прислал вход подписки")
         if call.key.models and call.body.get("model") not in call.key.models:
@@ -503,11 +503,14 @@ class AgentService:
     ) -> Iterator[bytes]:
         """События агенту по мере прихода; обрыв — уже восстановленная часть и событие error (раздел 12). usage —
         последние числа провайдера по каждому имени: у Anthropic message_delta несёт нарастающий итог."""
-        finished = failed = False
+        finished = done = failed = False
         usage: dict[str, int] = {}
         try:
             for line in upstream.lines():
                 if not line.startswith("data:"):
+                    continue
+                if line[5:].strip() == "[DONE]":        # конец ответа OpenAI-совместимого провайдера
+                    done = True
                     continue
                 try:
                     event = json.loads(line[5:])
@@ -525,8 +528,11 @@ class AgentService:
         finally:
             upstream.close()
             self._record(proto, chat_id, conv_id, prepared, stream)
-            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished, usage=usage)
-        if finished:
+            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished or done, usage=usage)
+        if finished or done:
+            if not finished:            # «[DONE]» без finish_reason: остаток текста — каким накопился
+                for out in stream.cut():
+                    yield proto.sse(out)
             if end := proto.end():
                 yield end
             return
