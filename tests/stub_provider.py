@@ -1,8 +1,8 @@
 """Заглушка облачного провайдера на петле (AC-3.2…AC-3.6, AC-4.3, AC-5.1): запоминает запросы и отвечает событиями
 протокола, по которому её спросили; без "stream": true — обычным ответом OpenAI-совместимого шлюза.
 
-script — ответы шлюзу агентов (планы 5Б, 5В) на POST /v1/messages и …/chat/completions по шагам, очередной шаг на
-каждый запрос: список событий (Anthropic — строками «event: …» / «data: …», без message_stop поток оборван; Chat
+script — ответы шлюзу агентов (планы 5Б, 5В) на POST /v1/messages, …/chat/completions и …/responses по шагам,
+очередной шаг на каждый запрос: список событий (Anthropic и Responses — строками «event: …» / «data: …»; Chat
 Completions — строками «data: …» и «data: [DONE]») или словарь — {"status": 429, "body": {…}, "headers": {…}} (ответ
 ошибкой), {"message": {…}} (ответ без потока), {"events": […], "cut": True} (Chat Completions без «[DONE]»).
 count_tokens — 404, как у провайдера без этого маршрута."""
@@ -80,7 +80,7 @@ class StubProvider:
                 if route.endswith("/count_tokens"):
                     self._json(404, {"type": "error", "error": {"type": "not_found_error", "message": "Not found"}})
                     return
-                if stub.script and route.endswith(("/v1/messages", "/chat/completions")):
+                if stub.script and route.endswith(("/v1/messages", "/chat/completions", "/responses")):
                     self._scripted(stub._step(body), route)
                     return
                 if not body.get("stream"):

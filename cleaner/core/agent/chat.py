@@ -13,7 +13,9 @@ from dataclasses import dataclass, field
 
 from cleaner.core.agent import ledger
 from cleaner.core.agent.stream import DeltaRestorer, map_strings, usage_numbers
-from cleaner.core.agent.walk import OTHER_KEYS, SCHEMA_KEYS, Unit, bare, strings, strings_of, text_block
+from cleaner.core.agent.walk import (
+    OTHER_KEYS, SCHEMA_KEYS, Unit, bare, parsed_arguments, strings, strings_of, text_block,
+)
 from cleaner.core.restore import originals
 from cleaner.core.types import ChatState, Settings
 
@@ -42,21 +44,10 @@ def _part_kind(part: object) -> str:
     return "other"
 
 
-def _parsed(raw: object) -> object:
-    """Аргументы вызова разобранными; не объект JSON — строка как есть (очищается как текст)."""
-    if isinstance(raw, str):
-        try:
-            value = json.loads(raw)
-        except ValueError:
-            return raw
-        return value if isinstance(value, (dict, list)) else raw
-    return raw
-
-
 def _call_node(call: object) -> object:
     if not isinstance(call, dict) or not isinstance(call.get("function"), dict):
         return call
-    return dict(call, function=dict(call["function"], arguments=_parsed(call["function"].get("arguments"))))
+    return dict(call, function=dict(call["function"], arguments=parsed_arguments(call["function"].get("arguments"))))
 
 
 def chat_units(body: dict) -> list[Unit]:

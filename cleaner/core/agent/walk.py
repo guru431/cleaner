@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
@@ -231,9 +232,21 @@ def add_instruction(body: dict, text: str) -> dict:
     return body
 
 
-def rebuild(body: dict, replaced: dict[Path, object]) -> dict:
-    """Новое тело: узлы по путям заменены, у блоков — cache_control из присланного тела; строковое содержимое остаётся
-    строкой. Присланное тело не меняется: копируются только контейнеры на путях замен."""
+def parsed_arguments(raw: object) -> object:
+    """Аргументы вызова из истории (строка JSON) разобранными — для отпечатка: агент пишет строку заново. Не объект и не
+    список JSON — строка как есть (очищается как текст)."""
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return raw
+        return value if isinstance(value, (dict, list)) else raw
+    return raw
+
+
+def rebuild(body: dict, replaced: dict[Path, object], keep: tuple[str, ...] = ("cache_control",)) -> dict:
+    """Новое тело: узлы по путям заменены, у блоков — поля keep из присланного тела (cache_control); строковое
+    содержимое остаётся строкой. Присланное тело не меняется: копируются только контейнеры на путях замен."""
     out = dict(body)
     copied = {id(out)}
     for path, node in replaced.items():
@@ -250,7 +263,7 @@ def rebuild(body: dict, replaced: dict[Path, object]) -> dict:
             parent[path[-1]] = node["text"]
             continue
         new = dict(node) if isinstance(node, dict) else node
-        if isinstance(old, dict) and "cache_control" in old and isinstance(new, dict):
-            new["cache_control"] = old["cache_control"]
+        if isinstance(old, dict) and isinstance(new, dict):
+            new.update((key, old[key]) for key in keep if key in old)
         parent[path[-1]] = new
     return out

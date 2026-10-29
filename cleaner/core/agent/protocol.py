@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from cleaner.core.agent import chat, stream, walk
+from cleaner.core.agent import chat, responses, stream, walk
 from cleaner.core.agent.walk import Unit
 from cleaner.core.types import ChatState, Settings
 
@@ -67,7 +67,7 @@ ANTHROPIC = GatewayProtocol(
     units=walk.anthropic_units, first_user=walk.first_user, structural=walk.structural, sanitize_unit=walk.sanitize_unit,
     contains_media=walk.contains_media, is_model_block=walk.is_model_block, model_kind=lambda node: node["type"],
     rebuild=walk.rebuild, add_instruction=walk.add_instruction, placeholder=walk.placeholder,
-    stream=stream.AnthropicStream, sse=stream.anthropic_sse, end=lambda: b"", error_event=stream.anthropic_error,
+    stream=stream.AnthropicStream, sse=stream.named_sse, end=lambda: b"", error_event=stream.anthropic_error,
     usage=stream.anthropic_usage,
 )
 
@@ -85,4 +85,28 @@ CHAT = GatewayProtocol(
     stream=chat.ChatStream, sse=chat.sse, end=lambda: b"data: [DONE]\n\n", error_event=chat.error_event, usage=chat.usage,
 )
 
-PROTOCOLS: dict[str, GatewayProtocol] = {"anthropic": ANTHROPIC, "chat": CHAT}
+# Responses (9.3, проверка 18.1a 5В). Заголовки x-codex-* — списком, а не по началу имени: заголовок не очистить, а
+# x-codex-turn-metadata несёт рабочие каталоги агента (то же — в client_metadata тела, оно очищается).
+# x-openai-internal-codex-responses-lite — у моделей «code mode»: без него провайдер не поймёт additional_tools.
+RESPONSES = GatewayProtocol(
+    name="responses", provider_protocol="responses",
+    headers=frozenset({
+        "session-id", "thread-id", "x-client-request-id", "originator", "x-openai-subagent", "x-oai-attestation",
+        "openai-beta", "accept", "content-type", "x-codex-beta-features", "x-codex-window-id", "x-codex-turn-state",
+        "x-openai-internal-codex-responses-lite",
+    }),
+    header_prefixes=(),
+    subscription_headers=frozenset({"authorization", "chatgpt-account-id", "user-agent", "x-openai-fedramp"}),
+    passed_back=(
+        "content-type", "x-codex-turn-state", "openai-model", "x-reasoning-included", "x-models-etag", "x-request-id",
+        "retry-after",
+    ),
+    session_header="session-id",
+    units=responses.responses_units, first_user=responses.first_user, structural=responses.structural,
+    sanitize_unit=responses.sanitize_unit, contains_media=responses.contains_media, is_model_block=walk.is_model_block,
+    model_kind=responses.model_kind, rebuild=responses.rebuild, add_instruction=responses.add_instruction,
+    placeholder=responses.placeholder, stream=responses.ResponsesStream, sse=stream.named_sse, end=lambda: b"",
+    error_event=responses.error_event, usage=responses.usage,
+)
+
+PROTOCOLS: dict[str, GatewayProtocol] = {"anthropic": ANTHROPIC, "chat": CHAT, "responses": RESPONSES}

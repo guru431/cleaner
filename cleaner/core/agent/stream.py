@@ -75,7 +75,8 @@ def anthropic_usage(event: dict) -> dict[str, int]:
     return usage_numbers(found, _ANTHROPIC_USAGE)
 
 
-def anthropic_sse(event: dict) -> bytes:
+def named_sse(event: dict) -> bytes:
+    """Событие с именем — «event: <type>» и «data: …» (Anthropic, Responses)."""
     data = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event.get('type', 'message')}\ndata: {data}\n\n".encode("utf-8")
 
