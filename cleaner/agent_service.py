@@ -116,7 +116,7 @@ def gateway_access(repo: Repository, provider_id: str, models: tuple[str, ...]) 
     if provider is None or not provider.enabled:
         raise ValueError("подключение не найдено или выключено")
     if provider.protocol not in GATEWAY_PROTOCOLS:
-        raise ValueError("шлюз для агентов пока работает только с подключениями по протоколу Anthropic")
+        raise ValueError("шлюз для агентов не работает с протоколом этого подключения")
     unknown = [model for model in models if model not in provider.models]
     if unknown:
         raise ValueError("таких моделей нет в подключении")
@@ -295,32 +295,43 @@ class AgentService:
             direction: self.repo.ledger_get(chat_id, conv_id, direction, [digests[u.path] for u in group])
             for direction, group in groups.items()
         }
-        replaced: dict[walk.Path, object] = {}
-        entries: list[LedgerEntry] = []
+        repeated: dict[walk.Path, object] = {}
+        fresh: list[tuple[str, walk.Unit]] = []
         structural = proto.structural(call.body)
-        checked = list(structural)
         result = _Prepared(secret=secret, settings=settings, repeated={"in": [], "out": []})
         for direction, group in groups.items():
             for unit in group:
                 digest = digests[unit.path]
                 entry = known[direction].get(digest)
                 if entry is not None:
-                    replaced[unit.path] = json.loads(entry.wire)
+                    repeated[unit.path] = json.loads(entry.wire)
                     result.repeated[direction].append(digest)
-                    continue
+                else:
+                    fresh.append((direction, unit))
+        # Блоки очищаются по одному: значение, найденное в позднем блоке (учётная запись из пути профиля в описании
+        # инструмента), в раннем осталось бы открытым, и проверка отказывала бы запросу при каждом повторе агента.
+        # Второй проход очищает новые блоки с уже полным состоянием чата.
+        for _ in range(2):
+            replaced, checked, entries = dict(repeated), list(structural), []
+            result.new, result.replaced, result.withheld = 0, Counter(), Counter()
+            for direction, unit in fresh:
                 node, withheld, counts = self._new(proto, unit, direction, state, settings, layers)
                 replaced[unit.path] = node
-                checked += walk.strings_of(node)
-                entries.append(LedgerEntry(conv_id, direction, digest, _json(unit.node), _json(node), withheld, counts))
+                checked += walk.checked_strings(unit.kind, node)
+                entries.append(LedgerEntry(
+                    conv_id, direction, digests[unit.path], _json(unit.node), _json(node), withheld, counts,
+                ))
                 result.new += 1
                 result.replaced.update(counts)
                 if withheld:
                     result.withheld[withheld] += 1
-        body = proto.add_instruction(proto.rebuild(call.body, replaced), pipeline.system_prompt(state.label_style))
-        out, leaks = pipeline.build_agent_outgoing(
-            state, settings, chat_id=chat_id, provider_id=provider.id, path=call.path, query=call.query,
-            headers=call.headers, allowed=proto.headers, prefixes=proto.header_prefixes, body=body, checked=checked,
-        )
+            body = proto.add_instruction(proto.rebuild(call.body, replaced), pipeline.system_prompt(state.label_style))
+            out, leaks = pipeline.build_agent_outgoing(
+                state, settings, chat_id=chat_id, provider_id=provider.id, path=call.path, query=call.query,
+                headers=call.headers, allowed=proto.headers, prefixes=proto.header_prefixes, body=body, checked=checked,
+            )
+            if not leaks:
+                break
         if leaks:
             in_service = bool(pipeline.checked_leaks(structural, state, settings))
             self.repo.audit(

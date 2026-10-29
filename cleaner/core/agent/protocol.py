@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from cleaner.core.agent import stream, walk
+from cleaner.core.agent import chat, stream, walk
 from cleaner.core.agent.walk import Unit
 from cleaner.core.types import ChatState, Settings
 
@@ -71,4 +71,18 @@ ANTHROPIC = GatewayProtocol(
     usage=stream.anthropic_usage,
 )
 
-PROTOCOLS: dict[str, GatewayProtocol] = {"anthropic": ANTHROPIC}
+# Chat Completions (9.2): OpenCode шлёт сессию в x-session-affinity (проверка 18.1c 5В) — она и для просмотра.
+CHAT = GatewayProtocol(
+    name="chat", provider_protocol="openai",
+    headers=frozenset({"content-type", "accept", "x-session-affinity"}),
+    header_prefixes=(),
+    subscription_headers=frozenset(),
+    passed_back=("content-type", "x-request-id", "retry-after"),
+    session_header="x-session-affinity",
+    units=chat.chat_units, first_user=walk.first_user, structural=chat.structural, sanitize_unit=chat.sanitize_unit,
+    contains_media=chat.contains_media, is_model_block=walk.is_model_block, model_kind=chat.model_kind,
+    rebuild=walk.rebuild, add_instruction=chat.add_instruction, placeholder=chat.placeholder,
+    stream=chat.ChatStream, sse=chat.sse, end=lambda: b"data: [DONE]\n\n", error_event=chat.error_event, usage=chat.usage,
+)
+
+PROTOCOLS: dict[str, GatewayProtocol] = {"anthropic": ANTHROPIC, "chat": CHAT}

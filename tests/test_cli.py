@@ -129,7 +129,7 @@ def test_apikey_add_gateway_key(home, monkeypatch, capsys, clock):
     openai = repo.add_provider(Provider("", "OpenAI", "openai", "https://llm.example/v1", "bearer", "sk-2", ("g-1",)))
     repo.conn.close()
     capsys.readouterr()
-    for extra in (["--provider", "нет"], ["--provider", openai], ["--provider", anthropic, "--model", "m-9"]):
+    for extra in (["--provider", "нет"], ["--provider", openai, "--model", "m-1"], ["--provider", anthropic, "--model", "m-9"]):
         assert main(["apikey", "add", "boss", "--name", "агент", *extra]) == 1, extra
     assert main(["apikey", "add", "boss", "--name", "агент", "--provider", anthropic, "--model", "m-2"]) == 0
     assert re.fullmatch(r"ck_[A-Za-z0-9_-]{43}\n", capsys.readouterr().out)

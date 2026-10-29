@@ -74,11 +74,12 @@ def providers(repo, url: str = "https://llm.example/anthropic") -> dict[str, str
     }
 
 
-def test_gateway_key_needs_an_enabled_anthropic_connection_and_its_models(ivan, repo):
+def test_gateway_key_needs_an_enabled_connection_and_its_models(ivan, repo):
+    """План 5В: шлюз говорит и на протоколах OpenAI — подключение OpenAI тоже годится."""
     ids = providers(repo)
     form = ivan.get("/keys").text
-    assert "DeepSeek" in form and "OpenAI" not in form and "Выключено" not in form
-    for provider, model in ((ids["openai"], "g-1"), (ids["off"], "m-1"), ("нет", "m-1"), (ids["anthropic"], "m-9")):
+    assert "DeepSeek" in form and "OpenAI" in form and "Выключено" not in form
+    for provider, model in ((ids["openai"], "m-1"), (ids["off"], "m-1"), ("нет", "m-1"), (ids["anthropic"], "m-9")):
         fields = {"name": "агент", "provider": provider, f"m:{provider}:{model}": "1"}
         assert ivan.post("/keys", **fields).status_code == 400, provider
     assert repo.api_keys() == []

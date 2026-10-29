@@ -1,9 +1,10 @@
 """Заглушка облачного провайдера на петле (AC-3.2…AC-3.6, AC-4.3, AC-5.1): запоминает запросы и отвечает событиями
 протокола, по которому её спросили; без "stream": true — обычным ответом OpenAI-совместимого шлюза.
 
-script — ответы шлюзу агентов (план 5Б) на POST /v1/messages по шагам, очередной шаг на каждый запрос: список событий
-Anthropic (уходят строками «event: …» / «data: …»; без message_stop — поток оборван) или словарь —
-{"status": 429, "body": {…}, "headers": {…}} (ответ ошибкой), {"message": {…}} (ответ без потока).
+script — ответы шлюзу агентов (планы 5Б, 5В) на POST /v1/messages и …/chat/completions по шагам, очередной шаг на
+каждый запрос: список событий (Anthropic — строками «event: …» / «data: …», без message_stop поток оборван; Chat
+Completions — строками «data: …» и «data: [DONE]») или словарь — {"status": 429, "body": {…}, "headers": {…}} (ответ
+ошибкой), {"message": {…}} (ответ без потока), {"events": […], "cut": True} (Chat Completions без «[DONE]»).
 count_tokens — 404, как у провайдера без этого маршрута."""
 from __future__ import annotations
 
@@ -79,8 +80,8 @@ class StubProvider:
                 if route.endswith("/count_tokens"):
                     self._json(404, {"type": "error", "error": {"type": "not_found_error", "message": "Not found"}})
                     return
-                if stub.script and route.endswith("/v1/messages"):
-                    self._scripted(stub._step(body))
+                if stub.script and route.endswith(("/v1/messages", "/chat/completions")):
+                    self._scripted(stub._step(body), route)
                     return
                 if not body.get("stream"):
                     self._json(200, {"choices": [{"message": {"content": "".join(stub.pieces)}, "finish_reason": "stop"}]})
@@ -98,20 +99,23 @@ class StubProvider:
                     self.wfile.flush()
                 self.wfile.write(tail.encode("utf-8"))
 
-            def _scripted(self, step: dict) -> None:
+            def _scripted(self, step: dict, route: str) -> None:
                 if "status" in step:
                     self._json(step["status"], step.get("body", {}), step.get("headers"))
                     return
                 if "message" in step:
                     self._json(200, step["message"])
                     return
+                chat = route.endswith("/chat/completions")
                 self.send_response(200)
                 self.send_header("content-type", "text/event-stream")
-                self.send_header("request-id", "req_stub")
+                self.send_header("x-request-id" if chat else "request-id", "req_stub")
                 self.end_headers()
                 for event in step["events"]:
-                    line = f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-                    self.wfile.write(line.encode("utf-8"))
+                    data = f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    self.wfile.write((data if chat else f"event: {event['type']}\n{data}").encode("utf-8"))
                     self.wfile.flush()
+                if chat and not step.get("cut"):
+                    self.wfile.write(b"data: [DONE]\n\n")
 
         return Handler

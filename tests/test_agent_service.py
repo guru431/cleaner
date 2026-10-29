@@ -217,6 +217,16 @@ def test_edit_during_request_is_retried(gw, repo, monkeypatch):
     assert len(calls) == 2 and len(gw.stub.requests) == 1
 
 
+def test_value_found_in_a_later_block_is_masked_in_the_earlier_ones(gw):
+    """Блоки очищаются по одному: учётная запись, найденная в позднем блоке (путь профиля в описании инструмента), в раннем
+    осталась бы открытой — и проверка утечек отказывала бы этому запросу при каждом повторе агента."""
+    gw.stub.script.append(model_turn("Готово"))
+    request = body("Запусти сборку от имени ivanov_ii")
+    request["tools"][0] = dict(request["tools"][0], description=r"Читает файлы, например C:\Users\ivanov_ii\notes.txt")
+    gw.send(request)
+    assert "ivanov_ii" not in gw.stub.bodies()
+
+
 def test_original_in_a_tool_name_refuses_the_request(gw, repo):
     gw.stub.script.append(model_turn("Готово"))
     gw.send(body(TASK))
