@@ -339,7 +339,8 @@ class ChatStream:
         if kept:
             return before + [dict(event, choices=kept)]
         # Отдавать из choices нечего, но поля сверх шапки есть (usage с пустой дельтой) — часть уходит без choices.
-        return before + ([dict(event, choices=[])] if "usage" in event else [])
+        # «usage: null» (include_usage, в каждой части) — не usage: иначе каждая удержанная дельта дала бы пустую часть.
+        return before + ([dict(event, choices=[])] if event.get("usage") else [])
 
     def cut(self) -> list[dict]:
         """Поток оборвался: несколько знаков текста и незаконченные аргументы — как пришли; пар у них нет."""

@@ -2,6 +2,7 @@
 Responses, ключ — в любом из заголовков агента, ошибки — в виде OpenAI, без текста запроса."""
 import gzip
 import json
+import tracemalloc
 
 import pytest
 
@@ -135,6 +136,19 @@ def test_too_deep_body_is_400_not_500(agent, stub, repo, protocol):
     assert [event.details["reason"] for event in repo.audit_events("agent_refused")] == ["body"] * 4
     stub.script.append(reply)
     assert send(routes_agent.MAX_DEPTH).status_code == 200 and len(stub.requests) == 1
+
+
+def test_depth_check_of_a_flat_array_costs_no_memory():
+    """Проверка глубины кладёт в стек только объекты и списки: плоский массив под пределом тела иначе стоил секунды цикла
+    событий и гигабайт памяти (финальное ревью 5Г, M1)."""
+    flat = {"messages": list(range(300_000))}
+    tracemalloc.start()
+    try:
+        assert not routes_agent._too_deep(flat)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024
 
 
 def test_models_list_in_openai_shape(agent):

@@ -69,6 +69,8 @@ class AgentReply:
     body: bytes | None = None
     events: Iterator[bytes] | None = None       # готовые строки SSE «event: …\ndata: …\n\n»
     stop: Callable[[], None] | None = None      # агент ушёл: оборвать ожидание провайдера (из другого потока)
+    # Закрыть поток, начат он или нет: ответ провайдера, журнал out, agent_send — один раз. Не во время чужого next.
+    close: Callable[[], None] | None = None
 
 
 class AgentRefused(Exception):
@@ -518,8 +520,24 @@ class AgentService:
             return AgentReply(upstream.status, {"content-type": "application/json"}, body=_json(message).encode("utf-8"))
         headers = {"content-type": "text/event-stream", "cache-control": "no-cache"}
         headers.update((name, value) for name, value in upstream.headers.items() if name not in ("content-type", "retry-after"))
-        events = self._events(call, proto, chat_id, conv_id, prepared, upstream, stream, audit)
-        return AgentReply(200, headers, events=events, stop=upstream.abort)
+        once = threading.Lock()         # не отпускается: конец ответа — один раз, из какого бы потока его ни позвали
+
+        def end(finished: bool, usage: dict[str, int]) -> None:
+            if not once.acquire(blocking=False):
+                return
+            upstream.close()
+            self._record(proto, chat_id, conv_id, prepared, stream)
+            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished, usage=usage)
+
+        events = self._events(proto, upstream, stream, end)
+
+        def close() -> None:
+            # Начатый генератор кончается своим finally; не начатый его не выполнит — тогда конец здесь (агент ушёл
+            # раньше первого чтения), иначе соединение пула и вход агента остались бы заняты навсегда.
+            events.close()
+            end(False, {})
+
+        return AgentReply(200, headers, events=events, stop=upstream.abort, close=close)
 
     def _record(
         self, proto: GatewayProtocol, chat_id: str, conv_id: str, prepared: _Prepared, stream: ProtocolStream,
@@ -536,9 +554,9 @@ class AgentService:
         if entries:
             self.repo.add_ledger(chat_id, entries)
 
+    @staticmethod
     def _events(
-        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, prepared: _Prepared,
-        upstream: egress.Upstream, stream: ProtocolStream, audit: dict,
+        proto: GatewayProtocol, upstream: egress.Upstream, stream: ProtocolStream, end: Callable[[bool, dict], None],
     ) -> Iterator[bytes]:
         """События агенту по мере прихода; обрыв — уже восстановленная часть и событие error (раздел 12). usage —
         последние числа провайдера по каждому имени: у Anthropic message_delta несёт нарастающий итог."""
@@ -565,9 +583,7 @@ class AgentService:
         except ProviderError:
             pass
         finally:
-            upstream.close()
-            self._record(proto, chat_id, conv_id, prepared, stream)
-            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished or done, usage=usage)
+            end(finished or done, usage)
         if finished or done:
             if not finished:            # «[DONE]» без finish_reason: остаток текста — каким накопился
                 for out in stream.cut():

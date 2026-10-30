@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import timezone, tzinfo
@@ -11,7 +12,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -52,6 +53,7 @@ AGENT_WORKERS = 8
 
 
 _UPLOAD_HEADROOM = 1024 * 1024      # поля формы и заголовки частей multipart сверх самого файла
+_CERT_BLOCK = re.compile(rb"-----BEGIN CERTIFICATE-----\r?\n.*?-----END CERTIFICATE-----", re.DOTALL)
 
 
 class BodyLimit:
@@ -208,10 +210,17 @@ def create_app(
     @app.get("/cert.pem")
     def service_cert() -> Response:
         """Сертификат службы для агентов (план 5Г) — без входа: то же, что любой клиент получает при TLS-соединении
-        (второе исключение AC-1.11). Ключ TLS этим путём не отдаётся."""
+        (второе исключение AC-1.11). Только блоки сертификата: ключ TLS не отдаётся, даже если он с сертификатом в одном
+        файле."""
         if not app.state.cert_file:
             raise StarletteHTTPException(404)
-        return FileResponse(app.state.cert_file, media_type="application/x-pem-file", filename="cleaner-cert.pem")
+        blocks = _CERT_BLOCK.findall(Path(app.state.cert_file).read_bytes())
+        if not blocks:
+            raise StarletteHTTPException(404)
+        return Response(
+            b"".join(block + b"\n" for block in blocks), media_type="application/x-pem-file",
+            headers={"content-disposition": 'attachment; filename="cleaner-cert.pem"'},
+        )
 
     @app.exception_handler(LoginRequired)
     async def to_login(request: Request, exc: LoginRequired) -> Response:

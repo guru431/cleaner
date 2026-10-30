@@ -152,6 +152,7 @@ class _Provider(ThreadingHTTPServer):
         self.release = threading.Event()
         self.connections = 0
         self.logins: list[str] = []
+        self.cookies: list[str] = []                # заголовок Cookie каждого запроса
         self.closed = threading.Event()             # сокет, закрытый после ответа, закрыт
         super().__init__(("127.0.0.1", 0), _ProviderHandler)
         self.url = f"http://127.0.0.1:{self.server_address[1]}"
@@ -180,6 +181,7 @@ class _ProviderHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self.rfile.read(int(self.headers["content-length"]))
         self.server.logins.append(self.headers.get("authorization", ""))
+        self.server.cookies.append(self.headers.get("cookie", ""))
         if self.server.silent and len(self.server.logins) == 1:
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
@@ -193,6 +195,7 @@ class _ProviderHandler(BaseHTTPRequestHandler):
         self.send_response(400)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
+        self.send_header("set-cookie", "acct=first-user-session; Path=/")     # как __cf_bm у Cloudflare
         self.end_headers()
         self.wfile.write(body)
         self.close_connection = self.server.drop
@@ -259,8 +262,25 @@ def test_aborted_response_frees_the_reader_and_its_connection_is_not_reused(stat
     assert lines[0] == "data: 1" and provider.connections == 2
 
 
+def test_abort_after_the_response_ended_leaves_the_socket_alone(state, settings, pool, monkeypatch):
+    """Ответ дочитан: httpx закрыл его и вернул соединение в пул раньше, чем Upstream.close. abort в этом окне не трогает
+    сокет — его мог уже взять другой запрос (финальное ревью 5Г, M4). Путь Linux — подменой платформы."""
+    out, _ = outgoing(state, settings)
+    shut: list = []
+    with _Provider() as provider:
+        upstream = egress.forward(out, connection(provider.url), state, settings)
+        upstream.read(1 << 20)
+        with monkeypatch.context() as patch:
+            patch.setattr(egress.sys, "platform", "linux")
+            patch.setattr(egress.socket.socket, "shutdown", lambda sock, how: shut.append(how))
+            upstream.abort()
+        upstream.close()
+    assert shut == []
+
+
 def test_pooled_connection_carries_each_requests_own_login(state, settings, pool):
-    """Вход по подписке — заголовок запроса, а не состояние соединения: два агента через одно соединение."""
+    """Вход по подписке — заголовок запроса, а не состояние соединения: два агента через одно соединение. Cookie
+    провайдера клиент пула не хранит и следующему агенту не отдаёт (финальное ревью 5Г, I1)."""
     proto = PROTOCOLS["anthropic"]
     logins = ["Bearer REDACTED_ANTHROPIC_KEY", "Bearer REDACTED_ANTHROPIC_KEY"]
     with _Provider() as provider:
@@ -273,3 +293,4 @@ def test_pooled_connection_carries_each_requests_own_login(state, settings, pool
             )
             assert _ask(out, subscription, state, settings) == 400
     assert provider.logins == logins and provider.connections == 1
+    assert provider.cookies == ["", ""]

@@ -8,11 +8,13 @@ import asyncio
 import functools
 import json
 import zlib
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import Executor, Future
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import Receive, Scope, Send
 
 from cleaner.agent_service import SUBSCRIPTIONS, AgentCall, AgentRefused, AgentReply, AgentService
 from cleaner.web.deps import AGENT_BODY_BYTES, ApiCaller, get_api_caller, repo_of
@@ -43,19 +45,25 @@ def _inflate(raw: bytes, encoding: str) -> bytes:
 
 
 def _too_deep(value: object) -> bool:
-    """Объекты и списки вложены глубже MAX_DEPTH (само тело — уровень 1); обход без рекурсии."""
-    stack = [(value, 1)]
+    """Объекты и списки вложены глубже MAX_DEPTH (само тело — уровень 1); обход без рекурсии. В стек — только объекты и
+    списки: плоский массив под пределом тела иначе стоил бы секунды цикла событий и гигабайт памяти."""
+    stack = [(value, 1)] if isinstance(value, (dict, list)) else []
     while stack:
         node, depth = stack.pop()
-        if isinstance(node, (dict, list)):
-            if depth > MAX_DEPTH:
-                return True
-            stack.extend((child, depth + 1) for child in (node.values() if isinstance(node, dict) else node))
+        if depth > MAX_DEPTH:
+            return True
+        children = node.values() if isinstance(node, dict) else node
+        stack.extend((child, depth + 1) for child in children if isinstance(child, (dict, list)))
     return False
 
 
 async def _body(request: Request) -> dict:
-    raw = await request.body()          # сжатое тело ограничивает app.BodyLimit
+    try:
+        raw = await request.body()      # сжатое тело ограничивает app.BodyLimit
+    except StarletteHTTPException as exc:
+        if exc.status_code != 413:
+            raise
+        raise _refused(413, f"тело запроса больше {MAX_BODY // (1024 * 1024)} МиБ") from None     # отказ по телу (12)
     encoding = request.headers.get("content-encoding", "").strip().lower()
     if encoding in ("gzip", "deflate"):
         raw = _inflate(raw, encoding)
@@ -80,26 +88,45 @@ def _agent(request: Request) -> AgentService:
     return request.app.state.agent
 
 
-async def _in_pool(pool: Executor, events: Iterator[bytes], stop: Callable[[], None] | None) -> AsyncIterator[bytes]:
-    """Поток ответа читается в пуле шлюза, а не в общем; агент закрыл соединение — генератор закрывается там же, и журнал
-    out и событие agent_send записываются.
+class _Stream(StreamingResponse):
+    """Поток ответа агенту. Агент ушёл раньше первого чтения (Starlette отменил отправку, пока шлюз очищал запрос или ждал
+    заголовков провайдера): _in_pool не начинался, и поток закрывается здесь — в пуле, ждать в finally нельзя."""
 
-    Агент ушёл, пока next ждёт провайдера: stop() рвёт соединение с провайдером, и поток пула свободен сразу, а не через
-    300 с. Генератор закрывает тот же поток пула, когда начатый next вернётся (done-callback), — два потока в генераторе
-    не бывают («generator already executing»). Ждать в finally нельзя: Starlette отменяет чтение областью anyio, и любой
-    await там отменяется сразу."""
-    reading: Future | None = None
-    try:
-        while (chunk := await asyncio.wrap_future(reading := pool.submit(next, events, _END))) is not _END:
-            yield chunk
-        reading = None                          # генератор кончился сам
-    finally:
-        if reading is not None and not reading.done():
-            if stop is not None:
-                stop()
-            reading.add_done_callback(lambda _: events.close())
-        elif reading is not None:
-            pool.submit(events.close)
+    def __init__(self, pool: Executor, reply: AgentReply):
+        self._pool, self._events, self._stop = pool, reply.events, reply.stop
+        self._close: Callable[[], None] = reply.close or reply.events.close
+        self._taken = False                     # закрытие взял на себя _in_pool
+        super().__init__(self._in_pool(), status_code=reply.status, headers=reply.headers)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if not self._taken:
+                self._pool.submit(self._close)
+
+    async def _in_pool(self) -> AsyncIterator[bytes]:
+        """Поток ответа читается в пуле шлюза, а не в общем; агент закрыл соединение — поток закрывается там же, и журнал
+        out и событие agent_send записываются.
+
+        Агент ушёл, пока next ждёт провайдера: stop() рвёт соединение с провайдером, и поток пула свободен сразу, а не
+        через 300 с. Поток закрывает тот же поток пула, когда начатый next вернётся (done-callback), — два потока в
+        генераторе не бывают («generator already executing»). Next отменён, не начавшись (пул занят), — закрытие сразу.
+        Ждать в finally нельзя: Starlette отменяет чтение областью anyio, и любой await там отменяется сразу."""
+        self._taken = True
+        pool, events, close = self._pool, self._events, self._close
+        reading: Future | None = None
+        try:
+            while (chunk := await asyncio.wrap_future(reading := pool.submit(next, events, _END))) is not _END:
+                yield chunk
+            reading = None                          # генератор кончился сам
+        finally:
+            if reading is not None and not reading.done():
+                if self._stop is not None:
+                    self._stop()
+                reading.add_done_callback(lambda _: close())
+            elif reading is not None:
+                pool.submit(close)
 
 
 async def _handle(request: Request, caller: ApiCaller, path: str, protocol: str = "anthropic") -> Response:
@@ -117,7 +144,7 @@ async def _handle(request: Request, caller: ApiCaller, path: str, protocol: str 
     pool = request.app.state.agent_pool
     reply: AgentReply = await asyncio.get_running_loop().run_in_executor(pool, _agent(request).handle, call)
     if reply.events is not None:
-        return StreamingResponse(_in_pool(pool, reply.events, reply.stop), status_code=reply.status, headers=reply.headers)
+        return _Stream(pool, reply)
     return Response(reply.body or b"", status_code=reply.status, headers=reply.headers)
 
 

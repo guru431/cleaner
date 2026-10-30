@@ -11,7 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from cleaner.agent_service import AgentCall, AgentService
+from cleaner.agent_service import AgentCall, AgentReply, AgentService
+from cleaner.egress import forward
 from cleaner.storage.repo import Provider, StaleState
 from cleaner.web import auth, routes_agent
 from tests.agent_bodies import agent_blocks, body, events_of, model_turn
@@ -120,7 +121,7 @@ def test_hello_is_204_without_a_key(agent):
     ("no_upstream", "no_upstream", 403), ("connection_gone", "connection_gone", 400), ("model", "model", 400),
     ("protocol", "protocol", 400), ("subscription_role", "subscription_role", 403),
     ("subscription_login", "subscription_login", 401), ("layer_down", "layer_down", 503),
-    ("layer_down_midway", "layer_down", 503), ("busy", "busy", 503), ("body", "body", 400),
+    ("layer_down_midway", "layer_down", 503), ("busy", "busy", 503), ("body", "body", 400), ("body_size", "body", 413),
 ])
 def test_every_refusal_is_recorded_with_its_reason(agent, stub, repo, engines, monkeypatch, case, reason, status):
     """Раздел 12: каждый отказ шлюза — событие agent_refused с причиной; ни ключа, ни текста запроса в нём нет."""
@@ -160,6 +161,8 @@ def test_every_refusal_is_recorded_with_its_reason(agent, stub, repo, engines, m
             monkeypatch.setattr(engines.second, "find", failing(OSError("модель упала")))
     elif case == "busy":
         monkeypatch.setattr(repo, "commit_chat", failing(StaleState("правка в интерфейсе")))
+    elif case == "body_size":
+        monkeypatch.setattr("cleaner.web.app.AGENT_BODY_BYTES", 64)        # предел BodyLimit, а не разбора тела
     else:
         content = b'{"model": "m-1", "messages": [{"role": "user", "content": "' + SECRET_TASK.encode() + b'"'
     response = post(agent, content=content or json.dumps(request).encode(), headers={"x-api-key": key})
@@ -194,7 +197,7 @@ def test_agent_leaving_while_the_provider_is_silent_frees_the_thread(caplog):
     pool = ThreadPoolExecutor(2, thread_name_prefix="cleaner-agent")
 
     async def agent():
-        stream = routes_agent._in_pool(pool, events(), stop)
+        stream = routes_agent._Stream(pool, AgentReply(200, {}, events=events(), stop=stop)).body_iterator
         assert await anext(stream) == b"data: 1\n\n"
         waiting = asyncio.ensure_future(anext(stream))
         while not reading.is_set():
@@ -235,13 +238,86 @@ def test_agent_leaving_mid_stream_closes_the_provider_and_keeps_the_record(repo,
         reply.stop()
         reader.join(2)
         assert not reader.is_alive() and time.perf_counter() - started < 1
-        reply.events.close()
+        reply.close()
+        reply.close()                       # конец — один раз: начатый поток закрылся своим finally
     finally:
         thinking.set()
     [send] = repo.audit_events("agent_send")
     assert send.details["finished"] is False
     out = [json.loads(entry.local) for entry, _ in repo.ledger_page(send.chat_id, 0, 100) if entry.direction == "out"]
     assert out == [{"type": "text", "text": "Смотрю журнал"}]
+
+
+def _checked_out() -> int:
+    """Запросы, которые держат соединения пула egress (вместе с их заголовками — входом агента по подписке)."""
+    return sum(len(client._transport._pool._requests) for client in forward._clients.values())
+
+
+def test_agent_gone_before_the_stream_starts_frees_the_pooled_connection(app, agent, stub, repo):
+    """Агент ушёл, пока шлюз очищал запрос или ждал заголовков провайдера (финальное ревью 5Г, C1): receive уже отвечает
+    http.disconnect, и Starlette отменяет отправку раньше первого чтения потока. Ответ провайдера всё равно закрыт —
+    соединение пула свободно, agent_send записан с finished: false."""
+    thinking = threading.Event()
+    stub.script.append([*model_turn("Смотрю")[:2], {"pause": thinking}])
+    raw = json.dumps(body(SECRET_TASK)).encode()
+    scope = {
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": BASE + "/v1/messages", "raw_path": (BASE + "/v1/messages").encode(), "query_string": b"",
+        "root_path": "", "client": ("127.0.0.1", 50000), "server": ("127.0.0.1", 5464),
+        "headers": [(b"host", b"127.0.0.1:5464"), (b"content-type", b"application/json"), (b"x-api-key", agent.key.encode()),
+                    (b"anthropic-version", b"2023-06-01"), (b"content-length", str(len(raw)).encode())],
+    }
+    messages = [{"type": "http.request", "body": raw, "more_body": False}]
+
+    async def receive() -> dict:
+        return messages.pop(0) if messages else {"type": "http.disconnect"}       # как uvicorn после ухода клиента
+
+    async def send(message: dict) -> None:
+        pass
+
+    try:
+        asyncio.run(app(scope, receive, send))
+        app.state.agent_pool.shutdown(wait=True)
+    finally:
+        thinking.set()
+    assert len(stub.requests) == 1 and _checked_out() == 0
+    [sent] = repo.audit_events("agent_send")
+    assert sent.details["finished"] is False
+
+
+def test_agent_gone_while_the_first_read_waits_for_a_thread_frees_the_pooled_connection(repo, engines, clock, stub):
+    """Пул шлюза занят, первое чтение потока ждёт в очереди, и агент ушёл: чтение отменено, не начавшись, — ответ
+    провайдера всё равно закрыт (финальное ревью 5Г, C1)."""
+    thinking, busy = threading.Event(), threading.Event()
+    stub.script.append([*model_turn("Смотрю")[:2], {"pause": thinking}])
+    user_id = repo.create_user("ivan", "hash", "user")
+    provider = repo.add_provider(Provider("", "Заглушка", "anthropic", stub.url, "x-api-key", "sk-stub-0123456789", ("m-1",)))
+    key_id = repo.add_api_key(user_id, "агент", "h1", "aaaa", upstream=f"provider:{provider}", models=("m-1",))
+    reply = AgentService(repo, engines, clock).handle(AgentCall(
+        repo.api_key(key_id), repo.user(user_id), "anthropic", "/v1/messages", "",
+        {"anthropic-version": "2023-06-01", "x-api-key": "ck_agent"}, body(SECRET_TASK),
+    ))
+    pool = ThreadPoolExecutor(1, thread_name_prefix="cleaner-agent")
+    pool.submit(busy.wait, 5)                       # единственный поток занят другим агентом
+
+    async def agent():
+        stream = routes_agent._Stream(pool, reply).body_iterator
+        waiting = asyncio.ensure_future(anext(stream))
+        await asyncio.sleep(0)                      # next в очереди пула
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+
+    try:
+        asyncio.run(agent())
+        busy.set()
+        pool.shutdown(wait=True)
+    finally:
+        busy.set()
+        thinking.set()
+    assert _checked_out() == 0
+    [sent] = repo.audit_events("agent_send")
+    assert sent.details["finished"] is False
 
 
 def test_session_cookie_does_not_open_the_gateway(ivan, agent):

@@ -254,6 +254,16 @@ def test_usage_only_chunk_reaches_the_agent(chat):
     assert out[-1] == dict(last, choices=[])
 
 
+def test_held_delta_with_null_usage_sends_no_empty_chunk(chat):
+    """С include_usage провайдер шлёт «usage: null» в каждой части: удержанная дельта (аргументы вызова) не становится
+    частью без choices — наивный клиент читает choices[0] (финальное ревью 5Г, M3)."""
+    state, settings = chat
+    arguments = json.dumps({"filePath": fake(chat, r"C:\Users\ivanov_ii\notes.txt")}, ensure_ascii=False)
+    chunks = [dict(part, usage=None) for part in [*call_chunks(0, "call_1", "read", arguments, size=4), chunk({}, "tool_calls")]]
+    out = run(ChatStream(state, settings), chunks)
+    assert all(part["choices"] for part in out) and out[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
 def test_tool_calls_without_index_stay_separate(chat):
     """Совместимый провайдер шлёт вызовы без index: часть с новым id — следующий вызов, без id — продолжение последнего."""
     state, settings = chat

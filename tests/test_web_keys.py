@@ -216,6 +216,11 @@ def test_cert_is_served_without_login_and_only_the_cert(browser, ivan, app, repo
     assert b"PRIVATE KEY" not in response.content
     assert response.headers["content-type"] == "application/x-pem-file"
     assert response.headers["content-disposition"] == 'attachment; filename="cleaner-cert.pem"'
+    # Ключ и сертификат одним файлом (tls_cert = tls_key): отдаются только блоки сертификата (финальное ревью 5Г, M5).
+    combined = tmp_path / "combined.pem"
+    combined.write_bytes(tls_key.read_bytes() + cert.read_bytes() + b"REDACTED_PRIVATE_KEY\n")
+    response = TestClient(create_app(repo, clock, secure_cookies=True, cert_file=str(combined))).get("/cert.pem")
+    assert response.status_code == 200 and response.content == cert.read_bytes()
     app.state.cert_file = str(cert)
     page = ivan.post("/keys", name="с TLS", provider=ids["anthropic"]).text
     assert 'href="/cert.pem"' in page and "путь к файлу сертификата" in html.unescape(page)

@@ -11,6 +11,7 @@ import socket
 import sys
 import threading
 from collections.abc import Iterator
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from urllib.parse import urlsplit
 
 import httpx
@@ -36,8 +37,10 @@ def _client(url: str) -> httpx.Client:
     with _clients_lock:
         client = _clients.get(origin)
         if client is None:
+            # Cookie провайдера (__cf_bm и другие) не хранятся: общий клиент отдал бы их запросам других агентов и входов.
             client = _clients[origin] = httpx.Client(
                 trust_env=False, follow_redirects=False, timeout=_TIMEOUT, limits=_LIMITS,
+                cookies=CookieJar(DefaultCookiePolicy(allowed_domains=[])),
             )
         return client
 
@@ -104,14 +107,15 @@ class Upstream:
 
     def abort(self) -> None:
         """Агент ушёл: оборвать ответ из другого потока. Поток, который ждёт молчащего провайдера, получает обрыв сразу, а
-        не через 300 с; соединение с недочитанным ответом httpx закрывает, в пул оно не возвращается. После close —
-        ничего: соединение уже могло уйти другому запросу.
+        не через 300 с; соединение с недочитанным ответом httpx закрывает, в пул оно не возвращается. После close и
+        после конца ответа (httpx отметил закрытие раньше, чем вернул соединение в пул) — ничего: соединение уже могло
+        уйти другому запросу.
 
         Linux: shutdown сокета будит recv другого потока (close — нет), а закрывает всё сам поток чтения: состояние httpx
         из чужого потока не трогается. Windows: shutdown не будит select, будит только закрытие сокета — response.close,
         как «Остановить» в cloud.send; сокет там закрывается последним, после отметок httpx о закрытии."""
         with self._lock:
-            if self._closed:
+            if self._closed or self._response.is_closed:
                 return
             stream = self._response.extensions.get("network_stream")
             sock = stream.get_extra_info("socket") if stream is not None else None
