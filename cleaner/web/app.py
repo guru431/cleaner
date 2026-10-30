@@ -18,7 +18,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from cleaner.agent_service import AgentRefused, AgentService
 from cleaner.clock import Clock
-from cleaner.egress import cloud
+from cleaner.egress import cloud, forward
 from cleaner.service import ChatService
 from cleaner.storage.repo import Repository
 from cleaner.web import (
@@ -165,6 +165,7 @@ def create_app(
     async def lifespan(app: FastAPI):
         yield
         agent_pool.shutdown(wait=False, cancel_futures=True)       # ответы агентам рвутся с остановкой; агент повторит
+        forward.close_clients()                                     # соединения с провайдерами
         # Остановка: соединение с базой закрывается после этого (__main__). Недождавшиеся задания помечаются
         # здесь, пока оно открыто, — а не случайной ошибкой записи в закрытую базу и пометкой при следующем старте.
         # Их потоки процесс не ждёт: по SIGTERM uvicorn сразу после этого повторяет сигнал, и процесс кончается,

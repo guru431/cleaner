@@ -7,7 +7,9 @@
 попадают ни в логи, ни в сообщения об ошибках."""
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -18,6 +20,33 @@ from cleaner.egress.cloud import Connection, LeakDetected, _headers, check_url
 
 _TIMEOUT = httpx.Timeout(30.0, read=300.0)          # агент с рассуждениями молчит минутами до первого слова
 _PASSED = ("content-type", "request-id", "retry-after")      # заголовки провайдера агенту, если протокол не задал свои
+_LIMITS = httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=60.0)
+
+# Соединения с провайдером переиспользуются (замер 30.10.2026: установка TLS — 0,19–0,43 с на ход агента). Клиент — на
+# источник scheme://host:port, общий для потоков пула шлюза. Вход агента по подписке — заголовок запроса, не клиента.
+_clients: dict[str, httpx.Client] = {}
+_clients_lock = threading.Lock()
+
+
+def _client(url: str) -> httpx.Client:
+    parts = urlsplit(url)
+    origin = f"{parts.scheme}://{parts.hostname}:{parts.port or (443 if parts.scheme == 'https' else 80)}"
+    with _clients_lock:
+        client = _clients.get(origin)
+        if client is None:
+            client = _clients[origin] = httpx.Client(
+                trust_env=False, follow_redirects=False, timeout=_TIMEOUT, limits=_LIMITS,
+            )
+        return client
+
+
+def close_clients() -> None:
+    """Закрыть клиенты пула — при остановке службы (после пула шлюза) и в тестах."""
+    with _clients_lock:
+        clients = list(_clients.values())
+        _clients.clear()
+    for client in clients:
+        client.close()
 
 
 class ProviderTimeout(ProviderError):
@@ -28,12 +57,15 @@ class ProviderTimeout(ProviderError):
 
 
 class Upstream:
-    """Ответ провайдера: код, разрешённые заголовки и тело — строками потока или байтами."""
+    """Ответ провайдера: код, разрешённые заголовки и тело — строками потока или байтами. owns_client — клиент свой
+    (тесты с transport) и закрывается с ответом; клиент пула общий и не закрывается."""
 
     def __init__(
         self, client: httpx.Client, response: httpx.Response, secrets: tuple[str, ...], passed: tuple[str, ...] = _PASSED,
+        *, owns_client: bool,
     ):
         self._client = client
+        self._owns_client = owns_client
         self._response = response
         # Длинные первыми: «Bearer <токен>» убирается целиком, а не оставляет «Bearer ***».
         self._secrets = sorted({secret.encode("utf-8") for secret in secrets if secret}, key=len, reverse=True)
@@ -68,7 +100,8 @@ class Upstream:
 
     def close(self) -> None:
         self._response.close()
-        self._client.close()
+        if self._owns_client:
+            self._client.close()
 
 
 def forward(
@@ -83,19 +116,26 @@ def forward(
         raise LeakDetected(len(leaks))
     check_url(connection.base_url)
     url = f"{connection.base_url.rstrip('/')}{out.path}" + (f"?{out.query}" if out.query else "")
-    client = httpx.Client(transport=transport, trust_env=False, follow_redirects=False, timeout=_TIMEOUT)
+    owns = transport is not None
+    if owns:
+        client = httpx.Client(transport=transport, trust_env=False, follow_redirects=False, timeout=_TIMEOUT)
+    else:
+        client = _client(url)
     try:
         request = client.build_request("POST", url, content=out.body, headers={**dict(out.headers), **_headers(connection)})
         response = client.send(request, stream=True)
     except httpx.TimeoutException:
-        client.close()
+        if owns:
+            client.close()
         raise ProviderTimeout() from None
     except httpx.HTTPError:
-        client.close()
+        if owns:
+            client.close()
         raise ProviderError("соединение с провайдером не удалось") from None
     if 300 <= response.status_code < 400:
         response.close()
-        client.close()
+        if owns:
+            client.close()
         raise ProviderError("провайдер ответил переадресацией — она не выполняется", status=response.status_code)
     agent = dict(out.headers).get("authorization", "")        # вход агента по подписке
-    return Upstream(client, response, (connection.api_key, agent, agent.partition(" ")[2]), passed)
+    return Upstream(client, response, (connection.api_key, agent, agent.partition(" ")[2]), passed, owns_client=owns)

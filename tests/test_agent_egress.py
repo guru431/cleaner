@@ -1,6 +1,8 @@
 """Запрос шлюза в ядре и модуль выхода egress.forward (спецификация 2026-10-28, разделы 5, 8.9, 9.1; SEC-1, SEC-2,
 SEC-13): провайдер получает только собранное pipeline, заголовки из списка и ключ подключения."""
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
@@ -127,3 +129,102 @@ def test_connection_error_is_a_provider_error_without_the_key(state, settings, e
         egress.forward(out, connection("http://127.0.0.1:1"), state, settings, transport=httpx.MockTransport(fail))
     assert KEY not in str(caught.value) and KEY not in repr(caught.value)
     assert isinstance(caught.value, egress.ProviderTimeout) is (error is httpx.ReadTimeout)
+
+
+@pytest.fixture
+def pool():
+    """Пул соединений шлюза — общий для процесса: в каждом тесте свой, закрывается в конце."""
+    egress.close_clients()
+    yield
+    egress.close_clients()
+
+
+class _Provider(ThreadingHTTPServer):
+    """Провайдер на петле: HTTP/1.1, ответ 400 с content-length; считает принятые соединения и пишет вход запросов.
+    drop — закрыть сокет после ответа, не предупредив заголовком Connection: close."""
+    daemon_threads = True
+
+    def __init__(self, drop: bool = False):
+        self.drop = drop
+        self.connections = 0
+        self.logins: list[str] = []
+        self.closed = threading.Event()             # сокет, закрытый после ответа, закрыт
+        super().__init__(("127.0.0.1", 0), _ProviderHandler)
+        self.url = f"http://127.0.0.1:{self.server_address[1]}"
+
+    def get_request(self):
+        accepted = super().get_request()
+        self.connections += 1
+        return accepted
+
+    def shutdown_request(self, request) -> None:
+        super().shutdown_request(request)
+        self.closed.set()
+
+    def __enter__(self):
+        threading.Thread(target=self.serve_forever, args=(0.01,), daemon=True).start()     # остановка без ожидания 0,5 с
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.shutdown()
+        self.server_close()
+
+
+class _ProviderHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["content-length"]))
+        self.server.logins.append(self.headers.get("authorization", ""))
+        body = json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": "нет"}}).encode()
+        self.send_response(400)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = self.server.drop
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+def _ask(out, conn, state, settings) -> int:
+    upstream = egress.forward(out, conn, state, settings)
+    try:
+        upstream.read(1 << 20)
+    finally:
+        upstream.close()
+    return upstream.status
+
+
+def test_provider_connection_is_reused_between_requests(state, settings, pool):
+    out, _ = outgoing(state, settings)
+    with _Provider() as provider:
+        statuses = [_ask(out, connection(provider.url), state, settings) for _ in range(2)]
+    assert statuses == [400, 400] and provider.connections == 1
+
+
+def test_connection_closed_by_the_provider_between_requests_is_not_reused(state, settings, pool):
+    """Провайдер закрыл соединение из пула, пока агент выполнял команду: следующий ход — по новому, а не 502."""
+    out, _ = outgoing(state, settings)
+    with _Provider(drop=True) as provider:
+        assert _ask(out, connection(provider.url), state, settings) == 400
+        assert provider.closed.wait(5)
+        assert _ask(out, connection(provider.url), state, settings) == 400
+    assert provider.connections == 2
+
+
+def test_pooled_connection_carries_each_requests_own_login(state, settings, pool):
+    """Вход по подписке — заголовок запроса, а не состояние соединения: два агента через одно соединение."""
+    proto = PROTOCOLS["anthropic"]
+    logins = ["Bearer REDACTED_ANTHROPIC_KEY", "Bearer REDACTED_ANTHROPIC_KEY"]
+    with _Provider() as provider:
+        subscription = Connection("anthropic", provider.url, "passthrough", "", 0)
+        for login in logins:
+            out, _ = build_agent_outgoing(
+                state, settings, chat_id=state.chat_id, provider_id="sub", path="/v1/messages", query="",
+                headers={**AGENT_HEADERS, "authorization": login}, allowed=proto.headers | proto.subscription_headers,
+                body={"model": "m-1", "messages": [{"role": "user", "content": "вопрос"}]}, checked=[],
+            )
+            assert _ask(out, subscription, state, settings) == 400
+    assert provider.logins == logins and provider.connections == 1
