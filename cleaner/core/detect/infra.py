@@ -109,6 +109,10 @@ _PROFILE = re.compile(
     re.IGNORECASE,
 )
 _TRAILING = ".,;:!?)'’"
+# Логин-заглушка в примере пути («/Users/name/», «C:\Users\username\» в описаниях инструментов агентов) — не учётная запись.
+_PROFILE_PLACEHOLDERS = frozenset(
+    {"name", "username", "user", "yourname", "your_name", "you", "login", "имя", "логин", "пользователь"}
+)
 _SID = re.compile(r"(?<![\w-])S-1-5-21-\d+-\d+-\d+(?:-\d+)?(?![\w-])")
 # Число компонентов ограничено: без предела цепочка «CN=a,CN=a,…» без DC даёт квадратичный перебор.
 _DN = re.compile(
@@ -320,7 +324,10 @@ def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:
     for m in _PROFILE.finditer(text):
         group = "spaced" if m.group("spaced") else "login"
         login = m.group(group).rstrip(_TRAILING)
-        if login and login.lower() not in builtin and not re.search(r"[%$]", login):
+        if (
+            login and login.lower() not in builtin and login.lower() not in _PROFILE_PLACEHOLDERS
+            and not re.search(r"[%$]", login)
+        ):
             start = m.start(group)
             yield Span(start, start + len(login), EntityType.ACCOUNT, name)
 

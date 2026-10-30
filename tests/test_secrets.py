@@ -267,6 +267,14 @@ def test_stop_listed_keys_still_hold_no_secret():
     assert found("passes_secret: Zx81kLmN02pQ") == {"Zx81kLmN02pQ"}
 
 
+def test_counter_tag_is_not_a_secret():
+    """FINDINGS P3 28.10: тег XML проверяется, как ключ пары, — счётчик токенов в системной части Claude Code не секрет."""
+    for text in ("<total_tokens>15000000 tokens left</total_tokens>", "<max_tokens>4096</max_tokens>"):
+        assert found(text) == set(), text
+    assert found("<access_token>q8Zr2vLx9TfK</access_token>") == {"q8Zr2vLx9TfK"}
+    assert found("<bypass_token>q8Zr2vLx9TfK</bypass_token>") == {"q8Zr2vLx9TfK"}
+
+
 def test_value_under_a_passes_key_that_is_no_count_is_a_secret():
     """Ревью раунда ключей PuTTY: стоп-слово passes (Argon2-Passes — число проходов) открывало и список паролей
     wifi_passes. Число под таким ключом — счётчик, остальное — пароль."""

@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from cleaner.core.detect import infra
@@ -570,3 +573,43 @@ def test_real_host_typed_under_an_issued_domain_is_masked_and_restored():
     again = "Узел host-1.domain-1.example"          # выданная часть перед подменой — та же подмена
     assert sanitize(state, again, Settings()).sanitized == again
     assert len(state.entities) == 2
+
+
+def test_agent_service_domains_stay_open():
+    """FINDINGS P3 28.10: адреса агентов в их системной части и описаниях инструментов общеизвестны."""
+    for text in ("https://claude.ai/code", "https://docs.claude.com/en/docs/claude-code", "https://chatgpt.com/codex",
+                 "https://opencode.ai/docs"):
+        state = ChatState(chat_id="agents", net_key=bytes(32))
+        assert sanitize(state, text, Settings()).sanitized == text
+
+
+def test_placeholder_login_in_a_profile_path_is_not_an_account():
+    """FINDINGS P3 29.10: логин-заглушка в примере пути (описание bash у OpenCode) — не учётная запись."""
+    for text in ('mkdir "/Users/name/My Documents"', "/home/user/app", r"C:\Users\username\Desktop"):
+        assert accounts(text) == set(), text
+    assert accounts("/home/ivanov/app") == {"ivanov"}
+
+
+def _strings(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    items = value.values() if isinstance(value, dict) else value if isinstance(value, list) else ()
+    return [text for item in items for text in _strings(item)]
+
+
+def test_claude_code_system_part_keeps_service_strings():
+    """Запись настоящего хода Claude Code в режиме написаний: счётчик токенов не секрет, ссылки на claude.* открыты."""
+    body = json.loads((Path(__file__).parent / "fixtures" / "agents" / "claude_code" / "turn2.json").read_text("utf-8"))
+    state = ChatState(chat_id="claude-code", net_key=bytes(32))
+    state.written = True
+    sanitized = []
+    for text in _strings([body["system"], body["messages"], body["tools"]]):
+        result = sanitize(state, text, Settings())
+        sanitized.append(result.sanitized)
+        for span in result.spans:
+            if state.entities[span.entity_id].type is T.SECRET:
+                assert "tokens left" not in text[span.start:span.end], text[span.start:span.end]
+    joined = "\n".join(sanitized)
+    assert "<total_tokens>15000000 tokens left</total_tokens>" in joined
+    for link in ("https://claude.com/claude-code", "claude.ai/code", "claude.ai/design", "claude.ai login"):
+        assert link in joined, link

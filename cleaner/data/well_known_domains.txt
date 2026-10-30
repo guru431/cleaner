@@ -70,6 +70,10 @@ digicert.com
 w3.org
 openai.com
 anthropic.com
+claude.ai
+claude.com
+chatgpt.com
+opencode.ai
 ollama.com
 huggingface.co
 # Имена из кода, совпадающие с доменом: окончание само по себе частое у настоящих узлов (.io)

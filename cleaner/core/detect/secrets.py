@@ -667,6 +667,8 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             spans.append(Span(*bounds, EntityType.SECRET, name))
     for pattern in (_XML, _URL, _CLI, _SECURE, _AUTH, _BEARER, *_COMMANDS):
         for m in pattern.finditer(text):
+            if pattern is _XML and not _secret_key(m.group("tag")):
+                continue                       # тег — как ключ пары: <total_tokens>, <max_tokens> — счётчики
             bounds = _value(m, minimum=2 if pattern is _CLI or pattern in _COMMANDS else 3)
             if bounds and not (pattern in (_AUTH, _BEARER) and _WORDS.fullmatch(text, *bounds)):
                 spans.append(Span(*bounds, EntityType.SECRET, name))
