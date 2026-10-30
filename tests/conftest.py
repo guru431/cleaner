@@ -16,6 +16,7 @@ from cleaner.core.risk import check as risk_check
 from cleaner.core.types import ChatState, Settings
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Span
+from cleaner.egress import forward
 from cleaner.ingest.extract import Extractor
 from cleaner.storage import db
 from cleaner.storage.repo import Repository
@@ -64,6 +65,13 @@ def _loopback_only(request, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+
+
+@pytest.fixture(autouse=True)
+def _close_pooled_clients():
+    """Клиенты пула egress живут в модуле: после теста — закрыть, чтобы следующий на том же порту петли их не получил."""
+    yield
+    forward.close_clients()
 
 
 @pytest.fixture

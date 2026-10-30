@@ -5,6 +5,7 @@ OpenAI — base_url https://<cleaner>:5464/agent/openai/v1. Открываетс
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import zlib
 from collections.abc import AsyncIterator, Iterator
@@ -77,7 +78,13 @@ async def _in_pool(pool: Executor, events: Iterator[bytes]) -> AsyncIterator[byt
 
 async def _handle(request: Request, caller: ApiCaller, path: str, protocol: str = "anthropic") -> Response:
     """path — путь у провайдера: у Anthropic — /v1/… к адресу без /v1, у OpenAI — к base_url, который кончается на /v1."""
-    body = await _body(request)
+    try:
+        body = await _body(request)
+    except AgentRefused:
+        # Отказ по телу — тоже событие (раздел 12); запись — вне цикла событий: замок базы бывает занят очисткой.
+        audit = functools.partial(repo_of(request).audit, "agent_refused", caller.user.id, key=caller.key.id, reason="body")
+        await asyncio.get_running_loop().run_in_executor(None, audit)
+        raise
     call = AgentCall(
         caller.key, caller.user, protocol, path, request.url.query, dict(request.headers.items()), body,
     )

@@ -6,7 +6,7 @@ import zlib
 
 import pytest
 
-from cleaner.storage.repo import Provider
+from cleaner.storage.repo import Provider, StaleState
 from cleaner.web import auth, routes_agent
 from tests.agent_bodies import agent_blocks, body, events_of, model_turn
 from tests.stub_provider import StubProvider
@@ -108,6 +108,63 @@ def test_models_lists_the_key_models(agent):
 def test_hello_is_204_without_a_key(agent):
     assert agent.head(BASE + "/api/hello").status_code == 204
     assert agent.get(BASE + "/api/hello").status_code == 204
+
+
+@pytest.mark.parametrize(("case", "reason", "status"), [
+    ("no_upstream", "no_upstream", 403), ("connection_gone", "connection_gone", 400), ("model", "model", 400),
+    ("protocol", "protocol", 400), ("subscription_role", "subscription_role", 403),
+    ("subscription_login", "subscription_login", 401), ("layer_down", "layer_down", 503),
+    ("layer_down_midway", "layer_down", 503), ("busy", "busy", 503), ("body", "body", 400),
+])
+def test_every_refusal_is_recorded_with_its_reason(agent, stub, repo, engines, monkeypatch, case, reason, status):
+    """Раздел 12: каждый отказ шлюза — событие agent_refused с причиной; ни ключа, ни текста запроса в нём нет."""
+    petr = repo.user_by_login("petr").id
+    upstream = repo.api_key_by_hash(auth.token_hash(agent.key)).upstream
+
+    def new_key(user_id: str = petr, **access) -> str:
+        value = auth.new_api_key()
+        repo.add_api_key(user_id, "отказ", auth.token_hash(value), value[-4:], **access)
+        return value
+
+    def failing(exc: Exception):
+        def fail(*args, **kwargs):
+            raise exc
+        return fail
+
+    key, request, content = agent.key, body(SECRET_TASK), None
+    if case == "no_upstream":
+        key = new_key()
+    elif case == "connection_gone":
+        gone = repo.add_provider(Provider("", "Выключено", "anthropic", stub.url, "x-api-key", "sk-off-0123", ("m-1",), enabled=False))
+        key = new_key(upstream=f"provider:{gone}")
+    elif case == "model":
+        request = body(SECRET_TASK, model="m-3")
+    elif case == "protocol":
+        openai = repo.add_provider(Provider("", "OpenAI", "openai", stub.url, "bearer", "sk-openai-0123", ("m-1",)))
+        key = new_key(upstream=f"provider:{openai}")
+    elif case == "subscription_role":
+        key = new_key(upstream="claude-subscription")
+    elif case == "subscription_login":
+        key = new_key(repo.create_user("boss", "hash", "admin"), upstream="claude-subscription")
+    elif case.startswith("layer_down"):
+        key = new_key(upstream=upstream, models=("m-1",), layers={"llm": True})
+        if case == "layer_down":
+            engines.unavailable = "локальная модель недоступна"
+        else:
+            monkeypatch.setattr(engines.second, "find", failing(OSError("модель упала")))
+    elif case == "busy":
+        monkeypatch.setattr(repo, "commit_chat", failing(StaleState("правка в интерфейсе")))
+    else:
+        content = b'{"model": "m-1", "messages": [{"role": "user", "content": "' + SECRET_TASK.encode() + b'"'
+    response = post(agent, content=content or json.dumps(request).encode(), headers={"x-api-key": key})
+    assert response.status_code == status, response.text
+    assert response.json()["error"]["message"].startswith("Cleaner:") and stub.requests == []
+    [event] = repo.audit_events("agent_refused")
+    assert event.details["reason"] == reason and event.user_id == repo.api_key_by_hash(auth.token_hash(key)).user_id
+    assert event.details["key"] == repo.api_key_by_hash(auth.token_hash(key)).id
+    assert (event.chat_id is not None) == (case in ("layer_down_midway", "busy"))     # чат — когда он уже известен
+    raw = json.dumps(event.details, ensure_ascii=False)
+    assert key not in raw and key[-8:] not in raw and "srv-dc01" not in raw and "Проверь" not in raw
 
 
 def test_session_cookie_does_not_open_the_gateway(ivan, agent):

@@ -350,3 +350,23 @@ def test_audit_has_no_text_or_keys(gw, repo):
     assert len(send) == 2 and send[-1].details["blocks_new"] > 0 and send[0].details["blocks_repeated"] > 0
     raw = json.dumps([e.details for e in events], ensure_ascii=False).lower()
     assert [value for value in (*CONTROL, STUB_KEY, "ck_agent", "проверь") if value.lower() in raw] == []
+
+
+def test_agent_send_carries_gateway_and_upstream_times(gw, repo):
+    """AC-5.7 на живых прогонах: время шлюза до отправки и время провайдера — в каждом agent_send, и с кодом ошибки."""
+    error = {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}
+    gw.stub.script += [model_turn("Готово"), {"status": 429, "body": error}]
+    gw.send(body(TASK))
+    assert gw.call(body("Вторая задача")).status == 429
+
+    def timeout(*args, **kwargs):
+        raise agent_service.egress.ProviderTimeout()
+
+    gw.service.forward = timeout
+    with pytest.raises(AgentRefused):
+        gw.call(body("Третья задача"))
+    send = repo.audit_events("agent_send")
+    assert sorted(event.details["status"] for event in send) == [200, 429, 504]
+    for event in send:
+        times = (event.details["ms_prepare"], event.details["ms_upstream"])
+        assert all(type(ms) is int and ms >= 0 for ms in times), event.details

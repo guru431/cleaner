@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
@@ -122,6 +123,11 @@ def _json(node: object) -> str:
     return json.dumps(node, ensure_ascii=False, separators=(",", ":"))
 
 
+def _ms(since: float) -> int:
+    """Миллисекунды от since по time.perf_counter — длительность, а не время суток (AC-5.7)."""
+    return int((time.perf_counter() - since) * 1000)
+
+
 GATEWAY_PROTOCOLS = frozenset(proto.provider_protocol for proto in PROTOCOLS.values())   # протоколы подключений шлюза
 
 
@@ -204,47 +210,64 @@ class AgentService:
             while len(self._states) > STATE_CACHE:
                 self._states.popitem(last=False)
 
+    def _refuse(
+        self, call: AgentCall, status: int, kind: str, message: str, reason: str, headers: dict | None = None,
+        *, chat_id: str | None = None,
+    ) -> AgentRefused:
+        """Отказ шлюза — событие agent_refused с причиной (раздел 12): пользователь, чат, если уже известен, id ключа."""
+        self.repo.audit("agent_refused", call.user.id, chat_id, key=call.key.id, reason=reason)
+        return AgentRefused(status, kind, message, headers)
+
     # --- запрос ------------------------------------------------------------------------
 
     def _subscription(self, call: AgentCall, proto: GatewayProtocol, access: str) -> _Access:
         """Подписка (9.4): роль администратора — на момент запроса (SEC-20); вход агента — его Authorization, к провайдеру
         уходит он, а не ключ подключения."""
         if call.user.role != "admin":
-            raise AgentRefused(403, "permission_error", "Cleaner: доступ по подписке — только у администратора")
+            raise self._refuse(
+                call, 403, "permission_error", "Cleaner: доступ по подписке — только у администратора", "subscription_role",
+            )
         if proto.name != SUBSCRIPTIONS[access][0]:
-            raise AgentRefused(400, "invalid_request_error", "Cleaner: протокол агента и подписки не совпадает")
+            raise self._refuse(call, 400, "invalid_request_error", "Cleaner: протокол агента и подписки не совпадает", "protocol")
         login = str(call.headers.get("authorization", "")).partition(" ")[2].strip()
         if not login or login.startswith(_CLEANER_KEY):         # ключ Cleaner на месте входа ушёл бы провайдеру
-            raise AgentRefused(401, "authentication_error", "Cleaner: агент не прислал вход подписки")
+            raise self._refuse(call, 401, "authentication_error", "Cleaner: агент не прислал вход подписки", "subscription_login")
         if call.key.models and call.body.get("model") not in call.key.models:
-            raise AgentRefused(400, "invalid_request_error", "Cleaner: эта модель ключу не разрешена")
+            raise self._refuse(call, 400, "invalid_request_error", "Cleaner: эта модель ключу не разрешена", "model")
         connection = cloud.Connection(proto.provider_protocol, self.subscription_urls[access], "passthrough", "", 0)
         return _Access(access, connection, proto.headers | proto.subscription_headers)
 
     def _access(self, call: AgentCall, proto: GatewayProtocol) -> _Access:
         upstream = call.key.upstream
         if not upstream:
-            raise AgentRefused(403, "permission_error", "Cleaner: у ключа нет доступа к модели — он только для /api/v1")
+            raise self._refuse(
+                call, 403, "permission_error", "Cleaner: у ключа нет доступа к модели — он только для /api/v1", "no_upstream",
+            )
         if upstream in SUBSCRIPTIONS:
             return self._subscription(call, proto, upstream)
         kind, _, provider_id = upstream.partition(":")
         provider = self.repo.provider(provider_id) if kind == "provider" else None
         if provider is None or not provider.enabled:
-            raise AgentRefused(400, "invalid_request_error", "Cleaner: подключение ключа удалено или выключено")
+            raise self._refuse(
+                call, 400, "invalid_request_error", "Cleaner: подключение ключа удалено или выключено", "connection_gone",
+            )
         model = call.body.get("model")
         allowed = call.key.models or provider.models
         if allowed and model not in allowed:
-            raise AgentRefused(400, "invalid_request_error", "Cleaner: эта модель ключу не разрешена")
+            raise self._refuse(call, 400, "invalid_request_error", "Cleaner: эта модель ключу не разрешена", "model")
         if provider.protocol != proto.provider_protocol:
-            raise AgentRefused(400, "invalid_request_error", "Cleaner: протокол агента и подключения не совпадает")
+            raise self._refuse(
+                call, 400, "invalid_request_error", "Cleaner: протокол агента и подключения не совпадает", "protocol",
+            )
         connection = cloud.Connection(
             provider.protocol, provider.base_url, provider.auth_style, provider.api_key, provider.max_tokens,
             provider.extra_body,
         )
         return _Access(provider.id, connection, proto.headers)     # Authorization и x-api-key агента не уходят никогда
 
-    def _layers(self, key: ApiKey) -> pipeline.Layers:
+    def _layers(self, call: AgentCall) -> pipeline.Layers:
         """Слои 4 и 5 ключа (решение владельца 4): включённый, но недоступный — 503, агент повторит."""
+        key = call.key
         ner = llm = None
         try:
             if key.layers.get("ner"):
@@ -256,7 +279,9 @@ class AgentService:
                     raise DetectorError("слоёв 4–5 в службе нет")
                 llm = _Checked(self.engines.llm())
         except DetectorError:
-            raise AgentRefused(503, "overloaded_error", "Cleaner: включённый для ключа слой очистки недоступен", _RETRY) from None
+            raise self._refuse(
+                call, 503, "overloaded_error", "Cleaner: включённый для ключа слой очистки недоступен", "layer_down", _RETRY,
+            ) from None
         return pipeline.Layers(ner=ner, llm=llm)
 
     def _chat(self, key: ApiKey, conv_id: str, session: str) -> str:
@@ -279,6 +304,7 @@ class AgentService:
             return self.repo.add_conversation(conv_id, current, key.id, session).chat_id
 
     def handle(self, call: AgentCall) -> AgentReply:
+        started = time.perf_counter()
         self._prune()
         proto = PROTOCOLS[call.protocol]
         access = self._access(call, proto)
@@ -286,7 +312,7 @@ class AgentService:
             ledger.conversation_secret(self.repo.global_key), call.key.id, proto.first_user(call.body),
         )
         session = str(call.headers.get(proto.session_header, "") if proto.session_header else "")[:200]
-        layers = self._layers(call.key)
+        layers = self._layers(call)
         chat_id = self._chat(call.key, conv_id, session)
         settings = self.repo.settings()
         with self._lock(chat_id):
@@ -297,7 +323,7 @@ class AgentService:
                 self.repo.touch_ledger(chat_id, conv_id, direction, digests)
         if prepared.withheld:
             self.repo.audit("agent_withheld", call.user.id, chat_id, key=call.key.id, reasons=dict(prepared.withheld))
-        return self._send(call, proto, chat_id, conv_id, access, prepared)
+        return self._send(call, proto, chat_id, conv_id, access, prepared, started)
 
     def _prepare(
         self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, access: _Access, settings: Settings,
@@ -310,7 +336,9 @@ class AgentService:
                 prepared, entries = self._clean(call, proto, chat_id, conv_id, access, state, settings, layers)
             except _LayerDown:
                 self._remember(chat_id, version, None)
-                raise AgentRefused(503, "overloaded_error", "Cleaner: локальная модель недоступна", _RETRY) from None
+                raise self._refuse(
+                    call, 503, "overloaded_error", "Cleaner: локальная модель недоступна", "layer_down", _RETRY, chat_id=chat_id,
+                ) from None
             except BaseException:
                 self._remember(chat_id, version, None)          # состояние могло измениться наполовину
                 raise
@@ -326,7 +354,10 @@ class AgentService:
             if len(state.entities) >= AGENT_CHAT_ENTITIES and self.repo.api_key(call.key.id).chat_id == chat_id:
                 self.repo.set_key_chat(call.key.id, None)       # новые разговоры — в новый чат (6.3)
             return prepared
-        raise AgentRefused(503, "overloaded_error", "Cleaner: чат шлюза меняют в интерфейсе, повторите запрос", _RETRY)
+        raise self._refuse(
+            call, 503, "overloaded_error", "Cleaner: чат шлюза меняют в интерфейсе, повторите запрос", "busy", _RETRY,
+            chat_id=chat_id,
+        )
 
     def _clean(
         self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, access: _Access, state: ChatState,
@@ -438,13 +469,15 @@ class AgentService:
 
     def _send(
         self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, access: _Access, prepared: _Prepared,
+        started: float,
     ) -> AgentReply:
         connection = access.connection
         audit = {
             "key": call.key.id, "access": access.id, "model": str(call.body.get("model", ""))[:100], "blocks_new": prepared.new,
             "blocks_repeated": sum(len(d) for d in prepared.repeated.values()), "withheld": sum(prepared.withheld.values()),
-            "replaced": dict(prepared.replaced),
+            "replaced": dict(prepared.replaced), "ms_prepare": _ms(started),
         }
+        sent = time.perf_counter()
         try:
             upstream = self.forward(prepared.out, connection, prepared.state, prepared.settings, passed=proto.passed_back)
         except cloud.LeakDetected as exc:
@@ -454,11 +487,12 @@ class AgentService:
                 f"Cleaner: в исходящем тексте найдено известное значение ({exc.count}), запрос не отправлен",
             ) from None
         except egress.ProviderTimeout:
-            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=504)
+            self.repo.audit("agent_send", call.user.id, chat_id, **audit, ms_upstream=_ms(sent), status=504)
             raise AgentRefused(504, "api_error", "Cleaner: провайдер не ответил вовремя") from None
         except (ProviderError, ValueError):
-            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=502)
+            self.repo.audit("agent_send", call.user.id, chat_id, **audit, ms_upstream=_ms(sent), status=502)
             raise AgentRefused(502, "api_error", "Cleaner: провайдер недоступен") from None
+        audit["ms_upstream"] = _ms(sent)
         if upstream.status >= 300 or call.path.endswith("/count_tokens"):
             try:
                 raw = upstream.read(_BODY_BYTES)
