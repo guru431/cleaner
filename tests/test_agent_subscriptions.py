@@ -164,7 +164,7 @@ def test_only_admins_create_subscription_keys(repo, ivan, boss):
     assert gateway_access(repo, "chatgpt-subscription", ("gpt-6.1-sol", "gpt-6.1-sol"), admin=True) == (
         "chatgpt-subscription", ("gpt-6.1-sol",))
     assert ivan.post("/keys", name="агент", provider="chatgpt-subscription").status_code == 400
-    assert boss.post("/keys", name="агент", provider="chatgpt-subscription").status_code == 200
+    assert boss.post("/keys", name="агент", provider="chatgpt-subscription").status_code == 303
     [key] = repo.api_keys()
     assert key.upstream == "chatgpt-subscription"
 

@@ -21,7 +21,7 @@ from cleaner.core.agent import ledger, walk
 from cleaner.core.agent.protocol import PROTOCOLS, GatewayProtocol, ProtocolStream
 from cleaner.core.detect import dictionary
 from cleaner.core.detect.base import DetectorError
-from cleaner.core.types import ChatState, Policy, Settings
+from cleaner.core.types import ChatState, Entity, Policy, Settings
 from cleaner.egress import ProviderError, cloud, forward as egress
 from cleaner.storage.repo import ApiKey, CheckpointBusy, LedgerEntry, Repository, StaleState, User
 
@@ -116,7 +116,10 @@ def _snapshot(state: ChatState) -> ChatState:
     """Состояние для потока ответа и проверки в egress: таблицы — копиями, чтобы следующий запрос того же чата под замком
     не менял их посреди чтения."""
     return replace(
-        state, entities=dict(state.entities), surrogates=dict(state.surrogates), issued=dict(state.issued),
+        state, entities={key: Entity(entity.id, entity.type, entity.number, entity.key, entity.restore_value, entity.origin,
+                                     entity.forms.copy(), entity.parts.copy(), entity.words.copy(), entity.restore_rank)
+                         for key, entity in state.entities.items()},
+        surrogates=dict(state.surrogates), issued=dict(state.issued),
         rules=list(state.rules), key_alias=dict(state.key_alias), foreign_labels=set(state.foreign_labels),
         counters=dict(state.counters), net6=dict(state.net6),
     )
@@ -168,9 +171,13 @@ class AgentService:
         self._guard = threading.Lock()
         self._locks: dict[str, threading.Lock] = {}
         self._states: OrderedDict[str, tuple[int, ChatState]] = OrderedDict()
+        repo.on_chat_deleted(self.forget_chat)
         self._pruned: datetime | None = None
 
     # --- служебное ---------------------------------------------------------------
+
+    def forget_chat(self, chat_id: str) -> None:
+        self._remember(chat_id, 0, None)
 
     def _lock(self, name: str) -> threading.Lock:
         with self._guard:
@@ -523,11 +530,17 @@ class AgentService:
         once = threading.Lock()         # не отпускается: конец ответа — один раз, из какого бы потока его ни позвали
 
         def end(finished: bool, usage: dict[str, int]) -> None:
+            nonlocal upstream, prepared, stream, call
             if not once.acquire(blocking=False):
                 return
-            upstream.close()
-            self._record(proto, chat_id, conv_id, prepared, stream)
-            self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished, usage=usage)
+            try:
+                upstream.close()
+                self._record(proto, chat_id, conv_id, prepared, stream)
+                self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished, usage=usage)
+            finally:
+                # close живёт до уничтожения HTTP-ответа: после записи он не должен держать тело запроса и снимок
+                # из 20 000 сущностей (и заставлять GC обходить их на следующих запросах).
+                del upstream, prepared, stream, call
 
         events = self._events(proto, upstream, stream, end)
 

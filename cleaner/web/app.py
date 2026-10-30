@@ -179,6 +179,7 @@ def create_app(
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.repo = repo
+    app.state.issued_keys = routes_keys.IssuedKeys(clock, repo.global_key)
     app.state.clock = clock
     app.state.engines = engines                      # cleaner.engines.Engines; в тестах — заглушка
     app.state.jobs = jobs

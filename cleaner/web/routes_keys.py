@@ -4,21 +4,57 @@
 from __future__ import annotations
 
 import json
+import threading
+from collections import OrderedDict
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
 from cleaner.agent_service import GATEWAY_PROTOCOLS, gateway_access
+from cleaner.storage import crypto
 from cleaner.storage.repo import ApiKey
 from cleaner.web import auth
 from cleaner.web.deps import Viewer, get_form, get_viewer, page, repo_of
 
 router = APIRouter()
-NAME_LIMIT = 100
 SUBSCRIPTION_NAMES = {"claude-subscription": "Подписка Claude", "chatgpt-subscription": "Подписка ChatGPT"}
 SUBSCRIPTION_OPTIONS = {"claude-subscription": "Подписка Claude (Claude Code)", "chatgpt-subscription": "Подписка ChatGPT (Codex)"}
 PROTOCOL_LABELS = {"anthropic": "Anthropic", "openai": "OpenAI Chat Completions", "responses": "OpenAI Responses"}
 CERT = "<путь к файлу сертификата Cleaner на этой машине>"
+
+
+class IssuedKeys:
+    """Однократный показ после POST/Redirect/GET. В памяти — шифротекст, связанный с сессией; в URL — случайный билет."""
+
+    def __init__(self, clock, secret: bytes):
+        self.clock, self.secret = clock, secret
+        self.pending = OrderedDict()
+        self.lock = threading.Lock()
+
+    def put(self, session: str, key_id: str, key: str) -> str:
+        ticket = auth.new_token()
+        with self.lock:
+            self._prune()
+            self.pending[ticket] = (session, self.clock.now() + timedelta(minutes=5), key_id,
+                                    crypto.seal(self.secret, key.encode("ascii"), session + ticket))
+            while len(self.pending) > 256:
+                self.pending.popitem(last=False)
+        return ticket
+
+    def take(self, session: str, ticket: str) -> tuple[str, str] | None:
+        with self.lock:
+            self._prune()
+            entry = self.pending.get(ticket)
+            if entry is None or entry[0] != session:
+                return None
+            self.pending.pop(ticket)
+        return entry[2], crypto.unseal(self.secret, entry[3], session + ticket).decode("ascii")
+
+    def _prune(self) -> None:
+        expired = [ticket for ticket, entry in self.pending.items() if entry[1] <= self.clock.now()]
+        for ticket in expired:
+            self.pending.pop(ticket)
 
 
 def _claude_code(request: Request, key: str, model: str) -> str:
@@ -119,14 +155,19 @@ def _page(request: Request, viewer: Viewer, issued: str = "", issued_key: ApiKey
 
 @router.get("/keys")
 def keys(request: Request, viewer: Viewer = Depends(get_viewer)) -> Response:
-    return _page(request, viewer)
+    issued = request.app.state.issued_keys.take(viewer.session.token_hash, request.query_params.get("issued", ""))
+    response = _page(request, viewer, issued[1], repo_of(request).api_key(issued[0])) if issued else _page(request, viewer)
+    response.headers["cache-control"] = "no-store"
+    response.headers["referrer-policy"] = "no-referrer"
+    return response
 
 
 @router.post("/keys")
 def create_key(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    name = form.get("name", "").strip()
-    if not 1 <= len(name) <= NAME_LIMIT:
-        raise HTTPException(400, f"Имя ключа — от 1 до {NAME_LIMIT} знаков")
+    try:
+        name = auth.api_key_name(form.get("name", ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
     repo = repo_of(request)
     provider_id = form.get("provider", "")
     upstream, models, layers = None, (), None
@@ -145,8 +186,8 @@ def create_key(request: Request, form: dict[str, str] = Depends(get_form), viewe
     key = auth.new_api_key()
     key_id = repo.add_api_key(viewer.user.id, name, auth.token_hash(key), key[-4:], upstream, models, layers)
     repo.audit("key_created", viewer.user.id, id=key_id)
-    # Страница, а не переадресация: ключ виден один раз и не попадает ни в адрес, ни в базу.
-    return _page(request, viewer, issued=key, issued_key=repo.api_key(key_id))
+    ticket = request.app.state.issued_keys.put(viewer.session.token_hash, key_id, key)
+    return RedirectResponse(f"/keys?issued={ticket}", status_code=303, headers={"cache-control": "no-store"})
 
 
 def _own_key(request: Request, key_id: str, viewer: Viewer) -> ApiKey:

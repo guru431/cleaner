@@ -28,6 +28,41 @@ def test_no_key_is_401_json(api):
     assert response.json() == {"error": {"code": 401, "message": "Нужен действующий ключ доступа"}}
 
 
+def test_rule_without_preview_survives_a_concurrent_text(api, repo, monkeypatch):
+    from cleaner.service import ChatService
+
+    program = api()
+    chat_id = chat(program)
+    clean(program, chat_id)
+    original = repo.commit_chat
+    interleaved = []
+
+    def commit(*args, **kwargs):
+        if not interleaved:
+            interleaved.append(True)
+            ChatService(repo).add_input(chat_id, repo.chat(chat_id).user_id, "ещё один текст")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "commit_chat", commit)
+    response = program.post(f"/api/v1/chats/{chat_id}/rules", json={"action": "unmask", "value": "i.ivanov@contoso.ru"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"changed": 1}
+
+
+def test_status_poll_does_not_decrypt_the_item(repo, monkeypatch):
+    from cleaner.web.routes_api import _status
+    from types import SimpleNamespace
+    from cleaner.service import ChatService
+
+    user = repo.create_user("anna", "hash", "user")
+    chat_id = repo.create_chat(user, "Чат")
+    item = ChatService(repo).add_input(chat_id, user, "почта one@contoso.ru")
+    monkeypatch.setattr(repo, "_item", lambda *args: pytest.fail("status polling decrypted the item"))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)))
+    assert _status(request, chat_id, item.id) == "done"
+    assert _status(request, chat_id, "missing") is None
+
+
 def test_session_cookie_does_not_open_the_api(ivan):
     response = ivan.get("/api/v1/chats")
     assert response.status_code == 401 and response.json()["error"]["code"] == 401

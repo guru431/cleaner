@@ -11,8 +11,8 @@
 - `FINDINGS.md` / `IDEAS.md` — находки и идеи.
 
 ## Тесты
-- Быстрый набор: `.venv/Scripts/python.exe -m pytest` (≤ 60 с); точечно — путь к файлу теста; полный — `-m "not manual"`.
-- Правка слоёв 1–3 и восстановления — ещё `.venv/Scripts/python.exe -m pytest tests/test_long_input.py -m integration`.
+- Быстрый набор: `.venv/Scripts/python.exe -m pytest` (≤ 60 с, два процесса); точечно — путь к файлу теста; полный — `-n 0 -m "not manual"`.
+- Правка слоёв 1–3 и восстановления — ещё `.venv/Scripts/python.exe -m pytest -n 0 tests/test_long_input.py -m integration`.
 
 ## Gotchas
 - Данные в тестах — только вымышленные; настоящие тексты в репозиторий не попадают.

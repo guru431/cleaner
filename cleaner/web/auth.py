@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import secrets
 import threading
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -14,6 +15,19 @@ from argon2.exceptions import InvalidHashError, VerificationError
 from cleaner.clock import Clock
 
 MIN_PASSWORD = 12
+API_KEY_NAME = 100
+
+
+def api_key_name(value: str) -> str:
+    """Имя ключа пригодно для формы и табличного вывода CLI."""
+    if any(unicodedata.category(char) == "Cc" for char in value):
+        raise ValueError("В имени ключа недопустимы управляющие знаки")
+    value = value.strip()
+    if not 1 <= len(value) <= API_KEY_NAME:
+        raise ValueError(f"Имя ключа — от 1 до {API_KEY_NAME} знаков")
+    return value
+
+
 _hasher = PasswordHasher()          # Argon2id с параметрами библиотеки по умолчанию
 # Хэш берёт 64 МиБ: анонимных входов разом может быть сколько угодно. Argon2 считается только в своём пуле
 # из HASH_SLOTS потоков, и очередь к нему — задания пула, а не потоки: вход ждёт места в цикле событий

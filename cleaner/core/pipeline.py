@@ -212,8 +212,11 @@ class SanitizeResult:
 
 
 def _context(state: ChatState, settings: Settings) -> DetectContext:
+    from cleaner.core.cache import lease_of
+
     return DetectContext(
         settings=settings,
+        cache_lease=lease_of(state),
         known=tuple((form, e.type) for e in state.entities.values() for form in e.forms),
         manual=tuple((r.value, r.type, r.bounds) for r in state.rules if r.action == "mask" and r.type is not None),
         unmask=ops.unmasked(state),

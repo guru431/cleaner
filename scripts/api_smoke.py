@@ -117,7 +117,11 @@ def http_call(base_url: str, key: str, context: ssl.SSLContext | None) -> Call:
                 code, raw = response.status, response.read()
         except urllib.error.HTTPError as exc:
             code, raw = exc.code, exc.read()
-        return code, json.loads(raw) if raw else {}
+        try:
+            data = json.loads(raw) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            data = {}
+        return code, data
 
     return call
 

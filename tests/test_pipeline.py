@@ -28,6 +28,21 @@ def test_short_host_name_in_the_same_text_is_linked(state, settings):
     assert "Server=HOST-1;" in result.sanitized
 
 
+@pytest.mark.parametrize("command", [
+    "ssh admin@SRV-DC01.corp.contoso.ru; ping srv-dc01",
+    "scp report.txt root@srv-dc01.corp.contoso.ru:/tmp/; ping srv-dc01",
+    "rsync -a report.txt ivanov@srv-dc01.corp.contoso.ru:/tmp/; ping srv-dc01",
+])
+@pytest.mark.parametrize("written", [False, True])
+def test_remote_login_registers_the_host_and_its_short_name(state, settings, command, written):
+    state.written = written
+    result = sanitize(state, command, settings)
+    assert "srv-dc01" not in result.sanitized.lower()
+    assert "ping host-" in result.sanitized
+    restored = restore(state, result.sanitized, settings).text
+    assert restored == command if written else restored.lower() == command.lower()
+
+
 def test_address_equal_to_an_earlier_surrogate_is_treated_as_already_replaced(state, settings):
     fake = sanitize(state, "узел 10.1.2.5", settings).spans[0].surrogate
     again = sanitize(state, f"проверьте {fake}", settings)

@@ -33,6 +33,58 @@ def test_input_is_sanitized_stored_and_logged_without_the_text(repo, chat):
     }
 
 
+def test_deleting_a_chat_evicts_originals_from_process_caches(repo, chat):
+    from cleaner.agent_service import AgentService
+    from cleaner.core import match, surrogates
+    from cleaner.core.detect import dictionary
+
+    user, chat_id = chat
+    service = ChatService(repo)
+    service.add_input(chat_id, user, "почта cache-original@contoso.ru и узел srv-cache01.corp.contoso.ru")
+    state, version = repo.load_state(chat_id)
+    gateway = AgentService(repo, None, repo.clock)
+    gateway._remember(chat_id, version, state)
+    assert chat_id in leakcheck._indexes and chat_id in surrogates._tables
+    service.delete_chat(chat_id, user)
+    assert chat_id not in leakcheck._indexes and chat_id not in surrogates._tables
+    assert chat_id not in gateway._states
+    assert "cache-original@contoso.ru" not in repr(dictionary._cache)
+    assert "cache-original@contoso.ru" not in match._NEEDLES
+
+
+def test_deleted_chat_is_not_put_back_by_an_index_being_built(state, settings, monkeypatch):
+    from cleaner.core import cache, match
+    from cleaner.core.pipeline import sanitize
+
+    sanitize(state, "почта cache-race@contoso.ru", settings)
+    cache.forget_chat(state.chat_id)
+    original = leakcheck._build
+
+    def interrupted(*args):
+        cache.forget_chat(state.chat_id)
+        return original(*args)
+
+    monkeypatch.setattr(leakcheck, "_build", interrupted)
+    leakcheck.check("чистый текст", state, settings)
+    assert state.chat_id not in leakcheck._indexes
+    assert "cache-race@contoso.ru" not in match._NEEDLES
+
+
+def test_work_finishing_after_chat_deletion_cannot_repopulate_caches(repo, chat):
+    from cleaner.core import match, surrogates
+    from cleaner.core.detect import dictionary
+    from cleaner.core.pipeline import sanitize
+
+    user, chat_id = chat
+    ChatService(repo).add_input(chat_id, user, "почта late-original@contoso.ru")
+    state, _ = repo.load_state(chat_id)
+    repo.delete_chat(chat_id)
+    sanitize(state, "ещё late-original@contoso.ru", repo.settings())
+    assert chat_id not in leakcheck._indexes and chat_id not in surrogates._tables
+    assert "late-original@contoso.ru" not in repr(dictionary._cache)
+    assert "late-original@contoso.ru" not in match._NEEDLES
+
+
 def test_failing_layer_fails_the_text_and_leaves_the_chat_untouched(repo, chat, monkeypatch):
     user, chat_id = chat
     service = ChatService(repo)

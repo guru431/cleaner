@@ -295,6 +295,8 @@ def _find(
     text: str, index: dict[str, dict[int, dict[str, tuple[tuple[str, T], ...]]]], long: dict[str, dict[str, _Node[T]]],
     loose: list[tuple[str, str, T]],
 ) -> list[tuple[int, int, T]]:
+    if not (index or long or loose):
+        return []
     lowered, starts, ends = _normalize(text)
     if "\\." in lowered or "\\@" in lowered:
         lowered, starts, ends = _unescaped(lowered, starts, ends)

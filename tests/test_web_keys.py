@@ -16,13 +16,19 @@ KEY = re.compile(r"ck_[A-Za-z0-9_-]{43}")
 
 
 def issue(browser, name: str) -> str:
-    response = browser.post("/keys", name=name)
+    response = issue_page(browser, name=name)
     assert response.status_code == 200, response.text
     return KEY.search(response.text).group(0)
 
 
+def issue_page(browser, **fields):
+    response = browser.post("/keys", **fields)
+    assert response.status_code == 303, response.text
+    return browser.get(response.headers["location"])
+
+
 def test_key_is_shown_once_then_only_its_tail(ivan):
-    response = ivan.post("/keys", name="Отчёты")
+    response = issue_page(ivan, name="Отчёты")
     key = KEY.search(response.text).group(0)
     assert "api/v1/chats" in response.text
     page = ivan.get("/keys").text
@@ -54,7 +60,7 @@ def test_key_name_is_required_and_limited(ivan, repo):
     for name in ("", "   ", "я" * 101):
         assert ivan.post("/keys", name=name).status_code == 400, len(name)
     assert repo.api_keys() == []
-    assert ivan.post("/keys", name="я" * 100).status_code == 200
+    assert ivan.post("/keys", name="я" * 100).status_code == 303
 
 
 def test_keys_page_is_in_the_menu_for_everyone(ivan, boss):
@@ -67,6 +73,33 @@ def test_key_forms_need_the_csrf_token(ivan, repo):
     [key] = repo.api_keys()
     assert ivan.client.post(f"/keys/{key.id}/disable", data={}).status_code == 403
     assert not repo.api_key(key.id).disabled
+
+
+def test_refresh_after_issuing_a_key_does_not_issue_another(ivan, repo):
+    response = ivan.post("/keys", name="один ключ")
+    assert response.status_code == 303
+    assert KEY.search(response.headers["location"]) is None
+    first = ivan.get(response.headers["location"])
+    assert KEY.search(first.text)
+    assert "no-store" in first.headers["cache-control"]
+    again = ivan.get(response.headers["location"])
+    assert KEY.search(again.text) is None and len(repo.api_keys()) == 1
+
+
+def test_key_names_cannot_contain_control_characters(ivan, repo):
+    for name in ("a\tb", "a\nb", "a\x00b", "a\x7fb"):
+        assert ivan.post("/keys", name=name).status_code == 400
+    assert repo.api_keys() == []
+
+
+def test_key_ticket_is_bound_to_the_session_and_expires(ivan, boss, clock):
+    response = ivan.post("/keys", name="личный ключ")
+    path = response.headers["location"]
+    assert KEY.search(boss.get(path).text) is None
+    assert KEY.search(ivan.get(path).text)
+    expired = ivan.post("/keys", name="просроченный показ")
+    clock.advance(minutes=6)
+    assert KEY.search(ivan.get(expired.headers["location"]).text) is None
 
 
 # --- ключи шлюза агентов (план 5Б, задача 9) ------------------------------------------------
@@ -88,7 +121,7 @@ def test_gateway_key_needs_an_enabled_connection_and_its_models(ivan, repo):
         fields = {"name": "агент", "provider": provider, f"m:{provider}:{model}": "1"}
         assert ivan.post("/keys", **fields).status_code == 400, provider
     assert repo.api_keys() == []
-    response = ivan.post("/keys", name="агент", provider=ids["anthropic"], **{f"m:{ids['anthropic']}:m-2": "1", "ner": "1"})
+    response = issue_page(ivan, name="агент", provider=ids["anthropic"], **{f"m:{ids['anthropic']}:m-2": "1", "ner": "1"})
     assert response.status_code == 200
     [key] = repo.api_keys()
     assert (key.upstream, key.models, key.layers) == (f"provider:{ids['anthropic']}", ("m-2",), {"ner": True, "llm": False})
@@ -100,7 +133,7 @@ def test_gateway_key_needs_an_enabled_connection_and_its_models(ivan, repo):
 
 def test_gateway_key_page_shows_the_claude_code_settings_once(ivan, repo):
     ids = providers(repo)
-    response = ivan.post("/keys", name="агент", provider=ids["anthropic"])         # моделей не отмечено — все
+    response = issue_page(ivan, name="агент", provider=ids["anthropic"])         # моделей не отмечено — все
     key = KEY.search(response.text).group(0)
     shown = html.unescape(response.text)
     for line in (
@@ -145,7 +178,7 @@ def test_each_access_shows_its_agent_settings_once(boss, repo):
                  '"apiKey": "{key}"', '"model": "cleaner/g-1"', 'OpenAI(base_url="http://testserver/agent/openai/v1"'],
     }
     for access, lines in cases.items():
-        response = boss.post("/keys", name=f"агент {access}", provider=access)
+        response = issue_page(boss, name=f"агент {access}", provider=access)
         assert response.status_code == 200, response.text
         key = KEY.search(response.text).group(0)
         shown = html.unescape(response.text)
@@ -162,7 +195,7 @@ def test_each_access_shows_its_agent_settings_once(boss, repo):
 
 
 def test_subscription_models_are_free_text(boss, repo):
-    response = boss.post("/keys", name="агент", provider="chatgpt-subscription", sub_models="gpt-6.1-sol, gpt-5.5,,gpt-5.5")
+    response = issue_page(boss, name="агент", provider="chatgpt-subscription", sub_models="gpt-6.1-sol, gpt-5.5,,gpt-5.5")
     assert response.status_code == 200
     assert repo.api_keys()[0].models == ("gpt-6.1-sol", "gpt-5.5")
 
@@ -175,7 +208,7 @@ def test_opencode_settings_carry_the_key_as_api_key(ivan, repo):
     """AI SDK шлёт apiKey заголовком Authorization: Bearer — шлюз берёт ключ оттуда и провайдеру его не передаёт
     (test_web_agent_openai.py::test_chat_and_responses_stream_through_the_gateway[authorization])."""
     ids = providers(repo)
-    response = ivan.post("/keys", name="opencode", provider=ids["openai"])
+    response = issue_page(ivan, name="opencode", provider=ids["openai"])
     key = KEY.search(response.text).group(0)
     config = json.loads(snippets(response)[1])             # первый — сам ключ
     assert config["provider"]["cleaner"]["options"] == {"baseURL": "http://testserver/agent/openai/v1", "apiKey": key}
@@ -186,12 +219,12 @@ def test_model_names_are_escaped_in_toml_and_python(boss, repo):
     """Модель подписки ChatGPT — свободное поле, модель подключения задаёт администратор: кавычка и обратная косая черта
     не ломают ни TOML Codex, ни Python SDK."""
     model = 'a"b\\c'
-    response = boss.post("/keys", name="codex", provider="chatgpt-subscription", sub_models=model)
+    response = issue_page(boss, name="codex", provider="chatgpt-subscription", sub_models=model)
     assert response.status_code == 200, response.text
     _, codex = snippets(response)                          # первый — сам ключ
     assert tomllib.loads(codex.split("\n\n# PowerShell")[0])["model"] == model
     provider = repo.add_provider(Provider("", "Go", "openai", "https://llm.example/v1", "bearer", "sk-2", (model,)))
-    response = boss.post("/keys", name="sdk", provider=provider)
+    response = issue_page(boss, name="sdk", provider=provider)
     key = KEY.search(response.text).group(0)
     _, opencode, sdk = snippets(response)
     assert json.loads(opencode)["model"] == f"cleaner/{model}"
@@ -209,7 +242,7 @@ def test_cert_is_served_without_login_and_only_the_cert(browser, ivan, app, repo
     anonymous = browser()
     assert anonymous.get("/cert.pem").status_code == 404                     # без TLS сертификата нет
     ids = providers(repo)
-    assert 'href="/cert.pem"' not in ivan.post("/keys", name="без TLS", provider=ids["anthropic"]).text
+    assert 'href="/cert.pem"' not in issue_page(ivan, name="без TLS", provider=ids["anthropic"]).text
     served = create_app(repo, clock, secure_cookies=True, cert_file=str(cert))
     response = TestClient(served).get("/cert.pem")
     assert response.status_code == 200 and response.content == cert.read_bytes()
@@ -222,7 +255,7 @@ def test_cert_is_served_without_login_and_only_the_cert(browser, ivan, app, repo
     response = TestClient(create_app(repo, clock, secure_cookies=True, cert_file=str(combined))).get("/cert.pem")
     assert response.status_code == 200 and response.content == cert.read_bytes()
     app.state.cert_file = str(cert)
-    page = ivan.post("/keys", name="с TLS", provider=ids["anthropic"]).text
+    page = issue_page(ivan, name="с TLS", provider=ids["anthropic"]).text
     assert 'href="/cert.pem"' in page and "путь к файлу сертификата" in html.unescape(page)
     assert 'href="/cert.pem"' not in ivan.get("/keys").text              # ссылка — при готовых настройках
 
@@ -230,7 +263,7 @@ def test_cert_is_served_without_login_and_only_the_cert(browser, ivan, app, repo
 def test_restart_starts_a_new_chat_for_new_conversations(ivan, repo):
     with StubProvider([model_turn("Раз"), model_turn("Два"), model_turn("Три")]) as stub:
         ids = providers(repo, stub.url)
-        key = KEY.search(ivan.post("/keys", name="агент", provider=ids["anthropic"]).text).group(0)
+        key = KEY.search(issue_page(ivan, name="агент", provider=ids["anthropic"]).text).group(0)
         [stored] = repo.api_keys()
 
         def send(task: str) -> None:

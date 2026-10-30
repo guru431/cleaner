@@ -9,9 +9,20 @@ from cleaner.storage import codec
 
 def test_every_field_of_the_chat_state_is_stored():
     """Потеря issued или счётчиков выдала бы известным сущностям другие замены."""
-    assert set(codec.FIELDS) == {f.name for f in fields(ChatState)}
+    assert set(codec.FIELDS) == {f.name for f in fields(ChatState) if f.metadata.get("persistent", True)}
     state = ChatState(chat_id="c", net_key=bytes(32))
     assert set(json.loads(codec.state_to_json(state))) == set(codec.FIELDS)
+
+
+def test_cache_lifetime_is_shared_by_snapshots_and_is_not_stored(state):
+    from dataclasses import replace
+    from cleaner.core.cache import invalidate_chat, lease_of
+
+    lease = lease_of(state)
+    snapshot = replace(state)
+    invalidate_chat(state.chat_id)
+    assert state.cache_lease is snapshot.cache_lease is lease and not lease.active
+    assert codec.state_from_json(codec.state_to_json(state)).cache_lease is None
 
 
 def test_state_after_sanitizing_survives_the_round_trip(state):

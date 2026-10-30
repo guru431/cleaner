@@ -1014,7 +1014,7 @@ class ChatService:
 
     def _edit(
         self, chat_id: str, user_id: str, action: str, change: Callable[[ChatState, list[Item]], None],
-        version: int | None = None, dry: bool = False, undone: str = "",
+        version: int | None = None, dry: bool = False, undone: str = "", summary: bool = False,
     ) -> EditPreview | None:
         """Правка состояния и повторная очистка входных текстов чата (FR-6.5, FR-6.8). Модели не вызываются.
 
@@ -1100,6 +1100,7 @@ class ChatService:
             return EditPreview(action, current, _changes(done["pairs"], done["items"]), leaks["count"])
 
         def after(committed: int) -> None:
+            done["version"] = committed
             # Снимок — сразу за записью и только для версии, которую она дала (save_undo): успела другая запись —
             # снимка нет. Отмена его стирает; правка не из UNDOABLE сменила версию, и прежний снимок не действует.
             if "before" in done:
@@ -1116,7 +1117,7 @@ class ChatService:
             self.repo.audit("edit", user_id, chat_id, action=action, texts=changed)
         if leaks["count"]:
             self.repo.audit("leak", user_id, chat_id, count=leaks["count"])
-        return None
+        return EditPreview(action, done["version"], _changes(done["pairs"], done["items"]), leaks["count"]) if summary else None
 
     def refresh(self, chat_id: str, user_id: str) -> None:
         self._edit(chat_id, user_id, "refresh", lambda state, items: None)
@@ -1144,7 +1145,7 @@ class ChatService:
 
     def mask_value(
         self, chat_id: str, user_id: str, item_id: str, value: str, type_: EntityType,
-        version: int | None = None, dry: bool = False,
+        version: int | None = None, dry: bool = False, *, summary: bool = False,
     ) -> EditPreview | None:
         def change(state: ChatState, items: list[Item]) -> None:
             item = next((i for i in items if i.id == item_id and i.kind == "input" and i.status == "done"), None)
@@ -1155,10 +1156,10 @@ class ChatService:
                 raise EditRefused("такого фрагмента в тексте нет")
             ops.mask(state, cleaned, type_)
 
-        return self._edit(chat_id, user_id, "mask", change, version, dry)
+        return self._edit(chat_id, user_id, "mask", change, version, dry, summary=summary)
 
     def unmask(
-        self, chat_id: str, user_id: str, values: Iterable[str], version: int | None = None, dry: bool = False,
+        self, chat_id: str, user_id: str, values: Iterable[str], version: int | None = None, dry: bool = False, *, summary: bool = False,
     ) -> EditPreview | None:
         """Снять замену со значений во всём чате (FR-6.2). Таблица чата передаёт все написания сущности."""
         cleaned = [value.strip() for value in values if value.strip()]
@@ -1169,7 +1170,7 @@ class ChatService:
             for value in cleaned:
                 ops.unmask(state, value)
 
-        return self._edit(chat_id, user_id, "unmask", change, version, dry)
+        return self._edit(chat_id, user_id, "unmask", change, version, dry, summary=summary)
 
     def retype(
         self, chat_id: str, user_id: str, entity_id: str, type_: EntityType, version: int | None = None, dry: bool = False,

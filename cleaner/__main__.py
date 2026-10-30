@@ -174,9 +174,6 @@ def cmd_user(args: argparse.Namespace) -> int:
     return 0
 
 
-API_KEY_NAME = 100          # как у страницы «Ключи»
-
-
 def cmd_apikey(args: argparse.Namespace) -> int:
     """Ключи доступа программ (FR-13.1) для проектов, которые заводятся сценарием. add печатает только ключ, одной
     строкой и один раз; --provider (и --model) — ключ шлюза агентов к подключению, --subscription claude|chatgpt — по
@@ -188,9 +185,7 @@ def cmd_apikey(args: argparse.Namespace) -> int:
             user = repo.user_by_login(args.target)
             if user is None:
                 raise ValueError(f"нет пользователя {args.target}")
-            name = (args.name or "").strip()
-            if not 1 <= len(name) <= API_KEY_NAME:
-                raise ValueError(f"имя ключа (--name) — от 1 до {API_KEY_NAME} знаков")
+            name = auth.api_key_name(args.name or "")
             if args.provider and args.subscription:
                 raise ValueError("--provider и --subscription вместе не задаются: у ключа один доступ к модели")
             access = f"{args.subscription}-subscription" if args.subscription else args.provider
@@ -199,7 +194,7 @@ def cmd_apikey(args: argparse.Namespace) -> int:
             )
             key = auth.new_api_key()
             key_id = repo.add_api_key(user.id, name, auth.token_hash(key), key[-4:], upstream, models)
-            repo.audit("key_created", user.id, id=key_id, by="cli")
+            repo.audit("key_created", id=key_id, owner=user.id, by="cli")
             print(key)
         elif args.action == "list":
             logins = {user.id: user.login for user in repo.users()}
@@ -210,7 +205,7 @@ def cmd_apikey(args: argparse.Namespace) -> int:
             key = repo.api_key(args.target)
             if key is None or not repo.disable_api_key(key.id):
                 raise ValueError(f"нет ключа {args.target}")
-            repo.audit("key_disabled", key.user_id, id=key.id, by="cli")
+            repo.audit("key_disabled", id=key.id, owner=key.user_id, by="cli")
     return 0
 
 

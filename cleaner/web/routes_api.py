@@ -94,11 +94,7 @@ def _item_result(request: Request, chat_id: str, item_id: str) -> dict:
 
 def _status(request: Request, chat_id: str, item_id: str) -> str | None:
     """Статус элемента; None — его нет (чат удалили, пока текст ждал)."""
-    try:
-        item = repo_of(request).item(chat_id, item_id)
-    except KeyError:
-        return None
-    return None if item is None else item.status
+    return repo_of(request).item_status(chat_id, item_id)
 
 
 @router.post("/chats")
@@ -216,8 +212,8 @@ def entities(request: Request, chat_id: str, caller: ApiCaller = Depends(get_api
 
 @router.post("/chats/{chat_id}/rules")
 def rules(request: Request, chat_id: str, body: RuleIn, caller: ApiCaller = Depends(get_api_caller)) -> Response:
-    """Правка распознавания во всём чате (FR-6.2, 6.3) — как на странице: предпросмотр, затем правка для его версии
-    чата; changed — сколько входных текстов изменилось. Замену назначают только фрагменту текста item_id."""
+    """Правка без предпросмотра: служба повторяет её при смене версии и возвращает сводку записанной правки.
+    changed — сколько входных текстов изменилось. Замену назначают только фрагменту текста item_id."""
     api_writable_chat(request, chat_id, caller)
     service = service_of(request)
     user_id = caller.user.id
@@ -233,8 +229,7 @@ def rules(request: Request, chat_id: str, body: RuleIn, caller: ApiCaller = Depe
         def edit(**options):
             return service.unmask(chat_id, user_id, [body.value], **options)
     try:
-        preview = edit(dry=True)
-        edit(version=preview.version)
+        preview = edit(summary=True)
     except EditRefused as exc:
         raise HTTPException(422, str(exc)) from None
     except KeyError:

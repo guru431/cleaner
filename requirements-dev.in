@@ -1,6 +1,7 @@
 -c requirements.txt
 pytest
 pytest-timeout
+pytest-xdist
 httpx
 # тестовый клиент Starlette: с httpx он устарел (StarletteDeprecationWarning)
 httpx2

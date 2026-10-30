@@ -4,6 +4,18 @@ import logging
 import re
 
 from scripts import api_smoke
+
+
+def test_smoke_reports_a_non_json_http_error(monkeypatch):
+    import io
+    import urllib.error
+
+    class Opener:
+        def open(self, *args, **kwargs):
+            raise urllib.error.HTTPError("https://cleaner.example", 502, "Bad gateway", {}, io.BytesIO(b"<html>failure</html>"))
+
+    monkeypatch.setattr(api_smoke.urllib.request, "build_opener", lambda *args: Opener())
+    assert api_smoke.http_call("https://cleaner.example", "ck_fictional", None)("GET", "/api/v1/chats", None) == (502, {})
 from tests.test_acceptance_core import CONTROL, TEXT
 
 KEY = re.compile(r"ck_[A-Za-z0-9_-]{43}")
@@ -39,7 +51,8 @@ def test_ac_5_8_control_text_of_stage_1_is_fully_replaced(api):
 
 def test_ac_5_8_key_is_never_stored_or_logged_in_clear(ivan, repo, tmp_path, caplog):
     caplog.set_level(logging.DEBUG)
-    key = KEY.search(ivan.post("/keys", name="Сборка отчётов").text).group(0)
+    issued = ivan.post("/keys", name="Сборка отчётов")
+    key = KEY.search(ivan.get(issued.headers["location"]).text).group(0)
     headers = {"X-Cleaner-Key": key}
     chat_id = ivan.client.post("/api/v1/chats", json={"title": "AC-5.8"}, headers=headers).json()["id"]
     ivan.client.post(f"/api/v1/chats/{chat_id}/texts", json={"text": "Почта a@x.example"}, headers=headers)

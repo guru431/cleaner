@@ -33,6 +33,7 @@ _EMAIL = re.compile(
 # в нём значат, что это уже параметры адреса («?mail=ivanov@contoso.ru»), — тогда это e-mail.
 _USERINFO_BEFORE = re.compile(r"[a-z][a-z0-9+.-]{0,31}://(?P<user>[^\s/@]*)$", re.IGNORECASE)
 _NOT_USERINFO = re.compile(r"[?#=]")
+_REMOTE_COMMAND = re.compile(r"(?:^|[;&|\r\n])\s*(?:sudo\s+)?(?:ssh|scp|sftp|rsync)\b[^;&|\r\n]*$", re.IGNORECASE)
 # Вход в адресе: «схема://логин@хост» и «схема://логин:пароль@хост». Ищется сам, а не через шаблон
 # e-mail: пароль бывает с «!$#=», хост — без точки. Пароль найдёт слой секретов, хост — слой 3.
 _URL_LOGIN = re.compile(
@@ -299,6 +300,13 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         url = _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()])
         if url and not _NOT_USERINFO.search(url.group("user") + local):
             continue        # пользователь адреса, а не e-mail: вход — правило _URL_LOGIN ниже
+        if not _IPV4_DOMAIN.fullmatch(hostmap.dotted(domain)) and _REMOTE_COMMAND.search(text[max(0, m.start() - 300):m.start()]):
+            # Цель ssh/scp — учётная запись и узел. Узел регистрируется отдельно: его короткое имя дальше тоже скрывается.
+            login = local.removesuffix("\\")
+            if login.lower() not in skip:
+                add(m.start(), m.start() + len(login), EntityType.ACCOUNT)
+            add(m.start() + len(local) + 1, end, EntityType.HOST)
+            continue
         if _IPV4_DOMAIN.fullmatch(hostmap.dotted(domain)):
             # Вход вида ivanov@10.1.2.5; служебный («user@», «root@») человека не выдаёт, как и в адресе. «\» перед «@» —
             # не часть имени входа.

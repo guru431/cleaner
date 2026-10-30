@@ -91,16 +91,32 @@ class _Tables:
 _TABLES = 8
 _tables: OrderedDict[str, _Tables] = OrderedDict()
 _tables_lock = threading.Lock()
+_generation = 0
+
+
+def forget_chat(chat_id: str) -> None:
+    global _generation
+    with _tables_lock:
+        _tables.pop(chat_id, None)
+        _generation += 1
 
 
 def _tables_of(state: ChatState) -> _Tables:
+    from cleaner.core.cache import lease_of
+
+    lease = lease_of(state)
     with _tables_lock:
-        cached = _tables.get(state.chat_id)
+        cached = _tables.get(state.chat_id) if lease.active else None
+        generation = _generation
         if cached is not None and cached.table == state.surrogates:
             _tables.move_to_end(state.chat_id)
             return cached
     built = _Tables(dict(state.surrogates))
     with _tables_lock:
+        if generation != _generation or not lease.active:
+            from cleaner.core.cache import clear_strings
+            clear_strings()
+            return built
         _tables[state.chat_id] = built
         _tables.move_to_end(state.chat_id)
         while len(_tables) > _TABLES:

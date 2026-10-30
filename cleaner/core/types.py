@@ -97,6 +97,13 @@ class ChatRule:
     bounds: str = "none"           # none — где угодно (выделение); strict | letters — как написания сущности (смена типа)
 
 
+class CacheLease:
+    """Право живых снимков чата сохранять производные таблицы в памяти процесса."""
+
+    def __init__(self) -> None:
+        self.active = True
+
+
 @dataclass
 class ChatState:
     """Всё, что чат помнит о заменах. Хранение — забота модуля storage."""
@@ -113,6 +120,7 @@ class ChatState:
     counters: dict[str, int] = field(default_factory=dict)
     net6: dict[str, int] = field(default_factory=dict)               # подсеть /64 -> её номер
     written: bool = False      # режим написаний (чат шлюза): каждое написание — своя замена, восстанавливается точно
+    cache_lease: CacheLease | None = field(default=None, repr=False, compare=False, metadata={"persistent": False})
 
 
 @dataclass(frozen=True)

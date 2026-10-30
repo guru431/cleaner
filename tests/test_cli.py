@@ -114,8 +114,11 @@ def test_apikey_add_list_disable(home, monkeypatch, capsys, clock):
     assert main(["apikey", "add", "boss", "--name", " "]) == 1
     repo = open_repo(home / "data" / "cleaner.db", key, clock)
     assert [(e.event, e.details) for e in repo.audit_events(limit=2)] == [
-        ("key_disabled", {"id": key_id, "by": "cli"}), ("key_created", {"id": key_id, "by": "cli"}),
+        ("key_disabled", {"id": key_id, "by": "cli", "owner": repo.api_key(key_id).user_id}),
+        ("key_created", {"id": key_id, "by": "cli", "owner": repo.api_key(key_id).user_id}),
     ]
+    assert all(event.user_id is None for event in repo.audit_events(limit=2))
+    assert main(["apikey", "add", "boss", "--name", "a\tb"]) == 1
     assert issued.encode("ascii") not in b"".join(p.read_bytes() for p in (home / "data").glob("cleaner.db*"))
     repo.conn.close()
 

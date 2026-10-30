@@ -101,9 +101,20 @@ class _Index:
 _INDEXES = 8
 _indexes: OrderedDict[str, tuple[tuple, _Index]] = OrderedDict()
 _indexes_lock = threading.Lock()
+_generation = 0
+
+
+def forget_chat(chat_id: str) -> None:
+    global _generation
+    with _indexes_lock:
+        _indexes.pop(chat_id, None)
+        _generation += 1
 
 
 def _index(state: ChatState, settings: Settings) -> _Index:
+    from cleaner.core.cache import lease_of
+
+    lease = lease_of(state)
     # Три кортежа, а не кортеж на сущность: кортежи строк сборщик мусора не отслеживает, и тысячи кортежей подписи в
     # памяти не удлиняют каждую полную сборку.
     values = state.entities.values()
@@ -117,12 +128,14 @@ def _index(state: ChatState, settings: Settings) -> _Index:
         ops.open_values(state, settings),
     )
     with _indexes_lock:
-        cached = _indexes.get(state.chat_id)
+        cached = _indexes.get(state.chat_id) if lease.active else None
+        generation = _generation
     if cached is not None and cached[0][1:] == rest:
         before, index = cached[0][0], cached[1]
         if before == entities:
             with _indexes_lock:
-                _indexes.move_to_end(state.chat_id)
+                if state.chat_id in _indexes:
+                    _indexes.move_to_end(state.chat_id)
             return index
         count = len(before[0])
         if count < len(entities[0]) and all(now[:count] == was for now, was in zip(entities, before)):
@@ -132,6 +145,10 @@ def _index(state: ChatState, settings: Settings) -> _Index:
     else:
         index = _build(entities, *rest)
     with _indexes_lock:
+        if generation != _generation or not lease.active:
+            from cleaner.core.cache import clear_strings
+            clear_strings()
+            return index
         _indexes[state.chat_id] = ((entities, *rest), index)
         _indexes.move_to_end(state.chat_id)
         while len(_indexes) > _INDEXES:

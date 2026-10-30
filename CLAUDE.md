@@ -9,11 +9,12 @@ tests:
   interpreter: .venv/Scripts/python.exe
   targeted: .venv/Scripts/python.exe -m pytest tests/<файл>.py
   fast: .venv/Scripts/python.exe -m pytest
-  full: .venv/Scripts/python.exe -m pytest -m "not manual"
+  full: .venv/Scripts/python.exe -m pytest -n 0 -m "not manual"
 
 Данные в тестах — только вымышленные. Настоящие тексты в репозиторий не попадают.
-Правка слоёв 1–3 и восстановления — ещё `.venv/Scripts/python.exe -m pytest tests/test_long_input.py -m integration`: обход всех слоёв по длинным рядам и сторожа линейности (около 40 с) вынесены из быстрого набора ради нормы 60 с, пороги в секундах краснеют от нагрузки машины.
-Правка шлюза агентов — ещё `.venv/Scripts/python.exe -m pytest tests/test_gateway_speed.py -m integration -rP`: добавка шлюза по разделу 13 спецификации 2026-10-28 (полный путь до заглушки провайдера на петле, `-rP` печатает p50, p95 и добавку); мерить на машине без нагрузки.
+Быстрый набор по умолчанию идёт в двух процессах pytest-xdist, файлы распределяются целиком (`--dist=loadfile`); порог 60 с и таймаут каждого теста прежние. Полный набор и замеры времени — с `-n 0`, чтобы параллельные тесты не искажали числа.
+Правка слоёв 1–3 и восстановления — ещё `.venv/Scripts/python.exe -m pytest -n 0 tests/test_long_input.py -m integration`: обход всех слоёв по длинным рядам и сторожа линейности (около 40 с) вынесены из быстрого набора ради нормы 60 с, пороги в секундах краснеют от нагрузки машины.
+Правка шлюза агентов — ещё `.venv/Scripts/python.exe -m pytest -n 0 tests/test_gateway_speed.py -m integration -rP`: добавка шлюза по разделу 13 спецификации 2026-10-28 (полный путь до заглушки провайдера на петле, `-rP` печатает p50, p95 и добавку); мерить на машине без нагрузки.
 
 ## Запуск для разработки
 

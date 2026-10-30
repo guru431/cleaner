@@ -8,7 +8,8 @@ import os
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterable
+import weakref
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -199,6 +200,7 @@ class Repository:
         self.clock = clock
         self.lock = threading.RLock()            # одно соединение на процесс: доступ по очереди
         self.global_key = self._load_global_key()
+        self._chat_delete_hooks: list[weakref.WeakMethod] = []
 
     # --- служебное ---------------------------------------------------------
 
@@ -342,6 +344,21 @@ class Repository:
             self._enc(self._dek(chat_id), title, f"chats.title:{chat_id}"), self._now(), chat_id,
         )
 
+    def on_chat_deleted(self, callback: Callable[[str], None]) -> None:
+        """Подписка живой службы на удаление; хранилище не продлевает жизнь службы и её кэшей."""
+        with self.lock:
+            self._chat_delete_hooks.append(weakref.WeakMethod(callback))
+
+    def _forget_chat(self, chat_id: str) -> None:
+        from cleaner.core.cache import invalidate_chat
+
+        invalidate_chat(chat_id)
+        with self.lock:
+            alive = [(reference, callback) for reference in self._chat_delete_hooks if (callback := reference()) is not None]
+            self._chat_delete_hooks = [reference for reference, _ in alive]
+        for _, callback in alive:
+            callback(chat_id)
+
     def delete_chat(self, chat_id: str) -> None:
         """Строки чата и его ключ удаляются (элементы — каскадом схемы: items.chat_id ON DELETE CASCADE, foreign_keys
         включает db.connect); secure_delete перезаписывает их на диске (FR-1.4).
@@ -353,6 +370,7 @@ class Repository:
         """
         with self.lock:
             self.conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+        self._forget_chat(chat_id)
         for _ in range(_CHECKPOINT_ATTEMPTS):
             with self.lock:
                 busy = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
@@ -372,11 +390,16 @@ class Repository:
         return ledger.chat_secret(self._dek(chat_id))
 
     def load_state(self, chat_id: str) -> tuple[ChatState, int]:
-        row = self._one("SELECT state_enc, version FROM chats WHERE id = ?", chat_id)
-        if row is None:
-            raise KeyError(chat_id)
-        raw = crypto.unseal(self._dek(chat_id), row["state_enc"], f"chats.state:{chat_id}")
-        return state_from_json(raw), row["version"]
+        from cleaner.core.cache import lease_of
+
+        with self.lock:
+            row = self._one("SELECT state_enc, version FROM chats WHERE id = ?", chat_id)
+            if row is None:
+                raise KeyError(chat_id)
+            raw = crypto.unseal(self._dek(chat_id), row["state_enc"], f"chats.state:{chat_id}")
+            state = state_from_json(raw)
+            lease_of(state)
+            return state, row["version"]
 
     # --- отмена последней правки (раздел 14) -------------------------------------------
 
@@ -429,6 +452,11 @@ class Repository:
     def item(self, chat_id: str, item_id: str) -> Item | None:
         row = self._one("SELECT * FROM items WHERE id = ? AND chat_id = ?", item_id, chat_id)
         return None if row is None else self._item(row, self._dek(chat_id))
+
+    def item_status(self, chat_id: str, item_id: str) -> str | None:
+        """Опрос задания без чтения и расшифровки оригинала и результата."""
+        row = self._one("SELECT status FROM items WHERE id = ? AND chat_id = ?", item_id, chat_id)
+        return None if row is None else row["status"]
 
     def _insert_item(self, key: bytes, chat_id: str, item: Item, seq: int, now: str) -> None:
         self.conn.execute(

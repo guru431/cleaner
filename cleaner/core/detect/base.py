@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
-from cleaner.core.types import EntityType, Settings, Span
+from cleaner.core.types import CacheLease, EntityType, Settings, Span
 
 _DATA = Path(__file__).resolve().parents[2] / "data"
 
@@ -49,6 +49,7 @@ class DetectContext:
     issued_domains: frozenset[str] = frozenset()       # подмены доменов и метки доменных имён: «domain-1.example», «<org_1>»
     issued_names: frozenset[str] = frozenset()         # подмены частей имён: «host-1», «sub-2»
     builtin: Builtin = field(default_factory=load_builtin)
+    cache_lease: CacheLease | None = field(default=None, repr=False, compare=False)
 
 
 class Detector(Protocol):

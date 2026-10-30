@@ -97,6 +97,39 @@ def test_no_control_value_reaches_the_provider(gw):
     assert "srv-dc01.corp.contoso.ru" in blocks[1]["text"] and "i.ivanov@contoso.ru" in blocks[1]["text"]
 
 
+def test_reply_snapshot_does_not_change_with_the_next_request(state, settings):
+    from cleaner.core.pipeline import sanitize
+
+    sanitize(state, "почта one@contoso.ru", settings)
+    snapshot = agent_service._snapshot(state)
+    entity = next(iter(state.entities.values()))
+    before = list(snapshot.entities[entity.id].forms)
+    entity.forms.append("ONE@CONTOSO.RU")
+    entity.parts["first"] = "Новое"
+    entity.words.append("изменение")
+    assert snapshot.entities[entity.id].forms == before
+    assert snapshot.entities[entity.id].parts == {}
+    assert snapshot.entities[entity.id].words == []
+
+
+def test_finished_reply_does_not_keep_the_snapshot_alive(gw, monkeypatch):
+    import weakref
+
+    snapshots = []
+    original = agent_service._snapshot
+
+    def snapshot(state):
+        copied = original(state)
+        snapshots.append(weakref.ref(copied))
+        return copied
+
+    monkeypatch.setattr(agent_service, "_snapshot", snapshot)
+    reply = gw.call(body(TASK))
+    assert b"message_stop" in b"".join(reply.events)
+    assert snapshots and all(reference() is None for reference in snapshots)
+    reply.close()
+
+
 def test_history_is_resent_byte_for_byte(gw, repo):
     first, second, _ = two_turns(gw)
     one, two = (request["body"] for request in gw.stub.requests)
