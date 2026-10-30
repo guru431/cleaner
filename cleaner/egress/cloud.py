@@ -7,9 +7,12 @@
 """
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
+import secrets
 import threading
+import uuid
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -35,6 +38,11 @@ FORBIDDEN_EXTRA = frozenset({
     # поиск и надстройки маршрутизаторов и провайдеров: OpenRouter, xAI, DashScope
     "plugins", "search_parameters", "enable_search", "web_search", "search_options", "documents", "file_ids",
 })
+# Узел адреса подключения → заголовок сессии, который провайдер требует: OpenCode Go без x-opencode-session отвечает
+# 400 MissingSessionID по всем трём протоколам (проба 30.10.2026).
+# Значение — UUID из отпечатка разговора или чата: постоянное в пределах разговора ради кэша промпта провайдера,
+# своё у каждого субагента и ничего не говорит о самом разговоре. Заголовок агента с тем же именем заменяется.
+SESSION_HEADERS: dict[str, str] = {"opencode.ai": "x-opencode-session"}
 _ERROR_BYTES = 8192
 _TIMEOUT = httpx.Timeout(30.0, read=180.0)          # модели с рассуждениями молчат минутами до первого слова
 
@@ -82,6 +90,14 @@ def check_extra_body(extra: object) -> None:
     forbidden = sorted(set(extra) & FORBIDDEN_EXTRA)
     if forbidden:
         raise ValueError(f"эти поля задаёт сам Cleaner или они запрещены: {', '.join(forbidden)}")
+
+
+def session_headers(base_url: str, seed: str) -> dict[str, str]:
+    """Заголовок сессии провайдера (SESSION_HEADERS) со значением из seed; у прочих узлов — ничего."""
+    name = SESSION_HEADERS.get((urlsplit(base_url).hostname or "").lower())
+    if name is None:
+        return {}
+    return {name: str(uuid.UUID(hex=hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32], version=4))}
 
 
 def _headers(connection: Connection) -> dict[str, str]:
@@ -154,6 +170,8 @@ def send(
     check_extra_body(dict(connection.extra_body))
     protocol = PROTOCOLS[connection.protocol]
     url, headers, body = protocol.request(ctx, connection)
+    # Пустой chat_id — у проверки подключения: сессия на один запрос.
+    headers = {**headers, **session_headers(connection.base_url, ctx.chat_id or secrets.token_hex(16))}
     key = connection.api_key
     if cancel is not None and cancel.is_set():
         return                                      # остановили, пока задание ждало в пуле: запрос не уходит

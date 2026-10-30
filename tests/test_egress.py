@@ -1,14 +1,16 @@
 """Модуль выхода в сеть (раздел 10.3): протоколы, проверка утечек, адреса, ошибки провайдера. Сеть подменена."""
 import json
 import threading
+import uuid
 from dataclasses import replace
 
 import httpx
 import pytest
 
+from cleaner.agent_service import SUBSCRIPTIONS
 from cleaner.core.pipeline import OutMessage, Turn, build_outgoing, probe_context
 from cleaner.egress import ProviderError
-from cleaner.egress.cloud import Connection, LeakDetected, check_extra_body, check_url, send
+from cleaner.egress.cloud import Connection, LeakDetected, check_extra_body, check_url, send, session_headers
 
 KEY = "REDACTED_SK_KEY"
 
@@ -286,3 +288,28 @@ def test_only_context_from_the_pipeline_is_accepted():
 
 def test_connection_repr_hides_the_key():
     assert KEY not in repr(connection()) and KEY not in str(connection())
+
+
+def test_session_header_only_for_listed_hosts():
+    """OpenCode Go без x-opencode-session отвечает 400 MissingSessionID по всем трём протоколам (план 5Г)."""
+    for url in ("https://opencode.ai/zen/go", "https://opencode.ai/zen/go/v1"):
+        header = session_headers(url, "seed-1")
+        assert list(header) == ["x-opencode-session"] and uuid.UUID(header["x-opencode-session"]).version == 4
+        assert header == session_headers(url, "seed-1") != session_headers(url, "seed-2")
+    for url in ("https://api.deepseek.com/anthropic", *(address for _, address in SUBSCRIPTIONS.values())):
+        assert session_headers(url, "seed-1") == {}
+
+
+def test_chat_send_and_provider_check_carry_the_session_header(ctx, state, settings):
+    conn = connection("anthropic", "https://opencode.ai/zen/go")
+    sessions = []
+    for context, chat_state in ((ctx, state), (ctx, state), (probe_context("p", "m"), None), (probe_context("p", "m"), None)):
+        recorder = Recorder(anthropic_chunks("x"))
+        run(context, conn, recorder, chat_state, settings)
+        sessions.append(recorder.requests[0].headers["x-opencode-session"])
+    assert sessions[0] == sessions[1] == session_headers(conn.base_url, ctx.chat_id)["x-opencode-session"]
+    # Проверка подключения — с пустым chat_id: значение случайное, но заголовок есть.
+    assert uuid.UUID(sessions[2]).version == 4 and len(set(sessions)) == 3
+    recorder = Recorder(anthropic_chunks("x"))
+    run(probe_context("p", "m"), connection("anthropic", "https://llm.example/anthropic"), recorder)
+    assert "x-opencode-session" not in recorder.requests[0].headers

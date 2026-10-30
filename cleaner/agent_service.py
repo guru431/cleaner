@@ -346,6 +346,8 @@ class AgentService:
         repeated: dict[walk.Path, object] = {}
         fresh: list[tuple[str, walk.Unit]] = []
         structural = proto.structural(call.body)
+        # Заголовок сессии провайдера (OpenCode Go) — из отпечатка разговора; присланный агентом заменяется.
+        session = cloud.session_headers(access.connection.base_url, conv_id)
         result = _Prepared(secret=secret, settings=settings, repeated={"in": [], "out": []})
         for direction, group in groups.items():
             for unit in group:
@@ -376,7 +378,8 @@ class AgentService:
             body = proto.add_instruction(proto.rebuild(call.body, replaced), pipeline.system_prompt(state.label_style))
             out, leaks = pipeline.build_agent_outgoing(
                 state, settings, chat_id=chat_id, provider_id=access.id, path=call.path, query=call.query,
-                headers=call.headers, allowed=access.headers, prefixes=proto.header_prefixes, body=body, checked=checked,
+                headers={**call.headers, **session}, allowed=access.headers | session.keys(), prefixes=proto.header_prefixes,
+                body=body, checked=checked,
             )
             if not leaks:
                 break

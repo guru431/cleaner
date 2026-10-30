@@ -3,6 +3,7 @@ Cleaner, заглушка провайдера на петле. Тела — з�
 import json
 import re
 import threading
+import uuid
 from dataclasses import replace
 from datetime import timedelta
 
@@ -14,6 +15,7 @@ from cleaner.core.agent import ledger, walk
 from cleaner.core.pipeline import system_prompt
 from cleaner.core.types import ChatRule, Policy
 from cleaner.core.types import EntityType as T
+from cleaner.egress import cloud
 from cleaner.storage.repo import Provider, StaleState
 from tests.agent_bodies import agent_blocks, assistant, body, events_of, model_turn, tool_result
 from tests.stub_provider import StubProvider
@@ -322,6 +324,23 @@ def test_provider_error_comes_back_as_is(gw):
     gw.stub.script.append({"status": 429, "body": error, "headers": {"retry-after": "7"}})
     reply = gw.call(body(TASK))
     assert (reply.status, reply.headers["retry-after"], json.loads(reply.body)) == (429, "7", error)
+
+
+def test_opencode_go_session_is_per_conversation(gw, monkeypatch):
+    """Два субагента одного ключа: у каждого разговора свой заголовок сессии, у ходов одного — один (ревью 5Г, п. 3)."""
+    monkeypatch.setattr(cloud, "SESSION_HEADERS", {"127.0.0.1": "x-opencode-session"})
+    agent = {"anthropic-version": "2023-06-01", "x-api-key": "ck_agent", "x-claude-code-session-id": "sess-agent-1",
+             "x-opencode-session": "agent-own"}
+    gw.stub.script += [answer, model_turn("Готово"), model_turn("Другое")]
+    first = body(TASK)
+    blocks = agent_blocks(gw.send(first, headers=agent))
+    gw.send(body(TASK, assistant(*blocks), tool_result("toolu_1", TEXT)), headers=agent)
+    gw.send(body("Другая задача: проверь журнал сборки"), headers=agent)
+    one, two, other = (gw.stub.headers(n)["x-opencode-session"] for n in range(3))
+    assert one == two != other and uuid.UUID(one).version == 4
+    conv = ledger.conversation_id(ledger.conversation_secret(gw.repo.global_key), gw.key_id, walk.first_user(first))
+    assert "agent-own" not in (one, other) and gw.stub.headers(0)["x-claude-code-session-id"] == "sess-agent-1" != one
+    assert conv not in one and conv[:8] not in one
 
 
 def test_audit_has_no_text_or_keys(gw, repo):
