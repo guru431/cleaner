@@ -396,3 +396,30 @@ def test_agent_send_carries_gateway_and_upstream_times(gw, repo):
     for event in send:
         times = (event.details["ms_prepare"], event.details["ms_upstream"])
         assert all(type(ms) is int and ms >= 0 for ms in times), event.details
+
+
+def test_parallel_request_waits_only_for_cleaning(gw):
+    """Запрос, чья модель ещё думает, не держит чат (раздел 13): замок снимается до отправки, и второй запрос того же
+    ключа и чата проходит, пока первый ждёт провайдера."""
+    received, release = threading.Event(), threading.Event()
+
+    def thinking(request):
+        received.set()
+        release.wait(5)
+        return model_turn("Первый")
+
+    gw.stub.script += [thinking, model_turn("Второй")]
+    first: dict[str, bytes] = {}
+    worker = threading.Thread(target=lambda: first.update(raw=gw.send(body(TASK))))
+    worker.start()
+    try:
+        assert received.wait(5)
+        second = gw.send(body(f"Второй: {TASK}"))
+        waiting = worker.is_alive()
+    finally:
+        release.set()
+        worker.join(5)
+    assert waiting
+    assert gw.chat_of(body(TASK)) == gw.chat_of(body(f"Второй: {TASK}"))
+    assert events_of(first["raw"])[-1]["type"] == events_of(second)[-1]["type"] == "message_stop"
+    assert "Первый" in first["raw"].decode("utf-8") and "Второй" in second.decode("utf-8")
