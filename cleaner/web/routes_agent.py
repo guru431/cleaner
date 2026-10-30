@@ -20,6 +20,7 @@ from cleaner.web.deps import AGENT_BODY_BYTES, ApiCaller, get_api_caller, repo_o
 router = APIRouter(prefix="/agent/anthropic")
 openai_router = APIRouter(prefix="/agent/openai")
 MAX_BODY = AGENT_BODY_BYTES         # и после распаковки (8.2)
+MAX_DEPTH = 64                      # обходы очистки рекурсивны: тело у предела разбора JSON уронило бы их (500)
 _END = object()
 
 
@@ -41,6 +42,18 @@ def _inflate(raw: bytes, encoding: str) -> bytes:
     raise _refused(400, "тело запроса не распаковывается")
 
 
+def _too_deep(value: object) -> bool:
+    """Объекты и списки вложены глубже MAX_DEPTH (само тело — уровень 1); обход без рекурсии."""
+    stack = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, (dict, list)):
+            if depth > MAX_DEPTH:
+                return True
+            stack.extend((child, depth + 1) for child in (node.values() if isinstance(node, dict) else node))
+    return False
+
+
 async def _body(request: Request) -> dict:
     raw = await request.body()          # сжатое тело ограничивает app.BodyLimit
     encoding = request.headers.get("content-encoding", "").strip().lower()
@@ -52,6 +65,8 @@ async def _body(request: Request) -> dict:
         )
     try:
         body = json.loads(raw)
+        if _too_deep(body):
+            raise _refused(400, f"тело запроса вложено глубже {MAX_DEPTH} уровней")
         # Строка с «\ud800» без пары — допустимый JSON, но её не записать ни в базу, ни в запрос к провайдеру.
         json.dumps(body, ensure_ascii=False).encode("utf-8")
     except (ValueError, UnicodeEncodeError, RecursionError):

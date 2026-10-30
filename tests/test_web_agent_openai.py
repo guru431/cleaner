@@ -8,6 +8,7 @@ import pytest
 from cleaner.storage.repo import Provider
 from cleaner.web import auth, routes_agent
 from tests.agent_bodies import body as claude_body
+from tests.agent_bodies import model_turn
 from tests.stub_provider import StubProvider
 from tests.test_agent_chat import chunk, opencode
 from tests.test_agent_responses import completed, message, text_events
@@ -104,6 +105,36 @@ def test_openai_errors_have_the_openai_shape(agent, stub, monkeypatch):
     stub.script.append({"status": 429, "body": {"error": {"message": "slow down", "type": "rate_limit_error"}}, "headers": {"retry-after": "7"}})
     limited = post(agent, "/v1/chat/completions", chat_request(), key)
     assert limited.status_code == 429 and limited.headers["retry-after"] == "7" and limited.json()["error"]["message"] == "slow down"
+
+
+@pytest.mark.parametrize("protocol", ["anthropic", "openai"])
+def test_too_deep_body_is_400_not_500(agent, stub, repo, protocol):
+    """Рекурсивные обходы очистки на теле у предела разбора JSON падали RecursionError → 500; теперь — отказ по телу."""
+    if protocol == "anthropic":
+        path, request, reply = "/agent/anthropic/v1/messages", {
+            "model": "m-1", "max_tokens": 16, "stream": True, "messages": [{"role": "user", "content": "привет"}],
+        }, model_turn("Готово")
+    else:
+        path, request, reply = BASE + "/v1/chat/completions", chat_request(), [
+            chunk({"role": "assistant", "content": "Готово"}), chunk({}, "stop"),
+        ]
+
+    def send(depth: int):           # само тело — уровень 1; текстом: json.dumps такую глубину не пишет
+        deep = "[" * (depth - 1) + '"лист"' + "]" * (depth - 1)
+        raw = json.dumps(dict(request, metadata="@"), ensure_ascii=False).replace('"@"', deep).encode("utf-8")
+        return agent.post(path, content=raw, headers={"content-type": "application/json", "x-cleaner-key": agent.keys[protocol]})
+
+    # Служебное поле обходит проверка утечек. 2000 — разбор проходит, обход падал (500); 5000 — RecursionError уже в разборе.
+    for depth in (2000, routes_agent.MAX_DEPTH + 1, 5000):
+        response = send(depth)
+        assert response.status_code == 400, response.text
+        error = response.json()["error"]
+        assert error["type"] == "invalid_request_error" and error["message"].startswith("Cleaner:")
+        assert (response.json().get("type") == "error") == (protocol == "anthropic") and ("code" in error) == (protocol == "openai")
+    assert send(routes_agent.MAX_DEPTH + 1).json()["error"]["message"] == "Cleaner: тело запроса вложено глубже 64 уровней"
+    assert [event.details["reason"] for event in repo.audit_events("agent_refused")] == ["body"] * 4
+    stub.script.append(reply)
+    assert send(routes_agent.MAX_DEPTH).status_code == 200 and len(stub.requests) == 1
 
 
 def test_models_list_in_openai_shape(agent):

@@ -343,6 +343,32 @@ def test_opencode_go_session_is_per_conversation(gw, monkeypatch):
     assert conv not in one and conv[:8] not in one
 
 
+def test_unknown_message_field_is_cleaned(gw, monkeypatch):
+    """8.3: незнакомое поле сообщения Claude Code очищается как текст и, как любой блок, повторяется из журнала."""
+    fresh: list[walk.Path] = []
+    new = gw.service._new
+
+    def spy(proto, unit, *args):
+        fresh.append(unit.path)
+        return new(proto, unit, *args)
+
+    monkeypatch.setattr(gw.service, "_new", spy)
+    note = ("messages", 0, "note")
+    gw.stub.script += [answer, model_turn("Готово")]
+    first = body(TASK)
+    first["messages"][0]["note"] = "узел srv-dc01.corp.contoso.ru"
+    blocks = agent_blocks(gw.send(first))
+    assert note in fresh
+    fresh.clear()
+    second = body(TASK, assistant(*blocks), tool_result("toolu_1", TEXT))
+    second["messages"][0]["note"] = first["messages"][0]["note"]
+    gw.send(second)
+    assert note not in fresh                # ход 2 — из журнала
+    one, two = (request["body"]["messages"][0] for request in gw.stub.requests)
+    assert HOST.fullmatch(one["note"].removeprefix("узел ")) and "srv-dc01" not in gw.stub.bodies()
+    assert two["note"] == one["note"] and one["role"] == two["role"] == "user"
+
+
 def test_audit_has_no_text_or_keys(gw, repo):
     two_turns(gw)
     events = repo.audit_events(limit=1000)

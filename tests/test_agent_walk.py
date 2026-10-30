@@ -130,6 +130,21 @@ def test_sanitize_unit_touches_only_content_strings():
     assert schema["properties"]["path"] == {"type": "string", "format": "uri", "description": "ПУТЬ К ФАЙЛУ"}
 
 
+def test_unknown_message_field_is_cleaned_and_put_back():
+    """8.3: строка под незнакомым ключом сообщения — текст, как в Chat Completions и Responses; role не трогается."""
+    request = {"messages": [{"role": "user", "content": "вопрос", "note": "узел srv", "meta": {"type": "kind", "tag": "метка"}}]}
+    units = by_path(walk.anthropic_units(request))
+    assert [(path, u.role, u.kind) for path, u in units.items()] == [
+        (("messages", 0, "content"), "user", "text"), (("messages", 0, "note"), "user", "other"),
+        (("messages", 0, "meta"), "user", "other"),
+    ]
+    replaced = {path: walk.sanitize_unit(u, str.upper) for path, u in units.items()}
+    assert walk.rebuild(request, replaced)["messages"][0] == {
+        "role": "user", "content": "ВОПРОС", "note": "УЗЕЛ SRV", "meta": {"type": "kind", "tag": "МЕТКА"},
+    }
+    assert request["messages"][0]["note"] == "узел srv"       # присланное тело не меняется
+
+
 def test_images_inside_tool_results_are_media():
     image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
     units = walk.anthropic_units({"messages": [

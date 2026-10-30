@@ -83,7 +83,10 @@ def anthropic_units(body: dict) -> list[Unit]:
         _content(units, ("system",), "system", system)
     for i, message in enumerate(body.get("messages") or ()):
         if isinstance(message, dict):
-            _content(units, ("messages", i, "content"), str(message.get("role", "")), message.get("content"))
+            role = str(message.get("role", ""))
+            _content(units, ("messages", i, "content"), role, message.get("content"))
+            # Строка под незнакомым ключом сообщения — текст (8.3), как в Chat Completions и Responses.
+            units += [Unit(("messages", i, key), role, "other", value) for key, value in message.items() if key not in ("role", "content")]
         else:
             units.append(Unit(("messages", i), "user", "other", message))
     units += [Unit(("tools", i), "tools", "tool_def", bare(tool)) for i, tool in enumerate(body.get("tools") or ())]
