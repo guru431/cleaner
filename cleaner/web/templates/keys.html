@@ -24,7 +24,7 @@
     {% endif %}
     <pre class="text mono">{{ text }}</pre>
     {% endfor %}
-    <p class="sub">Сертификат Cleaner самоподписанный: укажите путь к его файлу на машине агента, проверку TLS не выключайте.</p>
+    <p class="sub">Сертификат Cleaner самоподписанный: {% if cert %}<a href="/cert.pem">Сертификат службы</a> — {% endif %}сохраните его файл на машине агента и впишите путь к нему вместо <code>&lt;путь к файлу сертификата Cleaner на этой машине&gt;</code>, проверку TLS не выключайте.</p>
     {% else %}
     <p class="sub">Проверка из командной строки:</p>
     <pre class="text mono">curl -H "X-Cleaner-Key: {{ issued }}" {{ endpoint }}</pre>

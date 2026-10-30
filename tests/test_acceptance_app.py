@@ -73,6 +73,10 @@ def test_ac_1_11_only_the_login_page_is_open_without_a_session(app, browser):
         path = route.path or ""
         if path == "/login" or path.startswith("/static"):
             continue
+        if path == "/cert.pem":
+            # Сертификат — то, что клиент получает при TLS (план 5Г); у приложения тестов TLS нет — и файла нет.
+            assert anonymous.client.get(path).status_code == 404
+            continue
         concrete = re.sub(r"\{[^}]+\}", "0" * 32, path)
         for method in sorted((route.methods or set()) - {"HEAD"}):
             response = anonymous.client.request(method, concrete)

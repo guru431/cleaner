@@ -41,11 +41,16 @@ def _claude_subscription(request: Request, key: str) -> str:
     return json.dumps({"env": env}, ensure_ascii=False, indent=2)
 
 
+def _quoted(value: str) -> str:
+    """Строка в кавычках для TOML и Python: строка JSON допустима в обоих (модель подписки — свободное поле)."""
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _codex(request: Request, key: str, model: str, subscription: bool) -> str:
     """Codex — свой провайдер в ~/.codex/config.toml (раздел 9.3): по подписке — вход ChatGPT (requires_openai_auth, без
     env_key: иначе Codex шлёт ключ из окружения вместо токена), по ключу — env_key. Частный сертификат Codex берёт из
     CODEX_CA_CERTIFICATE (проверка 18.4 5В)."""
-    lines = ['model_provider = "cleaner"', *([f'model = "{model}"'] if model else []), "",
+    lines = ['model_provider = "cleaner"', *([f"model = {_quoted(model)}"] if model else []), "",
              "[model_providers.cleaner]", 'name = "Cleaner"', f'base_url = "{request.base_url}agent/openai/v1"',
              'wire_api = "responses"', 'env_http_headers = { "X-Cleaner-Key" = "CLEANER_KEY" }',
              "requires_openai_auth = true" if subscription else 'env_key = "CLEANER_KEY"']
@@ -54,11 +59,12 @@ def _codex(request: Request, key: str, model: str, subscription: bool) -> str:
 
 
 def _opencode(request: Request, key: str, model: str) -> str:
+    """apiKey AI SDK шлёт заголовком Authorization: Bearer — шлюз берёт ключ оттуда и провайдеру его не передаёт."""
     config = {
         "$schema": "https://opencode.ai/config.json",
         "provider": {"cleaner": {
             "npm": "@ai-sdk/openai-compatible", "name": "Cleaner",
-            "options": {"baseURL": f"{request.base_url}agent/openai/v1", "headers": {"X-Cleaner-Key": key}},
+            "options": {"baseURL": f"{request.base_url}agent/openai/v1", "apiKey": key},
             "models": {model: {"name": model}},
         }},
         "model": f"cleaner/{model}",
@@ -68,8 +74,8 @@ def _opencode(request: Request, key: str, model: str) -> str:
 
 def _sdk(request: Request, key: str, model: str) -> str:
     return (
-        f'from openai import OpenAI\n\nclient = OpenAI(base_url="{request.base_url}agent/openai/v1", api_key="{key}")\n'
-        f'reply = client.chat.completions.create(model="{model}", messages=[{{"role": "user", "content": "Привет"}}])'
+        f'from openai import OpenAI\n\nclient = OpenAI(base_url="{request.base_url}agent/openai/v1", api_key={_quoted(key)})\n'
+        f'reply = client.chat.completions.create(model={_quoted(model)}, messages=[{{"role": "user", "content": "Привет"}}])'
     )
 
 
@@ -106,7 +112,7 @@ def _page(request: Request, viewer: Viewer, issued: str = "", issued_key: ApiKey
     settings = _agent_settings(request, issued, issued_key, providers) if issued and issued_key and issued_key.upstream else []
     return page(
         request, "keys.html", viewer, keys=keys, logins=logins, issued=issued, endpoint=f"{request.base_url}api/v1/chats",
-        access=access, gateway=gateway, protocols=PROTOCOL_LABELS, agent_settings=settings,
+        access=access, gateway=gateway, protocols=PROTOCOL_LABELS, agent_settings=settings, cert=bool(request.app.state.cert_file),
         subscriptions=SUBSCRIPTION_OPTIONS if viewer.is_admin else {},
     )
 

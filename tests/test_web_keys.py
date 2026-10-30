@@ -1,9 +1,14 @@
 """Страница «Ключи» (FR-13.1, планы 5А и 5Б): выпуск, показ один раз, отзыв, кто что видит, ключи шлюза агентов."""
+import ast
 import html
 import json
 import re
+import tomllib
+
+from fastapi.testclient import TestClient
 
 from cleaner.storage.repo import Provider
+from cleaner.web.app import create_app
 from tests.agent_bodies import body, model_turn
 from tests.stub_provider import StubProvider
 
@@ -137,7 +142,7 @@ def test_each_access_shows_its_agent_settings_once(boss, repo):
         "chatgpt-subscription": ["requires_openai_auth = true", 'env_http_headers = { "X-Cleaner-Key" = "CLEANER_KEY" }',
                                  '$env:CLEANER_KEY = "{key}"'],
         openai: ['"npm": "@ai-sdk/openai-compatible"', '"baseURL": "http://testserver/agent/openai/v1"',
-                 '"X-Cleaner-Key": "{key}"', '"model": "cleaner/g-1"', 'OpenAI(base_url="http://testserver/agent/openai/v1"'],
+                 '"apiKey": "{key}"', '"model": "cleaner/g-1"', 'OpenAI(base_url="http://testserver/agent/openai/v1"'],
     }
     for access, lines in cases.items():
         response = boss.post("/keys", name=f"агент {access}", provider=access)
@@ -160,6 +165,61 @@ def test_subscription_models_are_free_text(boss, repo):
     response = boss.post("/keys", name="агент", provider="chatgpt-subscription", sub_models="gpt-6.1-sol, gpt-5.5,,gpt-5.5")
     assert response.status_code == 200
     assert repo.api_keys()[0].models == ("gpt-6.1-sol", "gpt-5.5")
+
+
+def snippets(response) -> list[str]:
+    return re.findall(r'<pre class="text mono">(.*?)</pre>', html.unescape(response.text), re.S)
+
+
+def test_opencode_settings_carry_the_key_as_api_key(ivan, repo):
+    """AI SDK шлёт apiKey заголовком Authorization: Bearer — шлюз берёт ключ оттуда и провайдеру его не передаёт
+    (test_web_agent_openai.py::test_chat_and_responses_stream_through_the_gateway[authorization])."""
+    ids = providers(repo)
+    response = ivan.post("/keys", name="opencode", provider=ids["openai"])
+    key = KEY.search(response.text).group(0)
+    config = json.loads(snippets(response)[1])             # первый — сам ключ
+    assert config["provider"]["cleaner"]["options"] == {"baseURL": "http://testserver/agent/openai/v1", "apiKey": key}
+    assert config["model"] == "cleaner/g-1"
+
+
+def test_model_names_are_escaped_in_toml_and_python(boss, repo):
+    """Модель подписки ChatGPT — свободное поле, модель подключения задаёт администратор: кавычка и обратная косая черта
+    не ломают ни TOML Codex, ни Python SDK."""
+    model = 'a"b\\c'
+    response = boss.post("/keys", name="codex", provider="chatgpt-subscription", sub_models=model)
+    assert response.status_code == 200, response.text
+    _, codex = snippets(response)                          # первый — сам ключ
+    assert tomllib.loads(codex.split("\n\n# PowerShell")[0])["model"] == model
+    provider = repo.add_provider(Provider("", "Go", "openai", "https://llm.example/v1", "bearer", "sk-2", (model,)))
+    response = boss.post("/keys", name="sdk", provider=provider)
+    key = KEY.search(response.text).group(0)
+    _, opencode, sdk = snippets(response)
+    assert json.loads(opencode)["model"] == f"cleaner/{model}"
+    calls = {node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id: node
+             for node in ast.walk(ast.parse(sdk)) if isinstance(node, ast.Call)}
+    assert {k.arg: k.value.value for k in calls["create"].keywords if k.arg == "model"} == {"model": model}
+    assert {k.arg: k.value.value for k in calls["OpenAI"].keywords}["api_key"] == key
+
+
+def test_cert_is_served_without_login_and_only_the_cert(browser, ivan, app, repo, clock, tmp_path):
+    """Сертификат службы — без входа (то же, что клиент получает при TLS); ключ TLS этим путём не отдаётся."""
+    cert, tls_key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert.write_bytes(b"-----BEGIN CERTIFICATE-----\nMIIBvymyshlennyi\n-----END CERTIFICATE-----\n")
+    tls_key.write_bytes(b"REDACTED_PRIVATE_KEY\n")
+    anonymous = browser()
+    assert anonymous.get("/cert.pem").status_code == 404                     # без TLS сертификата нет
+    ids = providers(repo)
+    assert 'href="/cert.pem"' not in ivan.post("/keys", name="без TLS", provider=ids["anthropic"]).text
+    served = create_app(repo, clock, secure_cookies=True, cert_file=str(cert))
+    response = TestClient(served).get("/cert.pem")
+    assert response.status_code == 200 and response.content == cert.read_bytes()
+    assert b"PRIVATE KEY" not in response.content
+    assert response.headers["content-type"] == "application/x-pem-file"
+    assert response.headers["content-disposition"] == 'attachment; filename="cleaner-cert.pem"'
+    app.state.cert_file = str(cert)
+    page = ivan.post("/keys", name="с TLS", provider=ids["anthropic"]).text
+    assert 'href="/cert.pem"' in page and "путь к файлу сертификата" in html.unescape(page)
+    assert 'href="/cert.pem"' not in ivan.get("/keys").text              # ссылка — при готовых настройках
 
 
 def test_restart_starts_a_new_chat_for_new_conversations(ivan, repo):

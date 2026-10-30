@@ -136,7 +136,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             repo, SystemClock(), secure_cookies=bool(cfg.tls_cert), max_text_chars=cfg.max_text_chars,
             tz=timezone(timedelta(hours=cfg.utc_offset_hours)),
             engines=Engines(repo, cfg.models_dir, max_text_chars=cfg.max_text_chars),
-            max_file_mb=cfg.max_file_mb,
+            max_file_mb=cfg.max_file_mb, cert_file=cfg.tls_cert,
         )
         # Журнал доступа выключен: в строке запроса бывает поиск по названиям чатов (SEC-11). Открытый поток ответа
         # облака (события сервера) не держит остановку: через 5 с соединения рвутся, и lifespan сохраняет идущие

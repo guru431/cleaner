@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -147,6 +147,7 @@ def create_app(
     repo: Repository, clock: Clock, *, secure_cookies: bool, max_text_chars: int = 500_000,
     tz: tzinfo = timezone.utc, engines: Any = None, jobs: Jobs | None = None, max_file_mb: int = 50,
     sends: Jobs | None = None, cloud_send: Any = None, files: Jobs | None = None, measures: Jobs | None = None,
+    cert_file: str = "",
 ) -> FastAPI:
     jobs = jobs or Jobs()
     # Отправки облаку и разбор файлов — свои пулы: скан идёт минуту на страницу, и в общем пуле из двух потоков
@@ -191,6 +192,7 @@ def create_app(
     app.state.key_throttle = auth.Throttle(clock)            # неверные ключи доступа — по адресу клиента
     app.state.secure_cookies = secure_cookies
     app.state.tz = tz
+    app.state.cert_file = cert_file                  # сертификат TLS службы; пусто — без TLS
     _interrupt(repo)            # служба одна, очередь в памяти: всё «в работе» прервано (остановка без lifespan, сбой)
     app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static")), name="static")
     app.include_router(routes_auth.router)
@@ -202,6 +204,14 @@ def create_app(
     app.include_router(routes_api.router)
     app.include_router(routes_agent.router)
     app.include_router(routes_agent.openai_router)
+
+    @app.get("/cert.pem")
+    def service_cert() -> Response:
+        """Сертификат службы для агентов (план 5Г) — без входа: то же, что любой клиент получает при TLS-соединении
+        (второе исключение AC-1.11). Ключ TLS этим путём не отдаётся."""
+        if not app.state.cert_file:
+            raise StarletteHTTPException(404)
+        return FileResponse(app.state.cert_file, media_type="application/x-pem-file", filename="cleaner-cert.pem")
 
     @app.exception_handler(LoginRequired)
     async def to_login(request: Request, exc: LoginRequired) -> Response:
