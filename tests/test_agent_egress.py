@@ -2,6 +2,7 @@
 SEC-13): провайдер получает только собранное pipeline, заголовки из списка и ключ подключения."""
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -141,11 +142,14 @@ def pool():
 
 class _Provider(ThreadingHTTPServer):
     """Провайдер на петле: HTTP/1.1, ответ 400 с content-length; считает принятые соединения и пишет вход запросов.
-    drop — закрыть сокет после ответа, не предупредив заголовком Connection: close."""
+    drop — закрыть сокет после ответа, не предупредив заголовком Connection: close. silent — на первый запрос начать
+    поток и молчать до release."""
     daemon_threads = True
 
-    def __init__(self, drop: bool = False):
+    def __init__(self, drop: bool = False, silent: bool = False):
         self.drop = drop
+        self.silent = silent
+        self.release = threading.Event()
         self.connections = 0
         self.logins: list[str] = []
         self.closed = threading.Event()             # сокет, закрытый после ответа, закрыт
@@ -176,6 +180,15 @@ class _ProviderHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self.rfile.read(int(self.headers["content-length"]))
         self.server.logins.append(self.headers.get("authorization", ""))
+        if self.server.silent and len(self.server.logins) == 1:
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("transfer-encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(b"9\r\ndata: 1\n\n\r\n")    # часть потока, как у провайдера, — chunked
+            self.server.release.wait(5)            # модель думает
+            self.close_connection = True
+            return
         body = json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": "нет"}}).encode()
         self.send_response(400)
         self.send_header("content-type", "application/json")
@@ -212,6 +225,38 @@ def test_connection_closed_by_the_provider_between_requests_is_not_reused(state,
         assert provider.closed.wait(5)
         assert _ask(out, connection(provider.url), state, settings) == 400
     assert provider.connections == 2
+
+
+def test_aborted_response_frees_the_reader_and_its_connection_is_not_reused(state, settings, pool):
+    """Агент ушёл, пока провайдер молчит: abort из другого потока будит чтение сразу, а не через 300 с, и соединение с
+    недочитанным ответом в пул не возвращается."""
+    out, _ = outgoing(state, settings)
+    with _Provider(silent=True) as provider:
+        upstream = egress.forward(out, connection(provider.url), state, settings)
+        lines, first = [], threading.Event()
+
+        def read() -> None:
+            try:
+                for line in upstream.lines():
+                    lines.append(line)
+                    first.set()
+            except ProviderError:
+                pass
+
+        reader = threading.Thread(target=read)
+        reader.start()
+        try:
+            assert first.wait(2)
+            time.sleep(0.05)                        # чтение ждёт провайдера
+            started = time.perf_counter()
+            upstream.abort()
+            reader.join(2)
+            assert not reader.is_alive() and time.perf_counter() - started < 1
+            upstream.close()
+            assert _ask(out, connection(provider.url), state, settings) == 400
+        finally:
+            provider.release.set()
+    assert lines[0] == "data: 1" and provider.connections == 2
 
 
 def test_pooled_connection_carries_each_requests_own_login(state, settings, pool):

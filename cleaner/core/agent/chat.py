@@ -204,6 +204,7 @@ class _Choice:
     parts: list[str] = field(default_factory=list)      # текст модели
     shown: list[str] = field(default_factory=list)      # отданный агенту текст
     calls: dict[int, _Call] = field(default_factory=dict)
+    last: int = 0                                       # номер последнего вызова — для частей без index
 
 
 class ChatStream:
@@ -242,16 +243,28 @@ class ChatStream:
         return {**self._head, "choices": [{"index": index, "delta": delta, "finish_reason": None}]}
 
     @staticmethod
-    def _heads(slot: _Choice, parts: object) -> list[dict]:
+    def _index(slot: _Choice, part: dict) -> int:
+        """Номер вызова. Совместимые провайдеры шлют части без index: часть с новым id — следующий вызов, без id —
+        продолжение последнего."""
+        if "index" in part:
+            return part["index"]
+        call_id = part.get("id")
+        if call_id is None:
+            return slot.last
+        known = next((index for index, call in slot.calls.items() if call.head.get("id") == call_id), None)
+        return known if known is not None else max(slot.calls, default=-1) + 1
+
+    @classmethod
+    def _heads(cls, slot: _Choice, parts: object) -> list[dict]:
         """Части вызовов: первая часть каждого уходит сразу с пустыми аргументами, аргументы копятся."""
         heads = []
         for part in parts if isinstance(parts, list) else ():
             if not isinstance(part, dict):
                 continue
             function = part.get("function") if isinstance(part.get("function"), dict) else {}
-            index = part.get("index", 0)
+            index = slot.last = cls._index(slot, part)
             if index not in slot.calls:
-                slot.calls[index] = _Call(dict(part, function=dict(function, arguments="")))
+                slot.calls[index] = _Call(dict(part, index=index, function=dict(function, arguments="")))
                 heads.append(slot.calls[index].head)
             arguments = function.get("arguments")
             slot.calls[index].parts.append(arguments if isinstance(arguments, str) else "")
@@ -323,7 +336,10 @@ class ChatStream:
                 delta["tool_calls"] = heads
             if delta:
                 kept.append(dict(choice, delta=delta))
-        return before + ([dict(event, choices=kept)] if kept else [])
+        if kept:
+            return before + [dict(event, choices=kept)]
+        # Отдавать из choices нечего, но поля сверх шапки есть (usage с пустой дельтой) — часть уходит без choices.
+        return before + ([dict(event, choices=[])] if "usage" in event else [])
 
     def cut(self) -> list[dict]:
         """Поток оборвался: несколько знаков текста и незаконченные аргументы — как пришли; пар у них нет."""

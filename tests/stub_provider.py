@@ -5,7 +5,8 @@ script — ответы шлюзу агентов (планы 5Б, 5В) на POS
 очередной шаг на каждый запрос: список событий (Anthropic и Responses — строками «event: …» / «data: …»; Chat
 Completions — строками «data: …» и «data: [DONE]») или словарь — {"status": 429, "body": {…}, "headers": {…}} (ответ
 ошибкой), {"message": {…}} (ответ без потока), {"events": […], "cut": True} (Chat Completions без «[DONE]»).
-Событие {"pause": <секунды>} в списке — пауза перед следующим событием, само не пишется (модель думает посреди ответа).
+Событие {"pause": <секунды>} в списке — пауза перед следующим событием, само не пишется (модель думает посреди ответа);
+вместо секунд — threading.Event: пауза до его установки.
 Шаг-функция может и ждать (threading.Event): заглушка получила запрос, а заголовков ответа ещё нет.
 count_tokens — 404, как у провайдера без этого маршрута."""
 from __future__ import annotations
@@ -121,7 +122,8 @@ class StubProvider:
                 self.end_headers()
                 for event in step["events"]:
                     if "pause" in event:
-                        time.sleep(event["pause"])
+                        pause = event["pause"]
+                        pause.wait() if isinstance(pause, threading.Event) else time.sleep(pause)
                         continue
                     data = f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                     self.wfile.write((data if chat else f"event: {event['type']}\n{data}").encode("utf-8"))

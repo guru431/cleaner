@@ -14,6 +14,7 @@ from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import originals
 from cleaner.core.types import ChatState, Settings
 from cleaner.storage.repo import Provider
+from tests import test_agent_responses as responses_tests
 from tests.stub_provider import StubProvider
 
 FIXTURES = Path(__file__).parent / "fixtures" / "agents" / "opencode"
@@ -243,6 +244,89 @@ def test_done_without_finish_reason_ends_the_stream(gw, stub):
     parts = received(gw.send(opencode({"role": "user", "content": "Проверь srv-dc01.corp.contoso.ru"})))
     assert parts[-1] == "[DONE]" and not [p for p in parts if isinstance(p, dict) and "error" in p]
     assert gw.repo.audit_events("agent_send")[0].details["finished"] is True
+
+
+def test_usage_only_chunk_reaches_the_agent(chat):
+    """Провайдер шлёт usage частью с пустой дельтой: дельты агенту нет, а usage уходит — частью без choices."""
+    state, settings = chat
+    last = dict(chunk(), usage=usage_chunk(cached=8)["usage"])
+    out = run(ChatStream(state, settings), [chunk({"role": "assistant", "content": "Готово"}), chunk({}, "stop"), last])
+    assert out[-1] == dict(last, choices=[])
+
+
+def test_tool_calls_without_index_stay_separate(chat):
+    """Совместимый провайдер шлёт вызовы без index: часть с новым id — следующий вызов, без id — продолжение последнего."""
+    state, settings = chat
+
+    def parts(call_id: str, name: str, arguments: str) -> list[dict]:
+        head = {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments[:6]}}
+        return [chunk({"tool_calls": [head]}), chunk({"tool_calls": [{"function": {"arguments": arguments[6:]}}]})]
+
+    first = json.dumps({"command": "dir"})
+    second = json.dumps({"filePath": fake(chat, r"C:\Users\ivanov_ii\notes.txt")}, ensure_ascii=False)
+    chunks = [*parts("call_a", "bash", first), *parts("call_b", "read", second), chunk({}, "tool_calls")]
+    out = run(ChatStream(state, settings), chunks)
+    heads = [(call["index"], call["id"], call["function"]["name"]) for call in calls_of(out) if "id" in call]
+    assert heads == [(0, "call_a", "bash"), (1, "call_b", "read")]
+    full = calls_of(out[-2:-1])
+    assert [(call["index"], json.loads(call["function"]["arguments"])) for call in full] == [
+        (0, {"command": "dir"}), (1, {"filePath": r"C:\Users\ivanov_ii\notes.txt"}),
+    ]
+
+
+def _cut_turn(protocol: str, text: str, error: dict | None = None) -> object:
+    """Ответ модели, оборванный посреди текста: у Chat — без «[DONE]», у Responses — без response.completed; error —
+    событие ошибки провайдера после текста."""
+    if protocol == "chat":
+        events = [chunk({"role": "assistant", "content": text[:5]}), chunk({"content": text[5:]})]
+        return {"events": events + ([error] if error else []), "cut": True}
+    events = responses_tests.text_events(0, responses_tests.message("msg_1", text), [5])[:-3]     # без done
+    return events + ([error] if error else [])
+
+
+def _send_cut(protocol: str, repo, engines, clock, stub, error: dict | None = None) -> list[dict]:
+    """Ход агента протоколом protocol, ответ модели с заменой узла — оборванный; части, которые получил агент."""
+    def model(request: dict) -> object:
+        return _cut_turn(protocol, f"Проверяю {HOST.search(json.dumps(request, ensure_ascii=False)).group()}", error)
+
+    stub.script.append(model)
+    task = "Проверь srv-dc01.corp.contoso.ru"
+    if protocol == "chat":
+        request = {"model": "m-1", "stream": True, "messages": [{"role": "user", "content": task}]}
+        raw = Gateway(repo, engines, clock, stub).send(request)
+    else:
+        message = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": task}]}
+        raw = responses_tests.Gateway(repo, engines, clock, stub).send({"model": "m-1", "stream": True, "input": [message]})
+    return responses_tests.received(raw)
+
+
+def _text_of(protocol: str, parts: list[dict]) -> str:
+    if protocol == "chat":
+        return content_of(parts)
+    return "".join(part["delta"] for part in parts if part.get("type") == "response.output_text.delta")
+
+
+@pytest.mark.parametrize("protocol", ["chat", "responses"])
+def test_cut_stream_ends_with_the_restored_text_and_an_error(repo, engines, clock, stub, protocol):
+    parts = _send_cut(protocol, repo, engines, clock, stub)
+    assert _text_of(protocol, parts[:-1]) == "Проверяю srv-dc01.corp.contoso.ru"
+    message = parts[-1]["error"]["message"] if protocol == "chat" else parts[-1]["message"]
+    assert message.startswith("Cleaner:") and (protocol == "chat" or parts[-1]["type"] == "error")
+    assert repo.audit_events("agent_send")[0].details["finished"] is False
+
+
+@pytest.mark.parametrize("protocol", ["chat", "responses"])
+def test_provider_error_mid_stream_is_passed_as_a_protocol_error(repo, engines, clock, stub, protocol):
+    """Ошибка провайдера посреди ответа: агенту — восстановленный остаток текста и ошибка провайдера как есть, своей
+    ошибки Cleaner не добавляет."""
+    if protocol == "chat":
+        error = {"error": {"message": "upstream overloaded", "type": "server_error", "code": None}}
+    else:
+        error = {"type": "error", "code": "server_error", "message": "upstream overloaded", "param": None}
+    parts = _send_cut(protocol, repo, engines, clock, stub, error)
+    assert _text_of(protocol, parts[:-1]) == "Проверяю srv-dc01.corp.contoso.ru" and parts[-1] == error
+    assert not [part for part in parts[:-1] if "error" in part or part.get("type") == "error"]
+    assert repo.audit_events("agent_send")[0].details["finished"] is False
 
 
 def test_reasoning_content_passes_untouched(chat, gw, stub):

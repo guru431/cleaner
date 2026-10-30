@@ -7,6 +7,8 @@
 попадают ни в логи, ни в сообщения об ошибках."""
 from __future__ import annotations
 
+import socket
+import sys
 import threading
 from collections.abc import Iterator
 from urllib.parse import urlsplit
@@ -67,6 +69,8 @@ class Upstream:
         self._client = client
         self._owns_client = owns_client
         self._response = response
+        self._lock = threading.Lock()
+        self._closed = False
         # Длинные первыми: «Bearer <токен>» убирается целиком, а не оставляет «Bearer ***».
         self._secrets = sorted({secret.encode("utf-8") for secret in secrets if secret}, key=len, reverse=True)
         self.status = response.status_code
@@ -98,7 +102,31 @@ class Upstream:
             raw = raw.replace(secret, b"***")
         return raw
 
+    def abort(self) -> None:
+        """Агент ушёл: оборвать ответ из другого потока. Поток, который ждёт молчащего провайдера, получает обрыв сразу, а
+        не через 300 с; соединение с недочитанным ответом httpx закрывает, в пул оно не возвращается. После close —
+        ничего: соединение уже могло уйти другому запросу.
+
+        Linux: shutdown сокета будит recv другого потока (close — нет), а закрывает всё сам поток чтения: состояние httpx
+        из чужого потока не трогается. Windows: shutdown не будит select, будит только закрытие сокета — response.close,
+        как «Остановить» в cloud.send; сокет там закрывается последним, после отметок httpx о закрытии."""
+        with self._lock:
+            if self._closed:
+                return
+            stream = self._response.extensions.get("network_stream")
+            sock = stream.get_extra_info("socket") if stream is not None else None
+            if sock is None or sys.platform == "win32":        # без сокета — transport тестов
+                self._response.close()
+                return
+            try:
+                # Метод socket, а не SSLSocket: тот обнулил бы _sslobj под читающим потоком.
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
+            except OSError:
+                pass
+
     def close(self) -> None:
+        with self._lock:
+            self._closed = True
         self._response.close()
         if self._owns_client:
             self._client.close()

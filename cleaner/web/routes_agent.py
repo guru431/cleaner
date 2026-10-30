@@ -8,8 +8,8 @@ import asyncio
 import functools
 import json
 import zlib
-from collections.abc import AsyncIterator, Iterator
-from concurrent.futures import Executor
+from collections.abc import AsyncIterator, Callable, Iterator
+from concurrent.futures import Executor, Future
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -80,15 +80,26 @@ def _agent(request: Request) -> AgentService:
     return request.app.state.agent
 
 
-async def _in_pool(pool: Executor, events: Iterator[bytes]) -> AsyncIterator[bytes]:
+async def _in_pool(pool: Executor, events: Iterator[bytes], stop: Callable[[], None] | None) -> AsyncIterator[bytes]:
     """Поток ответа читается в пуле шлюза, а не в общем; агент закрыл соединение — генератор закрывается там же, и журнал
-    out и событие agent_send записываются."""
-    loop = asyncio.get_running_loop()
+    out и событие agent_send записываются.
+
+    Агент ушёл, пока next ждёт провайдера: stop() рвёт соединение с провайдером, и поток пула свободен сразу, а не через
+    300 с. Генератор закрывает тот же поток пула, когда начатый next вернётся (done-callback), — два потока в генераторе
+    не бывают («generator already executing»). Ждать в finally нельзя: Starlette отменяет чтение областью anyio, и любой
+    await там отменяется сразу."""
+    reading: Future | None = None
     try:
-        while (chunk := await loop.run_in_executor(pool, next, events, _END)) is not _END:
+        while (chunk := await asyncio.wrap_future(reading := pool.submit(next, events, _END))) is not _END:
             yield chunk
+        reading = None                          # генератор кончился сам
     finally:
-        await loop.run_in_executor(pool, events.close)
+        if reading is not None and not reading.done():
+            if stop is not None:
+                stop()
+            reading.add_done_callback(lambda _: events.close())
+        elif reading is not None:
+            pool.submit(events.close)
 
 
 async def _handle(request: Request, caller: ApiCaller, path: str, protocol: str = "anthropic") -> Response:
@@ -106,7 +117,7 @@ async def _handle(request: Request, caller: ApiCaller, path: str, protocol: str 
     pool = request.app.state.agent_pool
     reply: AgentReply = await asyncio.get_running_loop().run_in_executor(pool, _agent(request).handle, call)
     if reply.events is not None:
-        return StreamingResponse(_in_pool(pool, reply.events), status_code=reply.status, headers=reply.headers)
+        return StreamingResponse(_in_pool(pool, reply.events, reply.stop), status_code=reply.status, headers=reply.headers)
     return Response(reply.body or b"", status_code=reply.status, headers=reply.headers)
 
 

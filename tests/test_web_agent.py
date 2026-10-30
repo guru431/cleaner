@@ -1,11 +1,17 @@
 """Маршруты шлюза Anthropic (спецификация 2026-10-28, разделы 8.2, 9.1, 12): ключ — в любом из заголовков агента,
 тело — как его шлёт агент, ошибки — в виде Anthropic, без текста запроса."""
+import asyncio
 import gzip
 import json
+import logging
+import threading
+import time
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from cleaner.agent_service import AgentCall, AgentService
 from cleaner.storage.repo import Provider, StaleState
 from cleaner.web import auth, routes_agent
 from tests.agent_bodies import agent_blocks, body, events_of, model_turn
@@ -165,6 +171,77 @@ def test_every_refusal_is_recorded_with_its_reason(agent, stub, repo, engines, m
     assert (event.chat_id is not None) == (case in ("layer_down_midway", "busy"))     # чат — когда он уже известен
     raw = json.dumps(event.details, ensure_ascii=False)
     assert key not in raw and key[-8:] not in raw and "srv-dc01" not in raw and "Проверь" not in raw
+
+
+def test_agent_leaving_while_the_provider_is_silent_frees_the_thread(caplog):
+    """Агент закрыл соединение, пока провайдер молчит (ревью 5Г, п. 1): stop рвёт ожидание, начатый next возвращается, и
+    генератор закрывается в пуле — без «generator already executing»; поток пула свободен сразу, а не через 300 с."""
+    reading, silent, stopped, closed = threading.Event(), threading.Event(), threading.Event(), []
+
+    def events():
+        try:
+            yield b"data: 1\n\n"
+            reading.set()
+            silent.wait(5)                  # провайдер молчит, пока stop не закроет соединение
+            yield b"data: 2\n\n"
+        finally:
+            closed.append(threading.current_thread().name)
+
+    def stop():
+        stopped.set()
+        silent.set()
+
+    pool = ThreadPoolExecutor(2, thread_name_prefix="cleaner-agent")
+
+    async def agent():
+        stream = routes_agent._in_pool(pool, events(), stop)
+        assert await anext(stream) == b"data: 1\n\n"
+        waiting = asyncio.ensure_future(anext(stream))
+        while not reading.is_set():
+            await asyncio.sleep(0.005)
+        waiting.cancel()                    # агент ушёл: Starlette отменяет чтение
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+
+    started = time.perf_counter()
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(agent())
+        pool.shutdown(wait=True)
+    assert stopped.is_set() and time.perf_counter() - started < 1
+    assert len(closed) == 1 and closed[0].startswith("cleaner-agent")
+    assert not caplog.records
+
+
+def test_agent_leaving_mid_stream_closes_the_provider_and_keeps_the_record(repo, engines, clock, stub):
+    """То же на службе: модель думает посреди ответа, агент ушёл после первого блока — соединение с провайдером закрыто
+    сразу, agent_send записан с finished: false, журнал out — по отданной части."""
+    thinking = threading.Event()
+    stub.script.append([*model_turn("Смотрю журнал")[:-2], {"pause": thinking}])
+    user_id = repo.create_user("ivan", "hash", "user")
+    provider = repo.add_provider(Provider("", "Заглушка", "anthropic", stub.url, "x-api-key", "sk-stub-0123456789", ("m-1",)))
+    key_id = repo.add_api_key(user_id, "агент", "h1", "aaaa", upstream=f"provider:{provider}", models=("m-1",))
+    reply = AgentService(repo, engines, clock).handle(AgentCall(
+        repo.api_key(key_id), repo.user(user_id), "anthropic", "/v1/messages", "",
+        {"anthropic-version": "2023-06-01", "x-api-key": "ck_agent"}, body(SECRET_TASK),
+    ))
+    try:
+        got = [next(reply.events)]
+        while events_of(b"".join(got))[-1]["type"] != "content_block_stop":
+            got.append(next(reply.events))
+        reader = threading.Thread(target=next, args=(reply.events, None))
+        reader.start()
+        time.sleep(0.05)                    # next ждёт провайдера
+        started = time.perf_counter()
+        reply.stop()
+        reader.join(2)
+        assert not reader.is_alive() and time.perf_counter() - started < 1
+        reply.events.close()
+    finally:
+        thinking.set()
+    [send] = repo.audit_events("agent_send")
+    assert send.details["finished"] is False
+    out = [json.loads(entry.local) for entry, _ in repo.ledger_page(send.chat_id, 0, 100) if entry.direction == "out"]
+    assert out == [{"type": "text", "text": "Смотрю журнал"}]
 
 
 def test_session_cookie_does_not_open_the_gateway(ivan, agent):

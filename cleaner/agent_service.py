@@ -68,6 +68,7 @@ class AgentReply:
     headers: dict[str, str]
     body: bytes | None = None
     events: Iterator[bytes] | None = None       # готовые строки SSE «event: …\ndata: …\n\n»
+    stop: Callable[[], None] | None = None      # агент ушёл: оборвать ожидание провайдера (из другого потока)
 
 
 class AgentRefused(Exception):
@@ -517,7 +518,8 @@ class AgentService:
             return AgentReply(upstream.status, {"content-type": "application/json"}, body=_json(message).encode("utf-8"))
         headers = {"content-type": "text/event-stream", "cache-control": "no-cache"}
         headers.update((name, value) for name, value in upstream.headers.items() if name not in ("content-type", "retry-after"))
-        return AgentReply(200, headers, events=self._events(call, proto, chat_id, conv_id, prepared, upstream, stream, audit))
+        events = self._events(call, proto, chat_id, conv_id, prepared, upstream, stream, audit)
+        return AgentReply(200, headers, events=events, stop=upstream.abort)
 
     def _record(
         self, proto: GatewayProtocol, chat_id: str, conv_id: str, prepared: _Prepared, stream: ProtocolStream,
