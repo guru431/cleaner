@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import bisect
 import re
-from dataclasses import dataclass
+import threading
+from collections import OrderedDict
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 
 from cleaner.core import surrogates
 from cleaner.core.entities import netmap, ops
-from cleaner.core.match import find_forms
-from cleaner.core.types import STRICT_TYPES, ChatState, EntityType, Policy, Settings
+from cleaner.core.match import Forms
+from cleaner.core.types import STRICT_TYPES, ChatState, DictEntry, EntityType, Policy, Settings
 
 # Записи адресов — как их находит слой 3: IPv4 (и с нулями впереди, и через «\.» или «\\.») с длиной префикса и без, IPv6
 # в любой записи, в том числе сразу за подписью («Source:2a00:…»; подпись в запись не входит). У IPv6 берётся и длина
@@ -29,15 +32,6 @@ class Leak:
 
 def _mode(type_: EntityType) -> str:
     return "strict" if type_ in STRICT_TYPES else "letters"
-
-
-def _key(value: str) -> str | None:
-    """Каноническая запись адреса или сети — как ключ сущности IP; не адрес — None."""
-    try:
-        ip, prefix = netmap.parse(value)
-    except ValueError:
-        return None
-    return str(ip) if prefix is None else f"{ip}/{prefix}"
 
 
 def _other_notations(
@@ -83,17 +77,69 @@ def _other_notations(
     return leaks
 
 
-def check(text: str, state: ChatState, settings: Settings) -> list[Leak]:
-    # Выданные замены вырезаются: подмена может случайно совпасть с настоящим значением.
-    chars = list(text)
-    for start, end in surrogates.find(state, text):
-        chars[start:end] = " " * (end - start)
-    open_values = ops.open_values(state, settings)
-    # Открытые значения тоже вырезаются: внутри открытого «srv-dc01.corp.contoso.ru» части
-    # «srv-dc01» и «contoso.ru» — не утечка, их показали намеренно. Только целыми словами:
-    # открытое «Ivan» не должно прятать от проверки «ivanov».
-    for start, end, _ in find_forms("".join(chars), [(value, "letters", None) for value in open_values]):
-        chars[start:end] = " " * (end - start)
+_Entities = tuple[tuple[str, ...], tuple[EntityType, ...], tuple[tuple[str, ...], ...]]     # id, тип, написания
+
+
+@dataclass(frozen=True)
+class _Index:
+    """Таблицы проверки одного содержимого: открытые значения, написания сущностей и словаря, ключи адресов (ключ
+    сущности — раньше ключа словаря, у сущностей — первой по порядку). После сборки не меняются."""
+
+    open_values: frozenset[str]
+    opened: Forms[None]
+    entities: Forms[str | None]
+    always: Forms[None]
+    entity_keys: dict[str, str]
+    keys: dict[str, str | None]
+
+
+# Таблицы последней проверки каждого чата (не больше _INDEXES чатов, как STATE_CACHE шлюза): на 20 000 сущностях их
+# сборка стоила 0,3 с на проверку, а запрос шлюза проверяет дважды (pipeline и egress). Подпись — копия всего, из чего
+# они собраны: написаний сущностей по порядку, словаря, выключенных политикой типов, открытых значений; таблицы собираются
+# из неё же, а не из изменяемых списков состояния. Подпись равна прежней — таблицы прежние; отличается только новыми
+# сущностями в конце — к прежним таблицам добавляются их написания (как при сборке с начала); иначе — сборка с начала.
+_INDEXES = 8
+_indexes: OrderedDict[str, tuple[tuple, _Index]] = OrderedDict()
+_indexes_lock = threading.Lock()
+
+
+def _index(state: ChatState, settings: Settings) -> _Index:
+    # Три кортежа, а не кортеж на сущность: кортежи строк сборщик мусора не отслеживает, и тысячи кортежей подписи в
+    # памяти не удлиняют каждую полную сборку.
+    values = state.entities.values()
+    entities: _Entities = (
+        tuple([entity.id for entity in values]), tuple([entity.type for entity in values]),
+        tuple([tuple(entity.forms) for entity in values]),
+    )
+    rest = (
+        tuple(settings.always),
+        frozenset(type_ for type_, policy in settings.policies.items() if policy is Policy.OFF),
+        ops.open_values(state, settings),
+    )
+    with _indexes_lock:
+        cached = _indexes.get(state.chat_id)
+    if cached is not None and cached[0][1:] == rest:
+        before, index = cached[0][0], cached[1]
+        if before == entities:
+            with _indexes_lock:
+                _indexes.move_to_end(state.chat_id)
+            return index
+        count = len(before[0])
+        if count < len(entities[0]) and all(now[:count] == was for now, was in zip(entities, before)):
+            index = _extend(index, tuple(now[count:] for now in entities), rest[1])
+        else:
+            index = _build(entities, *rest)
+    else:
+        index = _build(entities, *rest)
+    with _indexes_lock:
+        _indexes[state.chat_id] = ((entities, *rest), index)
+        _indexes.move_to_end(state.chat_id)
+        while len(_indexes) > _INDEXES:
+            _indexes.popitem(last=False)
+    return index
+
+
+def _opened(open_values: frozenset[str]) -> Callable[[str, EntityType], bool]:
     opened_addresses: set[str] | None = None
 
     def opened(form: str, type_: EntityType) -> bool:
@@ -108,31 +154,66 @@ def check(text: str, state: ChatState, settings: Settings) -> list[Leak]:
             opened_addresses = netmap.addresses(open_values)
         return bool(netmap.canonical_forms(form) & opened_addresses)
 
+    return opened
+
+
+def _searched(
+    pairs: Iterable[tuple[str | None, EntityType, Iterable[str]]], off: frozenset[EntityType],
+    opened: Callable[[str, EntityType], bool],
+) -> tuple[list[tuple[str, str, str | None]], dict[str, str | None]]:
+    """Написания, которые ищутся, и ключи адресов. Адрес IP сравнивается и по адресу: написания — только записи, которые
+    чат видел. Ключи — канонические записи тех же написаний, поэтому открытые и выключенные политикой не участвуют."""
     forms: list[tuple[str, str, str | None]] = []
-    # Адрес IP сравнивается и по адресу: написания — только записи, которые чат видел. Ключи — канонические записи
-    # тех же написаний сущностей IP и значений словаря, поэтому открытые и выключенные политикой не участвуют.
     keys: dict[str, str | None] = {}
-
-    def search(form: str, type_: EntityType, payload: str | None) -> None:
-        forms.append((form, _mode(type_), payload))
-        key = _key(form) if type_ is EntityType.IP else None
-        if key is not None:
-            keys.setdefault(key, payload)
-
-    for entity in state.entities.values():
-        if settings.policies.get(entity.type) is Policy.OFF:
+    for payload, type_, values in pairs:
+        if type_ in off:
             continue
-        for form in entity.forms:
-            if not opened(form, entity.type):
-                search(form, entity.type, entity.id)
-    for entry in settings.always:
-        if settings.policies.get(entry.type) is Policy.OFF:
-            continue
-        for form in (entry.value, *entry.aliases):
-            if not opened(form, entry.type):
-                search(form, entry.type, None)
+        for form in values:
+            if not opened(form, type_):
+                forms.append((form, _mode(type_), payload))
+                key = netmap.canonical_key(form) if type_ is EntityType.IP else None
+                if key is not None:
+                    keys.setdefault(key, payload)
+    return forms, keys
+
+
+def _build(
+    entities: _Entities, always: tuple[DictEntry, ...], off: frozenset[EntityType], open_values: frozenset[str],
+) -> _Index:
+    opened = _opened(open_values)
+    entity_forms, entity_keys = _searched(zip(*entities), off, opened)
+    always_forms, always_keys = _searched(
+        ((None, entry.type, (entry.value, *entry.aliases)) for entry in always), off, opened,
+    )
+    return _Index(
+        open_values, Forms([(value, "letters", None) for value in open_values]), Forms(entity_forms),
+        Forms(always_forms), entity_keys, always_keys | entity_keys,
+    )
+
+
+def _extend(index: _Index, entities: _Entities, off: frozenset[EntityType]) -> _Index:
+    """Таблицы index и сущностей entities после его сущностей — те же, что собранные с начала."""
+    forms, keys = _searched(zip(*entities), off, _opened(index.open_values))
+    added = {key: payload for key, payload in keys.items() if key not in index.entity_keys}
+    return replace(
+        index, entities=index.entities.extended(forms), entity_keys=index.entity_keys | added, keys=index.keys | added,
+    )
+
+
+def check(text: str, state: ChatState, settings: Settings) -> list[Leak]:
+    index = _index(state, settings)
+    # Выданные замены вырезаются: подмена может случайно совпасть с настоящим значением.
+    chars = list(text)
+    for start, end in surrogates.find(state, text):
+        chars[start:end] = " " * (end - start)
+    # Открытые значения тоже вырезаются: внутри открытого «srv-dc01.corp.contoso.ru» части
+    # «srv-dc01» и «contoso.ru» — не утечка, их показали намеренно. Только целыми словами:
+    # открытое «Ivan» не должно прятать от проверки «ivanov».
+    for start, end, _ in index.opened.find("".join(chars)):
+        chars[start:end] = " " * (end - start)
     remaining = "".join(chars)
-    found = {Leak(start, end, payload) for start, end, payload in find_forms(remaining, forms)}
-    if keys:
-        found |= _other_notations(remaining, keys, state, found)
+    found = {Leak(start, end, payload) for start, end, payload in index.entities.find(remaining)}
+    found |= {Leak(start, end, None) for start, end, _ in index.always.find(remaining)}
+    if index.keys:
+        found |= _other_notations(remaining, index.keys, state, found)
     return sorted(found, key=lambda leak: (leak.start, leak.end))

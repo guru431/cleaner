@@ -49,11 +49,33 @@ def canonical_forms(token: str) -> set[str]:
     """Записи адреса в каноническом виде, как их выдаёт подмена: сам адрес и, с длиной префикса, ещё и сеть —
     «2001:0db8:0001::0001» — это 2001:db8:1::1, «203.0.113.1/24» — и 203.0.113.1/24, и 203.0.113.1. Сравнение по ним
     не зависит от записи. Не адрес — пустое множество."""
+    key = canonical_key(token)
+    if key is None:
+        return set()
+    return {key.partition("/")[0], key} if "/" in key else {key}
+
+
+_KEYS: dict[str, str | None] = {}
+_KEYS_MAX = 1 << 16
+
+
+def canonical_key(token: str) -> str | None:
+    """Каноническая запись адреса или, с длиной префикса, сети; не адрес — None. Чистая функция строки, и ответы
+    запоминаются (не больше _KEYS_MAX, затем память очищается): проверка утечек разбирает тысячи адресов чата. Словарь
+    строк сборщик мусора не обходит."""
+    try:
+        return _KEYS[token]
+    except KeyError:
+        pass
     try:
         ip, prefix = parse(token)
+        key: str | None = str(ip) if prefix is None else f"{ip}/{prefix}"
     except ValueError:
-        return set()
-    return {str(ip)} if prefix is None else {str(ip), f"{ip}/{prefix}"}
+        key = None
+    if len(_KEYS) >= _KEYS_MAX:
+        _KEYS.clear()
+    _KEYS[token] = key
+    return key
 
 
 def addresses(values: Iterable[str]) -> set[str]:

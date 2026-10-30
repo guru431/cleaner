@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import threading
+from collections import OrderedDict
 
 from cleaner.core.entities import hostmap, macsid
-from cleaner.core.types import ChatState
+from cleaner.core.types import ChatState, Surrogate
 
 _LABEL = re.compile(r"<[A-Z]+(?:_[A-Z]+)*_\d+>|\[\[[A-Z]+(?:_[A-Z]+)*_\d+\]\]")
 # Адрес через «\.» или «\\.» (регулярное выражение, в том числе в строке JSON) — та же подмена: восстановление пишет
@@ -59,20 +61,20 @@ class Hit:
         return self.string[self._start:self._end]
 
 
-class Finder:
-    """Ищет замены чата. loose=True узнаёт и свои замены в другом виде записи: SID с RID,
-    MAC с другими разделителями — так повторная вставка не создаёт новых сущностей (FR-5.9)."""
+class _Tables:
+    """Таблицы поиска замен одной таблицы чата; table — её копия. После сборки не меняются — общие для потоков."""
 
-    def __init__(self, state: ChatState, loose: bool = False):
-        self.table = state.surrogates
-        self.loose = loose
+    __slots__ = ("table", "hosts", "macs", "macs_by_digits")
+
+    def __init__(self, table: dict[str, Surrogate]):
+        self.table = table
         # Имена узлов — деревом частей в нижнем регистре; None — замена, которой кончается цепочка. Имя длиннее 253
         # знаков чаты, сохранённые до 15.10.2026, хранят целиком: оно находится по своим частям (6.4), а в дереве
         # было бы глубиной в тысячи частей, и проход с каждой части текста шёл бы на всю эту глубину.
         self.hosts: dict[str | None, dict | str] = {}
         self.macs: dict[str, str] = {}
         self.macs_by_digits: dict[str, str] = {}
-        for key, surrogate in state.surrogates.items():
+        for key, surrogate in table.items():
             if surrogate.kind == "host" and len(surrogate.original or "") <= hostmap.MAX_NAME:
                 node = self.hosts
                 for part in key.lower().split("."):
@@ -81,6 +83,42 @@ class Finder:
             elif surrogate.kind == "mac":
                 self.macs[key.lower()] = key
                 self.macs_by_digits.setdefault(macsid.mac_key(key), key)
+
+
+# Таблицы последней таблицы замен каждого чата (не больше _TABLES чатов): на 20 000 сущностях сборка стоила 10–20 мс, а
+# запрос шлюза ищет замены в каждой очистке, в обеих проверках утечек и в восстановлении ответа. Берутся, только если
+# таблица замен равна той, из копии которой они собраны.
+_TABLES = 8
+_tables: OrderedDict[str, _Tables] = OrderedDict()
+_tables_lock = threading.Lock()
+
+
+def _tables_of(state: ChatState) -> _Tables:
+    with _tables_lock:
+        cached = _tables.get(state.chat_id)
+        if cached is not None and cached.table == state.surrogates:
+            _tables.move_to_end(state.chat_id)
+            return cached
+    built = _Tables(dict(state.surrogates))
+    with _tables_lock:
+        _tables[state.chat_id] = built
+        _tables.move_to_end(state.chat_id)
+        while len(_tables) > _TABLES:
+            _tables.popitem(last=False)
+    return built
+
+
+class Finder:
+    """Ищет замены чата. loose=True узнаёт и свои замены в другом виде записи: SID с RID,
+    MAC с другими разделителями — так повторная вставка не создаёт новых сущностей (FR-5.9)."""
+
+    def __init__(self, state: ChatState, loose: bool = False):
+        tables = _tables_of(state)
+        self.table = tables.table
+        self.loose = loose
+        self.hosts = tables.hosts
+        self.macs = tables.macs
+        self.macs_by_digits = tables.macs_by_digits
 
     def finditer(self, text: str) -> list[Hit]:
         if not self.table:

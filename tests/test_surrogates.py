@@ -16,6 +16,26 @@ def test_longer_surrogates_win_and_edges_are_respected(state):
     assert found == ["host-10", "HOST-1", "<PERSON_1>", "10.7.3.5"]
 
 
+def test_finder_follows_the_table_of_its_state(state):
+    """Задача 5a плана 5Г: таблицы поиска замен чата берутся из памяти, только пока таблица замен та же: замена, выданная
+    после прежнего поиска, находится, снятая — нет, а снимок таблицы ищет свои замены."""
+    state.surrogates["host-1"] = Surrogate("a", "srv", "host")
+    text = "host-1 host-2.domain-1.example <PERSON_1>"
+
+    def found() -> list[str]:
+        return [text[start:end] for start, end in surrogates.find(state, text)]
+
+    assert found() == ["host-1"]
+    snapshot = dict(state.surrogates)
+    state.surrogates["host-2.domain-1.example"] = Surrogate("b", "db.contoso.ru", "host")
+    state.surrogates["<PERSON_1>"] = Surrogate("c")
+    assert found() == ["host-1", "host-2.domain-1.example", "<PERSON_1>"]
+    del state.surrogates["host-1"]
+    assert found() == ["host-2.domain-1.example", "<PERSON_1>"]
+    state.surrogates = snapshot
+    assert found() == ["host-1"]
+
+
 def test_composite_host_name_is_found_whole_and_by_parts(state):
     state.surrogates.update(
         {

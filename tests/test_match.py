@@ -1,4 +1,4 @@
-from cleaner.core.match import find_forms, normalize
+from cleaner.core.match import Forms, find_forms, normalize
 
 
 def hits(text: str, *forms) -> list[tuple[str, object]]:
@@ -105,6 +105,24 @@ def test_escaped_at_is_an_at_and_a_doubled_backslash_is_not():
         (r"ivanov\@contoso.ru", 1), (r"IVANOV\@contoso\.ru", 1), ("ivanov@contoso.ru", 1),
     ])
     assert hits("ivanov@contoso.ru", (r"ivanov\@contoso.ru", "letters", 1)) == [("ivanov@contoso.ru", 1)]
+
+
+def test_extended_table_is_the_table_of_all_forms_and_the_old_one_stays_as_it_was():
+    """Задача 5a плана 5Г: таблица прежних написаний дополняется новыми (новые сущности чата) — находки те же и в том же
+    порядке, что у таблицы, собранной из всех написаний сразу; по прежней таблице ищут другие потоки, и она не меняется.
+    Новые написания делят с прежними первое слово, длину, само написание и куски длинного написания."""
+    long = "token-" + "a1" * 61
+    first = [("ivanov", "letters", 1), ("user00001", "strict", 2), (long, "strict", 3), ("вано", "none", 4)]
+    more = [("Ivanov", "strict", 5), ("user00002", "strict", 6), (long + "b", "strict", 7), (long[:100], "strict", 8),
+            ("ово", "none", 9), ("user", "letters", 10)]
+    text = f"ivanov, user00001 user00002 {long} {long}b {long[:100]} Иванов вово user"
+    table = Forms(first)
+    before = table.find(text)
+    extended = table.extended(more)
+    assert extended.find(text) == Forms(first + more).find(text)
+    assert {payload for _, _, payload in extended.find(text)} == set(range(1, 11))
+    assert table.find(text) == before == Forms(first).find(text)
+    assert extended.extended([("vovo", "none", 11)]).find("vovo") == [(0, 4, 11)] and extended.find("vovo") == []
 
 
 def test_yo_and_decomposed_letters_match_their_plain_forms():

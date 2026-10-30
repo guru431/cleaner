@@ -1,15 +1,90 @@
 """Проверка утечек (раздел 8): адрес IP находится по адресу, а не только по записям, которые чат уже видел."""
+import copy
+from dataclasses import replace
+
 import pytest
 
 from cleaner.core import leakcheck
 from cleaner.core.entities import ops
 from cleaner.core.pipeline import sanitize
-from cleaner.core.types import DictEntry, Entity, Policy, Settings, default_policies
+from cleaner.core.types import DictEntry, Entity, Policy, Settings, Surrogate, default_policies
 from cleaner.core.types import EntityType as T
 
 
 def leaked(text, state, settings) -> list[tuple[str, str | None]]:
     return [(text[leak.start:leak.end], leak.entity_id) for leak in leakcheck.check(text, state, settings)]
+
+
+def fresh(text, state, settings) -> list[tuple[str, str | None]]:
+    """leaked по копии состояния под новым id чата: таблицы проверки собираются с начала."""
+    fresh.count = getattr(fresh, "count", 0) + 1
+    return leaked(text, replace(copy.deepcopy(state), chat_id=f"fresh-{fresh.count}"), settings)
+
+
+def add(state, entity_id: str, type_: T, *forms: str) -> Entity:
+    state.entities[entity_id] = Entity(entity_id, type_, len(state.entities) + 1, forms[0], forms[0], "detector", [*forms])
+    return state.entities[entity_id]
+
+
+def test_tables_kept_between_checks_follow_every_change_of_the_state(state, settings):
+    """Задача 5a плана 5Г: таблицы проверки чата берутся из памяти, только пока всё, из чего они собраны, то же. Сущность,
+    добавленная после сборки (в том числе адрес — он находится и в другой записи), новое и заменённое на месте написание
+    прежней, правило «открыть», список «никогда не скрывать», выключенный тип и значение словаря меняют находки так же,
+    как при сборке с начала; находка не пропадает ни разу."""
+    text = "ivanov petrov vanya sidorov 010.001.002.005 contoso"
+
+    def found(current: Settings = settings) -> list[str]:
+        out = leaked(text, state, current)
+        assert out == fresh(text, state, current)
+        return [f"{value}:{entity_id}" for value, entity_id in out]
+
+    add(state, "a1", T.ACCOUNT, "ivanov")
+    assert found() == ["ivanov:a1"]
+    add(state, "a2", T.ACCOUNT, "petrov")                  # новая сущность в конце — таблицы дополняются
+    assert found() == ["ivanov:a1", "petrov:a2"]
+    add(state, "ip", T.IP, "10.1.2.5")
+    assert found() == ["ivanov:a1", "petrov:a2", "010.001.002.005:ip"]
+    state.entities["a1"].forms.append("vanya")              # новое написание прежней сущности — в её же списке
+    assert found() == ["ivanov:a1", "petrov:a2", "vanya:a1", "010.001.002.005:ip"]
+    state.entities["a2"].forms[0] = "sidorov"               # написание заменено на месте: та же длина списков
+    assert found() == ["ivanov:a1", "vanya:a1", "sidorov:a2", "010.001.002.005:ip"]
+    ops.unmask(state, "ivanov")
+    assert found() == ["vanya:a1", "sidorov:a2", "010.001.002.005:ip"]
+    state.rules.clear()
+    assert found() == ["ivanov:a1", "vanya:a1", "sidorov:a2", "010.001.002.005:ip"]
+    assert found(Settings(never=frozenset({"vanya"}))) == ["ivanov:a1", "sidorov:a2", "010.001.002.005:ip"]
+    assert found(Settings(policies=default_policies() | {T.IP: Policy.OFF})) == ["ivanov:a1", "vanya:a1", "sidorov:a2"]
+    assert found(Settings(always=(DictEntry(T.ORG, "contoso"),))) == [
+        "ivanov:a1", "vanya:a1", "sidorov:a2", "010.001.002.005:ip", "contoso:None",
+    ]
+    assert found() == ["ivanov:a1", "vanya:a1", "sidorov:a2", "010.001.002.005:ip"]
+
+
+def test_snapshot_is_checked_against_its_own_state(state, settings):
+    """Снимок состояния, который проверяет egress вне замка чата, проверяется по своим сущностям, а не по таблицам
+    живого состояния, собранным позже (и наоборот); подмена, выданная после снимка, вырезается только в живом."""
+    add(state, "a1", T.ACCOUNT, "ivanov")
+    snapshot = replace(state, entities=dict(state.entities), surrogates=dict(state.surrogates))
+    add(state, "a2", T.ACCOUNT, "petrov")
+    state.surrogates["petrov"] = Surrogate("a2", "petrov", "host")
+    text = "ivanov petrov"
+    assert leaked(text, state, settings) == [("ivanov", "a1")]
+    assert leaked(text, snapshot, settings) == [("ivanov", "a1")]
+    del state.surrogates["petrov"]
+    assert leaked(text, snapshot, settings) == [("ivanov", "a1")]
+    assert leaked(text, state, settings) == [("ivanov", "a1"), ("petrov", "a2")]
+    assert leaked(text, snapshot, settings) == [("ivanov", "a1")]
+
+
+def test_address_key_of_an_entity_added_later_wins_over_the_dictionary(state):
+    """Ключ адреса — у сущности раньше, чем у словаря, как при сборке с начала, и когда сущность добавлена к прежним
+    таблицам."""
+    always = Settings(always=(DictEntry(T.IP, "10.1.2.5"),))
+    add(state, "a1", T.ACCOUNT, "ivanov")
+    assert leaked("010.001.002.005", state, always) == [("010.001.002.005", None)]
+    add(state, "ip", T.IP, "10.1.2.5")
+    text = "010.001.002.005"
+    assert leaked(text, state, always) == [(text, "ip")] == fresh(text, state, always)
 
 
 @pytest.mark.parametrize(
