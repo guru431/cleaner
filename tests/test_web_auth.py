@@ -2,20 +2,34 @@ import asyncio
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import anyio
 import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException
 
 from cleaner.web import auth
-from cleaner.web.app import HSTS, MAX_BODY_BYTES, SECURITY_HEADERS, create_app
+from cleaner.web.app import BodyLimit, HSTS, MAX_BODY_BYTES, SECURITY_HEADERS, _UPLOAD_HEADROOM, create_app
 
 
 def test_pages_need_a_login(browser):
     response = browser().get("/")
     assert (response.status_code, response.headers["location"]) == (303, "/login")
+
+
+@pytest.mark.parametrize("prefix", ["/agent/anthropic", "/agent/openai"])
+def test_agent_errors_accept_structured_http_exception_details(app, browser, prefix):
+    @app.get(prefix + "/synthetic-error")
+    def structured_error():
+        raise HTTPException(400, {"reason": "synthetic"})
+
+    response = browser().get(prefix + "/synthetic-error")
+    assert response.status_code == 400
+    assert response.json()["error"]["message"].startswith("Cleaner:")
+    assert "synthetic" in response.json()["error"]["message"]
 
 
 def test_login_and_logout(browser, repo):
@@ -174,6 +188,16 @@ def test_oversized_body_without_content_length_is_refused(browser, path):
     )
     assert response.status_code == 413
     assert response.headers["Content-Security-Policy"] == SECURITY_HEADERS["Content-Security-Policy"]
+
+
+@pytest.mark.parametrize(("path", "upload"), [
+    ("/chats/abc/upload", True), ("/api/v1/chats/abc/files", True),
+    ("/reports/upload", False), ("/api/v1/chats/abc/extra/files", False),
+])
+def test_only_upload_routes_get_the_file_body_limit(path, upload):
+    app = SimpleNamespace(state=SimpleNamespace(max_file_bytes=128))
+    limiter = BodyLimit(None, limit=64)
+    assert limiter._limit({"path": path, "app": app}) == (128 + _UPLOAD_HEADROOM if upload else 64)
 
 
 def test_spraying_random_logins_does_not_reset_a_throttled_account(clock):

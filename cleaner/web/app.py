@@ -53,6 +53,7 @@ AGENT_WORKERS = 8
 
 
 _UPLOAD_HEADROOM = 1024 * 1024      # поля формы и заголовки частей multipart сверх самого файла
+_UPLOAD_PATH = re.compile(r"(?:/chats/[^/]+/upload|/api/v1/chats/[^/]+/files)")
 _CERT_BLOCK = re.compile(rb"-----BEGIN CERTIFICATE-----\r?\n.*?-----END CERTIFICATE-----", re.DOTALL)
 
 
@@ -69,7 +70,7 @@ class BodyLimit:
         история разговора); у остальных запросов — общий."""
         if scope["path"].startswith("/agent/"):
             return AGENT_BODY_BYTES
-        if scope["path"].endswith(("/upload", "/files")):
+        if _UPLOAD_PATH.fullmatch(scope["path"]):
             return scope["app"].state.max_file_bytes + _UPLOAD_HEADROOM
         return self.limit
 
@@ -236,8 +237,9 @@ def create_app(
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
         if _for_agent(request) or _for_openai_agent(request):
-            standard = exc.detail == HTTPStatus(exc.status_code).phrase
-            message = _STATUS_TEXT.get(exc.status_code, exc.detail) if standard else exc.detail
+            detail = str(exc.detail)
+            standard = detail == HTTPStatus(exc.status_code).phrase
+            message = _STATUS_TEXT.get(exc.status_code, detail) if standard else detail
             if _for_openai_agent(request):
                 return _openai_error(exc.status_code, message, exc.headers)
             return _agent_error(exc.status_code, message, exc.headers)

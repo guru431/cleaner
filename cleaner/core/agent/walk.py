@@ -32,7 +32,7 @@ OTHER_KEYS = frozenset({"type", "id", "cache_control"})
 class Unit:
     path: Path                 # где блок в теле; у строкового содержимого — путь самой строки
     role: str                  # system | user | assistant | tools | params
-    kind: str                  # text | tool_result | tool_use | tool_def | opaque | media | other
+    kind: str                  # text | reasoning | tool_result | tool_use | tool_def | opaque | media | other
     node: object               # блок без cache_control; строковое содержимое — блок text с этой строкой
 
 
@@ -212,7 +212,7 @@ def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
 
 def is_model_block(unit: Unit) -> bool:
     """Блок модели в истории — ищется в журнале out по тому, что шлюз отдал агенту (7.2.2)."""
-    return unit.role == "assistant" and unit.kind in ("text", "tool_use")
+    return unit.role == "assistant" and unit.kind in ("text", "tool_use", "reasoning")
 
 
 def placeholder(unit: Unit, reason: str) -> object:

@@ -12,7 +12,8 @@ from cleaner.core.agent.chat import ChatStream
 from cleaner.core.agent.protocol import PROTOCOLS
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import originals
-from cleaner.core.types import ChatState, Settings
+from cleaner.core.types import ChatState, Policy, Settings
+from cleaner.core.types import EntityType as T
 from cleaner.storage.repo import Provider
 from tests import test_agent_responses as responses_tests
 from tests.stub_provider import StubProvider
@@ -87,7 +88,7 @@ def test_opencode_turn_is_split_into_units():
     call = units[("messages", 2, "tool_calls", 0)]
     assert call.kind == "tool_use" and CHAT.is_model_block(call) and call.node == {"id": "call_cap_1", "type": "function", "function": {
         "name": "read", "arguments": {"filePath": "C:\\cleaner-capture\\contoso-repo\\notes.txt"}}}
-    assert units[("messages", 2, "reasoning_content")].kind == "opaque"
+    assert units[("messages", 2, "reasoning_content")].kind == "reasoning"
     result = units[("messages", 3)]
     assert (result.role, result.kind) == ("tool", "tool_result") and "Учётная запись: CONTOSO\\ivanov" in result.node["content"]
     tools = [u for u in units.values() if u.kind == "tool_def"]
@@ -348,6 +349,45 @@ def test_reasoning_content_passes_untouched(chat, gw, stub):
     history = {"role": "assistant", "content": "Смотрю.", "reasoning_content": "рассуждение srv-dc01.corp.contoso.ru"}
     gw.send(opencode({"role": "user", "content": "Привет"}, history, {"role": "user", "content": "Дальше"}))
     assert stub.requests[0]["body"]["messages"][3]["reasoning_content"] == "рассуждение srv-dc01.corp.contoso.ru"
+
+
+@pytest.mark.parametrize("protocol", ["chat", "responses"])
+@pytest.mark.parametrize("policy", [Policy.MASK, Policy.BLOCK])
+def test_unsigned_reasoning_uses_known_values_and_dictionary_then_freezes(repo, engines, clock, stub, protocol, policy):
+    repo.set_policy(T.TERM, policy)
+    entry = repo.add_dictionary("always", "ProjectAster", T.TERM)
+    thought = "known@contoso.ru ProjectAster unknown@elsewhere.test"
+    if protocol == "chat":
+        gateway = Gateway(repo, engines, clock, stub)
+        history = {"role": "assistant", "content": "", "reasoning_content": thought}
+        request = opencode({"role": "user", "content": "Почта known@contoso.ru"}, history)
+        field = "messages"
+        reply = [chunk({"content": "Готово"}), chunk({}, "stop")]
+        extract = lambda body: body[field][-1]["reasoning_content"]
+    else:
+        gateway = responses_tests.Gateway(repo, engines, clock, stub)
+        task = {"role": "user", "content": "Почта known@contoso.ru"}
+        history = {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-signed-content",
+                   "summary": [{"type": "summary_text", "text": thought}]}
+        request = {"model": "m-1", "stream": True, "input": [task, history]}
+        field = "input"
+        reply = [responses_tests.completed()]
+        extract = lambda body: body[field][-1]["summary"][0]["text"]
+    stub.script += [reply, reply]
+    gateway.send(request)
+    first = stub.requests[0]["body"]
+    cleaned = extract(first)
+    assert "known@contoso.ru" not in cleaned and "ProjectAster" not in cleaned
+    if policy is Policy.MASK:
+        assert "unknown@elsewhere.test" in cleaned
+    else:
+        assert cleaned.startswith("[Cleaner: блок не передан")
+    if protocol == "responses":
+        assert first[field][-1]["encrypted_content"] == history["encrypted_content"]
+    repo.delete_dictionary(entry)
+    gateway.send(request)
+    assert stub.requests[1]["body"][field] == first[field]
+    assert repo.audit_events("agent_send")[0].details["blocks_new"] == 0
 
 
 def test_instruction_goes_before_the_first_user_message():

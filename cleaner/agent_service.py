@@ -378,7 +378,7 @@ class AgentService:
         digests = {unit.path: ledger.block_digest(secret, proto.name, unit.role, unit.kind, unit.node) for unit in units}
         groups: dict[str, list[walk.Unit]] = {"in": [], "out": []}
         for unit in units:
-            if unit.kind != "opaque":       # рассуждения и блоки провайдера — как есть (7.2.3)
+            if unit.kind != "opaque":       # подписанные рассуждения и блоки провайдера — как есть (7.2.3)
                 groups["out" if proto.is_model_block(unit) else "in"].append(unit)
         known = {
             direction: self.repo.ledger_get(chat_id, conv_id, direction, [digests[u.path] for u in group])

@@ -193,7 +193,7 @@ def _try_pattern(expression: str, sample: str) -> list[str]:
     if compiled.match("") is not None:
         raise HTTPException(400, "Шаблон находит пустую строку")
     try:
-        return [m.group() for m in regex.finditer(expression, sample, timeout=PATTERN_TIMEOUT)]
+        return [m.group() for m in compiled.finditer(sample, timeout=PATTERN_TIMEOUT)]
     except TimeoutError:
         raise HTTPException(400, "Шаблон ищет слишком долго") from None
 

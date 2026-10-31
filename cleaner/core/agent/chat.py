@@ -71,8 +71,8 @@ def chat_units(body: dict) -> list[Unit]:
             Unit(("messages", i, "tool_calls", j), role, "tool_use", _call_node(call))
             for j, call in enumerate(message.get("tool_calls") or ())
         ]
-        if "reasoning_content" in message:           # рассуждения DeepSeek и подобных — как пришли (7.2.3)
-            units.append(Unit(("messages", i, "reasoning_content"), role, "opaque", message["reasoning_content"]))
+        if "reasoning_content" in message:           # неподписанный текст — блок модели (7.2.3)
+            units.append(Unit(("messages", i, "reasoning_content"), role, "reasoning", message["reasoning_content"]))
         units += [Unit(("messages", i, key), role, "other", value) for key, value in message.items() if key not in _MESSAGE_KEYS]
     units += [Unit(("tools", j), "tools", "tool_def", tool) for j, tool in enumerate(body.get("tools") or ())]
     units += [
@@ -142,7 +142,7 @@ def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
         return dict(node, function=dict(node["function"], arguments=arguments))
     if unit.kind == "tool_def" and isinstance(node, dict):
         return _tool_def(node, clean)
-    if unit.kind in ("other", "tool_use"):
+    if unit.kind in ("other", "tool_use", "reasoning"):
         return strings(node, clean, OTHER_KEYS)
     return copy.deepcopy(node)          # непрозрачный и удерживаемый — как есть
 
@@ -158,6 +158,8 @@ def placeholder(unit: Unit, reason: str) -> object:
     """Пометка удержанного блока того же вида (7.4): у результата инструмента — его содержимым."""
     text = ledger.placeholder(reason)
     node = unit.node if isinstance(unit.node, dict) else {}
+    if unit.kind == "reasoning":
+        return text
     if unit.kind == "tool_result":
         return dict(node, content=text)
     if unit.kind == "tool_use" and isinstance(node.get("function"), dict):

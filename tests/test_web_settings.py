@@ -90,10 +90,15 @@ def test_pattern_is_tried_on_a_sample_before_saving(boss, repo, monkeypatch):
         response = boss.post("/settings/patterns", name="Плохой", regex=bad, type="TERM", sample="1", action="save")
         assert response.status_code == 400, bad
 
-    def too_slow(*args, **kwargs):
-        raise TimeoutError
+    compiled = regex.compile("(a+)+$")
 
-    monkeypatch.setattr(regex, "finditer", too_slow)
+    class TooSlow:
+        match = compiled.match
+
+        def finditer(self, *args, **kwargs):
+            raise TimeoutError
+
+    monkeypatch.setattr(regex, "compile", lambda expression: TooSlow())
     slow = boss.post("/settings/patterns", name="Медленный", regex="(a+)+$", type="TERM", sample="a" * 30 + "b", action="save")
     assert slow.status_code == 400 and "долго" in slow.text
     assert len(repo.patterns()) == 1

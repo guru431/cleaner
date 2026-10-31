@@ -176,7 +176,7 @@ def test_codex_history_hits_the_ledger(gw, stub, repo):
     model = [event["item"] for event in script()[0] if event["type"] == "response.output_item.done"]
     assert second[len(first):len(first) + 3] == [dict(item, **{"content": None} if item["type"] == "reasoning" else {}) for item in model]
     latest = repo.audit_events("agent_send")[0].details           # свежие первыми
-    assert latest["blocks_new"] == 1        # результат команды; метаданные хода те же — один ход пользователя
+    assert latest["blocks_new"] == 2        # результат команды и впервые пересланный summary рассуждения
 
 
 def test_reserialized_arguments_still_hit_the_ledger(gw, stub):
@@ -282,6 +282,40 @@ def test_encrypted_reasoning_passes_untouched(chat, gw, stub):
     task = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Привет"}]}
     gw.send({"model": "gpt-5.5", "stream": True, "input": [task, history, dict(task, content=[{"type": "input_text", "text": "Дальше"}])]})
     assert stub.requests[0]["body"]["input"][2] == history
+
+
+@pytest.mark.parametrize("kind", ["message", "function_call"])
+def test_items_without_ids_are_restored_once_per_output_index(chat, kind):
+    state, settings = chat
+    host = fake(chat, "srv-dc01.corp.contoso.ru")
+    if kind == "message":
+        items = [message("unused", f"Узел {host}"), message("unused", "Готово")]
+        for item in items:
+            item.pop("id")
+    else:
+        items = [{"type": "function_call", "call_id": f"call_{i}", "name": "run",
+                  "arguments": json.dumps({"host": host})} for i in range(2)]
+    stream = ResponsesStream(state, settings)
+    done = [stream.feed({"type": "response.output_item.done", "output_index": i, "item": item})[-1]["item"]
+            for i, item in enumerate(items)]
+    result = stream.feed(completed(*items))[-1]["response"]["output"]
+    assert result == done
+    assert len(stream.pairs) == 2
+
+
+def test_text_streams_without_ids_stay_separate_by_output_index(chat):
+    state, settings = chat
+    host = fake(chat, "srv-dc01.corp.contoso.ru")
+    stream = ResponsesStream(state, settings)
+    for i, text in enumerate((f"Узел {host}", "Готово")):
+        stream.feed({"type": "response.output_text.delta", "output_index": i, "content_index": 0, "delta": text})
+    items = [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}
+             for text in (f"Узел {host}", "Готово")]
+    for i, item in enumerate(items):
+        stream.feed({"type": "response.output_item.done", "output_index": i, "item": item})
+    result = stream.feed(completed(*items))[-1]["response"]["output"]
+    assert [item["content"][0]["text"] for item in result] == ["Узел srv-dc01.corp.contoso.ru", "Готово"]
+    assert len(stream.pairs) == 2
 
 
 def test_usage_is_read_from_completed(gw, stub, repo):

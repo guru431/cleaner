@@ -92,6 +92,8 @@ def responses_units(body: dict) -> list[Unit]:
             units.append(Unit(path, "tool", "tool_result", _item_node(item)))
         elif kind in OPAQUE:
             units.append(Unit(path, "assistant", "opaque", item))
+            if kind == "reasoning" and item.get("summary"):
+                units.append(Unit((*path, "summary"), "assistant", "reasoning", item["summary"]))
         elif kind == "additional_tools":
             units += [Unit((*path, "tools", j), "tools", "tool_def", tool) for j, tool in enumerate(item.get("tools") or ())]
             units += [Unit((*path, key), "tools", "other", value) for key, value in item.items() if key not in _TOOLS_ITEM_KEYS]
@@ -189,7 +191,7 @@ def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
         return strings(node, clean, _ITEM_KEYS)
     if unit.kind == "tool_def" and isinstance(node, dict):
         return _tool_def(node, clean)
-    if unit.kind == "other":
+    if unit.kind in ("other", "reasoning"):
         return strings(node, clean, _ITEM_KEYS)
     return copy.deepcopy(node)          # непрозрачный и удерживаемый — как есть
 
@@ -205,6 +207,8 @@ def placeholder(unit: Unit, reason: str) -> object:
     """Пометка удержанного блока того же вида (7.4): у результата инструмента — его выводом."""
     text = ledger.placeholder(reason)
     node = unit.node if isinstance(unit.node, dict) else {}
+    if unit.kind == "reasoning":
+        return [{"type": "summary_text", "text": text}]
     if unit.kind == "tool_result":
         return dict(node, output=text)
     if unit.kind == "tool_use":
@@ -274,9 +278,9 @@ class ResponsesStream:
     def __init__(self, state: ChatState, settings: Settings):
         self.state = state
         self.settings = settings
-        self.texts: dict[tuple, _Part] = {}             # (item_id, content_index) → часть текста
-        self.items: dict[object, dict] = {}             # id → восстановленный элемент (completed повторяет его)
-        self.inputs: dict[object, list[str]] = {}       # id → части arguments или input
+        self.texts: dict[tuple, _Part] = {}             # ((id, output_index без id), content_index) → часть текста
+        self.items: dict[tuple, dict] = {}              # id или output_index → восстановленный элемент
+        self.inputs: dict[tuple, list[str]] = {}        # id или output_index → части arguments или input
         self.pairs: list[tuple[dict, dict]] = []
         self._text: Callable[[str], str] | None = None
         self._exact: Callable[[str], str] | None = None
@@ -303,7 +307,7 @@ class ResponsesStream:
         return event.get("type") in ("response.completed", "response.incomplete", "response.failed")
 
     def _slot(self, event: dict) -> tuple[tuple, _Part]:
-        key = (event.get("item_id"), event.get("content_index", 0))
+        key = (self._item_key(event.get("item_id"), event.get("output_index")), event.get("content_index", 0))
         if key not in self.texts:
             self.texts[key] = _Part(DeltaRestorer(self.state, self.settings, self._restore_text), event.get("output_index"))
         return key, self.texts[key]
@@ -312,7 +316,7 @@ class ResponsesStream:
         if not text:
             return []
         part.shown.append(text)
-        return [{"type": "response.output_text.delta", "item_id": key[0], "output_index": part.output_index,
+        return [{"type": "response.output_text.delta", "item_id": key[0][0], "output_index": part.output_index,
                  "content_index": key[1], "delta": text}]
 
     def _whole(self, event: dict, text: object) -> list[dict]:
@@ -327,11 +331,11 @@ class ResponsesStream:
             out += self._delta(key, part, part.restorer.finish())
         return out
 
-    def _close(self, item_id: object = None) -> list[dict]:
-        """Остатки текста открытых частей элемента (всех — при item_id None) перед его итоговым объектом."""
+    def _close(self, item_id: object = None, output_index: object = None) -> list[dict]:
+        """Остатки текста открытых частей элемента (всех — без id и индекса) перед его итоговым объектом."""
         out = []
         for key, part in self.texts.items():
-            if not part.done and (item_id is None or key[0] == item_id):
+            if not part.done and ((item_id is None and output_index is None) or key[0] == self._item_key(item_id, output_index)):
                 part.done = True
                 out += self._delta(key, part, part.restorer.finish())
         return out
@@ -339,18 +343,23 @@ class ResponsesStream:
     def _pair(self, item: dict, restored: dict) -> None:
         self.pairs.append((_call_node(restored), _item_node(item)))
 
-    def _item(self, item: dict) -> dict:
+    @staticmethod
+    def _item_key(item_id: object, output_index: object) -> tuple:
+        return (item_id, None if item_id is not None else output_index)
+
+    def _item(self, item: dict, output_index: object = None) -> dict:
         """Элемент ответа с восстановленным текстом, аргументами, патчем, командой; пары — в pairs, один раз."""
         item_id = item.get("id")
-        if item_id is not None and item_id in self.items:
-            return self.items[item_id]
+        key = self._item_key(item_id, output_index)
+        if key in self.items:
+            return self.items[key]
         kind = item.get("type")
         restored = item
         if kind == "message" and isinstance(item.get("content"), list):
             content = []
             for j, part in enumerate(item["content"]):
                 if _part_kind(part) == "text" and part["type"] == "output_text":
-                    streamed = self.texts.get((item_id, j))
+                    streamed = self.texts.get((key, j))
                     text = "".join(streamed.shown) if streamed is not None else self._restore_text(part["text"])
                     content.append(dict(part, text=text))
                     self.pairs.append((dict(part, text=text), dict(part)))
@@ -367,13 +376,14 @@ class ResponsesStream:
         elif kind == "local_shell_call" and "action" in item:
             restored = dict(item, action=self._restore_exact(item["action"]))
             self._pair(item, restored)
-        if item_id is not None:
-            self.items[item_id] = restored
+        if item_id is not None or output_index is not None:
+            self.items[key] = restored
         return restored
 
     def feed(self, event: dict) -> list[dict]:
         type_ = event.get("type")
         item_id = event.get("item_id")
+        key = self._item_key(item_id, event.get("output_index"))
         if type_ == "response.output_text.delta":
             key, part = self._slot(event)
             text = event.get("delta") or ""
@@ -386,13 +396,13 @@ class ResponsesStream:
             out = self._whole(event, event["part"].get("text"))
             return out + [dict(event, part=dict(event["part"], text="".join(self._slot(event)[1].shown)))]
         if type_ in ("response.function_call_arguments.delta", "response.custom_tool_call_input.delta"):
-            self.inputs.setdefault(item_id, []).append(event.get("delta") or "")
+            self.inputs.setdefault(key, []).append(event.get("delta") or "")
             return []                                    # Codex их только показывает: копятся до done
         if type_ == "response.function_call_arguments.done":
-            raw = event.get("arguments") if isinstance(event.get("arguments"), str) else "".join(self.inputs.get(item_id, ()))
+            raw = event.get("arguments") if isinstance(event.get("arguments"), str) else "".join(self.inputs.get(key, ()))
             return [dict(event, arguments=self._arguments(raw))]
         if type_ == "response.custom_tool_call_input.done":
-            raw = event.get("input") if isinstance(event.get("input"), str) else "".join(self.inputs.get(item_id, ()))
+            raw = event.get("input") if isinstance(event.get("input"), str) else "".join(self.inputs.get(key, ()))
             restored = self._restore_exact(raw)
             delta = {"type": "response.custom_tool_call_input.delta", "item_id": item_id,
                      "output_index": event.get("output_index"), "delta": restored}
@@ -401,16 +411,17 @@ class ResponsesStream:
             item = event["item"]
             for name in ("arguments", "input"):          # присланное сразу — как дельты, а начало уходит пустым
                 if isinstance(item.get(name), str) and item[name]:
-                    self.inputs.setdefault(item.get("id"), []).append(item[name])
+                    self.inputs.setdefault(self._item_key(item.get("id"), event.get("output_index")), []).append(item[name])
                     return [dict(event, item=dict(item, **{name: ""}))]
             return [event]
         if type_ == "response.output_item.done" and isinstance(event.get("item"), dict):
-            return self._close(event["item"].get("id")) + [dict(event, item=self._item(event["item"]))]
+            index = event.get("output_index")
+            return self._close(event["item"].get("id"), index) + [dict(event, item=self._item(event["item"], index))]
         if type_ in ("response.completed", "response.incomplete") and isinstance(event.get("response"), dict):
             response = event["response"]
             out = self._close()
             if isinstance(response.get("output"), list):
-                output = [self._item(item) if isinstance(item, dict) else item for item in response["output"]]
+                output = [self._item(item, i) if isinstance(item, dict) else item for i, item in enumerate(response["output"])]
                 return out + [dict(event, response=dict(response, output=output))]
             return out + [event]
         if type_ == "error":
@@ -429,4 +440,4 @@ class ResponsesStream:
         output = body.get("output")
         if not isinstance(output, list):
             return body
-        return dict(body, output=[self._item(item) if isinstance(item, dict) else item for item in output])
+        return dict(body, output=[self._item(item, i) if isinstance(item, dict) else item for i, item in enumerate(output)])

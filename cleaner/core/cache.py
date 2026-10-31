@@ -33,6 +33,8 @@ def invalidate_chat(chat_id: str) -> None:
 
 
 def forget_chat(chat_id: str) -> None:
+    """Глобальный кэш словаря содержит также известные значения чата, строковые кэши — их нормализацию.
+    Владельцев у этих записей нет, поэтому удаление чата требует очистить их целиком."""
     leakcheck.forget_chat(chat_id)
     surrogates.forget_chat(chat_id)
     dictionary.clear_cache()

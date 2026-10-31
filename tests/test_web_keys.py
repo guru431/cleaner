@@ -86,6 +86,30 @@ def test_refresh_after_issuing_a_key_does_not_issue_another(ivan, repo):
     assert KEY.search(again.text) is None and len(repo.api_keys()) == 1
 
 
+def test_full_ticket_store_refuses_a_new_key_without_losing_existing_keys(ivan, boss, app, repo):
+    issued = app.state.issued_keys
+    first = ivan.post("/keys", name="первый ключ")
+    second = boss.post("/keys", name="второй ключ")
+    for number in range(254):
+        issued.put("another-session", str(number), "ck_synthetic")
+    refused = ivan.post("/keys", name="переполнение")
+    assert refused.status_code == 429 and "показ" in refused.text
+    assert len(repo.api_keys()) == len(repo.audit_events("key_created")) == 2
+    assert KEY.search(ivan.get(first.headers["location"]).text)
+    assert KEY.search(boss.get(second.headers["location"]).text)
+    assert ivan.post("/keys", name="после показа").status_code == 303
+
+
+def test_expired_tickets_free_capacity_before_issuing_a_key(ivan, app, clock):
+    issued = app.state.issued_keys
+    for number in range(256):
+        issued.put("expired-session", str(number), "ck_synthetic")
+    clock.advance(minutes=5)
+    response = ivan.post("/keys", name="после истечения")
+    assert response.status_code == 303 and len(issued.pending) == 1
+    assert KEY.search(ivan.get(response.headers["location"]).text)
+
+
 def test_key_names_cannot_contain_control_characters(ivan, repo):
     for name in ("a\tb", "a\nb", "a\x00b", "a\x7fb"):
         assert ivan.post("/keys", name=name).status_code == 400

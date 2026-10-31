@@ -1,11 +1,15 @@
 """Отправка в интерфейсе (FR-8.3…8.6, FR-9.4): выбор подключения, подтверждение, поток ответа, остановка."""
+import asyncio
 import re
 
 import pytest
+from fastapi import Request
 
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Policy
 from cleaner.storage.repo import Item, Provider
+from cleaner.web import auth, routes_send
+from cleaner.web.deps import Viewer
 
 KEY = "sk-test-0123456789abcd"
 
@@ -95,6 +99,48 @@ def test_stream_sends_the_restored_text_then_done(ivan, app, repo, provider):
         body = "".join(response.iter_text())
     assert 'data: {"text": "Пишите на a@x.example "}' in body and body.rstrip().endswith("event: done\ndata: {}")
     assert ivan.get(f"/chats/{chat_id}/items/{'b' * 32}/stream").status_code == 404
+
+
+def test_stream_of_a_chat_deleted_during_lookup_is_not_found(ivan, repo, monkeypatch):
+    chat_id = ivan.chat()
+    item_id = "a" * 32
+    repo.add_item(chat_id, Item(item_id, 0, "answer", "", None, source="api", status="running"))
+
+    def deleted(chat_id):
+        raise KeyError(chat_id)
+
+    monkeypatch.setattr(repo, "load_state", deleted)
+    response = ivan.get(f"/chats/{chat_id}/items/{item_id}/stream")
+    assert response.status_code == 404 and "Страница не найдена" in response.text
+
+
+def test_stream_stops_before_restoring_after_the_browser_disconnects(ivan, app, repo, monkeypatch):
+    chat_id = ivan.chat()
+    item_id = "b" * 32
+    repo.add_item(chat_id, Item(item_id, 0, "answer", "", None, source="api", status="running"))
+    live = app.state.service.live.start(item_id)
+    live.append("Ответ")
+    session = repo.session(auth.token_hash(ivan.client.cookies["cleaner_session"]))
+    shown = []
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    request = Request({"type": "http", "app": app}, receive)
+
+    def restore(self, text):
+        shown.append(text)
+        return text
+
+    monkeypatch.setattr(routes_send.StreamRestorer, "feed", restore)
+    response = routes_send.stream(request, chat_id, item_id, Viewer(repo.user(session.user_id), session))
+
+    async def collect():
+        with pytest.raises(StopAsyncIteration):
+            await anext(response.body_iterator)
+
+    asyncio.run(collect())
+    assert shown == [] and not live.cancel.is_set()
 
 
 def test_stop_reaches_a_running_answer(ivan, app, repo, provider):

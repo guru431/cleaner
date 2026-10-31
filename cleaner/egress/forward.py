@@ -40,6 +40,7 @@ def _client(url: str) -> httpx.Client:
             # Cookie провайдера (__cf_bm и другие) не хранятся: общий клиент отдал бы их запросам других агентов и входов.
             client = _clients[origin] = httpx.Client(
                 trust_env=False, follow_redirects=False, timeout=_TIMEOUT, limits=_LIMITS,
+                verify=parts.scheme != "http",  # HTTP разрешён только на петле: TLS и загрузка CA ему не нужны.
                 cookies=CookieJar(DefaultCookiePolicy(allowed_domains=[])),
             )
         return client
@@ -80,8 +81,12 @@ class Upstream:
         self.headers = {name: response.headers[name] for name in passed if name in response.headers}
 
     def lines(self) -> Iterator[str]:
+        secrets = tuple(secret.decode("utf-8") for secret in self._secrets)
         try:
-            yield from self._response.iter_lines()
+            for line in self._response.iter_lines():
+                for secret in secrets:
+                    line = line.replace(secret, "***")
+                yield line
         except httpx.TimeoutException:
             raise ProviderTimeout() from None
         except (httpx.HTTPError, httpx.StreamError):
@@ -150,7 +155,8 @@ def forward(
     url = f"{connection.base_url.rstrip('/')}{out.path}" + (f"?{out.query}" if out.query else "")
     owns = transport is not None
     if owns:
-        client = httpx.Client(transport=transport, trust_env=False, follow_redirects=False, timeout=_TIMEOUT)
+        client = httpx.Client(transport=transport, trust_env=False, follow_redirects=False, timeout=_TIMEOUT,
+                             verify=urlsplit(url).scheme != "http")
     else:
         client = _client(url)
     try:

@@ -175,7 +175,9 @@ def send(
     key = connection.api_key
     if cancel is not None and cancel.is_set():
         return                                      # остановили, пока задание ждало в пуле: запрос не уходит
-    with httpx.Client(transport=transport, trust_env=False, follow_redirects=False, timeout=_TIMEOUT) as client:
+    # На разрешённом HTTP петли нет TLS: загрузка хранилища CA не нужна; HTTPS проверяется по-прежнему.
+    with httpx.Client(transport=transport, trust_env=False, follow_redirects=False, timeout=_TIMEOUT,
+                      verify=urlsplit(url).scheme != "http") as client:
         try:
             with client.stream("POST", url, json=body, headers={**headers, **_headers(connection)}) as response:
                 if on_open is not None:

@@ -112,6 +112,29 @@ def test_import_writes_all_values_at_once(repo):
     ]
 
 
+def test_dictionary_membership_decrypts_only_needed_values(repo, clock, monkeypatch):
+    first = repo.add_dictionary("always", "Ромашка", T.ORG, ("Romashka",), "комментарий")
+    clock.advance(seconds=1)
+    repo.add_dictionary("always", "Сосна", T.ORG)
+    other = repo.add_dictionary("never", "Берёза")
+    decrypt = repo._dec
+    opened = []
+
+    def tracked(key, data, aad):
+        opened.append(aad)
+        return decrypt(key, data, aad)
+
+    monkeypatch.setattr(repo, "_dec", tracked)
+    assert repo.in_dictionary("always", "РОМАШКА")
+    assert opened == [f"dictionary.value:{first}"]
+    opened.clear()
+    assert not repo.in_dictionary("never", "РОМАШКА")
+    assert opened == [f"dictionary.value:{other}"]
+    assert not repo.in_dictionary("always", "Romashka")  # псевдоним не считается отдельной записью
+    repo.delete_dictionary(first)
+    assert not repo.in_dictionary("always", "РОМАШКА")
+
+
 def test_users_sessions_and_audit(repo, clock):
     user = repo.create_user("ivan", "hash1", "admin")
     assert repo.create_session("t1", user, "csrf1", "hash1")

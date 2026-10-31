@@ -535,6 +535,7 @@ class Repository:
     # --- обработка элементов (раздел 14) ------------------------------------------
 
     def _update_meta(self, chat_id: str, item_id: str, change, status: str | None = None) -> None:
+        # Одно соединение защищено lock; meta и status сохраняются атомарно одним UPDATE.
         with self.lock:
             row = self.conn.execute(
                 "SELECT meta, status FROM items WHERE id = ? AND chat_id = ?", (item_id, chat_id)
@@ -1025,9 +1026,12 @@ class Repository:
 
     def in_dictionary(self, list_: str, value: str) -> bool:
         """Значение уже есть в списке — без учёта регистра, как при импорте CSV. Значения зашифрованы,
-        поэтому сравнение — после расшифровки."""
+        поэтому сравнение — после расшифровки только значений нужного списка, до первого совпадения."""
         wanted = value.lower()
-        return any(row.list == list_ and row.value.lower() == wanted for row in self.dictionary())
+        return any(
+            self._dec(self.global_key, row["value_enc"], f"dictionary.value:{row['id']}").lower() == wanted
+            for row in self._all("SELECT id, value_enc FROM dictionary WHERE list = ? ORDER BY created_at, id", list_)
+        )
 
     def delete_dictionary(self, entry_id: str) -> None:
         self._run("DELETE FROM dictionary WHERE id = ?", entry_id)

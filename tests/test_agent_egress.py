@@ -3,6 +3,7 @@ SEC-13): провайдер получает только собранное pip
 import json
 import threading
 import time
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -105,10 +106,62 @@ def test_error_body_comes_back_as_is_without_the_key(state, settings):
     assert KEY not in raw.decode() and json.loads(raw)["error"]["type"] == "rate_limit_error"
 
 
+def test_stream_redacts_connection_and_subscription_credentials(state, settings):
+    agent = "Bearer subscription-token-0123456789"
+    out, _ = outgoing(state, settings)
+    out = replace(out, headers=(*out.headers, ("authorization", agent)))
+    error = {"type": "error", "message": f"{KEY} / {agent} / {agent.partition(' ')[2]}"}
+    raw = ("data: " + json.dumps(error) + "\n\n").encode()
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=raw))
+    upstream = egress.forward(out, connection("http://127.0.0.1:1"), state, settings, transport=transport)
+    try:
+        lines = list(upstream.lines())
+    finally:
+        upstream.close()
+    assert json.loads(lines[0][6:]) == {"type": "error", "message": "*** / *** / ***"}
+
+
 def test_plain_http_is_refused_beyond_loopback(state, settings):
     out, _ = outgoing(state, settings)
     with pytest.raises(ValueError):
         egress.forward(out, connection("http://10.20.30.40/anthropic"), state, settings)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("path", ["agent", "chat"])
+def test_https_rejects_an_untrusted_certificate(state, settings, clock, tmp_path, path):
+    import ssl
+    from datetime import timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    from cleaner.core.pipeline import probe_context
+    from cleaner.egress.cloud import send
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(1).not_valid_before(clock.now() - timedelta(days=1))
+            .not_valid_after(clock.now() + timedelta(days=1)).sign(key, hashes.SHA256()))
+    cert_path, key_path = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(cert_path, key_path)
+    with StubProvider() as stub:
+        stub.server.socket = tls.wrap_socket(stub.server.socket, server_side=True)
+        url = stub.url.replace("http:", "https:")
+        with pytest.raises(ProviderError):
+            if path == "agent":
+                out, _ = outgoing(state, settings)
+                egress.forward(out, connection(url), state, settings)
+            else:
+                list(send(probe_context("p", "m"), Connection("openai", url, "bearer", KEY, 1024), None, None))
+        assert stub.requests == []
 
 
 def test_redirect_is_not_followed(state, settings):

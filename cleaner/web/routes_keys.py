@@ -13,6 +13,7 @@ from fastapi.responses import RedirectResponse, Response
 
 from cleaner.agent_service import GATEWAY_PROTOCOLS, gateway_access
 from cleaner.storage import crypto
+from cleaner.storage.db import transaction
 from cleaner.storage.repo import ApiKey
 from cleaner.web import auth
 from cleaner.web.deps import Viewer, get_form, get_viewer, page, repo_of
@@ -36,10 +37,10 @@ class IssuedKeys:
         ticket = auth.new_token()
         with self.lock:
             self._prune()
+            if len(self.pending) >= 256:
+                raise HTTPException(429, "Слишком много ключей ожидают показа. Покажите выпущенные ключи или повторите позже.")
             self.pending[ticket] = (session, self.clock.now() + timedelta(minutes=5), key_id,
                                     crypto.seal(self.secret, key.encode("ascii"), session + ticket))
-            while len(self.pending) > 256:
-                self.pending.popitem(last=False)
         return ticket
 
     def take(self, session: str, ticket: str) -> tuple[str, str] | None:
@@ -184,9 +185,10 @@ def create_key(request: Request, form: dict[str, str] = Depends(get_form), viewe
             raise HTTPException(400, f"Доступ к модели: {exc}") from None
         layers = {"ner": form.get("ner") == "1", "llm": form.get("llm") == "1"}
     key = auth.new_api_key()
-    key_id = repo.add_api_key(viewer.user.id, name, auth.token_hash(key), key[-4:], upstream, models, layers)
-    repo.audit("key_created", viewer.user.id, id=key_id)
-    ticket = request.app.state.issued_keys.put(viewer.session.token_hash, key_id, key)
+    with repo.lock, transaction(repo.conn):
+        key_id = repo.add_api_key(viewer.user.id, name, auth.token_hash(key), key[-4:], upstream, models, layers)
+        repo.audit("key_created", viewer.user.id, id=key_id)
+        ticket = request.app.state.issued_keys.put(viewer.session.token_hash, key_id, key)
     return RedirectResponse(f"/keys?issued={ticket}", status_code=303, headers={"cache-control": "no-store"})
 
 

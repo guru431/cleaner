@@ -143,12 +143,17 @@ def stream(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
         raise HTTPException(404, "Ответ не найден")
     service = service_of(request)
     live = service.live.get(item_id)
-    state, _ = repo_of(request).load_state(chat_id)
+    try:
+        state, _ = repo_of(request).load_state(chat_id)
+    except KeyError:
+        raise HTTPException(404, "Ответ не найден") from None
     restorer = StreamRestorer(state, repo_of(request).settings())
 
     async def events() -> AsyncIterator[str]:
         seen = 0
         while True:
+            if await request.is_disconnected():
+                return
             if live is not None:
                 text = live.text()
                 if len(text) > seen:
