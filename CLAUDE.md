@@ -5,6 +5,11 @@
 
 ## Tests
 
+Studio API: [docs/studio-api.md](docs/studio-api.md), `cleaner/integration.py`.
+Точечная проверка: `.venv/Scripts/python.exe -m pytest -n 0 tests/test_integration_api.py tests/test_web_api.py`.
+Сквозные HTTP/TLS и браузерные проверки живут в `studio/tests/test_cleaner_contract.py` и `test_ui_cleaner.py`;
+их `tests/studio_server.py` запускает только на петле и только с вымышленными данными и провайдером.
+
 tests:
   interpreter: .venv/Scripts/python.exe
   targeted: .venv/Scripts/python.exe -m pytest tests/<файл>.py

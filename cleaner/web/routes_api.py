@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections import Counter
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from cleaner.core.types import ChatState, EntityType
-from cleaner.service import EditRefused, InputView, TextTooLong
+from cleaner.core.detect.base import DetectorError
+from cleaner.core.detect.llm import CompletionError
+from cleaner.service import EditRefused, InputView, SendRefused, TextTooLong
+from cleaner.integration import IntegrationService, provider_for
+from cleaner.core.restore import StreamRestorer, restore as restore_text
 from cleaner.web import render
 from cleaner.web.deps import (
     ApiCaller, Upload, api_chat, api_writable_chat, get_api_caller, get_api_upload, repo_of, service_of,
@@ -61,6 +66,127 @@ class RuleIn(Body):
     value: str
     item_id: str = ""           # mask: текст, в котором есть фрагмент, — как выделение на экране проверки
     type: str = ""              # mask: код типа (EntityType)
+
+
+class RequestMessage(Body):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
+
+class RequestRule(Body):
+    action: Literal["mask", "unmask"]
+    value: str = Field(min_length=1, max_length=2000)
+    type: EntityType | None = None
+
+
+class RequestIn(Body):
+    model: str = Field(min_length=1, max_length=200)
+    messages: list[RequestMessage] = Field(min_length=1, max_length=1000)
+    rules: list[RequestRule] = Field(default_factory=list, max_length=100)
+
+
+class SendRequestIn(Body):
+    receipt: str = Field(min_length=1, max_length=24_000_000)
+
+
+def _request_caller(request: Request, chat_id: str, caller: ApiCaller = Depends(get_api_caller)) -> ApiCaller:
+    # Ownership must be checked before body validation, including malformed bodies from another owner.
+    api_writable_chat(request, chat_id, caller)
+    return caller
+
+
+@router.get("/models")
+def integration_models(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Response:
+    try:
+        _, models = provider_for(repo_of(request), caller.key)
+    except SendRefused as exc:
+        raise HTTPException(403, str(exc)) from None
+    return JSONResponse({"data": [{"id": model} for model in models]})
+
+
+@router.post("/chats/{chat_id}/requests")
+def prepare_request(request: Request, chat_id: str, body: RequestIn,
+                    caller: ApiCaller = Depends(_request_caller)) -> Response:
+    api_writable_chat(request, chat_id, caller)
+    if body.messages[-1].role != "user":
+        raise HTTPException(422, "Последним в запросе должен быть вопрос")
+    try:
+        result = IntegrationService.from_service(service_of(request)).prepare_request(
+            chat_id, caller.user.id, caller.key, body.model, [m.model_dump() for m in body.messages],
+            [rule.model_dump() for rule in body.rules],
+        )
+    except TextTooLong as exc:
+        raise HTTPException(413, str(exc)) from None
+    except (SendRefused, EditRefused) as exc:
+        raise HTTPException(409, str(exc)) from None
+    except (DetectorError, CompletionError):
+        raise HTTPException(503, "Очистка не выполнена: запрос не отправлен облачной модели") from None
+    return JSONResponse(result)
+
+
+@router.post("/chats/{chat_id}/requests/send", status_code=202)
+def send_request(request: Request, chat_id: str, body: SendRequestIn,
+                 caller: ApiCaller = Depends(_request_caller)) -> Response:
+    api_writable_chat(request, chat_id, caller)
+    try:
+        item = IntegrationService.from_service(service_of(request)).send_request(
+            chat_id, caller.user.id, caller.key, body.receipt,
+        )
+    except (SendRefused, EditRefused) as exc:
+        raise HTTPException(409, str(exc)) from None
+    return JSONResponse({"item_id": item.id}, status_code=202)
+
+
+@router.get("/chats/{chat_id}/answers/{item_id}/events")
+def answer_events(request: Request, chat_id: str, item_id: str,
+                  caller: ApiCaller = Depends(get_api_caller)) -> Response:
+    api_chat(request, chat_id, caller)
+    repo, service = repo_of(request), service_of(request)
+    item = repo.item(chat_id, item_id)
+    if item is None or item.kind != "answer" or item.source != "api":
+        raise HTTPException(404, "Ответ не найден")
+    state, _ = repo.load_state(chat_id)
+    settings = repo.settings()
+    restorer, live = StreamRestorer(state, settings), service.live.get(item_id)
+
+    def event(kind, data):
+        return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    async def events():
+        seen = 0
+        while True:
+            if await request.is_disconnected():
+                return
+            if live is not None:
+                text = live.text()
+                if len(text) > seen:
+                    shown = await run_in_threadpool(restorer.feed, text[seen:])
+                    seen = len(text)
+                    yield event("text", {"text": shown})
+            if live is None or live.finished:
+                final = await run_in_threadpool(repo.item, chat_id, item_id)
+                if final is None:
+                    yield event("done", {"status": "failed", "error": "Ответ удалён"})
+                    return
+                result = await run_in_threadpool(restore_text, state, final.original, settings)
+                yield event("done", {"status": final.status, "text": result.text, "raw": final.original,
+                                     "counters": result.counters, "error": final.meta.get("error", "")})
+                return
+            yield ": keepalive\n\n"
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+
+
+@router.post("/chats/{chat_id}/answers/{item_id}/stop", status_code=204)
+def stop_answer(request: Request, chat_id: str, item_id: str,
+                caller: ApiCaller = Depends(get_api_caller)) -> Response:
+    api_chat(request, chat_id, caller)
+    item = repo_of(request).item(chat_id, item_id)
+    if item is None or item.kind != "answer" or item.source != "api":
+        raise HTTPException(404, "Ответ не найден")
+    service_of(request).stop(chat_id, item_id)
+    return Response(status_code=204)
 
 
 def _text_result(view: InputView, state: ChatState) -> dict:

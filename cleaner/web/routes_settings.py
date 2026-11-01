@@ -43,7 +43,7 @@ EVENTS = (
     "settings_changed", "gold_added", "gold_deleted", "risk_check", "layer_changed",
     "provider_changed", "cloud_send", "local_answer", "eval_run", "reviewed", "api_auth_failed",
     "key_created", "key_disabled", "agent_send", "agent_refused", "agent_withheld", "agent_chat_created", "agent_pruned",
-    "key_restarted",
+    "key_restarted", "request_prepared",
 )
 PROTOCOL_NAMES = {"openai": "OpenAI-совместимый", "anthropic": "Anthropic-совместимый", "responses": "OpenAI Responses"}
 AUTH_NAMES = {"bearer": "Authorization: Bearer", "x-api-key": "x-api-key"}
