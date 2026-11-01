@@ -10,6 +10,7 @@
     <details class="inline">
       <summary class="btn" title="Переименовать" aria-label="Переименовать">{{ icon("edit") }}</summary>
       <div class="pop">
+        <strong class="menu-group">Изменение названия чата</strong>
         <form method="post" action="/chats/{{ chat.id }}/rename">
           {% include "_csrf.html" %}
           <input name="title" value="{{ chat.title }}" maxlength="200" required aria-label="Название чата">
@@ -32,6 +33,7 @@
     <details class="menu">
       <summary class="btn" title="Ещё" aria-label="Ещё">{{ icon("more") }}</summary>
       <div class="pop">
+        <strong class="menu-group">Удаление чата «{{ chat.title }}»</strong>
         <form method="post" action="/chats/{{ chat.id }}/delete">
           {% include "_csrf.html" %}
           <label class="check"><input type="checkbox" name="confirm" value="yes" required> Удалить чат безвозвратно, вместе с таблицей замен и ключом</label>
@@ -75,7 +77,7 @@
           <a class="btn" href="/chats/{{ chat.id }}/items/{{ e.id }}">Проверка</a>
           {% if e.deliverable %}
           <button type="button" data-copy="text-{{ e.id }}">{{ icon("copy") }}<span>Скопировать</span></button>
-          <a class="btn" href="/chats/{{ chat.id }}/items/{{ e.id }}/download">{{ icon("download") }}Скачать .txt</a>
+          <a class="btn" href="/chats/{{ chat.id }}/items/{{ e.id }}/download" download>{{ icon("download") }}Скачать .txt</a>
           {% endif %}
         </span>
         {% endif %}
@@ -173,7 +175,7 @@
     <div class="tabs" data-tabs data-tabs-remember>
       <div class="tab-list" role="tablist">
         <button type="button" role="tab" data-tab="text" aria-selected="true">Текст</button>
-        <button type="button" role="tab" data-tab="file" aria-selected="false">Файл</button>
+        <button type="button" role="tab" data-tab="file" aria-selected="false">Файлы</button>
         <button type="button" role="tab" data-tab="instruction" aria-selected="false">Инструкция</button>
         <button type="button" role="tab" data-tab="answer" aria-selected="false">Ответ вручную</button>
       </div>
@@ -190,10 +192,11 @@
       <div class="tab-panel" role="tabpanel" data-tab-panel="file">
         <form method="post" action="/chats/{{ chat.id }}/upload" enctype="multipart/form-data" class="compose">
           {% include "_csrf.html" %}
-          <input type="file" name="file" required aria-label="Файл">
+          <input type="file" name="file" multiple required aria-label="Файлы" data-upload-batch data-max-bytes="{{ max_file_mb * 1024 * 1024 }}">
           <button class="primary">Загрузить и очистить</button>
+          <div class="upload-preview" data-upload-preview hidden aria-live="polite"></div>
           <label class="check"><input type="checkbox" name="ocr" value="all"> {{ ocr_all }}</label>
-          <small class="hint">Файл до {{ max_file_mb }} МБ: DOCX, XLSX, PPTX, PDF (и скан), EML, MSG, HTML, CSV, текст, PNG, JPEG. Отметка — для PDF с текстом на картинках или неполным слоем текста: каждая страница идёт в распознавание, это дольше</small>
+          <small class="hint">До 10 файлов, весь пакет до {{ max_file_mb }} МБ: DOCX, XLSX, PPTX, PDF (и скан), EML, MSG, HTML, CSV, текст, PNG, JPEG. Результат каждого файла — отдельно в ленте; повторяется только ошибочный. Перед передачей выберите состав запроса. Скачивается очищенный текст без исходного оформления. Отметка — для PDF с текстом на картинках или неполным слоем текста: каждая страница идёт в распознавание, это дольше</small>
         </form>
       </div>
       <div class="tab-panel" role="tabpanel" data-tab-panel="instruction">

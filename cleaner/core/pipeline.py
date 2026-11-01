@@ -6,10 +6,11 @@ import bisect
 import hashlib
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from types import ModuleType
 from typing import Protocol
+from urllib.parse import parse_qsl, urlencode
 
 from cleaner.core import leakcheck, restore, surrogates
 from cleaner.core.detect import dictionary, infra, ner, orgs, rules, secrets
@@ -533,13 +534,32 @@ def build_agent_outgoing(
     """Заголовки агента — только из списка протокола (allowed) и с его началами имён (prefixes); остальные отбрасываются,
     ключи агента и X-Cleaner-Key тоже. Значение не из ASCII заголовком HTTP не отправить — такой заголовок отбрасывается,
     а не роняет запрос."""
+    query, _ = agent_transport(query, (), path)
     kept = tuple(
         (name.lower(), value) for name, value in headers.items()
         if (name.lower() in allowed or name.lower().startswith(prefixes)) and value.isascii()
     )
     raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    out = AgentOutgoing(chat_id, provider_id, path, query, kept, raw, tuple(checked))
+    _, transport = agent_transport(query, kept, path)
+    out = AgentOutgoing(chat_id, provider_id, path, query, kept, raw, (*checked, *transport))
     return out, checked_leaks(out.checked, state, settings)
+
+
+def agent_transport(query: str, headers: Iterable[tuple[str, str]], path: str) -> tuple[str, tuple[str, ...]]:
+    """SEC-2 covers decoded query fields and forwarded headers, including their names. Provider credentials are a
+    separate channel: Authorization is supplied only for the pinned subscription endpoint and is never inspected or
+    recorded as user content. The sole supported query switch is Anthropic's beta=true|false."""
+    try:
+        pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=True, errors="strict", max_num_fields=16)
+    except (ValueError, UnicodeError):
+        raise ValueError("unsupported_query") from None
+    if any(name != "beta" or value not in ("true", "false") or not path.startswith("/v1/messages") for name, value in pairs):
+        raise ValueError("unsupported_query")
+    if len(pairs) > 1:
+        raise ValueError("unsupported_query")
+    checked = [part for pair in pairs for part in pair]
+    checked += [part for name, value in headers if name.lower() != "authorization" for part in (name, value)]
+    return urlencode(pairs), tuple(checked)
 
 
 def probe_context(provider_id: str, model: str) -> OutgoingContext:

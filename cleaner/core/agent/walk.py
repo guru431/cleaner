@@ -107,15 +107,17 @@ def first_user(body: dict) -> object:
     return None
 
 
-def strings_of(value: object) -> Iterator[str]:
+def strings_of(value: object, *, keys: bool = True) -> Iterator[str]:
     if isinstance(value, str):
         yield value
     elif isinstance(value, list):
         for item in value:
-            yield from strings_of(item)
+            yield from strings_of(item, keys=keys)
     elif isinstance(value, dict):
-        for item in value.values():
-            yield from strings_of(item)
+        for key, item in value.items():
+            if keys:
+                yield key
+            yield from strings_of(item, keys=keys)
 
 
 def structural(body: dict) -> list[str]:
@@ -130,29 +132,89 @@ def structural(body: dict) -> list[str]:
                 out.append(block["name"])
     for key, value in body.items():
         if key in PARAMS:
-            out += strings_of(value)
+            out += parameter_strings(value, data=key == "metadata")
     return out
 
 
 _UNCHECKED_SCHEMA_KEYS = frozenset({"required", "type"})
+_SCHEMA_MAPS = frozenset({"properties", "patternProperties", "definitions", "$defs", "dependentSchemas"})
+_TOOL_FIELDS = frozenset({"name", "type", "description", "input_schema", "parameters", "function", "strict", "format", "cache_control"})
+_SCHEMA_FIELDS = frozenset({
+    "$id", "$schema", "$ref", "$anchor", "$comment", "$defs", "title", "description", "type", "format", "default",
+    "examples", "enum", "const", "properties", "patternProperties", "definitions", "dependentSchemas", "required",
+    "additionalProperties", "unevaluatedProperties", "propertyNames", "items", "prefixItems", "additionalItems",
+    "contains", "minContains", "maxContains", "minItems", "maxItems", "uniqueItems", "minimum", "maximum",
+    "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength", "pattern", "minProperties",
+    "maxProperties", "dependentRequired", "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "readOnly", "writeOnly",
+})
+_UNIT_FIELDS = {
+    "text": frozenset({"type", "text", "annotations", "cache_control"}),
+    "tool_use": frozenset({"type", "id", "call_id", "status", "name", "input", "function", "arguments", "action"}),
+    "tool_result": frozenset({"type", "id", "call_id", "tool_use_id", "tool_call_id", "status", "role", "content", "output", "is_error"}),
+    "reasoning": frozenset({"type", "id", "status", "text", "summary", "content"}),
+    "media": frozenset({"type", "text"}),     # withheld placeholders have a text envelope
+}
+_PARAM_FIELDS = _SCHEMA_FIELDS | _TOOL_FIELDS | frozenset({
+    "schema", "json_schema", "metadata", "effort", "summary", "verbosity", "budget_tokens", "display", "enabled",
+    "disable_parallel_tool_use", "include_usage", "edits", "trigger", "clear_at_least", "keep", "clear_tool_inputs",
+    "exclude_tools", "cache_creation", "scope", "ttl", "value", "container", "skills", "version", "skill_id",
+})
 
 
-def checked_strings(kind: str, node: object) -> Iterator[str]:
+def parameter_strings(node: object, *, data: bool = False) -> Iterator[str]:
+    """Parameter envelopes have protocol/schema field names; metadata and unfamiliar names are user data."""
+    if data or not isinstance(node, (dict, list)):
+        yield from strings_of(node)
+    elif isinstance(node, list):
+        for item in node:
+            yield from parameter_strings(item)
+    else:
+        for key, item in node.items():
+            if key not in _PARAM_FIELDS:
+                yield key
+            if key in _SCHEMA_MAPS and isinstance(item, dict):
+                for schema in item.values():
+                    yield from parameter_strings(schema)
+            elif key != "required" or isinstance(item, dict):
+                yield from parameter_strings(item, data=key == "metadata")
+
+
+def checked_strings(kind: str, node: object, *, schema: bool = False, names: bool = False) -> Iterator[str]:
     """Строки нового узла для проверки утечек. У описания инструмента — без имён обязательных свойств (required) и типов
     схемы: шлюз их, как и сами имена свойств, не очищает, а совпадение имени свойства с найденной сущностью (учётная
     запись «name» из примера пути «/Users/name/» в описании bash у OpenCode) отказывало бы каждому запросу агента.
     Остальные служебные значения схемы (format, $ref, $schema) уходят как есть и проверяются."""
     if kind != "tool_def":
-        yield from strings_of(node)
+        if not isinstance(node, dict):
+            yield from strings_of(node)
+            return
+        for key, item in node.items():
+            if key not in _UNIT_FIELDS.get(kind, ()):
+                yield key
+            if kind == "tool_use" and key == "function":
+                yield from checked_strings("tool_use", item)
+            elif kind == "tool_result" and key in ("content", "output") and isinstance(item, list):
+                for part in item:
+                    nested = "text" if isinstance(part, dict) and part.get("type") in ("text", "input_text", "output_text") else "other"
+                    yield from checked_strings(nested, part)
+            else:
+                yield from strings_of(item)
     elif isinstance(node, str):
         yield node
     elif isinstance(node, list):
         for item in node:
-            yield from checked_strings(kind, item)
+            yield from checked_strings(kind, item, schema=schema)
     elif isinstance(node, dict):
         for key, item in node.items():
+            fields = _SCHEMA_FIELDS if schema else _TOOL_FIELDS
+            if not names and key not in fields:
+                yield key
+            if key == "metadata" and not names:
+                yield from strings_of(item)
+                continue
             if key not in _UNCHECKED_SCHEMA_KEYS or isinstance(item, dict):
-                yield from checked_strings(kind, item)
+                yield from checked_strings(kind, item, schema=schema or key in ("input_schema", "parameters"),
+                                           names=key in _SCHEMA_MAPS and (schema or key in ("input_schema", "parameters")))
 
 
 def strings(value: object, clean: Callable[[str], str], skip: frozenset[str]) -> object:

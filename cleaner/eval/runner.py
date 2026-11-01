@@ -116,6 +116,7 @@ def format_results(results: dict[str, Report], count: int) -> str:
             "Лишние замены среди версий, кодов ошибок и общеизвестных доменов: "
             f"{share(report.overmasked, report.candidates)}"
         )
+        lines.append(f"Ложные срабатывания вне эталона: {sum(report.found.values()) - sum(report.correct.values())}")
     return "\n".join(lines)
 
 
@@ -204,6 +205,7 @@ class Comparison:
     drops: list[str] = field(default_factory=list)       # полнота класса упала
     unchecked: list[str] = field(default_factory=list)   # сопоставимого базового замера нет — QA-6 не проверена
     replace: list[str] = field(default_factory=list)     # слои, чей базовый замер снят на другом наборе: замена — только явно
+    warnings: list[str] = field(default_factory=list)    # цена маскирования; предупреждение отдельно от запрета QA-6
 
     def verdict(self) -> str:
         if self.drops:
@@ -213,7 +215,10 @@ class Comparison:
         return "QA-6: ни один класс не упал против базового замера."
 
     def lines(self) -> list[str]:
-        return [f"ПОЛНОТА УПАЛА: {d}" for d in self.drops] + [f"НЕ ПРОВЕРЕНО: {u}" for u in self.unchecked] + [self.verdict()]
+        return (
+            [f"ПОЛНОТА УПАЛА: {d}" for d in self.drops] + [f"НЕ ПРОВЕРЕНО: {u}" for u in self.unchecked]
+            + [f"ПОЛЕЗНОСТЬ: {w}" for w in self.warnings] + [self.verdict()]
+        )
 
 
 def baselines(repo) -> dict[str, dict[str, dict]]:
@@ -231,7 +236,7 @@ def save_baseline(repo, dataset: str, results: dict[str, Report], fp: str, examp
     stored = baselines(repo)
     layers = {name: entry for name, entry in stored.get(dataset, {}).items() if entry}
     layers.update({
-        name: {"fingerprint": fp, "examples": examples, "classes": {t: list(c) for t, c in report.classes.items()}}
+        name: {"fingerprint": fp, "examples": examples, **summary(report)}
         for name, report in results.items()
     })
     stored[dataset] = layers
@@ -260,6 +265,20 @@ def compare(results: dict[str, Report], baseline: dict[str, dict], fp: str, exam
             result.replace.append(name)
             continue
         old, new = before["classes"], report.classes
+        if "chars" in before and "types" in before:
+            previous = before["chars"][0]
+            if report.chars_outside > previous:
+                result.warnings.append(
+                    f"слои {name}: лишне скрытых знаков было {previous}, стало {report.chars_outside}"
+                )
+            previous_fp = sum(t["found"] - t["correct"] for t in before["types"].values())
+            current_fp = sum(report.found.values()) - sum(report.correct.values())
+            if current_fp > previous_fp:
+                result.warnings.append(
+                    f"слои {name}: ложных срабатываний было {previous_fp}, стало {current_fp}"
+                )
+        else:
+            result.warnings.append(f"слои {name}: полезность не сравнивалась — в базовом замере нет счётчиков")
         for title in sorted(set(old) | set(new)):
             (hidden, total), (now, current) = old.get(title, (0, 0)), new.get(title, (0, 0))
             if total != current:
@@ -310,7 +329,7 @@ def measure(
         "measured_at": repo.clock.now().isoformat(timespec="seconds"), "examples": len(examples), "fingerprint": fp,
         "unit": unit, "versions": versions, "source": source or {},
         "layers": {name: summary(report) for name, report in results.items()},
-        "drops": comparison.drops, "unchecked": comparison.unchecked,
+        "drops": comparison.drops, "unchecked": comparison.unchecked, "warnings": comparison.warnings,
     }
     repo.set_setting(PASSPORT_KEY, json.dumps(stored, ensure_ascii=False))
     return Measurement(results, comparison, fp, len(examples))

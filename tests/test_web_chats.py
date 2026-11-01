@@ -165,3 +165,23 @@ def test_layer_is_switched_off_for_a_chat_shown_on_the_review_and_logged(ivan, r
             "слой не выполнялся") in page
     assert [e.details for e in repo.audit_events("layer_changed")] == [{"layer": "ner", "enabled": False}]
     assert ivan.post(f"/chats/{chat_id}/layers", layer="rules", enabled="no").status_code == 400
+
+
+def test_chat_mode_filter_survives_return_and_searches_only_owned_key_names(ivan, boss, repo):
+    normal = ivan.chat("Обычный вопрос")
+    user_id = repo.user_by_login("ivan").id
+    agent = repo.create_chat(user_id, "Автоматический разговор", kind="agent")
+    key_id = repo.add_api_key(user_id, "Мой сборщик", "synthetic-hash", "1234")
+    repo.add_conversation("a" * 64, agent, key_id, "synthetic-session")
+    repo.create_chat(repo.user_by_login("boss").id, "Чужая консультация")
+    filtered = ivan.get("/chats", kind="agent")
+    assert f'href="/chats/{agent}"' in filtered.text and f'href="/chats/{normal}"' not in filtered.text
+    assert "Мой сборщик" in filtered.text and "Последний запрос:" in filtered.text
+    returned = ivan.get(f"/chats/{agent}").text
+    assert 'aria-current="page">Агенты</a>' in returned and f'href="/chats/{normal}"' not in returned
+    assert "Автоматический разговор" in ivan.get("/chats", q="СБОРЩИК").text
+    consultations = ivan.get("/chats", kind="chat").text
+    assert f'href="/chats/{normal}"' in consultations and f'href="/chats/{agent}"' not in consultations
+    all_chats = ivan.get("/chats", kind="all").text
+    assert f'href="/chats/{normal}"' in all_chats and f'href="/chats/{agent}"' in all_chats
+    assert "Чужая консультация" not in all_chats

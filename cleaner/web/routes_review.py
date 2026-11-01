@@ -285,6 +285,9 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
     if any(opened_marks):
         legend.append(("opened", render.OPENED.lower()))
     sources = [(code, label) for code, label in render.SOURCE_NAMES.items() if any(code in w["sources"] for w in why.values())]
+    next_review = next((other.id for other in repo_of(request).items(chat_id)
+                        if other.kind == "input" and other.seq > item.seq and other.status == "done"), "")
+    provider_id, _ = repo_of(request).chat_provider(chat_id)
     return page(
         request, "review.html", viewer, chat=chat, item=item, deliverable=entry.deliverable,
         leaks=len(entry.leaks), blocked=len(entry.blocked), opened=_opened(sanitized, state),
@@ -296,7 +299,8 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
         exposed=[", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],
         types=render.TYPE_NAMES, pending=False, retry=can_retry(item), warnings=_warnings(item), extraction=_extraction(item),
         risk=repo_of(request).item_risk(chat_id, item_id) if item.risk_status == "done" else None, risk_kinds=KINDS,
-        undo=repo_of(request).undo_action(chat_id), undo_names=UNDOABLE,
+        undo=repo_of(request).undo_action(chat_id), undo_names=UNDOABLE, next_review=next_review,
+        transfer="send" if provider_id else "manual",
     )
 
 
@@ -315,8 +319,13 @@ def check_risk(request: Request, chat_id: str, item_id: str, form: dict[str, str
 @router.post("/chats/{chat_id}/items/{item_id}/gold")
 def save_gold(request: Request, chat_id: str, item_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
     own_chat(request, chat_id, viewer)
+    from cleaner.eval.coverage import CHECKS
+
     try:
-        service_of(request).save_gold(chat_id, viewer.user.id, item_id)
+        service_of(request).save_gold(
+            chat_id, viewer.user.id, item_id, scenario=form.get("scenario", ""),
+            checks=tuple(key for key, _ in CHECKS if form.get(key) == "yes"),
+        )
     except EditRefused as exc:
         raise HTTPException(400, str(exc)) from None
     except KeyError:

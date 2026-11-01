@@ -32,7 +32,7 @@
 {% endmacro %}
 {% block content %}
 <h1>Подключения к облачным моделям</h1>
-<p class="lead">Запрос уходит только очищенным и только после подтверждения пользователя. Адрес — только HTTPS (HTTP — для петли). Ключ после сохранения не показывается: видны последние четыре знака.</p>
+<p class="lead">В консультации очищенный запрос уходит после экрана подтверждения. Шлюз агентов отправляет очищенные запросы автоматически по выданному ключу, без подтверждения каждого хода. «Проверить соединение» отправляет отдельный пробный запрос без данных пользователя. Адрес — только HTTPS (HTTP — для петли). Ключ после сохранения не показывается: видны последние четыре знака.</p>
 {% if result %}<p class="flash {{ 'bad' if failed else 'good' }}">{{ result }}</p>{% endif %}
 {% if detail %}<p class="muted">Сообщение провайдера: {{ detail }}</p>{% endif %}
 {% if providers %}
@@ -53,15 +53,16 @@
           <button title="Короткий запрос к выбранной модели, без данных пользователя">Проверить соединение</button>
         </form>
         <details class="inline" name="edit">
-          <summary class="btn">Изменить</summary>
+          <summary class="btn" aria-label="Изменить подключение {{ p.name }}">Изменить</summary>
           <div class="pop">
+            <strong class="menu-group">Изменение подключения «{{ p.name }}»</strong>
             <form method="post" action="/settings/providers/{{ p.id }}" class="form">
               {% include "_csrf.html" %}{{ fields(p) }}
               <div class="buttons"><button class="primary">Сохранить</button></div>
             </form>
           </div>
         </details>
-        <form method="post" action="/settings/providers/{{ p.id }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form>
+        <form method="post" action="/settings/providers/{{ p.id }}/delete">{% include "_csrf.html" %}<button class="danger" aria-label="Удалить подключение {{ p.name }}" title="Подключение перестанет быть доступно чатам и ключам шлюза">Удалить</button></form>
       </td>
     </tr>
     {% endfor %}

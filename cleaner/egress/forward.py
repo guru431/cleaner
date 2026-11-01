@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import socket
+import re
 import sys
 import threading
 from collections.abc import Iterator
@@ -16,7 +17,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from cleaner.core.pipeline import AgentOutgoing, checked_leaks
+from cleaner.core.pipeline import AgentOutgoing, agent_transport, checked_leaks
 from cleaner.core.types import ChatState, Settings
 from cleaner.egress import ProviderError
 from cleaner.egress.cloud import Connection, LeakDetected, _headers, check_url
@@ -24,6 +25,10 @@ from cleaner.egress.cloud import Connection, LeakDetected, _headers, check_url
 _TIMEOUT = httpx.Timeout(30.0, read=300.0)          # агент с рассуждениями молчит минутами до первого слова
 _PASSED = ("content-type", "request-id", "retry-after")      # заголовки провайдера агенту, если протокол не задал свои
 _LIMITS = httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=60.0)
+RESPONSE_BYTES = 32 * 1024 * 1024
+EVENT_BYTES = 2 * 1024 * 1024
+EVENT_LINES = 32_768
+_LINEBREAK = re.compile(rb"\r\n|\r|\n")
 
 # Соединения с провайдером переиспользуются (замер 30.10.2026: установка TLS — 0,19–0,43 с на ход агента). Клиент — на
 # источник scheme://host:port, общий для потоков пула шлюза. Вход агента по подписке — заголовок запроса, не клиента.
@@ -62,6 +67,11 @@ class ProviderTimeout(ProviderError):
         super().__init__("провайдер не ответил вовремя")
 
 
+class ProviderLimit(ProviderError):
+    def __init__(self) -> None:
+        super().__init__("превышен предел размера ответа провайдера")
+
+
 class Upstream:
     """Ответ провайдера: код, разрешённые заголовки и тело — строками потока или байтами. owns_client — клиент свой
     (тесты с transport) и закрывается с ответом; клиент пула общий и не закрывается."""
@@ -82,8 +92,34 @@ class Upstream:
 
     def lines(self) -> Iterator[str]:
         secrets = tuple(secret.decode("utf-8") for secret in self._secrets)
+        pending = b""
+        total = 0
+        lines = 0
         try:
-            for line in self._response.iter_lines():
+            for chunk in self._response.iter_bytes():
+                total += len(chunk)
+                if total > RESPONSE_BYTES:
+                    raise ProviderLimit()
+                pending += chunk
+                start = 0
+                for boundary in _LINEBREAK.finditer(pending):
+                    if boundary.group() == b"\r" and boundary.end() == len(pending):
+                        break       # CRLF can be split across chunks.
+                    if boundary.start() - start > EVENT_BYTES:
+                        raise ProviderLimit()
+                    lines += 1
+                    if lines > EVENT_LINES:
+                        raise ProviderLimit()
+                    line = pending[start:boundary.start()].decode("utf-8", errors="replace")
+                    for secret in secrets:
+                        line = line.replace(secret, "***")
+                    yield line
+                    start = boundary.end()
+                pending = pending[start:]
+                if len(pending) > EVENT_BYTES:
+                    raise ProviderLimit()
+            if pending:
+                line = pending.rstrip(b"\r").decode("utf-8", errors="replace")
                 for secret in secrets:
                     line = line.replace(secret, "***")
                 yield line
@@ -148,11 +184,12 @@ def forward(
     """passed — заголовки ответа провайдера, которые уходят агенту (по протоколу)."""
     if not isinstance(out, AgentOutgoing):
         raise TypeError("egress.forward принимает только AgentOutgoing, собранный pipeline")
-    leaks = checked_leaks(out.checked, state, settings)
+    query, transport_checked = agent_transport(out.query, out.headers, out.path)
+    leaks = checked_leaks((*out.checked, *transport_checked), state, settings)
     if leaks:
         raise LeakDetected(len(leaks))
     check_url(connection.base_url)
-    url = f"{connection.base_url.rstrip('/')}{out.path}" + (f"?{out.query}" if out.query else "")
+    url = f"{connection.base_url.rstrip('/')}{out.path}" + (f"?{query}" if query else "")
     owns = transport is not None
     if owns:
         client = httpx.Client(transport=transport, trust_env=False, follow_redirects=False, timeout=_TIMEOUT,

@@ -9,7 +9,7 @@ try {
 }
 // Вид рабочего места (меню «Вид»): отметки — именами через пробел; ставятся только известные, иначе — исходный вид.
 try {
-  const marks = ["text-large", "rows-loose", "side-folded", "composer-folded", "reading"];
+  const marks = ["text-large", "ui-large", "contrast", "rows-loose", "side-folded", "composer-folded", "reading"];
   (localStorage.getItem("cleaner-view") || "").split(" ").filter((name) => marks.includes(name))
     .forEach((name) => document.documentElement.classList.add(`view-${name}`));
 } catch (error) {

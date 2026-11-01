@@ -23,6 +23,21 @@
   <p class="sub">Чат шлюза агентов — только для просмотра. Ключ: {{ keys or "—" }}. Создан {{ chat.created_at | local(tz) }}. Разговоров: {{ conversations }}.</p>
   <p class="sub">Таблица замен общая для всех разговоров ключа; <a href="/chats/{{ chat.id }}/entities">правки распознавания</a> — правки действуют на следующие запросы агента. Уже отправленные блоки повторяются дословно, пока идёт их разговор.</p>
   <section class="panel">
+    <header class="panel-head"><h2 class="title">Квитанции запросов</h2></header>
+    <div class="panel-body">
+      <p class="sub">Один запрос объединяет новые и повторённые блоки. Содержимое доступно владельцу чата; значения ключей доступа и токенов в квитанцию не записываются.</p>
+      {% for receipt in receipts %}
+      <details{% if selected_request and selected_request.id == receipt.id %} open{% endif %}>
+        <summary>{{ receipt.time | local(tz) }} · {{ receipt.protocol }} · {{ receipt.model }} · {{ receipt.status }} · {{ receipt.ms_total }} мс</summary>
+        <p>Доступ: {{ receipt.access }}. Новых блоков: {{ receipt.new }}, повторённых: {{ receipt.repeated }}, удержанных: {{ receipt.withheld.values() | sum }}. Слои: {{ receipt.layers | join(", ") }}.{% if receipt.reason %} Причина отказа или обрыва: <code>{{ receipt.reason }}</code>.{% endif %}</p>
+        <p>Проверяемые каналы: {{ receipt.channels | join("; ") }}. Заголовки: {{ receipt.headers | join(", ") or "—" }}. Параметры URL: {{ receipt.parameters | join(", ") or "—" }}. Учётные данные передаются отдельно: {{ receipt.credential_channel }}.</p>
+        <p><a href="?request={{ receipt.id }}">Показать блоки этого запроса</a> · <span class="mono">{{ receipt.id[:12] }}</span></p>
+      </details>
+      {% else %}<p class="sub">Запросов ещё нет. Для старых записей журнала квитанции не создаются задним числом.</p>{% endfor %}
+      {% if selected_request %}<p><a href="/chats/{{ chat.id }}">Показать весь журнал</a></p>{% endif %}
+    </div>
+  </section>
+  <section class="panel">
     <header class="panel-head"><h2 class="title">Журнал отправленного</h2></header>
     <div class="panel-body">
       <p class="{{ 'flash warn' if opened else 'sub' }}">В показанных записях известные значения открыты в {{ opened }} {{ "блоке" if opened == 1 else "блоках" }}{% if opened %}: значение ушло открытым до правила, а разговор повторяет блок дословно{% endif %}.</p>

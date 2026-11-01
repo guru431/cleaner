@@ -1,8 +1,9 @@
 """Восстановление потока ответа Anthropic для агента (спецификация 2026-10-28, раздел 10). Текст отдаётся по мере
 прихода, без правила ссылок (терминал агента ссылок не загружает), секреты в нём — метками (FR-7.7). Аргументы вызова
 инструмента копятся до конца блока и уходят одной дельтой, восстановленные точно (10.3): секреты — тоже. Рассуждения,
-подписи, ping и незнакомые события — как пришли и сразу. Ответ целиком не копится: держится хвост текста до границы
-замены и аргументы одного вызова."""
+подписи, ping и незнакомые события — как пришли и сразу. Сам DeltaRestorer держит только неотданный хвост;
+обработчики сохраняют исходные и восстановленные блоки для зашифрованного журнала. Их общий объём ограничен
+egress: 32 МиБ ответа и 2 МиБ одной строки SSE, включая аргументы инструментов."""
 from __future__ import annotations
 
 import json
@@ -10,7 +11,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-from cleaner.core.restore import originals, safe_cut
+from cleaner.core.restore import RestoreLimit, originals, safe_cut
 from cleaner.core.types import ChatState, EntityType, Settings
 
 _TYPES = "|".join(t.value.replace("_", r"\\?_") for t in sorted(EntityType, key=lambda t: -len(t.value)))
@@ -21,7 +22,31 @@ _LABEL_TAIL = re.compile(
     rf"(?:(?:\\?<|&lt;|\\?\[\\?\[)\s*(?:(?ai:{_TYPES})\s*(?:\\?_\s*(?:\d+\s*)?)?)?"
     rf"|(?<![\w<\[])(?ai:{_TYPES})\s*(?:\\?_\s*(?:\d+\s*)?)?)\Z"
 )
-_TAIL_WINDOW = 256          # длина окна, в котором ищется такой конец
+RESTORED_BYTES = 32 * 1024 * 1024
+ARGUMENT_BYTES = 2 * 1024 * 1024
+
+
+class RestorationBudget:
+    """Aggregate restored text and tool argument bytes, shared by all blocks and choices of one response."""
+
+    def __init__(self):
+        self.remaining = RESTORED_BYTES
+        self.arguments = ARGUMENT_BYTES
+
+    def original(self, state: ChatState, settings: Settings, *, exact: bool = False) -> Callable[[str], str]:
+        restore = originals(state, settings, exact=exact, max_bytes=ARGUMENT_BYTES if exact else RESTORED_BYTES)
+
+        def checked(value: str) -> str:
+            result = restore(value)
+            size = len(result.encode("utf-8"))
+            if size > self.remaining or exact and size > self.arguments:
+                raise RestoreLimit("response_expansion_limit")
+            self.remaining -= size
+            if exact:
+                self.arguments -= size
+            return result
+
+        return checked
 
 
 class DeltaRestorer:
@@ -31,21 +56,22 @@ class DeltaRestorer:
     def __init__(self, state: ChatState, settings: Settings, original: Callable[[str], str] | None = None):
         self.original = original or originals(state, settings)
         self.text = ""
-        self.sent = 0           # до этого знака текст уже отдан
 
     def feed(self, chunk: str) -> str:
         self.text += chunk
-        cut = self.sent + safe_cut(self.text[self.sent:])
-        tail = _LABEL_TAIL.search(self.text, max(self.sent, cut - _TAIL_WINDOW), cut)
+        cut = safe_cut(self.text)
+        # Пробелы внутри допустимой метки не ограничены фиксированным окном: её начало нужно удержать,
+        # даже когда модель разделяет тип и номер сотнями пробелов и разрывами дельт.
+        tail = _LABEL_TAIL.search(self.text, 0, cut)
         if tail is not None:
             cut = tail.start()
-        if cut <= self.sent:
+        if not cut:
             return ""
-        piece, self.sent = self.text[self.sent:cut], cut
+        piece, self.text = self.text[:cut], self.text[cut:]
         return self.original(piece)
 
     def finish(self) -> str:
-        piece, self.sent = self.text[self.sent:], len(self.text)
+        piece, self.text = self.text, ""
         return self.original(piece) if piece else ""
 
 
@@ -114,17 +140,18 @@ class AnthropicStream:
         self.settings = settings
         self.blocks: dict[int, _Block] = {}
         self.pairs: list[tuple[dict, dict]] = []
+        self.budget = RestorationBudget()
         self._text: Callable[[str], str] | None = None
         self._exact: Callable[[str], str] | None = None
 
     def _restore_text(self, text: str) -> str:
         if self._text is None:
-            self._text = originals(self.state, self.settings)
+            self._text = self.budget.original(self.state, self.settings)
         return self._text(text)
 
     def _restore_input(self, value: object) -> object:
         if self._exact is None:
-            self._exact = originals(self.state, self.settings, exact=True)
+            self._exact = self.budget.original(self.state, self.settings, exact=True)
         return map_strings(value, self._exact)
 
     @staticmethod

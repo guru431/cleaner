@@ -19,7 +19,7 @@ from cleaner.core.detect.llm import CompletionError
 from cleaner.core.types import EntityType, Policy
 from cleaner.egress import ProviderError, cloud
 from cleaner.engines import GATEWAY_KEY_ENV, LocalSettings, local_settings, save_local_settings
-from cleaner.eval import runner
+from cleaner.eval import coverage, runner
 from cleaner.eval.metrics import CLASSES
 from cleaner.storage.repo import Provider, User
 from cleaner.web import auth, render
@@ -39,7 +39,7 @@ DUPLICATE = "Такое значение уже есть в этом списк�
 EVENTS = (
     "login", "login_failed", "logout", "chat_created", "chat_deleted", "sanitize", "restore", "edit", "edit_undo", "leak",
     "dictionary_changed", "dictionary_import", "pattern_changed", "policy_changed",
-    "user_created", "user_disabled", "user_enabled", "password_changed", "error", "jobs_interrupted",
+    "user_created", "user_disabled", "user_enabled", "password_changed", "error", "jobs_interrupted", "job_cancelled",
     "settings_changed", "gold_added", "gold_deleted", "risk_check", "layer_changed",
     "provider_changed", "cloud_send", "local_answer", "eval_run", "reviewed", "api_auth_failed",
     "key_created", "key_disabled", "agent_send", "agent_refused", "agent_withheld", "agent_chat_created", "agent_pruned",
@@ -504,6 +504,7 @@ def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
         ("Скрыто знаков вне эталона — от скрытых", [runner.share(layers[n]["chars"][0], layers[n]["chars"][1]) for n in names]),
         ("Скрыто знаков вне эталона — от текста вне эталона", [runner.share(layers[n]["chars"][0], layers[n]["chars"][2]) for n in names]),
         ("Лишние замены среди версий, кодов ошибок и общеизвестных доменов", [runner.share(*layers[n]["overmasked"]) for n in names]),
+        ("Ложные срабатывания вне эталона", [str(total(n, "found") - total(n, "correct")) for n in names]),
     ]
     types = sorted({type_ for name in names for type_ in layers[name]["types"]})
     empty = {"entities": [0, 0], "mentions": [0, 0], "found": 0, "correct": 0, "typed": 0}
@@ -535,7 +536,7 @@ def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
         "measured_at": entry["measured_at"], "examples": entry["examples"], "unit": entry["unit"],
         "fingerprint": entry["fingerprint"][:12], "changed": current is not None and current != entry["fingerprint"],
         "versions": shown, "layers": names, "classes": classes, "quality": quality, "types": by_type,
-        "drops": entry["drops"], "unchecked": entry["unchecked"],
+        "drops": entry["drops"], "unchecked": entry["unchecked"], "warnings": entry.get("warnings", []),
     }
 
 
@@ -576,6 +577,7 @@ def gold(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
         {
             "id": row.id, "created_at": row.created_at, "login": logins.get(row.user_id, "—"), "length": len(row.text),
             "types": ", ".join(f"{type_} — {count}" for type_, count in sorted(Counter(s["type"] for s in row.spans).items())),
+            "scenario": dict(coverage.SCENARIOS).get(row.metadata.get("scenario"), "Не указан"),
         }
         for row in examples
     ]
@@ -586,6 +588,7 @@ def gold(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
     return page(
         request, "gold.html", viewer, rows=rows, target=GOLD_TARGET, own=own, opened=opened,
         measure=request.app.state.measure, measure_layers=_measure_layers(repo), engines=request.app.state.engines is not None,
+        coverage=coverage.matrix(examples),
     )
 
 
@@ -602,7 +605,19 @@ def measure_gold(request: Request, form: dict[str, str] = Depends(get_form), vie
         if app.state.measure["status"] in ("queued", "running"):
             return _redirect("/settings/gold")
         app.state.measure = {"status": "queued", "layers": layers}
-    app.state.measures.submit(_measure, app, viewer.user.id, layers)
+        state = app.state.measure
+        reservation = None
+        try:
+            reservation = app.state.measures.budget.reserve(viewer.user.id)
+            app.state.measures.submit_reserved(
+                _measure, (app, viewer.user.id, layers), reservation, user=viewer.user.id, kind="measure",
+                cancelled=lambda reason: state.update(status="failed", error=reason),
+            )
+        except Exception:
+            if reservation is not None:
+                reservation.release()
+            app.state.measure = {"status": "failed", "layers": layers, "error": "Замер не поставлен в очередь: повторите позже"}
+            raise
     return _redirect("/settings/gold")
 
 

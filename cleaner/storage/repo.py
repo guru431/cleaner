@@ -150,6 +150,7 @@ class GoldRow:
     text: str
     spans: list[dict]          # start, end, type, entity (номер сущности в примере), origin
     created_at: str
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,7 @@ class ApiKey:
     models: tuple[str, ...] = ()               # разрешённые модели подключения; пусто — все
     layers: dict[str, bool] = field(default_factory=lambda: dict(KEY_LAYERS), hash=False)     # слои 4 и 5 шлюза
     chat_id: str | None = None                 # текущий чат шлюза
+    agent_epoch: int = 0                       # namespace после явного сброса клиента без id разговора
 
 
 class Repository:
@@ -771,7 +773,7 @@ class Repository:
         return ApiKey(
             row["id"], row["user_id"], self._dec(self.global_key, row["name_enc"], f"api_keys.name:{row['id']}"),
             row["tail"], bool(row["disabled"]), row["created_at"], row["last_used_at"] or "",
-            row["upstream"], tuple(json.loads(row["models"])), KEY_LAYERS | json.loads(row["layers"]), row["chat_id"],
+            row["upstream"], tuple(json.loads(row["models"])), KEY_LAYERS | json.loads(row["layers"]), row["chat_id"], row["agent_epoch"],
         )
 
     def add_api_key(
@@ -792,6 +794,11 @@ class Repository:
     def set_key_chat(self, key_id: str, chat_id: str | None) -> None:
         """Текущий чат шлюза ключа; None — следующий новый разговор начнёт новый чат («Начать заново»)."""
         self._run("UPDATE api_keys SET chat_id = ? WHERE id = ?", chat_id, key_id)
+
+    def restart_key_chat(self, key_id: str) -> None:
+        """Explicit reset: clients without stable session ids get a new persistent namespace. Identified sessions can
+        continue their existing conversation; a new session or X-Cleaner-Conversation-Id starts a separate one."""
+        self._run("UPDATE api_keys SET chat_id = NULL, agent_epoch = agent_epoch + 1 WHERE id = ?", key_id)
 
     def api_key_by_hash(self, token_hash: str) -> ApiKey | None:
         return self._api_key(self._one("SELECT * FROM api_keys WHERE token_hash = ?", token_hash))
@@ -925,6 +932,34 @@ class Repository:
         )
         return [(self._ledger_entry(row, key), row["first_seen"]) for row in rows]
 
+    def add_agent_receipt(self, chat_id: str, conversation: str, receipt: dict) -> str:
+        request_id = uuid.uuid4().hex
+        self._run(
+            "INSERT INTO agent_receipts(id, conversation, created_at, content_enc) VALUES (?, ?, ?, ?)",
+            request_id, conversation, self._now(),
+            self._enc(self._dek(chat_id), json.dumps(receipt, ensure_ascii=False), f"agent_receipts.content:{request_id}"),
+        )
+        return request_id
+
+    def agent_receipts(self, chat_id: str, offset: int = 0, limit: int = 20) -> list[dict]:
+        key = self._dek(chat_id)
+        rows = self._all(
+            "SELECT r.* FROM agent_receipts r JOIN agent_conversations c ON c.id = r.conversation WHERE c.chat_id = ? "
+            "ORDER BY r.created_at DESC, r.rowid DESC LIMIT ? OFFSET ?", chat_id, limit, offset,
+        )
+        return [dict(json.loads(self._dec(key, row["content_enc"], f"agent_receipts.content:{row['id']}")),
+                     id=row["id"], conversation=row["conversation"], time=row["created_at"]) for row in rows]
+
+    def agent_receipt(self, chat_id: str, request_id: str) -> dict | None:
+        row = self._one(
+            "SELECT r.* FROM agent_receipts r JOIN agent_conversations c ON c.id = r.conversation "
+            "WHERE c.chat_id = ? AND r.id = ?", chat_id, request_id,
+        )
+        if row is None:
+            return None
+        return dict(json.loads(self._dec(self._dek(chat_id), row["content_enc"], f"agent_receipts.content:{row['id']}")),
+                    id=row["id"], conversation=row["conversation"], time=row["created_at"])
+
     def prune_agent(self, before: str) -> int:
         """Разговоры без запросов с before удаляются с журналом (каскадом, 7.3); чаты шлюза без разговоров, которые не
         текущие ни у одного ключа, — как удаление чата (контрольная точка WAL). Число удалённых чатов."""
@@ -953,15 +988,16 @@ class Repository:
 
     # --- эталонный набор (FR-6.10, QA-1) -----------------------------------------------
 
-    def add_gold(self, user_id: str | None, text: str, spans: list[dict]) -> str:
+    def add_gold(self, user_id: str | None, text: str, spans: list[dict], metadata: dict | None = None) -> str:
         gold_id = uuid.uuid4().hex
         key = self.global_key
         self._run(
-            "INSERT INTO gold(id, user_id, text_enc, spans_enc, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO gold(id, user_id, text_enc, spans_enc, created_at, metadata_enc) VALUES (?, ?, ?, ?, ?, ?)",
             gold_id, user_id,
             self._enc(key, text, f"gold.text:{gold_id}"),
             self._enc(key, json.dumps(spans), f"gold.spans:{gold_id}"),
             self._now(),
+            self._enc(key, json.dumps(metadata or {}), f"gold.metadata:{gold_id}"),
         )
         return gold_id
 
@@ -973,6 +1009,7 @@ class Repository:
                 self._dec(key, row["text_enc"], f"gold.text:{row['id']}"),
                 json.loads(self._dec(key, row["spans_enc"], f"gold.spans:{row['id']}")),
                 row["created_at"],
+                json.loads(self._dec(key, row["metadata_enc"], f"gold.metadata:{row['id']}")) if row["metadata_enc"] else {},
             )
             for row in self._all("SELECT * FROM gold ORDER BY created_at, id")
         ]

@@ -1,6 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg">
   <!-- Иконки интерфейса: контурные, 16×16, цвет — currentColor. Подключение: <use href="/static/icons.svg#имя">. -->
   <defs>
+    <symbol id="chat" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+      <path d="M2 2h12v9H7l-4 3v-3H2Z"/>
+    </symbol>
+    <symbol id="code" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m5 4-4 4 4 4m6-8 4 4-4 4M9 2 7 14"/>
+    </symbol>
     <symbol id="search" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
       <circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/>
     </symbol>

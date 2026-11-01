@@ -13,12 +13,16 @@
 {% from "_ui.html" import theme_toggle, view_menu %}
 {% if viewer %}
 {% set path = request.url.path %}
-{% set section = "settings" if path.startswith("/settings") else "keys" if path.startswith("/keys") else "chats" %}
+{% set chat_kind = request.query_params.get("kind", request.cookies.get("cleaner-chat-kind", "all")) %}
+{% set is_agent = chat.kind == "agent" if chat is defined and chat else chat_kind == "agent" %}
+{% set section = "settings" if path.startswith("/settings") else "keys" if path.startswith("/keys") else "jobs" if path.startswith("/jobs") else "agents" if is_agent else "chats" %}
 <header class="top">
   <a class="brand" href="/chats">Cleaner</a>
   <nav class="sections">
-    <a href="/chats"{% if section == "chats" %} class="on" aria-current="true"{% endif %}>Чаты</a>
+    <a href="/chats?kind=chat"{% if section == "chats" %} class="on" aria-current="page"{% endif %}>Чаты</a>
+    <a href="/chats?kind=agent"{% if section == "agents" %} class="on" aria-current="page"{% endif %}>Агенты</a>
     <a href="/keys"{% if section == "keys" %} class="on" aria-current="true"{% endif %}>Ключи</a>
+    <a href="/jobs"{% if section == "jobs" %} class="on" aria-current="page"{% endif %}>Мои задания</a>
     {% if viewer.is_admin %}<a href="/settings"{% if section == "settings" %} class="on" aria-current="true"{% endif %}>Настройки</a>{% endif %}
   </nav>
   <span class="who">{{ viewer.user.login }}</span>

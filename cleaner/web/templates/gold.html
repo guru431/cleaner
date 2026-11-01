@@ -12,6 +12,8 @@
   <p class="sub">Единица подсчёта: {{ p.unit }}. Точность — по пересечению: найденное засчитывается, если задело любой эталонный фрагмент, без учёта типа и лишнего захвата.</p>
   {% for line in p.drops %}<p class="flash bad">Полнота упала: {{ line }}</p>{% endfor %}
   {% for line in p.unchecked %}<p class="flash warn">Не проверено: {{ line }}</p>{% endfor %}
+  {% for line in p.warnings %}<p class="flash warn">Полезность: {{ line }}</p>{% endfor %}
+  <p class="sub">Лишнее скрытие и ложные срабатывания сравниваются с базовым замером как предупреждения. QA-6 по-прежнему запрещает падение полноты. Задержка и расход контекста измеряются отдельно.</p>
   <p class="sub">{% for name, value in p.versions %}{{ name }}: <span class="mono">{{ value }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</p>
 </div>
 <table class="grid">
@@ -43,6 +45,19 @@
 <h1>Эталонный набор</h1>
 <p class="lead">Примеров: {{ rows | length }} из {{ target }}, нужных к концу этапа 2. Примеры сохраняются кнопкой «Сохранить как эталон» на экране проверки; тексты здесь не показываются. Базовый замер для QA-6 сохраняет команда <code>python -m cleaner eval --save-baseline</code>.</p>
 <section class="panel">
+  <header class="panel-head"><h2 class="title">Пробелы покрытия собственного набора</h2></header>
+  <div class="panel-body"><p class="sub">Число примеров по классам QA-3 и сценариям. Ноль означает пробел; один пример может покрывать несколько классов. Сценарий и проверки выбираются явно при сохранении эталона. Автоматического копирования текстов нет.</p></div>
+  <div class="table-scroll"><table class="grid">
+    <thead><tr><th>Класс QA-3</th>{% for _, label in coverage.scenarios %}<th class="num">{{ label }}</th>{% endfor %}</tr></thead>
+    <tbody>{% for row in coverage.rows %}<tr><td>{{ row.title }}</td>{% for count in row.cells %}<td class="num{% if not count %} muted{% endif %}">{{ count }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  </table></div>
+  <div class="panel-body">
+    <p>Сущностей с повторными упоминаниями: {{ coverage.repeated }}.</p>
+    {% for label, count in coverage.checks %}<p class="sub">{{ label }}: {{ count }} из {{ rows | length }} примеров</p>{% endfor %}
+    <p class="sub">Эти отметки фиксируют проверку человеком; отсутствие отметки не означает полного извлечения или отсутствия ложных срабатываний.</p>
+  </div>
+</section>
+<section class="panel">
   <header class="panel-head">
     <h2 class="title">Паспорт качества: собственный набор (QA-1)</h2>
     <span class="state">слои {{ measure_layers | join(", ") }}</span>
@@ -69,15 +84,15 @@
 <section class="panel">
   <header class="panel-head"><h2 class="title">Примеры</h2></header>
   <table class="grid">
-    <thead><tr><th>Сохранён</th><th>Кем</th><th class="num">Знаков</th><th>Разметка</th><th></th></tr></thead>
+    <thead><tr><th>Сохранён</th><th>Кем</th><th>Сценарий</th><th class="num">Знаков</th><th>Разметка</th><th></th></tr></thead>
     <tbody>
     {% for row in rows %}
     <tr>
-      <td class="mono nowrap">{{ row.created_at | local(tz) }}</td><td>{{ row.login }}</td><td class="num">{{ row.length }}</td><td>{{ row.types }}</td>
+      <td class="mono nowrap">{{ row.created_at | local(tz) }}</td><td>{{ row.login }}</td><td>{{ row.scenario }}</td><td class="num">{{ row.length }}</td><td>{{ row.types }}</td>
       <td class="actions"><form method="post" action="/settings/gold/{{ row.id }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form></td>
     </tr>
     {% else %}
-    <tr><td colspan="5" class="empty">Примеров пока нет</td></tr>
+    <tr><td colspan="6" class="empty">Примеров пока нет</td></tr>
     {% endfor %}
     </tbody>
   </table>

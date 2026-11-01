@@ -141,3 +141,39 @@ def test_measurement_goes_to_the_passport_without_texts(repo):
     assert entry["layers"]["1-3"]["types"]["PERSON"]["entities"] == [0, 1]
     assert entry["versions"]["models"] == {} and len(entry["versions"]["code"]) == 64
     assert entry["unchecked"] == ["слои 1-3: базового замера нет"] and entry["measured_at"] == "2026-10-14T09:00:00+00:00"
+
+
+def test_utility_warning_preserves_the_recall_gate_and_is_persisted(repo):
+    ex = example("mail a@x.example; Version 2.4.1", (5, 16, T.EMAIL, 0, ""))
+    before = evaluate([ex], lambda _: [(5, 16, T.EMAIL)])
+    after = evaluate([ex], lambda _: [(0, 16, T.EMAIL), (26, 31, T.TERM)])
+    runner.save_baseline(repo, runner.GOLD, {"1-3": before}, "fp", 1)
+    comparison = runner.compare({"1-3": after}, runner.baselines(repo)[runner.GOLD], "fp", 1)
+    assert comparison.drops == [] and comparison.unchecked == []
+    assert len(comparison.warnings) == 2
+    assert "знаков было 0, стало" in comparison.warnings[0]
+    assert "ложных срабатываний было 0, стало 1" in comparison.warnings[1]
+    assert "ПОЛЕЗНОСТЬ:" in "\n".join(comparison.lines())
+    worse = evaluate([ex], lambda _: [])
+    assert runner.compare({"1-3": worse}, runner.baselines(repo)[runner.GOLD], "fp", 1).drops
+
+
+def test_coverage_includes_empty_cells_and_counts_examples_once(repo):
+    from cleaner.eval import coverage
+
+    spans = [{"start": 0, "end": 3, "type": "PERSON", "entity": 0},
+             {"start": 4, "end": 7, "type": "PERSON", "entity": 0}]
+    metadata = coverage.metadata("config", ["word_forms", "repeated"])
+    repo.add_gold(None, "Лев Лев", spans, metadata)
+    repo.add_gold(None, "Лев", spans[:1])
+    classified = next(row for row in repo.gold() if row.metadata)
+    legacy = next(row for row in repo.gold() if not row.metadata)
+    assert classified.metadata == metadata and legacy.metadata == {}
+    matrix = coverage.matrix(repo.gold())
+    names = [key for key, _ in matrix["scenarios"]]
+    fio = next(row for row in matrix["rows"] if row["title"] == "ФИО")
+    assert fio["cells"][names.index("config")] == 1
+    assert fio["cells"][names.index("")] == 1
+    assert fio["cells"][names.index("agent")] == 0
+    assert matrix["repeated"] == 1
+    assert dict(matrix["checks"])["Все повторные упоминания проверены"] == 1

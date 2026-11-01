@@ -135,7 +135,7 @@ def test_chat_pages_open_with_chats_current(ivan, repo):
     for path in paths:
         response = ivan.get(path)
         assert response.status_code == 200, path
-        assert re.findall(r'<a href="([^"]+)" class="on"', response.text) == ["/chats"], path
+        assert re.findall(r'<a href="([^"]+)" class="on"', response.text) == ["/chats?kind=chat"], path
 
 
 LONG_TITLE = "Согласование договора поставки серверного оборудования для филиала «Север» на четвёртый квартал"

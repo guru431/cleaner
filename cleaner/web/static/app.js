@@ -78,9 +78,10 @@ function refresh() {
 
 // Начатый, но не отправленный ввод: перезагрузка его сбросила бы (поля браузер восстанавливает не всегда, выбор файла —
 // никогда). Скрытые поля пишет сервер — не в счёт; список без selected в разметке исходно стоит на первом варианте.
-function editing() {
+function editing(exceptForm = null) {
   return [...document.querySelectorAll("input, textarea, select")].some((field) => {
-    if (field.type === "hidden" || field.disabled) return false;
+    if (!field.form || field.form.method.toLowerCase() !== "post" || field.form === exceptForm ||
+        field.type === "hidden" || field.disabled) return false;
     if (field.type === "file") return field.files.length > 0;
     if (field.type === "checkbox" || field.type === "radio") return field.checked !== field.defaultChecked;
     if (field.tagName === "SELECT") {
@@ -91,6 +92,121 @@ function editing() {
     return field.value !== field.defaultValue;
   });
 }
+
+// Черновики остаются только в DOM текущей вкладки. Предупреждение покрывает ссылки, другую форму, перезагрузку
+// и закрытие вкладки; отправка своей формы считается явным завершением ввода.
+let leaving = false;
+window.addEventListener("pageshow", () => { leaving = false; });
+const leaveMessage = "На странице есть неотправленный ввод. Уйти и потерять изменения?";
+window.addEventListener("beforeunload", (event) => {
+  if (leaving || !editing()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+document.addEventListener("click", (event) => {
+  const link = event.target.closest("a[href]");
+  if (!link || event.defaultPrevented || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey ||
+      event.button !== 0 || link.target === "_blank" || link.hasAttribute("download")) return;
+  const target = new URL(link.href, location.href);
+  if (target.origin === location.origin && target.pathname === location.pathname && target.search === location.search && target.hash) return;
+  if (!editing()) return;
+  if (!window.confirm(leaveMessage)) { event.preventDefault(); return; }
+  leaving = true;
+  queueMicrotask(() => { if (event.defaultPrevented) leaving = false; });
+});
+document.addEventListener("submit", (event) => {
+  if (event.defaultPrevented) return;
+  if (editing(event.target) && !window.confirm(leaveMessage)) { event.preventDefault(); return; }
+  leaving = true;
+  queueMicrotask(() => { if (event.defaultPrevented) leaving = false; });
+});
+
+// Только меню действий; обычные details с пояснениями остаются независимыми.
+const actionMenus = [...document.querySelectorAll("details.menu, details.inline")];
+const menuSummary = (menu) => menu.querySelector(":scope > summary");
+function closeMenu(menu, focus = false) {
+  menu.open = false;
+  menuSummary(menu)?.setAttribute("aria-expanded", "false");
+  if (focus) menuSummary(menu)?.focus({ preventScroll: true });
+}
+actionMenus.forEach((menu) => {
+  menuSummary(menu)?.setAttribute("aria-expanded", String(menu.open));
+  menu.addEventListener("toggle", () => {
+    menuSummary(menu)?.setAttribute("aria-expanded", String(menu.open));
+    if (menu.open) actionMenus.filter((other) => other !== menu && other.open).forEach((other) => closeMenu(other));
+  });
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const open = actionMenus.find((menu) => menu.open);
+  if (open) { event.preventDefault(); closeMenu(open, true); }
+});
+document.addEventListener("click", (event) => {
+  actionMenus.filter((menu) => menu.open && !menu.contains(event.target)).forEach((menu) => {
+    closeMenu(menu, !event.target.closest("a, button, input, select, textarea, summary"));
+  });
+});
+
+// Последовательная выдача ключа; без JS остаётся прежняя полная форма. В хранилище идут только настройки вида.
+document.querySelectorAll("[data-key-form]").forEach((form) => {
+  const mode = form.querySelector("[data-key-mode]");
+  const provider = form.querySelector("[data-key-provider]");
+  const summary = form.querySelector("[data-key-summary]");
+  mode.name = "key_mode";
+  const display = (element, on) => {
+    if (!element) return;
+    element.hidden = !on;
+    element.querySelectorAll("input, select").forEach((field) => { field.disabled = !on; });
+  };
+  const update = () => {
+    for (const option of provider.options) {
+      const matches = (option.dataset.mode || "api") === mode.value;
+      option.hidden = !matches;
+      option.disabled = !matches;
+    }
+    if (provider.selectedOptions[0]?.disabled) provider.value = [...provider.options].find((option) => !option.disabled)?.value || "";
+    const agent = mode.value !== "api";
+    display(form.querySelector("[data-key-access]"), agent);
+    display(form.querySelector("[data-key-subscription]"), mode.value === "subscription");
+    display(form.querySelector("[data-key-layers]"), agent);
+    form.querySelectorAll("[data-key-models]").forEach((group) => display(group, mode.value === "connection" && group.dataset.keyModels === provider.value));
+    const selected = provider.selectedOptions[0];
+    const checked = [...form.querySelectorAll("[data-key-models] input:checked")].filter((field) => !field.disabled);
+    const models = mode.value === "subscription" ? form.elements.sub_models?.value.trim() : checked.map((field) => field.parentElement.textContent.trim()).join(", ");
+    const layers = ["1–3", ...["ner", "llm"].flatMap((name, i) => form.elements[name]?.checked ? [String(i + 4)] : [])];
+    summary.textContent = `Владелец: ${form.dataset.owner}. ${agent ? `Протокол: ${selected.dataset.protocol}. Доступ: ${selected.dataset.connection}. Модели: ${models || "все модели выбранного доступа"}. Слои: ${layers.join(", ")}. Автоматическая отправка запросов агента без подтверждения каждого хода.` : "Только очистка API. Слои по настройкам чата. Облачная модель ключом не подключена."}`;
+  };
+  form.addEventListener("change", update);
+  form.addEventListener("input", update);
+  update();
+});
+
+// Предварительный список — имена и объём локально, содержимое читается лишь после явной отправки формы.
+document.querySelectorAll("[data-upload-batch]").forEach((field) => {
+  const preview = field.form.querySelector("[data-upload-preview]");
+  const size = (bytes) => bytes < 1024 ? `${bytes} Б` : bytes < 1048576
+    ? `${(bytes / 1024).toLocaleString("ru", { maximumFractionDigits: 1 })} КБ`
+    : `${(bytes / 1048576).toLocaleString("ru", { maximumFractionDigits: 2 })} МБ`;
+  field.addEventListener("change", () => {
+    const files = [...field.files];
+    const total = files.reduce((sum, file) => sum + file.size, 0);
+    const invalid = files.length > 10 || total > Number(field.dataset.maxBytes);
+    field.setCustomValidity(invalid ? "Выберите до 10 файлов с общим объёмом в пределах лимита пакета." : "");
+    preview.replaceChildren();
+    if (!files.length) { preview.hidden = true; return; }
+    preview.hidden = false;
+    const title = document.createElement("p");
+    title.textContent = `Файлов: ${files.length}; всего ${size(total)}${invalid ? " — превышен лимит пакета" : ""}.`;
+    preview.append(title);
+    const list = document.createElement("ul");
+    files.forEach((file) => {
+      const row = document.createElement("li");
+      row.textContent = `${file.name} · ${size(file.size)} · готов к загрузке`;
+      list.append(row);
+    });
+    preview.append(list);
+  });
+});
 
 // По концу задания, проверки риска или потока страница перезагружается, если ввод не начат. Иначе — строка над
 // страницей: что готово и кнопка «Обновить результат», которую нажимают, когда закончат; опрос больше не нужен.
@@ -309,6 +425,11 @@ function showWhy(mark) {
   const key = mark && (mark.dataset.entity || ["leak", "opened"].find((name) => mark.classList.contains(name)));
   const entry = key && document.getElementById("why-data").content.querySelector(`[data-why="${CSS.escape(key)}"]`);
   const pane = mark && paneOf(mark);
+  const typeLabel = document.querySelector("[data-selected-type]");
+  if (typeLabel) {
+    typeLabel.hidden = !entry || !pane;
+    typeLabel.textContent = entry && pane ? `Тип: ${entry.dataset.typeName || entry.querySelector("p")?.textContent.trim() || mark.title}` : "";
+  }
   if (!entry || !pane) {
     whyBody.replaceChildren(...whyEmpty.map((node) => node.cloneNode(true)));
     place.textContent = "";

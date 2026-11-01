@@ -238,10 +238,14 @@ def test_gold_measure_runs_in_the_background_and_fills_the_passport(boss, ivan, 
 
 
 def test_second_press_while_measuring_does_not_start_another(boss, repo, app):
+    from cleaner.queueing import Budget
+
     repo.add_gold(None, "звонил Петров, почта a@x.example", GOLD_SPANS)
     repo.set_layer_defaults({"ner": False, "llm": True})
     calls = []
-    app.state.measures = SimpleNamespace(submit=lambda *args: calls.append(args))         # задание ещё в очереди
+    app.state.measures = SimpleNamespace(
+        budget=Budget(), submit_reserved=lambda fn, args, reservation, **options: calls.append((fn, *args)),
+    )  # задание ещё в очереди
     boss.post("/settings/gold/measure")
     boss.post("/settings/gold/measure")
     assert len(calls) == 1 and calls[0][-1] == ["1-3", "1-4", "1-5"]                      # слой 5 включён по умолчанию

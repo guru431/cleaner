@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Мои задания — Cleaner{% endblock %}
+{% block main %}
+<h1>Мои задания</h1>
+<p class="hint">Только ваши ожидающие и выполняющиеся задания. Позиция — среди ваших ожидающих заданий;
+разные виды обработки используют отдельные пулы. Ожидание ограничено пятью минутами.</p>
+<p><a href="/jobs">Обновить</a></p>
+{% if jobs %}
+<div class="table-scroll"><table><thead><tr><th>Операция / чат</th><th>Поставлено</th><th>Состояние</th><th>Действие</th></tr></thead>
+<tbody>{% for job in jobs %}<tr>
+<td>{{ job.name }} · <a href="/chats/{{ job.chat_id }}#item-{{ job.item_id }}">{{ job.chat_title }}</a></td>
+<td>{{ job.created_at|local(tz) }}</td>
+<td>{% if job.status == 'queued' %}В очереди · {{ job.position }} среди моих{% else %}В работе{% endif %}{% if job.progress %} · {{ job.progress }}{% endif %}</td>
+<td>{% if job.cancellable %}<form method="post" action="/jobs/{{ job.id }}/cancel"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Отменить ожидающее</button></form>{% else %}Отмена после начала недоступна{% endif %}</td>
+</tr>{% endfor %}</tbody></table></div>
+{% else %}<p>Сейчас заданий нет.</p>{% endif %}
+{% endblock %}

@@ -24,7 +24,7 @@
     {% endif %}
     <pre class="text mono">{{ text }}</pre>
     {% endfor %}
-    <p class="sub">Сертификат Cleaner самоподписанный: {% if cert %}<a href="/cert.pem">Сертификат службы</a> — {% endif %}сохраните его файл на машине агента и впишите путь к нему вместо <code>&lt;путь к файлу сертификата Cleaner на этой машине&gt;</code>, проверку TLS не выключайте.</p>
+    <p class="sub">Сертификат Cleaner самоподписанный: {% if cert %}<a href="/cert.pem" download>Сертификат службы</a> — {% endif %}сохраните его файл на машине агента и впишите путь к нему вместо <code>&lt;путь к файлу сертификата Cleaner на этой машине&gt;</code>, проверку TLS не выключайте.</p>
     {% else %}
     <p class="sub">Проверка из командной строки:</p>
     <pre class="text mono">curl -H "X-Cleaner-Key: {{ issued }}" {{ endpoint }}</pre>
@@ -33,7 +33,7 @@
 </section>
 {% endif %}
 <section class="panel">
-  <table class="grid">
+  <table class="grid keys-table">
     <thead><tr><th>Имя</th>{% if viewer.is_admin %}<th>Владелец</th>{% endif %}<th>Ключ</th><th>Доступ</th><th>Создан</th><th>Последний запрос</th><th>Состояние</th><th></th></tr></thead>
     <tbody>
     {% for k in keys %}
@@ -41,7 +41,7 @@
       <td>{{ k.name }}</td>
       {% if viewer.is_admin %}<td>{{ logins.get(k.user_id, "?") }}</td>{% endif %}
       <td class="mono">…{{ k.tail }}</td>
-      <td>{{ access[k.id] }}{% if k.chat_id %}<br><a href="/chats/{{ k.chat_id }}">текущий чат шлюза</a>{% endif %}</td>
+      <td>{{ access[k.id] }}<div class="sub">{{ key_details[k.id] }}</div>{% if k.chat_id %}<br>{% if k.user_id == viewer.user.id %}<a href="/chats/{{ k.chat_id }}">текущий чат шлюза</a>{% else %}<span class="muted">Есть текущий чат шлюза у владельца</span>{% endif %}{% endif %}</td>
       <td class="nowrap">{{ k.created_at | local(tz) }}</td>
       <td class="nowrap">{{ k.last_used_at | local(tz) if k.last_used_at else "—" }}</td>
       <td>{% if k.disabled %}<span class="badge bad">отключён</span>{% else %}<span class="badge good">действует</span>{% endif %}</td>
@@ -50,12 +50,12 @@
         {% if k.upstream %}
         <form method="post" action="/keys/{{ k.id }}/restart" title="Новые разговоры агента — в новом чате с новой таблицей замен; идущие доживают в своём">
           {% include "_csrf.html" %}
-          <button>Начать заново</button>
+          <button aria-label="Начать новый чат ключа {{ k.name }}">Начать заново</button>
         </form>
         {% endif %}
         <form method="post" action="/keys/{{ k.id }}/disable">
           {% include "_csrf.html" %}
-          <button class="danger">Отключить</button>
+          <button class="danger" title="Программы с этим ключом потеряют доступ; снова включить ключ нельзя" aria-label="Отключить ключ {{ k.name }} навсегда">Отключить</button>
         </form>
         {% endif %}
       </td>
@@ -69,39 +69,48 @@
 <section class="panel">
   <header class="panel-head"><h2 class="title">Новый ключ</h2></header>
   <div class="panel-body">
-    <form method="post" action="/keys" class="form">
+    <form method="post" action="/keys" class="form" data-key-form data-owner="{{ viewer.user.login }}">
       {% include "_csrf.html" %}
+      <label class="field key-mode"><span>Режим</span><span class="control">
+        <select data-key-mode aria-label="Режим нового ключа">
+          <option value="api">Только очистка API</option>
+          {% if gateway %}<option value="connection">Агент через подключение</option>{% endif %}
+          {% if subscriptions %}<option value="subscription">Агент по подписке</option>{% endif %}
+        </select>
+      </span></label>
       <label class="field"><span>Имя</span><span class="control">
         <input name="name" maxlength="100" autocomplete="off" required>
         <small class="hint">Для какой программы — чтобы потом найти и отключить ключ</small>
       </span></label>
-      <label class="field"><span>Доступ к модели</span><span class="control">
-        <select name="provider">
+      <label class="field" data-key-access><span>Доступ к модели</span><span class="control">
+        <select name="provider" data-key-provider>
           <option value="">Нет (только API)</option>
-          {% for p in gateway %}<option value="{{ p.id }}">{{ p.name }} ({{ protocols[p.protocol] }})</option>{% endfor %}
-          {% for value, label in subscriptions.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+          {% for p in gateway %}<option value="{{ p.id }}" data-mode="connection" data-protocol="{{ protocols[p.protocol] }}" data-connection="{{ p.name }}">{{ p.name }} ({{ protocols[p.protocol] }})</option>{% endfor %}
+          {% for value, label in subscriptions.items() %}<option value="{{ value }}" data-mode="subscription" data-protocol="{{ 'Anthropic' if value == 'claude-subscription' else 'OpenAI Responses' }}" data-connection="{{ label }}">{{ label }}</option>{% endfor %}
         </select>
         <small class="hint">Anthropic — для Claude Code, OpenAI Responses — для Codex, OpenAI Chat Completions — для OpenCode и SDK OpenAI. Доступ задаётся при выпуске и не меняется: другой доступ — новый ключ.</small>
       </span></label>
       {% if subscriptions %}
-      <label class="field"><span>Модели подписки</span><span class="control">
+      <label class="field" data-key-subscription><span>Модели подписки</span><span class="control">
         <input name="sub_models" autocomplete="off" placeholder="gpt-6.1-sol, claude-opus-5-5">
         <small class="hint">Через запятую; пусто — все. Подписка — вход самого агента, Cleaner его не хранит; ключ с подпиской выпускает только администратор</small>
       </span></label>
       {% endif %}
       {% for p in gateway %}
-      <div class="field"><span>Модели «{{ p.name }}»</span><span class="control">
+      <div class="field" data-key-models="{{ p.id }}"><span>Модели «{{ p.name }}»</span><span class="control">
         {% for m in p.models %}<label class="check"><input type="checkbox" name="m:{{ p.id }}:{{ m }}" value="1"> {{ m }}</label>{% endfor %}
         <small class="hint">Ни одной не отмечено — все модели подключения</small>
       </span></div>
       {% endfor %}
       {% if gateway or subscriptions %}
-      <div class="field"><span>Слои шлюза</span><span class="control">
+      <div class="field" data-key-layers><span>Слои шлюза</span><span class="control">
         <label class="check"><input type="checkbox" name="ner" value="1"> Имена и организации (слой 4)</label>
         <label class="check"><input type="checkbox" name="llm" value="1"> Допроверка локальной моделью (слой 5)</label>
         <small class="hint">По умолчанию шлюз работает слоями 1–3 и словарём организации; слои 4 и 5 замедляют каждый ход агента</small>
       </span></div>
       {% endif %}
+      <div class="key-summary flash" data-key-summary role="status" aria-live="polite"></div>
+      <noscript><p class="hint">Для очистки API оставьте «Нет». Для агента выберите одно подключение или подписку; учитываются модели только выбранного доступа. Шлюз отправляет запросы автоматически, без подтверждения каждого хода. Пустой список моделей разрешает все модели выбранного доступа.</p></noscript>
       <div class="buttons"><button class="primary">Выпустить</button></div>
     </form>
   </div>

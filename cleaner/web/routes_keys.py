@@ -146,11 +146,21 @@ def _page(request: Request, viewer: Viewer, issued: str = "", issued_key: ApiKey
         for key in keys
     }
     gateway = [p for p in providers if p.enabled and p.protocol in GATEWAY_PROTOCOLS]
+    provider_by_upstream = {f"provider:{p.id}": p for p in providers}
+    details = {}
+    for key in keys:
+        provider = provider_by_upstream.get(key.upstream)
+        protocol = PROTOCOL_LABELS.get(provider.protocol, "") if provider else (
+            "Anthropic" if key.upstream == "claude-subscription" else
+            "OpenAI Responses" if key.upstream == "chatgpt-subscription" else "")
+        enabled = key.layers or {}
+        layer_text = "1–3" + (", 4" if enabled.get("ner") else "") + (", 5" if enabled.get("llm") else "")
+        details[key.id] = f"{protocol} · слои {layer_text} · автоматическая отправка" if key.upstream else "Слои по настройкам чата"
     settings = _agent_settings(request, issued, issued_key, providers) if issued and issued_key and issued_key.upstream else []
     return page(
         request, "keys.html", viewer, keys=keys, logins=logins, issued=issued, endpoint=f"{request.base_url}api/v1/chats",
         access=access, gateway=gateway, protocols=PROTOCOL_LABELS, agent_settings=settings, cert=bool(request.app.state.cert_file),
-        subscriptions=SUBSCRIPTION_OPTIONS if viewer.is_admin else {},
+        subscriptions=SUBSCRIPTION_OPTIONS if viewer.is_admin else {}, key_details=details,
     )
 
 
@@ -171,6 +181,13 @@ def create_key(request: Request, form: dict[str, str] = Depends(get_form), viewe
         raise HTTPException(400, str(exc)) from None
     repo = repo_of(request)
     provider_id = form.get("provider", "")
+    # Новый UI указывает режим явно; старые клиенты и форма без JS сохраняют прежний контракт provider.
+    mode = form.get("key_mode", "")
+    if mode and (mode not in ("api", "connection", "subscription") or
+                 (mode == "api" and provider_id) or
+                 (mode == "connection" and (not provider_id or provider_id in SUBSCRIPTION_NAMES)) or
+                 (mode == "subscription" and provider_id not in SUBSCRIPTION_NAMES)):
+        raise HTTPException(400, "Режим ключа не соответствует выбранному доступу к модели")
     upstream, models, layers = None, (), None
     if provider_id:
         # Отметки моделей — поля «m:<подключение>:<модель>»: у формы несколько подключений, у каждого свои модели. У
@@ -215,6 +232,6 @@ def restart_key(request: Request, key_id: str, form: dict[str, str] = Depends(ge
     """«Начать заново» (6.3, FR-5.2): новые разговоры ключа — в новом чате шлюза; идущие доживают в своём."""
     key = _own_key(request, key_id, viewer)
     repo = repo_of(request)
-    repo.set_key_chat(key.id, None)
+    repo.restart_key_chat(key.id)
     repo.audit("key_restarted", viewer.user.id, id=key.id)
     return RedirectResponse("/keys", status_code=303)

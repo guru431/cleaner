@@ -30,8 +30,8 @@ def login_form(request: Request) -> Response:
 
 
 async def _login_fields(request: Request) -> dict[str, str]:
-    form = await request.form()
-    return {key: value for key, value in form.items() if isinstance(value, str)}
+    async with request.form(max_files=0) as form:
+        return {key: value for key, value in form.items() if isinstance(value, str)}
 
 
 # async: место для Argon2 (десятки миллисекунд и 64 МБ на попытку) вход ждёт в цикле событий и не держит

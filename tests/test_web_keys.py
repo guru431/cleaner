@@ -321,3 +321,30 @@ def test_restart_is_owner_or_admin_only(browser, ivan, boss, repo):
     assert repo.api_key(key.id).chat_id == chat
     assert ivan.client.post(f"/keys/{key.id}/restart", data={}).status_code == 403
     assert boss.post(f"/keys/{key.id}/restart").status_code == 303 and repo.api_key(key.id).chat_id is None
+
+
+def test_foreign_gateway_chat_is_not_linked_for_admin(ivan, boss, repo):
+    ids = providers(repo)
+    ivan.post("/keys", name="личный агент", provider=ids["anthropic"])
+    [key] = repo.api_keys()
+    chat_id = repo.create_chat(key.user_id, "Личный журнал", kind="agent")
+    repo.set_key_chat(key.id, chat_id)
+    assert f'href="/chats/{chat_id}"' in ivan.get("/keys").text
+    admin = boss.get("/keys").text
+    assert "Есть текущий чат шлюза у владельца" in admin
+    assert f'href="/chats/{chat_id}"' not in admin
+    assert boss.get(f"/chats/{chat_id}").status_code == 404
+
+
+def test_explicit_key_mode_is_validated_before_issuance(ivan, boss, repo):
+    ids = providers(repo)
+    for mode, provider in (("api", ids["anthropic"]), ("connection", ""),
+                           ("connection", "chatgpt-subscription"), ("subscription", ids["openai"]),
+                           ("arbitrary", "")):
+        assert boss.post("/keys", name="ошибка режима", key_mode=mode, provider=provider).status_code == 400
+    assert repo.api_keys() == []
+    assert ivan.post("/keys", name="скрипт", key_mode="api").status_code == 303
+    assert ivan.post("/keys", name="агент", key_mode="connection", provider=ids["openai"], llm="1").status_code == 303
+    stored = next(key for key in repo.api_keys() if key.name == "агент")
+    assert stored.layers == {"ner": False, "llm": True}
+    assert "OpenAI Chat Completions · слои 1–3, 5 · автоматическая отправка" in ivan.get("/keys").text

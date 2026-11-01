@@ -1,6 +1,7 @@
 """Docling на сгенерированных документах, без сети (NFR-2, AC-2.2 — часть, которую можно проверить без сервера)."""
 import io
 import os
+import sys
 import zipfile
 from email.message import EmailMessage
 from pathlib import Path
@@ -160,6 +161,12 @@ def test_spreadsheet_stays_a_table(docling, no_network):
 
 
 def test_pdf_pages_convert_offline(docling, no_network):
+    if sys.platform == "win32":
+        from cleaner.ingest.windows_pdf import backend_class
+        from docling.datamodel.base_models import InputFormat
+
+        # Regression for native heap corruption in docling-parse's threaded Windows renderer (#357).
+        assert docling._converter_once().format_to_options[InputFormat.PDF].backend is backend_class()
     pages = docling.pdf_pages(make_pdf([f"Contact {CANARY}.", "Second page."]), [1, 2])
     assert CANARY in pages[1] and "Second page." in pages[2]
 

@@ -12,11 +12,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from cleaner.core.agent import ledger
-from cleaner.core.agent.stream import DeltaRestorer, map_strings, usage_numbers
+from cleaner.core.agent.stream import DeltaRestorer, RestorationBudget, map_strings, usage_numbers
 from cleaner.core.agent.walk import (
-    OTHER_KEYS, SCHEMA_KEYS, Unit, bare, parsed_arguments, strings, strings_of, text_block,
+    OTHER_KEYS, SCHEMA_KEYS, Unit, bare, parameter_strings, parsed_arguments, strings, text_block,
 )
-from cleaner.core.restore import originals
 from cleaner.core.types import ChatState, Settings
 
 MEDIA = frozenset({"image_url", "input_audio", "file"})
@@ -96,7 +95,7 @@ def structural(body: dict) -> list[str]:
         out += [name for call in calls or () if (name := _name(call))]
     for key, value in body.items():
         if key in PARAMS:
-            out += strings_of(value)
+            out += parameter_strings(value, data=key == "metadata")
     return out
 
 
@@ -218,18 +217,19 @@ class ChatStream:
         self.settings = settings
         self.choices: dict[int, _Choice] = {}
         self.pairs: list[tuple[dict, dict]] = []
+        self.budget = RestorationBudget()
         self._head: dict = {}
         self._text: Callable[[str], str] | None = None
         self._exact: Callable[[str], str] | None = None
 
     def _restore_text(self, text: str) -> str:
         if self._text is None:
-            self._text = originals(self.state, self.settings)
+            self._text = self.budget.original(self.state, self.settings)
         return self._text(text)
 
     def _restore_arguments(self, value: object) -> object:
         if self._exact is None:
-            self._exact = originals(self.state, self.settings, exact=True)
+            self._exact = self.budget.original(self.state, self.settings, exact=True)
         return map_strings(value, self._exact)
 
     @staticmethod

@@ -93,10 +93,13 @@ def parse_items(raw: str) -> list[tuple[str, str]]:
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
         raise ValueError("в ответе нет списка items")
-    return [
-        (item["text"], item["type"]) for item in items
-        if isinstance(item, dict) and isinstance(item.get("text"), str) and isinstance(item.get("type"), str)
-    ]
+    pairs = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not isinstance(item.get("type"), str):
+            # Невалидная структура — сбой ответа, а не отсутствие чувствительных строк.
+            raise ValueError("элемент items должен содержать строки text и type")
+        pairs.append((item["text"], item["type"]))
+    return pairs
 
 
 def _acceptable(value: str, chunk: str, finder: surrogates.Finder) -> bool:

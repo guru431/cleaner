@@ -7,9 +7,14 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import Executor, Future, ThreadPoolExecutor, wait
+from datetime import datetime, timezone
+
+from cleaner.queueing import Budget, Reservation
 
 log = logging.getLogger("cleaner.jobs")
 
@@ -18,20 +23,122 @@ INTERRUPTED = "Обработка прервана перезапуском сл
 # Сколько остановка службы ждёт идущие задания. systemd ждёт остановки 90 с, а страница распознавания
 # идёт до минуты: дольше ждать незачем, недождавшиеся помечаются прерванными.
 STOP_WAIT = 30.0
+MAX_WAIT = 300.0
+CANCELLED = "Отменено до начала обработки: исходный файл не хранится"
+EXPIRED = "Время ожидания истекло: запустите обработку ещё раз"
+
+
+class Task:
+    def __init__(self, fn, args, reservation, user, chat, item, kind, cancelled, now):
+        self.id = uuid.uuid4().hex
+        self.fn, self.args, self.reservation = fn, args, reservation
+        self.user, self.chat, self.item, self.kind = user, chat, item, kind
+        self.cancelled = cancelled
+        self.state = "queued"
+        self.created = now().isoformat()
+        self.lock = threading.RLock()
+        self.future: Future | None = None
+        self.timer: threading.Timer | None = None
+
+    def run(self):
+        with self.lock:
+            if self.state != "queued":
+                return
+            self.state = "running"
+            fn, args = self.fn, self.args
+            self.fn, self.args = None, ()
+            if self.timer:
+                self.timer.cancel()
+        _run(fn, args)
+
+    def cancel(self, reason):
+        with self.lock:
+            if self.state != "queued":
+                return False
+            self.state = "cancelled"
+            # Future.cancel сам по себе оставляет аргументы в очереди ThreadPoolExecutor до следующего worker.
+            self.fn, self.args = None, ()
+            if self.timer:
+                self.timer.cancel()
+            if self.future:
+                self.future.cancel()
+        try:
+            if self.cancelled:
+                self.cancelled(reason)
+        except Exception as exc:
+            log.error("отмена задания: %s", type(exc).__name__)
+        finally:
+            self.reservation.release()
+        return True
 
 
 class Jobs:
-    def __init__(self, executor: Executor | None = None, stop_wait: float = STOP_WAIT):
+    def __init__(self, executor: Executor | None = None, stop_wait: float = STOP_WAIT,
+                 budget: Budget | None = None, max_wait: float = MAX_WAIT, now=None):
         self._executor = executor or ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="cleaner-job")
         self._stop_wait = stop_wait
+        self.budget = budget or Budget()
+        self.max_wait = max_wait
+        self.now = now or (lambda: datetime.now(timezone.utc))
+        self._tasks: dict[str, Task] = {}
+        self._lock = threading.RLock()
         # add, discard и копия set(...) в shutdown атомарны под GIL (копия множества идёт в C без обхода на Python):
         # отдельный замок не нужен.
         self._pending: set[Future] = set()
 
     def submit(self, fn: Callable[..., None], *args: object) -> None:
-        future = self._executor.submit(_run, fn, args)
+        reservation = self.budget.reserve("")
+        self.submit_reserved(fn, args, reservation)
+
+    def submit_reserved(self, fn, args, reservation: Reservation, *, user="", chat="", item="", kind="",
+                        cancelled=None) -> None:
+        task = Task(fn, args, reservation, user, chat, item, kind, cancelled, self.now)
+        reservation.attached = True
+        with self._lock:
+            self._tasks[task.id] = task
+        try:
+            future = self._executor.submit(task.run)
+        except BaseException:
+            with self._lock:
+                self._tasks.pop(task.id, None)
+            reservation.release()
+            raise
+        task.future = future
         self._pending.add(future)
-        future.add_done_callback(self._pending.discard)
+
+        def finished(future):
+            self._pending.discard(future)
+            if future.cancelled():
+                task.cancel(INTERRUPTED)
+            if task.timer:
+                task.timer.cancel()
+            reservation.release()
+            with self._lock:
+                self._tasks.pop(task.id, None)
+
+        future.add_done_callback(finished)
+        with task.lock:
+            if task.state == "queued" and not future.done():
+                task.timer = threading.Timer(self.max_wait, task.cancel, (EXPIRED,))
+                task.timer.daemon = True
+                task.timer.start()
+
+    def owned(self, user: str) -> list[dict]:
+        with self._lock:
+            return [{"id": t.id, "chat_id": t.chat, "item_id": t.item, "kind": t.kind,
+                     "status": t.state, "created_at": t.created, "cancellable": t.state == "queued"}
+                    for t in self._tasks.values() if t.user == user]
+
+    def cancel(self, task_id: str, user: str) -> bool | None:
+        with self._lock:
+            task = self._tasks.get(task_id)
+        return task.cancel(CANCELLED) if task is not None and task.user == user else None
+
+    def cancel_chat(self, chat: str) -> None:
+        with self._lock:
+            tasks = [t for t in self._tasks.values() if t.chat == chat]
+        for task in tasks:
+            task.cancel(CANCELLED)
 
     def shutdown(self) -> int:
         return shutdown(self)

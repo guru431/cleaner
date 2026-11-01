@@ -1,0 +1,17 @@
+<p class="muted">Проверьте все упоминания каждой сущности, в том числе формы слов. Выберите сценарий, которому не хватает примеров на странице «Эталонный набор».</p>
+<form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/gold">
+  {% include "_csrf.html" %}
+  <label>Сценарий
+    <select name="scenario">
+      <option value="">Не указан</option>
+      <option value="log">Журнал</option><option value="config">Конфигурация</option>
+      <option value="correspondence">Переписка</option><option value="document">Документ</option>
+      <option value="agent">Диалог агента</option>
+    </select>
+  </label>
+  <label><input type="checkbox" name="word_forms" value="yes"> Формы слов проверены</label>
+  <label><input type="checkbox" name="repeated" value="yes"> Все повторные упоминания проверены</label>
+  <label><input type="checkbox" name="false_positives" value="yes"> Ложные срабатывания проверены</label>
+  <label><input type="checkbox" name="extraction" value="yes"> Полнота извлечения проверена</label>
+  <button>Сохранить как эталон</button>
+</form>

@@ -48,11 +48,12 @@
       <td class="actions">
         {# Снять замену, сменить тип, присоединить — через предпросмотр последствий (/preview). #}
         <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/unmask/preview">
-          {% include "_csrf.html" %}{{ back_field() }}<button class="danger">Снять замену…</button>
+          {% include "_csrf.html" %}{{ back_field() }}<button class="danger" title="Открыть предпросмотр снятия {{ r.surrogates | join(', ') }} во всём чате">Снять замену…</button>
         </form>
         <details class="inline" name="edit">
-          <summary class="btn">Изменить…</summary>
+          <summary class="btn" aria-label="Изменить замену {{ r.surrogates | join(', ') }}">Изменить…</summary>
           <div class="pop">
+            <strong class="menu-group">Изменение замены {{ r.surrogates | join(", ") }}</strong>
             <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/retype/preview">
               {% include "_csrf.html" %}{{ back_field() }}
               <select name="type" aria-label="Тип">{% for code, name in types.items() %}<option value="{{ code.value }}"{% if code == r.type %} selected{% endif %}>{{ name }}</option>{% endfor %}</select>

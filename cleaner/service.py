@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import logging
 import pickle
 import re
@@ -10,6 +11,7 @@ import uuid
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from functools import wraps
 from typing import Any
 
 from cleaner.core import leakcheck, risk
@@ -24,6 +26,7 @@ from cleaner.core.pipeline import (
 from cleaner.core.restore import RestoreResult, restore, restore_answers
 from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
 from cleaner.egress import ProviderError, cloud
+from cleaner.queueing import Budget, Reservation
 from cleaner.storage.codec import state_to_json
 from cleaner.storage.repo import CheckpointBusy, Item, Provider, Repository, StaleState
 
@@ -71,6 +74,30 @@ Submit = Callable[..., None]
 def run_now(fn: Callable[..., None], *args: Any) -> None:
     """Задание выполняется сразу, в том же потоке: для команд и тестов. Приложение передаёт Jobs.submit."""
     fn(*args)
+
+
+def admitted(kind: str):
+    """Одинаковый допуск для UI и API, включая синхронные восстановление и правки."""
+    def decorate(fn):
+        signature = inspect.signature(fn)
+
+        @wraps(fn)
+        def call(self, *args, **kwargs):
+            if self.budget is None:
+                return fn(self, *args, **kwargs)
+            supplied = kwargs.pop("reservation", None)
+            values = signature.bind(self, *args, **kwargs).arguments
+            size = len(values.get("data", b"")) * 2 + self.max_text_chars * 8
+            reservation = supplied or self.budget.reserve(values["user_id"], size)
+            previous = getattr(self._admission, "current", None)
+            self._admission.current = (reservation, values["user_id"], values["chat_id"], kind)
+            try:
+                return fn(self, *args, **kwargs)
+            finally:
+                self._admission.current = previous
+                reservation.release_unused()
+        return call
+    return decorate
 
 
 class TextTooLong(ValueError):
@@ -399,7 +426,7 @@ class ChatService:
     def __init__(
         self, repo: Repository, max_text_chars: int = 500_000, engines: Any = None, submit: Submit = run_now,
         send_submit: Submit = run_now, cloud_send: Callable[..., Iterable[str]] = cloud.send,
-        file_submit: Submit = run_now,
+        file_submit: Submit = run_now, budget: Budget | None = None,
     ):
         self.repo = repo
         self.max_text_chars = max_text_chars
@@ -407,11 +434,36 @@ class ChatService:
         self.submit = submit
         self.send_submit = send_submit  # свой пул: облако не ждёт за очисткой и моделями в общем (раздел 14)
         self.file_submit = file_submit  # свой пул: вставленный текст не ждёт за распознаванием сканов (раздел 14)
+        self.budget = budget
+        self._admission = threading.local()
         self.cloud_send = cloud_send
         self.live = LiveAnswers()
         self._view_leaks: OrderedDict[bytes, tuple[Leak, ...]] = OrderedDict()
         self._view_found = 0                    # находок во всех запомненных итогах
         self._view_leaks_lock = threading.Lock()
+
+    def _submit(self, submit: Submit, fn, *args) -> None:
+        admission = getattr(self._admission, "current", None)
+        pool = getattr(submit, "__self__", None)
+        if admission is None or not hasattr(pool, "submit_reserved"):
+            submit(fn, *args)
+            return
+        reservation, user_id, chat_id, kind = admission
+        item_id = args[1]
+
+        def cancelled(reason):
+            if kind == "risk":
+                self.repo.set_item_risk_status(chat_id, item_id, args[3], "interrupted", ("queued",))
+            elif self.repo.item(chat_id, item_id) is not None:
+                self.repo.set_item_status(chat_id, item_id, "failed", reason)
+            self.repo.audit("job_cancelled", user_id, chat_id, item_id=item_id)
+
+        try:
+            pool.submit_reserved(fn, args, reservation, user=user_id, chat=chat_id, item=item_id,
+                                 kind=kind, cancelled=cancelled)
+        except Exception:
+            cancelled("Служба не приняла задание: повторите позже")
+            raise
 
     def _check_length(self, text: str) -> None:
         if len(text) > self.max_text_chars:
@@ -466,19 +518,21 @@ class ChatService:
 
     # --- входные тексты: очередь и задание (раздел 14) ----------------------------
 
+    @admitted("text")
     def add_input(self, chat_id: str, user_id: str, text: str, source: str = "paste") -> Item:
         self._check_length(text)
         if source not in INPUT_SOURCES:
             raise EditRefused("неизвестный вид текста")
         item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", text, None, source=source, status="queued"))
-        self.submit(self.process, chat_id, item.id, user_id)
+        self._submit(self.submit, self.process, chat_id, item.id, user_id)
         return self.repo.item(chat_id, item.id) or item
 
+    @admitted("file")
     def add_file(self, chat_id: str, user_id: str, filename: str, data: bytes, ocr_all: bool = False) -> Item:
         """Файл — в очередь. Его байты живут только в памяти задания; имя нужно лишь для расширения (FR-2.7).
         ocr_all — распознать каждую страницу PDF: выбор пользователя, когда слой текста неполон или нечитаем."""
         item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="queued"))
-        self.file_submit(self.process, chat_id, item.id, user_id, data, filename, ocr_all)
+        self._submit(self.file_submit, self.process, chat_id, item.id, user_id, data, filename, ocr_all)
         return self.repo.item(chat_id, item.id) or item
 
     def process(
@@ -585,6 +639,7 @@ class ChatService:
             return
         self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="process")
 
+    @admitted("text")
     def retry(self, chat_id: str, user_id: str, item_id: str) -> None:
         """Очистить заново всеми включёнными слоями: после отказа, перезапуска или включения слоя."""
         item = self.repo.item(chat_id, item_id)
@@ -596,10 +651,11 @@ class ChatService:
             raise EditRefused("текст файла не был извлечён, а сам файл не хранится: загрузите его ещё раз")
         if not self.repo.queue_item(chat_id, item_id):        # второе нажатие успело прочесть «готово» (m-10)
             raise EditRefused(_IN_PROGRESS)
-        self.submit(self.process, chat_id, item_id, user_id)
+        self._submit(self.submit, self.process, chat_id, item_id, user_id)
 
     # --- проверка остаточного риска (FR-9.3) ------------------------------------------
 
+    @admitted("risk")
     def check_risk(self, chat_id: str, user_id: str, item_id: str) -> None:
         item = self.repo.item(chat_id, item_id)
         if item is None or item.kind != "input":
@@ -611,7 +667,7 @@ class ChatService:
         job = self.repo.queue_risk(chat_id, item_id, _RISK_IDLE)       # одним UPDATE (m-10)
         if job is None:
             raise EditRefused("проверка уже идёт")
-        self.submit(self.run_risk, chat_id, item_id, user_id, job)
+        self._submit(self.submit, self.run_risk, chat_id, item_id, user_id, job)
 
     def run_risk(self, chat_id: str, item_id: str, user_id: str, job: str) -> None:
         """Задание: только очищенный текст и только локальной модели (FR-9.5).
@@ -652,6 +708,7 @@ class ChatService:
 
     # --- ответы модели и вид чата ----------------------------------------------------
 
+    @admitted("restore")
     def add_answer(self, chat_id: str, user_id: str, text: str) -> Item:
         self._check_length(text)
         counters: dict[str, int] = {}
@@ -821,6 +878,7 @@ class ChatService:
         preview.stale = state_to_json(state) != before
         return preview
 
+    @admitted("send")
     def send(self, chat_id: str, user_id: str, digest: str, exclude: frozenset[int] = frozenset()) -> Item:
         """FR-8.4: запрос собирается заново и уходит, только если он совпал с показанным на экране подтверждения.
         exclude — исключённые пользователем элементы, как на экране: с другим составом отпечаток не совпадёт."""
@@ -854,7 +912,7 @@ class ChatService:
             chars=sum(len(text) for text in context.texts()), excluded=excluded,
         )
         self.live.start(item.id)
-        self.send_submit(self.run_send, chat_id, item.id, user_id, context, link(provider), in_request)
+        self._submit(self.send_submit, self.run_send, chat_id, item.id, user_id, context, link(provider), in_request)
         return item
 
     def run_send(
@@ -929,6 +987,10 @@ class ChatService:
         """FR-1.4: идущие ответы облака прерываются, чтобы поток провайдера не читался впустую, затем чат удаляется.
         via — откуда удалён (api), для журнала."""
         self.stop_chat(chat_id)
+        for submit in (self.submit, self.file_submit, self.send_submit):
+            pool = getattr(submit, "__self__", None)
+            if hasattr(pool, "cancel_chat"):
+                pool.cancel_chat(chat_id)
         try:
             self.repo.delete_chat(chat_id)
         except CheckpointBusy as exc:
@@ -968,6 +1030,7 @@ class ChatService:
             raise SendRefused("Последним в чате должен быть вопрос: вставьте текст")
         return ([{"role": "system", "content": "\n\n".join(system)}] if system else []) + messages
 
+    @admitted("local")
     def ask_local(self, chat_id: str, user_id: str) -> Item:
         """FR-9.4: вопрос локальной модели вместо облачной. Текст не очищается: оригиналы уходят только по адресу
         локальной модели — петлевому, частному или доверенному (SEC-12); при частном или доверенном это другой сервер.
@@ -988,7 +1051,7 @@ class ChatService:
         [item] = self._apply(chat_id, work)
         messages = built["messages"]
         self.repo.audit("local_answer", user_id, chat_id, messages=len(messages))
-        self.submit(self.run_local, chat_id, item.id, user_id, messages)
+        self._submit(self.submit, self.run_local, chat_id, item.id, user_id, messages)
         return item
 
     def run_local(self, chat_id: str, item_id: str, user_id: str, messages: list[dict[str, str]]) -> None:
@@ -1143,6 +1206,7 @@ class ChatService:
             result.action = kind
         return result
 
+    @admitted("rule")
     def mask_value(
         self, chat_id: str, user_id: str, item_id: str, value: str, type_: EntityType,
         version: int | None = None, dry: bool = False, *, summary: bool = False,
@@ -1158,6 +1222,7 @@ class ChatService:
 
         return self._edit(chat_id, user_id, "mask", change, version, dry, summary=summary)
 
+    @admitted("rule")
     def unmask(
         self, chat_id: str, user_id: str, values: Iterable[str], version: int | None = None, dry: bool = False, *, summary: bool = False,
     ) -> EditPreview | None:
@@ -1206,8 +1271,14 @@ class ChatService:
 
     # --- эталонный набор (FR-6.10, QA-1) --------------------------------------------------
 
-    def save_gold(self, chat_id: str, user_id: str, item_id: str) -> str:
+    def save_gold(self, chat_id: str, user_id: str, item_id: str, *, scenario: str = "", checks: tuple[str, ...] = ()) -> str:
         """Проверенный пользователем текст и итоговая разметка — копией под общим ключом."""
+        from cleaner.eval.coverage import metadata
+
+        try:
+            reviewed = metadata(scenario, checks)
+        except ValueError as exc:
+            raise EditRefused(str(exc)) from None
         state, _ = self.repo.load_state(chat_id)
         item = self.repo.item(chat_id, item_id)
         if item is None or item.kind != "input":
@@ -1224,6 +1295,6 @@ class ChatService:
                 "start": span["start"], "end": span["end"], "type": entity.type.value,
                 "entity": numbers.setdefault(entity.id, len(numbers)), "origin": entity.origin,
             })
-        gold_id = self.repo.add_gold(user_id, item.original, spans)
+        gold_id = self.repo.add_gold(user_id, item.original, spans, reviewed)
         self.repo.audit("gold_added", user_id, chat_id, spans=len(spans))
         return gold_id

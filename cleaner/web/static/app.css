@@ -3,7 +3,8 @@
 :root {
   color-scheme: light;
   --bg: #ffffff; --bg-sub: #f6f8fa; --fg: #1f2328; --muted: #656d76;
-  --line: #d0d7de; --line-soft: #eaeef2; --accent: #0969da; --primary: #1f883d;
+  --line: #d0d7de; --line-soft: #eaeef2; --accent: #0969da; --action: #0969da; --primary: var(--action);
+  --reviewed: #8250df; --reviewed-bg: #f4edff;
   --good: #1a7f37; --good-bg: #dafbe1; --warn: #9a6700; --warn-bg: #fff8c5; --bad: #cf222e; --bad-bg: #ffebe9;
   --top: #1f2937; --top-fg: #e5e7eb; --top-on: #374151;
   --mark: #e8eaf6; --t-person: #ffe0b2; --t-org: #dcedc8; --t-address: #f0f4c3; --t-email: #b3e5fc; --t-phone: #b2dfdb;
@@ -24,7 +25,8 @@
   :root:not([data-theme="light"]) {
     color-scheme: dark;
     --bg: #0d1117; --bg-sub: #161b22; --fg: #e6edf3; --muted: #8d96a0;
-    --line: #30363d; --line-soft: #21262d; --accent: #4493f8; --primary: #238636;
+    --line: #30363d; --line-soft: #21262d; --accent: #4493f8; --action: #1f6feb; --primary: var(--action);
+    --reviewed: #bc8cff; --reviewed-bg: #291d3e;
     --good: #3fb950; --good-bg: #12321d; --warn: #d29922; --warn-bg: #3a2e0b; --bad: #f85149; --bad-bg: #3c1618;
     --top: #010409; --top-fg: #c9d1d9; --top-on: #21262d;
     --mark: #2b2f45; --t-person: #5a3a12; --t-org: #2f4a1e; --t-address: #45481a; --t-email: #123f57; --t-phone: #11433f;
@@ -37,7 +39,8 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #0d1117; --bg-sub: #161b22; --fg: #e6edf3; --muted: #8d96a0;
-  --line: #30363d; --line-soft: #21262d; --accent: #4493f8; --primary: #238636;
+  --line: #30363d; --line-soft: #21262d; --accent: #4493f8; --action: #1f6feb; --primary: var(--action);
+  --reviewed: #bc8cff; --reviewed-bg: #291d3e;
   --good: #3fb950; --good-bg: #12321d; --warn: #d29922; --warn-bg: #3a2e0b; --bad: #f85149; --bad-bg: #3c1618;
   --top: #010409; --top-fg: #c9d1d9; --top-on: #21262d;
   --mark: #2b2f45; --t-person: #5a3a12; --t-org: #2f4a1e; --t-address: #45481a; --t-email: #123f57; --t-phone: #11433f;
@@ -47,6 +50,7 @@
 }
 
 :root.view-text-large { --text-size: 14.5px; }
+:root.view-ui-large { zoom: 1.15; }
 :root.view-rows-loose { --text-line: 1.75; --ui-line: 1.65; --cell-y: 10px; }
 
 /* --- основа ------------------------------------------------------------------ */
@@ -165,6 +169,8 @@ label.stack input { font-weight: 400; width: 100%; }
   border: 1px solid var(--line); border-radius: 11px; background: var(--bg-sub); font-size: 12px;
 }
 .badge.good { color: var(--good); background: var(--good-bg); border-color: transparent; }
+.badge.reviewed { color: var(--reviewed); background: var(--reviewed-bg); border-color: transparent; }
+.bad-text { color: var(--bad); }
 .badge.warn { color: var(--warn); background: var(--warn-bg); border-color: transparent; }
 .badge.bad { color: var(--bad); background: var(--bad-bg); border-color: transparent; }
 .badge .icon { width: 12px; height: 12px; }
@@ -293,6 +299,11 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 .chat-list .current a { background: var(--bg); border-left-color: var(--accent); }
 .chat-list .name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-list small { display: block; color: var(--muted); font-size: 11.5px; }
+.chat-mode { overflow-wrap: anywhere; }
+.chat-mode .icon { width: 12px; height: 12px; margin-right: 4px; }
+.chat-kinds { display: flex; gap: 2px; flex-wrap: wrap; }
+.chat-kinds a { color: var(--fg); padding: 3px 5px; border: 1px solid var(--line); border-radius: var(--radius); font-size: 11px; }
+.chat-kinds [aria-current="page"] { border-color: var(--accent); font-weight: 600; background: var(--bg); }
 .chat-list .empty { padding: 6px 12px; color: var(--muted); }
 .work.empty-state { display: flex; align-items: center; justify-content: center; padding: 24px; color: var(--muted); text-align: center; }
 
@@ -334,6 +345,14 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 .crumbs .sep { color: var(--muted); }
 .crumbs h1, .crumbs .here { font-size: 16px; font-weight: 600; white-space: nowrap; }
 .summary { margin: 0 0 12px; }
+.review-brief { position: sticky; top: 0; z-index: 6; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  margin: 0 0 8px; padding: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); }
+.review-brief form { margin: 0; }
+.review-brief > span:not(.spacer) { display: inline-flex; align-items: center; gap: 4px; }
+.review-explanation { margin-top: 6px; }
+.review-explanation > summary { cursor: pointer; color: var(--muted); }
+.review-explanation[open] > summary { margin-bottom: 8px; }
+.selected-type { max-width: 100%; height: auto; min-height: 24px; white-space: normal; border-color: var(--fg); }
 .badges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 8px; }
 .compare { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 .compare pre.text { max-height: 60vh; overflow: auto; }
@@ -428,6 +447,14 @@ td.actions > form:has(> button.danger):not(:only-child):first-child { margin-rig
 
 /* Без JS переключать нечем — меню и кнопки свёртки не показываются, вид исходный. */
 html:not(.js) .view-menu, html:not(.js) .side-fold, html:not(.js) .tab-fold { display: none; }
+html:not(.js) .key-mode, html:not(.js) .key-summary { display: none; }
+.key-summary { margin: 4px 0; border-color: var(--line); max-width: 800px; background: var(--bg-sub); }
+.keys-table .nowrap { white-space: normal; }
+.keys-table td.actions { white-space: normal; min-width: 130px; }
+.keys-table td.actions > form { margin: 0 0 6px; padding: 0; border: 0; }
+.upload-preview { flex-basis: 100%; max-height: 120px; overflow-y: auto; }
+.upload-preview ul { margin-bottom: 0; padding-left: 20px; }
+.upload-preview li { overflow-wrap: anywhere; }
 .top summary.btn { background: transparent; color: var(--top-fg); border-color: var(--top-on); }
 .top summary.btn:hover, .top details[open] > summary.btn { background: var(--top-on); }
 .view-menu > .pop { min-width: 290px; gap: 4px; color: var(--fg); }
@@ -451,6 +478,27 @@ html:not(.js) .view-menu, html:not(.js) .side-fold, html:not(.js) .tab-fold { di
 /* Режим чтения на проверке: панели «Оригинал» и «Очищенный» — первыми и на всю высоту окна (main), остальное ниже. */
 :root.view-reading main.page:has(> .compare) { display: flex; flex-direction: column; }
 :root.view-reading main.page:has(> .compare) > * { flex: none; }
-:root.view-reading .compare { order: -1; height: 100%; margin-bottom: 12px; }
+:root.view-reading .review-brief { order: -3; }
+:root.view-reading .review-tools { order: -2; }
+:root.view-reading .compare { order: -1; height: calc(100% - 160px); min-height: 240px; margin-bottom: 12px; }
 :root.view-reading .compare > .panel { display: flex; flex-direction: column; min-height: 0; margin: 0; }
 :root.view-reading .compare pre.text { flex: 1; min-height: 0; max-height: none; }
+
+/* Контрастный вариант дополняет оттенок формой. Короткий тип выбранной замены выводится над панелями. */
+:root.view-contrast mark { border: 1px solid currentColor; text-decoration: underline; text-underline-offset: 2px; }
+:root.view-contrast mark.active { outline: 3px double var(--fg); }
+:root.view-contrast mark.opened { border-style: dashed; }
+@media (forced-colors: active) {
+  mark { border: 1px solid MarkText; text-decoration: underline; }
+  mark.active { outline: 3px double Highlight; }
+  .badge { border: 1px solid currentColor; }
+}
+@media (max-width: 1100px) {
+  .chat-head { flex-wrap: wrap; gap: 6px; }
+  .chat-head h1 { max-width: 55%; }
+  .layers { flex-wrap: wrap; margin-left: 0; }
+  .top { padding: 0 10px; }
+  .top a { padding: 4px 7px; }
+  .top .brand { margin-right: 4px; }
+  .top .who { max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
+}

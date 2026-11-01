@@ -86,6 +86,24 @@ def test_garbage_is_retried_once_then_fails(state, settings):
         sanitize(state, "текст", settings, Layers(llm=LlmLayer(Completer("не JSON", "опять не JSON"))))
 
 
+@pytest.mark.parametrize("invalid", [
+    {"text": 17, "type": "PERSON"}, {"text": "AuditMarker"}, None,
+])
+def test_malformed_items_fail_instead_of_becoming_an_empty_result(state, settings, invalid):
+    answer = json.dumps({"items": [{"text": "AuditMarker", "type": "TERM"}, invalid]})
+    completer = Completer(answer, answer)
+    with pytest.raises(DetectorError, match="не разбирается"):
+        sanitize(state, "AuditMarker", settings, Layers(llm=LlmLayer(completer, send_schema=False)))
+    assert len(completer.requests) == 2
+
+
+def test_malformed_items_retry_and_accept_a_valid_empty_result(state, settings):
+    completer = Completer('{"items":[{"text":17,"type":"PERSON"}]}', items())
+    result = sanitize(state, "AuditMarker", settings, Layers(llm=LlmLayer(completer)))
+    assert result.sanitized == "AuditMarker"
+    assert len(completer.requests) == 2
+
+
 def test_unavailable_model_fails_at_once(state, settings):
     completer = Completer(CompletionError("unavailable", "локальная модель недоступна"))
     with pytest.raises(DetectorError, match="Слой 5: локальная модель недоступна"):

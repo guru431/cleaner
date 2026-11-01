@@ -30,9 +30,15 @@ def block_digest(secret: bytes, protocol: str, role: str, kind: str, node: objec
     return _hmac(secret, protocol.encode(), role.encode(), kind.encode(), canonical(node))
 
 
-def conversation_id(secret: bytes, key_id: str, first: object) -> str:
-    """Отпечаток разговора (6.3): первое сообщение пользователя вместе с ключом."""
-    return _hmac(secret, key_id.encode(), canonical(first))
+def conversation_id(secret: bytes, key_id: str, first: object, *, session: str = "", epoch: int = 0) -> str:
+    """Stable client conversation id plus first user message and key. Without an id, first-message fallback is scoped
+    to the key's persistent reset epoch. Keeping epoch zero's encoding lets existing fallback histories resume."""
+    parts = [key_id.encode(), canonical(first)]
+    if session:
+        parts += [b"session", session.encode()]
+    elif epoch:
+        parts += [b"epoch", str(epoch).encode()]
+    return _hmac(secret, *parts)
 
 
 def chat_secret(dek: bytes) -> bytes:

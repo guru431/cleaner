@@ -20,6 +20,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from cleaner.agent_service import AgentRefused, AgentService
 from cleaner.clock import Clock
 from cleaner.egress import cloud, forward
+from cleaner.queueing import QueueFull
 from cleaner.service import ChatService
 from cleaner.storage.repo import Repository
 from cleaner.web import (
@@ -89,7 +90,20 @@ class BodyLimit:
                 raise StarletteHTTPException(413, "Слишком большой запрос")
             return message
 
-        await self.app(scope, limited, send)
+        reservation = None
+        if scope.get("method") in ("POST", "PUT", "PATCH") and not _UPLOAD_PATH.fullmatch(scope["path"]):
+            # FastAPI читает JSON до проверки dependency ключа. Общий входной бюджет нужен уже здесь:
+            # число и объём синхронных API-запросов ограничены и до их разбора, не только у service.add_*.
+            try:
+                reservation = scope["app"].state.jobs.budget.reserve(None, limit, count=0)
+            except QueueFull as exc:
+                await _queue_error(Request(scope), exc)(scope, receive, send)
+                return
+        try:
+            await self.app(scope, limited, send)
+        finally:
+            if reservation:
+                reservation.release()
 
 
 def _for_program(request: Request) -> bool:
@@ -139,6 +153,19 @@ def _openai_error(code: int, message: str, headers: dict[str, str] | None = None
     return JSONResponse({"error": error}, status_code=code, headers=headers)
 
 
+def _queue_error(request: Request, exc: QueueFull) -> Response:
+    headers = {"Retry-After": str(exc.retry_after)}
+    if _for_openai_agent(request):
+        return _openai_error(exc.status, str(exc), headers)
+    if _for_agent(request):
+        return _agent_error(exc.status, str(exc), headers)
+    if _for_program(request):
+        return _json_error(exc.status, str(exc), headers)
+    response = page(request, "error.html", None, status_code=exc.status, code=exc.status, message=str(exc))
+    response.headers.update(headers)
+    return response
+
+
 def _interrupt(repo: Repository) -> None:
     """Всё, что осталось в очереди или в работе, — отказ «прервано» с кнопкой повтора (NFR-6)."""
     interrupted = repo.fail_interrupted(INTERRUPTED)
@@ -159,9 +186,12 @@ def create_app(
     files = files or Jobs(ThreadPoolExecutor(max_workers=FILE_WORKERS, thread_name_prefix="cleaner-file"))
     # Замер эталонного набора идёт минуты и в общем пуле занял бы поток очистки текстов пользователей.
     measures = measures or Jobs(ThreadPoolExecutor(max_workers=1, thread_name_prefix="cleaner-eval"))
+    for pool in (jobs, sends, files, measures):
+        pool.budget = jobs.budget
+        pool.now = clock.now
     service = ChatService(
         repo, max_text_chars, engines, submit=jobs.submit, send_submit=sends.submit, cloud_send=cloud_send or cloud.send,
-        file_submit=files.submit,
+        file_submit=files.submit, budget=jobs.budget,
     )
     agent_pool = ThreadPoolExecutor(max_workers=AGENT_WORKERS, thread_name_prefix="cleaner-agent")
 
@@ -184,6 +214,7 @@ def create_app(
     app.state.clock = clock
     app.state.engines = engines                      # cleaner.engines.Engines; в тестах — заглушка
     app.state.jobs = jobs
+    app.state.job_pools = (jobs, files, sends, measures)
     app.state.measures = measures
     # Состояние замера — в памяти процесса: после перезапуска прерванного замера нет, а итог пишет само задание.
     app.state.measure = {"status": "idle"}
@@ -227,6 +258,10 @@ def create_app(
     @app.exception_handler(LoginRequired)
     async def to_login(request: Request, exc: LoginRequired) -> Response:
         return RedirectResponse("/login", status_code=303)
+
+    @app.exception_handler(QueueFull)
+    async def queue_full(request: Request, exc: QueueFull) -> Response:
+        return _queue_error(request, exc)
 
     @app.exception_handler(AgentRefused)
     async def agent_refused(request: Request, exc: AgentRefused) -> Response:

@@ -169,7 +169,7 @@ def test_structural_strings_list_names_and_metadata():
     assert strings[0] == "capture-model" and "Read" in strings and "Bash" in strings
     assert any("device_id" in s for s in strings)
     assert walk.structural({"model": "m", "tool_choice": {"type": "tool", "name": "Grep"}, "metadata": {"user_id": "u"}}) == [
-        "m", "tool", "Grep", "u",
+        "m", "tool", "Grep", "user_id", "u",
     ]
     units = walk.anthropic_units({"model": "m", "stream": True, "unknown_field": {"note": "заметка"}})
     assert [(u.path, u.role, u.kind) for u in units] == [(("unknown_field",), "params", "other")]

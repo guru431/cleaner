@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import io
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
@@ -11,7 +12,9 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
+from cleaner.queueing import Reservation
 from cleaner.service import ChatService
 from cleaner.storage.repo import ApiKey, Chat, Repository, Session, User
 from cleaner.web import auth
@@ -160,14 +163,33 @@ def get_admin(viewer: Viewer = Depends(get_viewer)) -> Viewer:
 async def get_form(request: Request, viewer: Viewer = Depends(get_viewer)) -> dict[str, str]:
     """Поля формы POST. Без верного токена формы — отказ: запрос пришёл не с нашей страницы.
     Размер тела ограничивает app.BodyLimit."""
-    form = await request.form(max_part_size=MAX_BODY_BYTES)
-    # Байты, а не строки: compare_digest не сравнивает строки с не-ASCII знаками (TypeError).
-    if not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), viewer.session.csrf.encode("utf-8")):
-        raise HTTPException(403, "Форма устарела — обновите страницу")
-    return {key: value for key, value in form.items() if isinstance(value, str)}
+    async with request.form(max_part_size=MAX_BODY_BYTES, max_files=0) as form:
+        # Байты, а не строки: compare_digest не сравнивает строки с не-ASCII знаками (TypeError).
+        if not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), viewer.session.csrf.encode("utf-8")):
+            raise HTTPException(403, "Форма устарела — обновите страницу")
+        return {key: value for key, value in form.items() if isinstance(value, str)}
 
 
 _UPLOAD_OVERHEAD = 64 * 1024        # поля формы и заголовки частей multipart
+MAX_BATCH_FILES = 10
+
+
+class MemoryBuffer(io.BytesIO):
+    _rolled = False                    # UploadFile читает/пишет BytesIO без пула дисковых операций
+
+
+class MemoryMultipart(MultiPartParser):
+    """Starlette хранит файлы в SpooledTemporaryFile. Здесь их содержимое существует только в BytesIO."""
+    def on_headers_finished(self) -> None:
+        super().on_headers_finished()
+        upload = self._current_part.file
+        if upload is not None:
+            empty_spool = upload.file
+            empty_spool.close()              # ещё ни одного байта файла не принято
+            memory = MemoryBuffer()
+            upload.file = memory
+            self._files_to_close_on_error.remove(empty_spool)
+            self._files_to_close_on_error.append(memory)
 
 
 @dataclass(frozen=True)
@@ -175,36 +197,91 @@ class Upload:
     filename: str        # только для расширения: нигде не сохраняется
     data: bytes
     ocr_all: bool = False       # отметка «Распознать текст на всех страницах PDF»
+    reservation: Reservation | None = None
 
 
-async def _read_upload(request: Request, csrf: str | None) -> Upload:
+async def _read_upload(request: Request, csrf: str | None, user_id: str = "", multiple: bool = False) -> list[Upload]:
     """Файл из формы multipart. Предел — max_file_mb (FR-2.2); Cleaner файл на диск не пишет (FR-2.7).
     csrf — токен формы страницы; у программы его нет (None), её открывает ключ доступа."""
     limit = request.app.state.max_file_bytes
     too_large = f"Файл больше {limit // (1024 * 1024)} МБ"
-    if int(request.headers.get("content-length") or 0) > limit + _UPLOAD_OVERHEAD:
+    length = request.headers.get("content-length", "0")
+    if not length.isascii() or not length.isdigit():
+        raise HTTPException(400, "Неверный размер запроса")
+    if len(length) > 12 or int(length) > limit + _UPLOAD_OVERHEAD:
         raise HTTPException(413, too_large)
-    form = await request.form(max_files=1, max_fields=4)
-    if csrf is not None and not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), csrf.encode("utf-8")):
-        raise HTTPException(403, "Форма устарела — обновите страницу")
-    upload = form.get("file")
-    if not isinstance(upload, UploadFile) or not upload.filename:
-        raise HTTPException(400, "Выберите файл")
-    data = await upload.read(limit + 1)
-    await upload.close()
-    if len(data) > limit:
-        raise HTTPException(413, too_large)
-    return Upload(upload.filename, data, form.get("ocr") == "all")
+    count = MAX_BATCH_FILES if multiple else 1
+    # Предел на весь пакет. На разборе одновременно живут буфер multipart и извлечённые bytes, плюс текст очистки.
+    reserve = request.app.state.jobs.budget.reserve(user_id, limit * 2 + count * request.app.state.service.max_text_chars * 8, count)
+    parser = None
+    form = None
+    uploads = []
+    try:
+        received = 0
+
+        async def bounded_stream():
+            nonlocal received
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > limit + _UPLOAD_OVERHEAD:
+                    raise HTTPException(413, too_large)
+                yield chunk
+
+        if not request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+            raise HTTPException(400, "Выберите файл")
+        parser = MemoryMultipart(request.headers, bounded_stream(), max_files=count, max_fields=4,
+                                 max_part_size=_UPLOAD_OVERHEAD)
+        form = await parser.parse()
+        if csrf is not None and not hmac.compare_digest(str(form.get("csrf", "")).encode("utf-8"), csrf.encode("utf-8")):
+            raise HTTPException(403, "Форма устарела — обновите страницу")
+        files = form.getlist("file")
+        if not files or any(not isinstance(f, UploadFile) or not f.filename for f in files):
+            raise HTTPException(400, "Выберите файл")
+        if any(isinstance(value, UploadFile) and key != "file" for key, value in form.multi_items()):
+            raise HTTPException(400, "Неверное поле файла")
+        total = 0
+        for upload in files:
+            data = await upload.read(limit + 1)
+            total += len(data)
+            if total > limit:
+                raise HTTPException(413, too_large)
+            uploads.append(Upload(upload.filename, data, form.get("ocr") == "all"))
+        reservations = reserve.split([len(upload.data) * 2 + request.app.state.service.max_text_chars * 8 for upload in uploads])
+        return [Upload(upload.filename, upload.data, upload.ocr_all, ticket) for upload, ticket in zip(uploads, reservations)]
+    except MultiPartException:
+        raise HTTPException(400, f"Неверная форма загрузки (не больше {count} файлов)") from None
+    finally:
+        try:
+            if form is not None:
+                await form.close()
+        finally:
+            if parser is not None:
+                # parse() закрывает файлы лишь для MultiPartException: disconnect/CancelledError/413 также требуют cleanup.
+                for file in parser._files_to_close_on_error:
+                    file.close()
+            reserve.release()
 
 
-async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)) -> Upload:
+async def get_upload(request: Request, viewer: Viewer = Depends(get_viewer)):
     """Файл из формы страницы — с токеном формы."""
-    return await _read_upload(request, viewer.session.csrf)
+    writable_chat(request, request.path_params["chat_id"], viewer)
+    uploads = await _read_upload(request, viewer.session.csrf, viewer.user.id, multiple=True)
+    try:
+        yield uploads
+    finally:
+        for upload in uploads:
+            upload.reservation.release_unused()
 
 
-async def get_api_upload(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Upload:
+async def get_api_upload(request: Request, caller: ApiCaller = Depends(get_api_caller)):
     """Файл программы: поле file и необязательное ocr=all. Ключ проверяется раньше, чем читается тело."""
-    return await _read_upload(request, None)
+    api_writable_chat(request, request.path_params["chat_id"], caller)
+    uploads = await _read_upload(request, None, caller.user.id)
+    try:
+        yield uploads[0]
+    finally:
+        for upload in uploads:
+            upload.reservation.release_unused()
 
 
 def page(request: Request, name: str, viewer: Viewer | None, status_code: int = 200, **context: object) -> HTMLResponse:

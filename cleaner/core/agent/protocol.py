@@ -35,7 +35,7 @@ class GatewayProtocol:
     header_prefixes: tuple[str, ...]        # и по началу имени
     subscription_headers: frozenset[str]    # добавка при доступе по подписке
     passed_back: tuple[str, ...]            # заголовки провайдера агенту
-    session_header: str                     # сессия агента — для просмотра; "" — у протокола её нет
+    session_header: str                     # стабильная сессия агента для границы разговора; "" — её нет
     units: Callable[[dict], list[Unit]]
     first_user: Callable[[dict], object]
     structural: Callable[[dict], list[str]]

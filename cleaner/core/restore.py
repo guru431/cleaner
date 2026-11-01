@@ -1077,7 +1077,11 @@ def _restore(restorer: _Restorer, answer: str) -> RestoreResult:
     return RestoreResult("".join(parts), segments, restorer.counters)
 
 
-def originals(state: ChatState, settings: Settings, exact: bool = False) -> Callable[[str], str]:
+class RestoreLimit(ValueError):
+    """A gateway response would exceed its restoration budget; contains no source content."""
+
+
+def originals(state: ChatState, settings: Settings, exact: bool = False, *, max_bytes: int | None = None) -> Callable[[str], str]:
     """Значение с выданными заменами внутри — с их оригиналами, как в ответе, но без проверки ссылок: это значение из
     текста пользователя, а не ответ модели. Так конвейер узнаёт, какой адрес написан с заменой внутри (pipeline._outside).
     Восстановление собирается при первом значении, одно на очистку: собранное заново для каждого значения, оно проходило
@@ -1096,7 +1100,16 @@ def originals(state: ChatState, settings: Settings, exact: bool = False) -> Call
         nonlocal restorer
         if restorer is None:
             restorer = _Restorer(state, settings)
-        return "".join(piece for piece, _, _ in restorer.run([(value, None, value)], links=False, tolerant=not exact))
+        pieces = restorer.run([(value, None, value)], links=False, tolerant=not exact)
+        # Repeated labels can refer to the same huge original. Check the referenced pieces before joining them into
+        # an expanded string: checking only after join would allocate the very object the limit must prevent.
+        if max_bytes is not None:
+            size = 0
+            for piece, _, _ in pieces:
+                size += len(piece.encode("utf-8"))
+                if size > max_bytes:
+                    raise RestoreLimit("response_expansion_limit")
+        return "".join(piece for piece, _, _ in pieces)
 
     return original
 

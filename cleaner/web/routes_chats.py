@@ -5,6 +5,7 @@ import bisect
 import hashlib
 import ipaddress
 import json
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -44,11 +45,32 @@ def partial_extraction(meta: dict[str, object]) -> str:
     return "; ".join(parts)
 
 
-def chat_list(request: Request, viewer: Viewer, query: str = "") -> list[Chat]:
-    """Названия зашифрованы, поэтому поиск идёт после расшифровки, в памяти (FR-1.2)."""
-    chats = repo_of(request).chats(viewer.user.id)
+@dataclass(frozen=True)
+class ListedChat(Chat):
+    agent_key: str = ""
+    last_request: str = ""
+
+
+def chat_filter(request: Request) -> str:
+    selected = request.query_params.get("kind", request.cookies.get("cleaner-chat-kind", "all"))
+    return selected if selected in ("all", "chat", "agent") else "all"
+
+
+def chat_list(request: Request, viewer: Viewer, query: str = "") -> list[ListedChat]:
+    """Поиск по расшифрованным названиям и именам ключей — только среди чатов владельца."""
+    repo = repo_of(request)
+    selected = chat_filter(request)
+    keys = {key.id: key.name for key in repo.api_keys(viewer.user.id)}
+    chats = []
+    for chat in repo.chats(viewer.user.id):
+        if selected != "all" and chat.kind != selected:
+            continue
+        conversations = repo.chat_conversations(chat.id) if chat.kind == "agent" else []
+        names = ", ".join(dict.fromkeys(keys[c.key_id] for c in conversations if c.key_id in keys))
+        last = max((c.last_seen for c in conversations), default="")
+        chats.append(ListedChat(**vars(chat), agent_key=names, last_request=last))
     needle = query.strip().lower()
-    return [chat for chat in chats if needle in chat.title.lower()] if needle else chats
+    return [chat for chat in chats if needle in f"{chat.title} {chat.agent_key}".lower()] if needle else chats
 
 
 def input_view(view: ChatView, item_id: str) -> InputView:
@@ -174,7 +196,11 @@ def _choices(request: Request) -> list[tuple[str, str]]:
 
 @router.get("/chats")
 def chats(request: Request, q: str = "", viewer: Viewer = Depends(get_viewer)) -> Response:
-    return page(request, "chats.html", viewer, chats=chat_list(request, viewer, q), q=q)
+    response = page(request, "chats.html", viewer, chats=chat_list(request, viewer, q), q=q)
+    if "kind" in request.query_params:
+        response.set_cookie("cleaner-chat-kind", chat_filter(request), max_age=365 * 86400,
+                            httponly=True, secure=request.url.scheme == "https", samesite="lax")
+    return response
 
 
 @router.post("/chats")
@@ -229,6 +255,14 @@ def _agent_chat(request: Request, chat: Chat, viewer: Viewer, q: str) -> Respons
     raw = request.query_params.get("offset", "0")
     offset = int(raw) if raw.isdigit() and len(raw) < 9 else 0
     shown = repo.ledger_page(chat.id, offset, LEDGER_PAGE)
+    receipts = repo.agent_receipts(chat.id, offset, LEDGER_PAGE)
+    selected = repo.agent_receipt(chat.id, request.query_params.get("request", ""))
+    if selected:
+        shown = []
+        for direction in ("in", "out"):
+            digests = [block["digest"] for block in selected["blocks"] if block["direction"] == direction]
+            entries = repo.ledger_get(chat.id, selected["conversation"], direction, digests)
+            shown += [(entries[digest], selected["time"]) for digest in digests if digest in entries]
     conversations = {c.id: c for c in repo.chat_conversations(chat.id)}
     keys = [repo.api_key(key_id) for key_id in dict.fromkeys(c.key_id for c in conversations.values())]
     state, _ = repo.load_state(chat.id)
@@ -248,6 +282,7 @@ def _agent_chat(request: Request, chat: Chat, viewer: Viewer, q: str) -> Respons
     return page(
         request, "agent_chat.html", viewer, chat=chat, chats=chat_list(request, viewer, q), q=q, rows=rows,
         opened=sum(opened), keys=", ".join(key.name for key in keys if key), conversations=len(conversations),
+        receipts=receipts, selected_request=selected,
         offset=offset, more=len(shown) == LEDGER_PAGE, step=LEDGER_PAGE,
     )
 
@@ -310,10 +345,60 @@ def add_input(request: Request, chat_id: str, form: dict[str, str] = Depends(get
 
 
 @router.post("/chats/{chat_id}/upload")
-def upload(request: Request, chat_id: str, upload: Upload = Depends(get_upload), viewer: Viewer = Depends(get_viewer)) -> Response:
+def upload(request: Request, chat_id: str, upload: list[Upload] = Depends(get_upload), viewer: Viewer = Depends(get_viewer)) -> Response:
     writable_chat(request, chat_id, viewer)
-    item = service_of(request).add_file(chat_id, viewer.user.id, upload.filename, upload.data, upload.ocr_all)
-    return RedirectResponse(f"/chats/{chat_id}/items/{item.id}", status_code=303)
+    items = []
+    while upload:
+        file = upload[0]
+        items.append(service_of(request).add_file(chat_id, viewer.user.id, file.filename, file.data, file.ocr_all,
+                                                reservation=file.reservation))
+        upload.pop(0)                    # зависимости больше не держат копию исходных bytes уже принятого задания
+    target = f"/chats/{chat_id}/items/{items[0].id}" if len(items) == 1 else f"/chats/{chat_id}"
+    return RedirectResponse(target, status_code=303)
+
+
+JOB_NAMES = {"file": "Извлечение файла", "text": "Очистка текста", "risk": "Проверка риска",
+             "local": "Ответ локальной модели", "send": "Ответ облачной модели"}
+
+
+def _my_jobs(request: Request, viewer: Viewer) -> list[dict]:
+    repo = repo_of(request)
+    rows = []
+    for pool in request.app.state.job_pools:
+        for job in pool.owned(viewer.user.id):
+            chat = repo.chat(job["chat_id"])
+            if chat is None or chat.user_id != viewer.user.id:
+                continue
+            item = repo.item(chat.id, job["item_id"])
+            rows.append(job | {"chat_title": chat.title, "name": JOB_NAMES.get(job["kind"], "Обработка"),
+                               "progress": item.meta.get("progress", "") if item else ""})
+    rows.sort(key=lambda row: row["created_at"])
+    for position, row in enumerate([row for row in rows if row["status"] == "queued"], 1):
+        row["position"] = position
+    return rows
+
+
+@router.get("/jobs")
+def my_jobs(request: Request, viewer: Viewer = Depends(get_viewer)) -> Response:
+    return page(request, "jobs.html", viewer, jobs=_my_jobs(request, viewer))
+
+
+@router.get("/jobs/status")
+def my_jobs_status(request: Request, viewer: Viewer = Depends(get_viewer)) -> Response:
+    return JSONResponse({"jobs": _my_jobs(request, viewer)})
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(request: Request, job_id: str, form: dict[str, str] = Depends(get_form),
+               viewer: Viewer = Depends(get_viewer)) -> Response:
+    for pool in request.app.state.job_pools:
+        cancelled = pool.cancel(job_id, viewer.user.id)
+        if cancelled is None:
+            continue
+        if not cancelled:
+            raise HTTPException(409, "Обработка уже началась: отмена ожидающего задания недоступна")
+        return RedirectResponse("/jobs", status_code=303)
+    raise HTTPException(404, "Задание не найдено")
 
 
 @router.post("/chats/{chat_id}/answer")

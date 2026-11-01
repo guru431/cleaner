@@ -21,6 +21,7 @@ from cleaner.core.agent import ledger, walk
 from cleaner.core.agent.protocol import PROTOCOLS, GatewayProtocol, ProtocolStream
 from cleaner.core.detect import dictionary
 from cleaner.core.detect.base import DetectorError
+from cleaner.core.restore import RestoreLimit
 from cleaner.core.types import ChatState, Entity, Policy, Settings
 from cleaner.egress import ProviderError, cloud, forward as egress
 from cleaner.storage.repo import ApiKey, CheckpointBusy, LedgerEntry, Repository, StaleState, User
@@ -110,6 +111,7 @@ class _Prepared:
     new: int = 0
     withheld: Counter = field(default_factory=Counter)
     replaced: Counter = field(default_factory=Counter)
+    blocks: list[dict] = field(default_factory=list)
 
 
 def _snapshot(state: ChatState) -> ChatState:
@@ -226,7 +228,9 @@ class AgentService:
     ) -> AgentRefused:
         """Отказ шлюза — событие agent_refused с причиной (раздел 12): пользователь, чат, если уже известен, id ключа."""
         self.repo.audit("agent_refused", call.user.id, chat_id, key=call.key.id, reason=reason)
-        return AgentRefused(status, kind, message, headers)
+        refused = AgentRefused(status, kind, message, headers)
+        refused.reason = reason
+        return refused
 
     # --- запрос ------------------------------------------------------------------------
 
@@ -318,22 +322,73 @@ class AgentService:
         self._prune()
         proto = PROTOCOLS[call.protocol]
         access = self._access(call, proto)
+        identity = call.headers.get("x-cleaner-conversation-id", "") or (
+            call.headers.get("thread-id", "") if proto.name == "responses" else ""
+        ) or call.headers.get(proto.session_header, "")
+        if not isinstance(identity, str) or len(identity) > 1024:
+            raise self._refuse(call, 400, "invalid_request_error", "Cleaner: неверный идентификатор разговора", "session")
+        if identity and proto.name == "anthropic":
+            identity = _json([identity, call.headers.get("x-claude-code-agent-id", ""), call.headers.get("x-claude-code-parent-agent-id", "")])
         conv_id = ledger.conversation_id(
             ledger.conversation_secret(self.repo.global_key), call.key.id, proto.first_user(call.body),
+            session=identity, epoch=self.repo.api_key(call.key.id).agent_epoch,
         )
-        session = str(call.headers.get(proto.session_header, "") if proto.session_header else "")[:200]
+        # Upgrade compatibility: versions through 31.10 ignored session ids in the digest but retained the first
+        # supplied id in the conversation row. Adopt that history only when its actual client id matches; a new
+        # session with an identical first message must never inherit it. Explicit Cleaner ids always start a namespace.
+        legacy_safe = not (proto.name == "anthropic" and call.headers.get("x-claude-code-agent-id"))
+        if identity and legacy_safe and not call.headers.get("x-cleaner-conversation-id") and self.repo.conversation(conv_id) is None:
+            legacy_id = ledger.conversation_id(ledger.conversation_secret(self.repo.global_key), call.key.id, proto.first_user(call.body))
+            legacy = self.repo.conversation(legacy_id)
+            client_ids = {call.headers.get(proto.session_header, ""), call.headers.get("thread-id", "")}
+            if legacy is not None and legacy.session and legacy.session in client_ids:
+                conv_id = legacy_id
+        session = f"session:{conv_id[:12]}" if identity else ""
         layers = self._layers(call)
         chat_id = self._chat(call.key, conv_id, session)
         settings = self.repo.settings()
-        with self._lock(chat_id):
-            prepared = self._prepare(call, proto, chat_id, conv_id, access, settings, layers)
-        self.repo.touch_conversation(conv_id, session)
+        prepared = None
+        try:
+            with self._lock(chat_id):
+                prepared = self._prepare(call, proto, chat_id, conv_id, access, settings, layers)
+            return self._dispatch(call, proto, chat_id, conv_id, access, prepared, started)
+        except AgentRefused as exc:
+            self._receipt(call, proto, chat_id, conv_id, access, prepared, started, exc.status, getattr(exc, "reason", exc.kind))
+            raise
+
+    def _dispatch(
+        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, access: _Access,
+        prepared: _Prepared, started: float,
+    ) -> AgentReply:
+        self.repo.touch_conversation(conv_id, "")
         for direction, digests in prepared.repeated.items():
             if digests:
                 self.repo.touch_ledger(chat_id, conv_id, direction, digests)
         if prepared.withheld:
             self.repo.audit("agent_withheld", call.user.id, chat_id, key=call.key.id, reasons=dict(prepared.withheld))
-        return self._send(call, proto, chat_id, conv_id, access, prepared, started)
+        reply = self._send(call, proto, chat_id, conv_id, access, prepared, started)
+        if reply.events is None:
+            self._receipt(call, proto, chat_id, conv_id, access, prepared, started, reply.status)
+        return reply
+
+    def _receipt(
+        self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, access: _Access,
+        prepared: _Prepared | None, started: float, status: int, reason: str = "",
+    ) -> None:
+        """Whole-request boundary, under the chat key; credential values and arbitrary header/query values are absent."""
+        out = prepared.out if prepared else None
+        self.repo.add_agent_receipt(chat_id, conv_id, {
+            "protocol": proto.name, "access": access.id, "model": str(call.body.get("model", ""))[:100],
+            "status": status, "reason": reason, "ms_total": _ms(started),
+            "layers": [1, 2, 3] + ([4] if call.key.layers.get("ner") else []) + ([5] if call.key.layers.get("llm") else []),
+            "new": prepared.new if prepared else 0,
+            "repeated": sum(map(len, prepared.repeated.values())) if prepared else 0,
+            "withheld": dict(prepared.withheld) if prepared else {}, "blocks": prepared.blocks if prepared else [],
+            "channels": ["JSON: новые значения и ключи объектов", "JSON: служебные параметры", "URL: разобранные параметры", "HTTP: разрешённые заголовки"],
+            "headers": sorted(name for name, _ in out.headers) if out else [],
+            "parameters": ["beta"] if out and out.query else [],
+            "credential_channel": "Authorization подписки" if call.key.upstream in SUBSCRIPTIONS else "ключ подключения",
+        })
 
     def _prepare(
         self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, access: _Access, settings: Settings,
@@ -409,6 +464,10 @@ class AgentService:
                 node, withheld, counts = self._new(proto, unit, direction, state, settings, layers)
                 replaced[unit.path] = node
                 checked += walk.checked_strings(unit.kind, node)
+                # The unfamiliar envelope name is outside unit.node. Check it for new units, while a frozen
+                # unit (including its original field name) retains the conversation's existing exception.
+                if unit.kind == "other" and isinstance(unit.path[-1], str):
+                    checked.append(unit.path[-1])
                 entries.append(LedgerEntry(
                     conv_id, direction, digests[unit.path], _json(unit.node), _json(node), withheld, counts,
                 ))
@@ -417,11 +476,14 @@ class AgentService:
                 if withheld:
                     result.withheld[withheld] += 1
             body = proto.add_instruction(proto.rebuild(call.body, replaced), pipeline.system_prompt(state.label_style))
-            out, leaks = pipeline.build_agent_outgoing(
-                state, settings, chat_id=chat_id, provider_id=access.id, path=call.path, query=call.query,
-                headers={**call.headers, **session}, allowed=access.headers | session.keys(), prefixes=proto.header_prefixes,
-                body=body, checked=checked,
-            )
+            try:
+                out, leaks = pipeline.build_agent_outgoing(
+                    state, settings, chat_id=chat_id, provider_id=access.id, path=call.path, query=call.query,
+                    headers={**call.headers, **session}, allowed=access.headers | session.keys(), prefixes=proto.header_prefixes,
+                    body=body, checked=checked,
+                )
+            except ValueError:
+                raise self._refuse(call, 400, "invalid_request_error", "Cleaner: неподдерживаемые параметры URL", "query", chat_id=chat_id) from None
             if not leaks:
                 break
         if leaks:
@@ -431,11 +493,19 @@ class AgentService:
                 reason="leak_structural" if in_service else "leak", count=len(leaks),
             )
             where = "в служебном поле запроса (имя инструмента, metadata, модель)" if in_service else "в исходящем тексте"
-            raise AgentRefused(
+            refused = AgentRefused(
                 400, "invalid_request_error",
                 f"Cleaner: {where} найдено известное значение ({len(leaks)}), запрос не отправлен",
             )
+            refused.reason = "leak_structural" if in_service else "leak"
+            raise refused
         result.out, result.state = out, _snapshot(state)
+        held = {entry.digest for entry in entries if entry.withheld}
+        result.blocks = [
+            {"direction": direction, "digest": digests[unit.path], "kind": unit.kind,
+             "status": "повторён" if unit.path in repeated else "удержан" if digests[unit.path] in held else "новый"}
+            for direction, group in groups.items() for unit in group
+        ]
         return result, entries
 
     def _new(
@@ -492,10 +562,12 @@ class AgentService:
             upstream = self.forward(prepared.out, connection, prepared.state, prepared.settings, passed=proto.passed_back)
         except cloud.LeakDetected as exc:
             self.repo.audit("agent_refused", call.user.id, chat_id, key=call.key.id, reason="leak_egress", count=exc.count)
-            raise AgentRefused(
+            refused = AgentRefused(
                 400, "invalid_request_error",
                 f"Cleaner: в исходящем тексте найдено известное значение ({exc.count}), запрос не отправлен",
-            ) from None
+            )
+            refused.reason = "leak_egress"
+            raise refused from None
         except egress.ProviderTimeout:
             self.repo.audit("agent_send", call.user.id, chat_id, **audit, ms_upstream=_ms(sent), status=504)
             raise AgentRefused(504, "api_error", "Cleaner: провайдер не ответил вовремя") from None
@@ -519,6 +591,9 @@ class AgentService:
             try:
                 reply = json.loads(raw)
                 message = stream.complete(reply)
+            except RestoreLimit:
+                raise self._refuse(call, 502, "api_error", "Cleaner: превышен предел размера восстановленного ответа",
+                                   "response_limit", chat_id=chat_id) from None
             except (ValueError, AttributeError):
                 self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=502)
                 raise AgentRefused(502, "api_error", "Cleaner: провайдер прислал не JSON") from None
@@ -537,6 +612,8 @@ class AgentService:
                 upstream.close()
                 self._record(proto, chat_id, conv_id, prepared, stream)
                 self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished, usage=usage)
+                self._receipt(call, proto, chat_id, conv_id, access, prepared, started, 200 if finished else 502,
+                              "" if finished else getattr(stream, "failure_reason", "stream_interrupted"))
             finally:
                 # close живёт до уничтожения HTTP-ответа: после записи он не должен держать тело запроса и снимок
                 # из 20 000 сущностей (и заставлять GC обходить их на следующих запросах).
@@ -574,37 +651,48 @@ class AgentService:
         """События агенту по мере прихода; обрыв — уже восстановленная часть и событие error (раздел 12). usage —
         последние числа провайдера по каждому имени: у Anthropic message_delta несёт нарастающий итог."""
         finished = done = failed = False
+        limited = False
+        tail: list[dict] = []
         usage: dict[str, int] = {}
         try:
-            for line in upstream.lines():
-                if not line.startswith("data:"):
-                    continue
-                if line[5:].strip() == "[DONE]":        # конец ответа OpenAI-совместимого провайдера
-                    done = True
-                    continue
-                try:
-                    event = json.loads(line[5:])
-                except ValueError:
-                    continue
-                if not isinstance(event, dict):
-                    continue
-                finished = finished or stream.finished(event)
-                failed = failed or event.get("type") == "error" or "error" in event
-                usage.update(proto.usage(event))
-                for out in stream.feed(event):
-                    yield proto.sse(out)
-        except ProviderError:
-            pass
+            try:
+                for line in upstream.lines():
+                    if not line.startswith("data:"):
+                        continue
+                    if line[5:].strip() == "[DONE]":        # конец ответа OpenAI-совместимого провайдера
+                        done = True
+                        continue
+                    try:
+                        event = json.loads(line[5:])
+                    except ValueError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    failed = failed or event.get("type") == "error" or "error" in event
+                    usage.update(proto.usage(event))
+                    for out in stream.feed(event):
+                        yield proto.sse(out)
+                    finished = finished or stream.finished(event)
+            except egress.ProviderLimit:
+                raise
+            except ProviderError:
+                pass
+            if not finished:
+                tail = stream.cut()       # budget also covers the unfinished label flushed at [DONE] or disconnect
+        except (RestoreLimit, egress.ProviderLimit):
+            limited = True
+            finished = done = False
+            stream.failure_reason = "response_limit"
         finally:
             end(finished or done, usage)
+        if limited:
+            yield proto.sse(proto.error_event("Cleaner: превышен предел размера ответа или аргументов инструмента"))
+            return
+        for out in tail:
+            yield proto.sse(out)
         if finished or done:
-            if not finished:            # «[DONE]» без finish_reason: остаток текста — каким накопился
-                for out in stream.cut():
-                    yield proto.sse(out)
             if end := proto.end():
                 yield end
             return
-        for out in stream.cut():
-            yield proto.sse(out)
         if not failed:
             yield proto.sse(proto.error_event("Cleaner: поток ответа провайдера оборвался"))

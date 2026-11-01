@@ -30,6 +30,22 @@
   {% endif %}
 </section>
 {% else %}
+<section class="review-brief" aria-label="Сводка проверки текста">
+  <strong>Текст {{ item.seq }}</strong>
+  {{ readiness_badge(readiness) }}
+  <span{% if leaks or blocked %} class="bad-text"{% endif %}>{{ icon("warning") }}Блокировки: {{ leaks + blocked }}</span>
+  <span>Открыто: {{ opened }}</span>
+  <span title="Отметка пользователя, не гарантия отсутствия неизвестных утечек">Проверено: {{ "да" if readiness == "reviewed" else "нет" }}</span>
+  <span class="spacer"></span>
+  {% if readiness == "review" %}
+  <form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/reviewed" class="mark-reviewed">
+    {% include "_csrf.html" %}<input type="hidden" name="digest" value="{{ shown }}">
+    <button class="primary" title="Вы сверили замены с оригиналом. Изменение очищенного текста снимет отметку">{{ icon("check") }}Отметить проверенным</button>
+  </form>
+  {% endif %}
+  {% if next_review %}<a class="btn" href="/chats/{{ chat.id }}/items/{{ next_review }}">Следующий текст</a>{% endif %}
+  <a class="btn" href="/chats/{{ chat.id }}/{{ transfer }}">Передача…</a>
+</section>
 <section class="summary">
   <div class="badges">
     {% for name, count in summary %}<span class="badge">{{ name }} — {{ count }}</span>{% else %}<span class="muted">Замен нет</span>{% endfor %}
@@ -45,18 +61,14 @@
     {% endif %}
     <span class="badge" title="Слои распознавания, выполненные для этого текста">слои {{ layers_ran }}</span>
     {# Отметка «проверено» — подсказка маршрута чата, не разрешение; форма несёт отпечаток показанного текста. #}
-    {{ readiness_badge(readiness) if readiness in ("review", "reviewed") }}
-    {% if readiness == "review" %}
-    <form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/reviewed" class="mark-reviewed">
-      {% include "_csrf.html" %}
-      <input type="hidden" name="digest" value="{{ shown }}">
-      <button title="Вы сверили замены с оригиналом. Изменение очищенного текста снимет отметку">{{ icon("check") }}Отметить проверенным</button>
-    </form>
-    {% endif %}
   </div>
   {% if extraction %}<p class="muted">{{ extraction }}</p>{% endif %}
+  {% if warnings or notices %}
+  <details class="review-explanation"><summary>Слои и особенности текста: пояснения ({{ warnings | length + notices | length }})</summary>
   {% for text in warnings %}<p class="flash warn">{{ text }}</p>{% endfor %}
   {% for text, count in notices %}<p class="flash warn">{{ text }} ({{ count }})</p>{% endfor %}
+  </details>
+  {% endif %}
   {% if exposed %}
   <p class="flash warn">Прежний вариант этого текста содержал открытым значение, которое теперь скрывается: {{ exposed | join("; ") }}. Если текст уже был передан, значение ушло открытым.</p>
   {% endif %}
@@ -79,6 +91,7 @@
 </div>
 <div class="review-tools" data-review-tools>
   <span class="muted">Замены:</span>
+  <span class="badge selected-type" data-selected-type hidden aria-live="polite"></span>
   <button type="button" data-step="-1" title="Клавиша P в панели текста">Предыдущая</button>
   <button type="button" data-step="1" title="Клавиша N в панели текста">Следующая</button>
   <span class="legend" role="group" aria-label="Показать только">
@@ -99,7 +112,7 @@
       {% if deliverable %}
       <span class="actions">
         <button type="button" data-copy="sanitized">{{ icon("copy") }}<span>Скопировать</span></button>
-        <a class="btn" href="/chats/{{ chat.id }}/items/{{ item.id }}/download">{{ icon("download") }}Скачать .txt</a>
+        <a class="btn" href="/chats/{{ chat.id }}/items/{{ item.id }}/download" download>{{ icon("download") }}Скачать .txt</a>
       </span>
       {% endif %}
     </header>
@@ -116,7 +129,7 @@
 </section>
 <template id="why-data">
   {% for entity_id, w in why.items() %}
-  <div data-why="{{ entity_id }}">
+  <div data-why="{{ entity_id }}" data-type-name="{{ w.type }}">
     <p><span class="mono">{{ w.surrogate }}</span> — {{ w.type }}</p>
     <dl class="why-list">
       <dt>Нашли</dt><dd>{{ w.names | join("; ") or "—" }}</dd>
@@ -224,7 +237,7 @@
   {% endif %}
   <div class="tab-panel" role="tabpanel" data-tab-panel="gold">
     <p class="muted">Сначала проверьте замены. Копия текста с текущей разметкой попадёт в набор для измерения качества и останется в нём после удаления чата.</p>
-    <form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/gold">{% include "_csrf.html" %}<button>Сохранить как эталон</button></form>
+    {% include "_gold_save.html" %}
   </div>
 </div>
 {% endif %}

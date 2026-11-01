@@ -35,9 +35,12 @@ set -a; . data/cleaner.env; set +a
 ```bash
 .venv/Scripts/python.exe -m pytest                       # быстрый набор (≤ 60 с)
 .venv/Scripts/python.exe -m pytest tests/<файл>.py       # точечно
-.venv/Scripts/python.exe -m pytest -m "not manual"       # полный
-.venv/Scripts/python.exe -m pytest tests/test_long_input.py -m integration   # после правки слоёв 1–3 и восстановления
+.venv/Scripts/python.exe -m pytest -n 0 -m "not manual"  # полный
+.venv/Scripts/python.exe -m pytest -n 0 tests/test_long_input.py -m integration   # после правки слоёв 1–3 и восстановления
 ```
+
+Канонический контракт тестов — раздел Tests в [CLAUDE.md](CLAUDE.md). Команды в датированных
+планах описывают исторические этапы; полный набор и замеры скорости выполняются последовательно (`-n 0`).
 
 ## Где работает
 

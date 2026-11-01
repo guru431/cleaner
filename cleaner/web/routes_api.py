@@ -154,7 +154,8 @@ def add_file(
     """Файл — в очередь разбора (FR-2.2…2.9); результат — опросом GET …/items/{item_id}."""
     api_writable_chat(request, chat_id, caller)
     try:
-        item = service_of(request).add_file(chat_id, caller.user.id, upload.filename, upload.data, upload.ocr_all)
+        item = service_of(request).add_file(chat_id, caller.user.id, upload.filename, upload.data, upload.ocr_all,
+                                            reservation=upload.reservation)
     except KeyError:
         raise HTTPException(404, "Чат не найден") from None
     return JSONResponse({"item_id": item.id, "status": item.status}, status_code=202)
