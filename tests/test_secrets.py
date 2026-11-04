@@ -153,16 +153,17 @@ def test_allowlist_pragma_does_not_switch_the_library_rules_off():
 
 
 UNSIGNED_JWT = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+NPM_LEGACY = "-".join(('0f1e2d3c', '4b5a', '6978', '8796', 'a5b4c3d2e1f0'))
+OPENAI_LEGACY = "sk-" + 'Ab12Cd34Ef56Gh78Ij90T3BlbkFJKl12Mn34Op56Qr78St90'
+
 
 
 @pytest.mark.parametrize(
     "text, value",
     [
-        ('//registry.npmjs.org/:_au' 'thToken=0f1e2d3c-4b5a-6978' '-8796-a5b4c3d2e1f0',
-         '0f1e2d3c-4b5a-6978' '-8796-a5b4c3d2e1f0'),
+        (f'//registry.npmjs.org/:_authToken={NPM_LEGACY}', NPM_LEGACY),
         ("//registry.npmjs.org/:_authToken=npm_" + "a1B2c3D4e5F6" * 3, "npm_" + "a1B2c3D4e5F6" * 3),
-        ('ключ sk-A' 'b12Cd34Ef56Gh78Ij90T3BlbkFJKl12Mn34Op56Qr78St90 в логе',  # secret-scan:allow -- synthetic test fixture
-         'sk-A' 'b12Cd34Ef56Gh78Ij90T3BlbkFJKl12Mn34Op56Qr78St90'),  # secret-scan:allow -- synthetic test fixture
+        (f'ключ {OPENAI_LEGACY} в логе', OPENAI_LEGACY),  # secret-scan:allow -- synthetic test fixture
         (f"заголовок {UNSIGNED_JWT} в логе", UNSIGNED_JWT),
     ],
 )
