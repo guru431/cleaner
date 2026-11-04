@@ -171,15 +171,15 @@ def test_audit_filter_lists_every_event_the_service_writes():
 
 def test_local_model_settings_are_saved_and_a_public_address_is_refused(boss, repo):
     boss.post(
-        "/settings/local-llm", url="http://example:30000/v1", model="qwen-27b-fast", trusted="", schema="prompt",
+        "/settings/local-llm", url="http://10.20.0.10:30000/v1", model="qwen-27b-fast", trusted="", schema="prompt",
         ocr_model=" tencent/HunyuanOCR ",
     )
     assert local_settings(repo) == LocalSettings(
-        "http://example:30000/v1", "qwen-27b-fast", frozenset(), False, "tencent/HunyuanOCR",
+        "http://10.20.0.10:30000/v1", "qwen-27b-fast", frozenset(), False, "tencent/HunyuanOCR",
     )
     response = boss.post("/settings/local-llm", url="http://8.8.8.8:30000/v1", model="x", trusted="")
     assert response.status_code == 400 and "не петлевой" in response.text
-    assert local_settings(repo).url == "http://example:30000/v1"
+    assert local_settings(repo).url == "http://10.20.0.10:30000/v1"
     assert [e.details for e in repo.audit_events("settings_changed")] == [{"section": "local_llm"}]
 
 

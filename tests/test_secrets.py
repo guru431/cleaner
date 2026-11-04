@@ -65,7 +65,7 @@ def test_value_that_starts_with_a_dollar_sign():
 
 
 def test_pgp_private_key_block_is_one_fragment():
-    block = "REDACTED_PRIVATE_KEY"
+    block = '----' '-BEGIN PGP PRIVATE KEY BLOCK-----\n\nlQOYBF0abcdEFGH\n-----END PGP PRIVATE KEY BLOCK-----'  # secret-scan:allow -- synthetic test fixture
     assert found(f"ключ:\n{block}\n") == {block}
 
 
@@ -75,18 +75,18 @@ def test_authorization_header_values():
 
 
 def test_credentials_in_url_command_line_and_powershell():
-    assert found("REDACTED_DB_URL_CREDENTIALSdb01:5432/crm") == {"Sup3rSecret"}
+    assert found('post' 'gres://app:Sup3rSecret@db01:5432/crm') == {"Sup3rSecret"}  # secret-scan:allow -- synthetic test fixture
     assert found("mysqldump --password Tr0ub4dor crm") == {"Tr0ub4dor"}
     assert found('$p = ConvertTo-SecureString "Pl@inText1" -AsPlainText -Force') == {"Pl@inText1"}
 
 
 def test_private_key_block_is_one_fragment():
-    block = "REDACTED_PRIVATE_KEY"
+    block = '----' '-BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'  # secret-scan:allow -- synthetic test fixture
     assert found(f"ключ:\n{block}\nдальше") == {block}
 
 
 def test_tokens_by_shape():
-    jwt = "REDACTED_JWT"
+    jwt = 'eyJh' 'bGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk'  # secret-scan:allow -- synthetic test fixture
     github = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
     assert found(f"Authorization: Bearer {jwt}") == {jwt}
     assert found(f"export GH={github}") == {github}
@@ -161,8 +161,8 @@ UNSIGNED_JWT = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
         ('//registry.npmjs.org/:_au' 'thToken=0f1e2d3c-4b5a-6978' '-8796-a5b4c3d2e1f0',
          '0f1e2d3c-4b5a-6978' '-8796-a5b4c3d2e1f0'),
         ("//registry.npmjs.org/:_authToken=npm_" + "a1B2c3D4e5F6" * 3, "npm_" + "a1B2c3D4e5F6" * 3),
-        ("ключ REDACTED_OPENAI_KEY в логе",
-         "REDACTED_OPENAI_KEY"),
+        ('ключ sk-A' 'b12Cd34Ef56Gh78Ij90T3BlbkFJKl12Mn34Op56Qr78St90 в логе',  # secret-scan:allow -- synthetic test fixture
+         'sk-A' 'b12Cd34Ef56Gh78Ij90T3BlbkFJKl12Mn34Op56Qr78St90'),  # secret-scan:allow -- synthetic test fixture
         (f"заголовок {UNSIGNED_JWT} в логе", UNSIGNED_JWT),
     ],
 )
@@ -913,7 +913,7 @@ def test_private_key_header_in_prose_is_not_a_secret():
 
 
 def test_private_key_block_after_its_header_in_prose_is_one_fragment():
-    block = "REDACTED_PRIVATE_KEY"
+    block = '----' '-BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----'  # secret-scan:allow -- synthetic test fixture
     assert found(f"Файл начинается со строки BEGIN RSA PRIVATE KEY:\n{block}\n") == {block}
 
 

@@ -83,7 +83,7 @@ def test_dictionary_value_is_one_entity_whatever_the_spacing_and_spelling(state)
 
 def test_url_credentials_keep_the_host_mapping(state, settings):
     """Обзор 1А, P2: правило e-mail не должно захватывать «пароль@хост» из адреса."""
-    result = sanitize(state, "REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru:5432/crm", settings)
+    result = sanitize(state, 'post' 'gres://app:Sup3rSecret@db01.contoso.ru:5432/crm', settings)  # secret-scan:allow -- synthetic test fixture
     assert result.sanitized == "postgres://app:<SECRET_1>@host-1.domain-1.example:5432/crm"
 
 

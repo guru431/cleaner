@@ -15,7 +15,7 @@ TEXT = (
     "Соседний узел 10.1.2.77, внешний адрес 85.143.10.20. "
     "Профиль C:\\Users\\ivanov\\Desktop, ИНН организации 7707083893. "
     "Строка подключения: Server=SRV-DC01;User Id=app;Password=P@ssw0rd!2024;\n"
-    "REDACTED_PRIVATE_KEY\n"
+    '----' '-BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234\n-----END RSA PRIVATE KEY-----\n'  # secret-scan:allow -- synthetic test fixture
 )
 SECRETS = ("P@ssw0rd!2024", "MIIEowIBAAKCAQEA1234")
 CONTROL = (

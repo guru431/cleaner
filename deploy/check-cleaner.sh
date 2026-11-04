@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Проверка Cleaner фактом на живом сервере (значения ниже — example; на другом хосте их переопределяет
+# Проверка Cleaner фактом на живом сервере (без профиля доступны только петлевые значения; их переопределяет
 # профиль /etc/cleaner/host.env, который кладёт установщик): служба, права файлов, вход по HTTPS, экран,
 # исходящие службы (с этапа 3 — только TCP 443), самопроверка. Образец — check-egress.sh и
 # check-rerank.sh репозитория vLLM: проверяется то, что происходит, а не то, что написано.
@@ -12,15 +12,15 @@
 set -uo pipefail
 
 UNIT=cleaner.service
-HOST_IP=example
+HOST_IP=127.0.0.1
 PORT=5464
-CLIENTS=example/19
+CLIENTS=127.0.0.0/8
 APP=/opt/cleaner
 DATA=/var/lib/cleaner
 ETC=/etc/cleaner
 CERT=$ETC/tls/cert.pem
 GATEWAY="127.0.0.1:30000"
-SERVER_GUARD=1
+SERVER_GUARD=0
 HOST_ENV=$ETC/host.env
 # shellcheck source=/dev/null
 if [[ -f "$HOST_ENV" ]]; then . "$HOST_ENV"; fi

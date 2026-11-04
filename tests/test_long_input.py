@@ -21,7 +21,7 @@ from cleaner.core.types import ChatState, DictEntry, Entity, Settings, Surrogate
 from cleaner.core.types import EntityType as T
 
 # Модуль — в полном наборе, как норма скорости слоёв 1–3 (раздел 17): обход всех слоёв по сотне длинных рядов (17 с) — с
-# 16.10.2026, остальные сторожа линейности — с 18.10: 20 с из 63–70 быстрого набора на workstation при норме 60 с, и пороги
+# 16.10.2026, остальные сторожа линейности — с 18.10: 20 с из 63–70 быстрого набора на dev-workstation при норме 60 с, и пороги
 # в секундах краснели от нагрузки машины. Упавший по порогу тест — перезапустить по имени на свободной машине. Правку
 # слоёв 1–3 и восстановления проверяют модулем отдельно: pytest tests/test_long_input.py -m integration.
 pytestmark = pytest.mark.integration

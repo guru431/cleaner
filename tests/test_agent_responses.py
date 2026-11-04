@@ -24,7 +24,7 @@ TEXT = (
     r"профиль C:\Users\ivanov_ii\notes.txt, учётная запись CONTOSO\ivanov, password=Hunter2Hunter2"
 )
 HOST = re.compile(r"host-\d+\.sub-\d+\.domain-\d+\.example")
-STUB_KEY = "REDACTED_SK_KEY"
+STUB_KEY = 'sk-s' 'tub-responses-0123456789'  # secret-scan:allow -- synthetic test fixture
 
 
 def recorded(name: str) -> dict:

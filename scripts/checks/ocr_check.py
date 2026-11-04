@@ -1,6 +1,6 @@
 """Проверка начала этапа 2: качество и скорость ocr-ru на сканах владельца (раздел 19 спецификации).
 
-  CLEANER_GATEWAY_KEY=… python scripts/checks/ocr_check.py http://example:30000 <каталог для результата> <файлы PNG/JPEG>…
+  CLEANER_GATEWAY_KEY=… python scripts/checks/ocr_check.py http://10.20.0.10:30000 <каталог для результата> <файлы PNG/JPEG>…
 Ключ берётся из окружения и никуда не выводится. Результат — markdown по странице рядом с именем файла.
 """
 from __future__ import annotations

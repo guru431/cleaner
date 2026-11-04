@@ -1,7 +1,8 @@
-"""Файлы установки на example: договорённости между юнитом, настройками, файлами зависимостей и кодом.
+"""Файлы установки: договорённости между юнитом, настройками, файлами зависимостей и кодом.
 
 Сами сценарии deploy/ проверяются на сервере (check-cleaner.sh) и в быстрый набор не входят.
 """
+import os
 import re
 from pathlib import Path
 
@@ -15,7 +16,7 @@ DEPLOY = ROOT / "deploy"
 
 def test_server_config_loads_and_satisfies_the_tls_rule():
     cfg = config.load(DEPLOY / "cleaner.toml")
-    assert (cfg.host, cfg.port, cfg.data_dir.as_posix()) == ("example", 5464, "/var/lib/cleaner")
+    assert (cfg.host, cfg.port, cfg.data_dir.as_posix()) == ("127.0.0.1", 5464, "/var/lib/cleaner")
     assert (cfg.tls_cert, cfg.tls_key) == ("/etc/cleaner/tls/cert.pem", "/etc/cleaner/tls/key.pem")
     assert (cfg.models_dir.as_posix(), cfg.max_file_mb) == ("/opt/cleaner/models", 50)
     config.check_transport(cfg)
@@ -52,9 +53,7 @@ def test_egress_table_allows_internal_nets_and_443_and_rejects_the_rest():
     внутренние сети, затем 443 по IPv4 с записью, остальное — запись и отказ."""
     text = EGRESS.read_text(encoding="utf-8")
     assert text.startswith("#!/usr/bin/env bash\n") and "\r" not in text
-    assert _internal(EGRESS) == {
-        "127.0.0.0/8", "example/24", "example/24", "example/19", "example/24", "172.16.0.0/12",
-    }
+    assert _internal(EGRESS) == {"127.0.0.0/8"}
     rules = text[text.index("nft -f - <<EOF"):]
     order = [rules.index(part) for part in (
         "table inet $TABLE\ndelete table inet $TABLE\n", "type filter hook output priority filter; policy accept;",
@@ -69,7 +68,7 @@ def test_egress_table_allows_internal_nets_and_443_and_rejects_the_rest():
     assert not [line for line in rules.splitlines() if "skuid !=" in line and not line.strip().startswith("#")]
     # Второй слой для входящих на порт службы — тот же, что у правила ufw и настроек сервера.
     cfg = config.load(DEPLOY / "cleaner.toml")
-    assert f"PORT={cfg.port}" in text.splitlines() and "CLIENTS=example/19" in text.splitlines()
+    assert f"PORT={cfg.port}" in text.splitlines() and "CLIENTS=127.0.0.0/8" in text.splitlines()
     # Профиль хоста переопределяет сети до построения таблицы; сетей клиентов может быть несколько.
     assert text.index('. "$HOST_ENV"') < text.index("nft -f - <<EOF")
     assert "clients=$(tr ' ' ',' <<< \"$CLIENTS\")" in text.splitlines()
@@ -81,11 +80,12 @@ def test_egress_table_allows_internal_nets_and_443_and_rejects_the_rest():
 
 
 def test_egress_internal_nets_match_the_servers_guard():
-    """Правило vLLM: все копии списка внутренних сетей меняются вместе. Тест vLLM видит только свой репозиторий."""
-    guard = Path("D:/vsc/vLLM/dashboard/deploy/ai-egress-guard.sh")
-    if not guard.exists():
-        pytest.skip("репозитория vLLM рядом нет (сервер); там сверяет check-cleaner.sh")
-    assert _internal(EGRESS) == _internal(guard)
+    """Локальный профиль и серверный экран должны разрешать одинаковые внутренние сети."""
+    guard = os.environ.get("CLEANER_SERVER_GUARD")
+    if not guard:
+        pytest.skip("CLEANER_SERVER_GUARD не задан; на сервере сверяет check-cleaner.sh")
+    profile = Path(os.environ.get("CLEANER_HOST_PROFILE", str(HOSTS / "example.conf")))
+    assert set(_profile(profile)["INTERNAL"].split()) == _internal(Path(guard))
 
 
 def test_installer_sets_the_egress_chain_before_the_service_restarts():
@@ -136,9 +136,9 @@ def test_scripts_use_the_addresses_and_paths_of_the_unit_and_the_config(script):
     for line in (f"PORT={cfg.port}", "APP=/opt/cleaner", f"DATA={cfg.data_dir.as_posix()}", "ETC=/etc/cleaner"):
         assert line in lines, line
     if script == "check-cleaner.sh":
-        # Значения по умолчанию — example (сервер, где профиль ещё не разложен); host.env их переопределяет.
-        s06 = _profile(HOSTS / "example.conf")
-        assert f"HOST_IP={s06['HOST_IP']}" in lines and f"CLIENTS={s06['CLIENTS']}" in lines
+        # Без локального профиля проверка использует безопасные петлевые значения.
+        example = _profile(HOSTS / "example.conf")
+        assert f"HOST_IP={example['HOST_IP']}" in lines and f"CLIENTS={example['CLIENTS']}" in lines
         assert text.index('. "$HOST_ENV"') < text.index('echo "1. Служба"')
     else:
         assert 'PROFILE="$SRC/deploy/hosts/$HOST_NAME.conf"' in lines
@@ -165,7 +165,7 @@ def test_host_profiles_are_complete_and_clients_stay_inside_internal_nets():
     import ipaddress
 
     profiles = sorted(HOSTS.glob("*.conf"))
-    assert {p.stem for p in profiles} >= {"example", "example"}
+    assert "example" in {p.stem for p in profiles}
     for path in profiles:
         text = path.read_text(encoding="utf-8")
         assert "\r" not in text, path.name
@@ -180,32 +180,24 @@ def test_host_profiles_are_complete_and_clients_stay_inside_internal_nets():
         assert values["SERVER_GUARD"] in ("0", "1"), path.name
 
 
-def test_s06_profile_matches_the_defaults_of_the_config_and_the_egress_chain():
-    """example — сервер, где всё начиналось: значения по умолчанию в настройках и сценариях совпадают с профилем."""
-    s06 = _profile(HOSTS / "example.conf")
+def test_example_profile_matches_the_defaults_of_the_config_and_the_egress_chain():
+    """Без рабочего профиля сервер и экран ограничены петлёй."""
+    example = _profile(HOSTS / "example.conf")
     cfg = config.load(DEPLOY / "cleaner.toml")
-    assert s06["HOST_IP"] == cfg.host
-    assert set(s06["INTERNAL"].split()) == _internal(EGRESS)
-    assert (s06["GATEWAY"], s06["SERVER_GUARD"]) == ("127.0.0.1:30000", "1")
+    assert example["HOST_IP"] == cfg.host
+    assert set(example["INTERNAL"].split()) == _internal(EGRESS)
+    assert (example["GATEWAY"], example["SERVER_GUARD"]) == ("127.0.0.1:30000", "0")
 
 
-def test_example_profile_opens_the_home_lan_and_vpn_and_uses_the_local_gateway():
-    """Решение владельца 2026-10-15: на example — домашняя сеть и VPN, слой 5 — шлюз llm_routers на этом же хосте."""
-    srv = _profile(HOSTS / "example.conf")
-    assert (srv["HOST_IP"], srv["CLIENTS"]) == ("example, "192.168.0.0/20 example/20")
-    assert (srv["GATEWAY"], srv["SERVER_GUARD"]) == ("127.0.0.1:4000", "0")
-
-
-def test_example_perimeter_keeps_the_port_open_to_the_profile_clients():
-    """Периметр llm_routers удаляет на example правила ufw не из своего nets.env: 2026-10-16 он закрыл службу
-    клиентам. Порт и сети там — копия профиля, правила — с комментарием установщика. Тест llm_routers видит
-    только свой репозиторий."""
-    nets = ROOT.parent / "llm_routers" / "example" / "deploy" / "nets.env"
-    if not nets.exists():
-        pytest.skip("репозитория llm_routers рядом нет")
-    perimeter = _profile(nets)
+def test_perimeter_keeps_the_port_open_to_the_profile_clients():
+    """Необязательная локальная сверка сетей клиента со списком внешнего периметра."""
+    nets = os.environ.get("CLEANER_PERIMETER_CONFIG")
+    if not nets:
+        pytest.skip("CLEANER_PERIMETER_CONFIG не задан")
+    profile = Path(os.environ.get("CLEANER_HOST_PROFILE", str(HOSTS / "example.conf")))
+    perimeter = _profile(Path(nets))
     cfg = config.load(DEPLOY / "cleaner.toml")
-    assert (perimeter["CLEANER_PORT"], perimeter["CLEANER_NETS"]) == (str(cfg.port), _profile(HOSTS / "example.conf")["CLIENTS"])
+    assert (perimeter["CLEANER_PORT"], perimeter["CLEANER_NETS"]) == (str(cfg.port), _profile(profile)["CLIENTS"])
     assert "comment 'cleaner'" in (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
 
 

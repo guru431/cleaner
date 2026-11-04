@@ -12,7 +12,7 @@ from cleaner.core.pipeline import OutMessage, Turn, build_outgoing, probe_contex
 from cleaner.egress import ProviderError
 from cleaner.egress.cloud import Connection, LeakDetected, check_extra_body, check_url, send, session_headers
 
-KEY = "REDACTED_SK_KEY"
+KEY = 'sk-t' 'est-0123456789abcdef'  # secret-scan:allow -- synthetic test fixture
 
 
 def connection(protocol: str = "openai", base_url: str = "https://llm.example/v1", **extra) -> Connection:
@@ -145,7 +145,7 @@ def test_leak_blocks_the_request_before_any_connection(ctx, state, settings):
     assert recorder.requests == []
 
 
-@pytest.mark.parametrize("url", ["http://llm.example/v1", "http://example:30000/v1", "ftp://llm.example", "llm.example"])
+@pytest.mark.parametrize("url", ["http://llm.example/v1", "http://10.20.0.10:30000/v1", "ftp://llm.example", "llm.example"])
 def test_plain_http_is_refused_beyond_loopback(url):
     with pytest.raises(ValueError):
         check_url(url)

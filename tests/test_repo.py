@@ -270,8 +270,8 @@ def test_chat_layers_follow_the_default_until_chosen(repo):
 def test_settings_are_stored_by_key(repo):
     assert repo.setting("local_llm.url") is None
     repo.set_setting("local_llm.url", "http://127.0.0.1:30000/v1")
-    repo.set_setting("local_llm.url", "http://example:30000/v1")
-    assert repo.setting("local_llm.url") == "http://example:30000/v1"
+    repo.set_setting("local_llm.url", "http://10.20.0.10:30000/v1")
+    assert repo.setting("local_llm.url") == "http://10.20.0.10:30000/v1"
 
 
 def test_gold_examples_are_encrypted_and_deleted(tmp_path, repo):

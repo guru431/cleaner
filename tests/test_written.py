@@ -83,7 +83,7 @@ def _piece(rnd: random.Random) -> str:
     if kind == 8:
         return rnd.choice(("ИНН 7707083893", "ИНН 7707 083 893"))
     if kind == 9:
-        return rnd.choice(("password=Hunter2Hunter2", "token: REDACTED_GITHUB_PAT_CLASSIC"))
+        return rnd.choice(("password=Hunter2Hunter2", 'token: ghp_' 'aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5'))  # secret-scan:allow -- synthetic test fixture
     if kind == 10:
         return rnd.choice(("S-1-5-21-1004336348-1177238915-682003330-1001", "CN=Ivanov,OU=Users,DC=corp,DC=contoso,DC=ru"))
     if kind == 11:

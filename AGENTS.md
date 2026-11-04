@@ -1,28 +1,26 @@
 # AGENTS.md — cleaner
 
-Локальная псевдонимизация перед облачной LLM: убирает персональные и учётные данные и сведения об
-инфраструктуре из текста и документов, хранит таблицу соответствий и восстанавливает оригиналы в ответе
-модели. Полные правила — `CLAUDE.md`.
+Локальная псевдонимизация перед облачной LLM: очистка текста и документов,
+шифрованная таблица соответствий и восстановление ответа. Полные правила — `CLAUDE.md`.
 
 ## Ключевые файлы
-- `TZ.md` — требования; `docs/superpowers/specs/2026-10-13-cleaner-design.md` — устройство; планы — `docs/superpowers/plans/`.
+- `TZ.md` — требования; `docs/superpowers/specs/` — устройство и контракты.
 - `cleaner/` — код; запуск `python -m cleaner …` (`init`, `serve`, `models download`, `eval`).
-- `deploy/` — установщик `install-cleaner.sh`, юнит `cleaner.service`, проверка `check-cleaner.sh`, выход наружу `cleaner-egress.sh`.
-- `FINDINGS.md` / `IDEAS.md` — находки и идеи.
+- `deploy/` — установка, systemd, сетевые ограничения и проверка сервера.
+- `docs/deployment.md` — установка с локальным профилем; `docs/publication.md` — публикация.
 
 ## Тесты
-- Быстрый набор: `.venv/Scripts/python.exe -m pytest` (≤ 60 с, два процесса); точечно — путь к файлу теста; полный — `-n 0 -m "not manual"`.
-- Правка слоёв 1–3 и восстановления — ещё `.venv/Scripts/python.exe -m pytest -n 0 tests/test_long_input.py -m integration`.
+- Быстрый набор: `.venv/Scripts/python.exe -m pytest` (два процесса, бюджет 60 с).
+- Точечно: та же команда с путём к файлу; полный: `-n 0 -m "not manual"`.
+- Правка слоёв 1–3 и восстановления: ещё `-n 0 tests/test_long_input.py -m integration`.
+- Правка шлюза агентов: ещё `-n 0 tests/test_gateway_speed.py -m integration -rP`.
 
 ## Gotchas
-- Данные в тестах — только вымышленные; настоящие тексты в репозиторий не попадают.
-- Разработка идёт в основном на build-host (`D:\vsc\cleaner`); с workstation проект сводится через git.
-- Прод — служба на example, `https://example:5464`, только из сети example/19; вход
-  `ssh -i ~/.ssh/example -p 34012 example@example`. Правила сервера — в проекте `vLLM`.
-- Слой 5 и распознавание сканов ходят в шлюз example; ключ — строка `CLEANER_GATEWAY_KEY` в `data/cleaner.env`
-  (дописывает владелец), в репозиторий и в вывод не попадает.
-- Зависимости — `uv pip compile … --exclude-newer "14 days"`, серверные — `deploy/lock_linux.py` (порядок — `CLAUDE.md`).
-- `ufw` — только под страховкой `ufw-failsafe`; значения ключей и отпечаток сертификата в файлы не записывать.
-- На example правила ufw для 5464 держит и периметр llm_routers (`CLEANER_PORT`, `CLEANER_NETS` в `example/deploy/nets.env`):
-  сети клиентов профиля `deploy/hosts/example.conf` меняются только вместе с ними.
-- Репозиторий приватный (`git.example.net/xadmin/cleaner`), публиковать нельзя.
+- В тестах только вымышленные данные; настоящие тексты и ключи в Git не попадают.
+- Адреса и сети серверов — локальные `deploy/hosts/*.conf`, кроме безопасного `example.conf`.
+- `git archive` не включает рабочий профиль: добавляйте его в защищённый каталог доставки отдельно.
+- Слой 5 и распознавание сканов используют настраиваемый локальный шлюз; `CLEANER_GATEWAY_KEY`
+  передаётся окружением. Значения ключей не выводить и не сохранять в репозиторий.
+- `ufw` менять только под страховкой `ufw-failsafe`; сети клиентов должны входить в `INTERNAL`.
+- `.sh` — UTF-8 без BOM и LF; данные и SQLite остаются на локальном диске.
+- GitHub содержит только очищенную историю. Старую приватную историю и теги туда не отправлять.

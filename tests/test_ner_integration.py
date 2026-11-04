@@ -52,7 +52,7 @@ def test_organisation_with_a_digit_is_not_an_address(layer, no_network):
 
 
 def test_password_taken_for_a_name_is_typed_by_layer_5(layer, no_network, state, settings, engines):
-    """AC-4.1 на example: GLiNER называет «sunflower77» именем; со слоем 5 — SECRET, без него — скрыт как PERSON."""
+    """AC-4.1 на cleaner-server: GLiNER называет «sunflower77» именем; со слоем 5 — SECRET, без него — скрыт как PERSON."""
     text = "Для общего ящика на стикере записано: sunflower77, отвечает Сидоров"
     without = sanitize(state, text, settings, Layers(ner=layer)).sanitized
     assert without == "Для общего ящика на стикере записано: <PERSON_1>, отвечает <PERSON_2>"

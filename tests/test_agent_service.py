@@ -23,7 +23,7 @@ from tests.test_acceptance_core import CONTROL, TEXT
 
 TASK = "Проверь узел srv-dc01.corp.contoso.ru и почту i.ivanov@contoso.ru"
 HOST = re.compile(r"host-\d+\.sub-\d+\.domain-\d+\.example")
-STUB_KEY = "REDACTED_SK_KEY"
+STUB_KEY = 'sk-s' 'tub-0123456789abcdef'  # secret-scan:allow -- synthetic test fixture
 
 
 class Gateway:

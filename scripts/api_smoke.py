@@ -1,7 +1,7 @@
 """Проверка живого экземпляра Cleaner через /api/v1 (AC-5.8) и пример клиента для своих проектов.
 
-  CLEANER_API_KEY=ck_… python scripts/api_smoke.py --url https://example5464 --cacert cert.pem
-  CLEANER_API_KEY=ck_… python scripts/api_smoke.py --url https://example5464 --cacert cert.pem --expect-revoked
+  CLEANER_API_KEY=ck_… python scripts/api_smoke.py --url https://10.30.0.10:5464 --cacert cert.pem
+  CLEANER_API_KEY=ck_… python scripts/api_smoke.py --url https://10.30.0.10:5464 --cacert cert.pem --expect-revoked
 
 Сценарий: чат → очистка контрольного текста (вымышленные почта, телефон, адрес IP, имя узла, пароль в строке
 подключения) → в очищенном нет ни одного контрольного значения → восстановление очищенного → в нём все значения,
@@ -128,7 +128,7 @@ def http_call(base_url: str, key: str, context: ssl.SSLContext | None) -> Call:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Проверка экземпляра Cleaner через /api/v1 (AC-5.8)")
-    parser.add_argument("--url", required=True, help="адрес экземпляра, например https://example5464")
+    parser.add_argument("--url", required=True, help="адрес экземпляра, например https://10.30.0.10:5464")
     parser.add_argument("--cacert", help="сертификат экземпляра (самоподписанный) для проверки TLS")
     parser.add_argument("--expect-revoked", action="store_true", help="ключ отозван: ждать 401")
     args = parser.parse_args(argv)

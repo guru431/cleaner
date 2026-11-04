@@ -262,7 +262,7 @@ def test_cert_is_served_without_login_and_only_the_cert(browser, ivan, app, repo
     """Сертификат службы — без входа (то же, что клиент получает при TLS); ключ TLS этим путём не отдаётся."""
     cert, tls_key = tmp_path / "cert.pem", tmp_path / "key.pem"
     cert.write_bytes(b"-----BEGIN CERTIFICATE-----\nMIIBvymyshlennyi\n-----END CERTIFICATE-----\n")
-    tls_key.write_bytes(b"REDACTED_PRIVATE_KEY\n")
+    tls_key.write_bytes(b'----' b'-BEGIN PRIVATE KEY-----\nMIIEvymyshlennyi\n-----END PRIVATE KEY-----\n')  # secret-scan:allow -- synthetic test fixture
     anonymous = browser()
     assert anonymous.get("/cert.pem").status_code == 404                     # без TLS сертификата нет
     ids = providers(repo)
@@ -275,7 +275,7 @@ def test_cert_is_served_without_login_and_only_the_cert(browser, ivan, app, repo
     assert response.headers["content-disposition"] == 'attachment; filename="cleaner-cert.pem"'
     # Ключ и сертификат одним файлом (tls_cert = tls_key): отдаются только блоки сертификата (финальное ревью 5Г, M5).
     combined = tmp_path / "combined.pem"
-    combined.write_bytes(tls_key.read_bytes() + cert.read_bytes() + b"REDACTED_PRIVATE_KEY\n")
+    combined.write_bytes(tls_key.read_bytes() + cert.read_bytes() + b'----' b'-BEGIN EC PRIVATE KEY-----\nMHcvymysh\n-----END EC PRIVATE KEY-----\n')  # secret-scan:allow -- synthetic test fixture
     response = TestClient(create_app(repo, clock, secure_cookies=True, cert_file=str(combined))).get("/cert.pem")
     assert response.status_code == 200 and response.content == cert.read_bytes()
     app.state.cert_file = str(cert)

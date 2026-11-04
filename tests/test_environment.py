@@ -26,8 +26,8 @@ def test_detect_secrets_scans_a_plain_string():
     names = sorted(cls.__name__ for cls in get_mapping_from_secret_type_to_class().values())
     assert "AWSKeyDetector" in names
     with transient_settings({"plugins_used": [{"name": n} for n in names]}):
-        found = [secret.secret_value for secret in scan_line("aws_access_key_id = REDACTED_AWS_ACCESS_KEY")]
-    assert "REDACTED_AWS_ACCESS_KEY" in found
+        found = [secret.secret_value for secret in scan_line('aws_access_key_id = AKIA' 'ZZZZZZZZZZZZZZZZ')]  # secret-scan:allow -- synthetic test fixture
+    assert 'AKIA' 'ZZZZZZZZZZZZZZZZ' in found  # secret-scan:allow -- synthetic test fixture
 
 
 def test_pymorphy3_knows_name_parts_offline():

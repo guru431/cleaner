@@ -21,7 +21,7 @@ NOTES = TEXT + "Почта для отчётов: I.Ivanov@Contoso.RU\n"      # 
 HOST = re.compile(r"host-\d+\.sub-\d+\.domain-\d+\.example")
 FAKES = re.compile(r"<[A-Z_]+_\d+>|\b(?:host|sub|domain)-\d+\b|\.example\b")
 TASK = "Прочитай notes.txt, отметь основную почту и проверь контроллер домена"
-OAUTH = "REDACTED_ANTHROPIC_KEY"
+OAUTH = 'sk-a' 'nt-oat01-acceptance-0123456789'  # secret-scan:allow -- synthetic test fixture
 CHATGPT = "eyJhbGciOi.acceptance-chatgpt.0123456789"
 
 

@@ -1,8 +1,8 @@
-# Настройки Cleaner на example. Установщик кладёт файл в /etc/cleaner/cleaner.toml один раз
+# Шаблон настроек Cleaner. Установщик подставляет адрес из локального профиля хоста
 # и дальше его не трогает: правка на сервере переживает обновление.
 
 [server]
-host = "example"   # только интерфейс сети клиентов example/19 (SEC-8)
+host = "127.0.0.1"   # внешний интерфейс требует TLS и явного профиля хоста (SEC-8)
 port = 5464
 tls_cert = "/etc/cleaner/tls/cert.pem"
 tls_key = "/etc/cleaner/tls/key.pem"

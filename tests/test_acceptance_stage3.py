@@ -13,7 +13,7 @@ from cleaner.storage.repo import Provider
 from tests.stub_provider import StubProvider
 from tests.test_acceptance_core import CONTROL, TEXT
 
-KEY = "REDACTED_SK_KEY"
+KEY = 'sk-c' 'anary-Kanareyka7Q4Z'  # secret-scan:allow -- synthetic test fixture
 
 
 @pytest.fixture

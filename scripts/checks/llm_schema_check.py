@@ -1,6 +1,6 @@
 """Проверка начала этапа 4: соблюдает ли модель за шлюзом схему JSON слоя 5 (раздел 19 спецификации).
 
-  CLEANER_GATEWAY_KEY=… python scripts/checks/llm_schema_check.py http://example:30000/v1 qwen-27b qwen-27b-fast
+  CLEANER_GATEWAY_KEY=… python scripts/checks/llm_schema_check.py http://10.20.0.10:30000/v1 qwen-27b qwen-27b-fast
 Типы и схема ответа — слоя 5 (cleaner.core.detect.llm): своих копий у проверки нет.
 """
 from __future__ import annotations

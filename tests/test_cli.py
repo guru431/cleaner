@@ -167,12 +167,12 @@ def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monk
     calls = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: calls.append(kwargs))
     config, data = home / "cleaner.toml", f'[paths]\ndata_dir = "{(home / "data").as_posix()}"\n'
-    config.write_text('[server]\nhost = "example"\n' + data, encoding="utf-8")
+    config.write_text('[server]\nhost = "10.20.0.10"\n' + data, encoding="utf-8")
     assert main(["serve"]) == 1 and calls == []
-    config.write_text('[server]\nhost = "example"\ntls_cert = "c.pem"\ntls_key = "k.pem"\n' + data, encoding="utf-8")
+    config.write_text('[server]\nhost = "10.20.0.10"\ntls_cert = "c.pem"\ntls_key = "k.pem"\n' + data, encoding="utf-8")
     assert main(["serve"]) == 0
     [kwargs] = calls
-    assert (kwargs["host"], kwargs["ssl_certfile"], kwargs["access_log"]) == ("example", "c.pem", False)
+    assert (kwargs["host"], kwargs["ssl_certfile"], kwargs["access_log"]) == ("10.20.0.10", "c.pem", False)
     assert os.environ["HF_HUB_OFFLINE"] == "1" and os.environ["TRANSFORMERS_OFFLINE"] == "1"
     # Обзор плана 2+4, m-7: предупреждения Docling бывают с текстом ячеек документа — в журнал службы они не идут.
     assert all(logging.getLogger(name).level == logging.CRITICAL for name in ("docling", "transformers", "gliner"))

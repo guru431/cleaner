@@ -20,3 +20,16 @@ __pycache__/
 
 # brainstorming and plan-execution scratch (ledgers, briefs, mockups)
 .superpowers/
+
+# Private operations, publication denylist and historical working notes
+.claude/
+.sanitize-patterns*
+.github-push-deny
+/deploy/hosts/*.conf
+!/deploy/hosts/example.conf
+/docs/private/
+/docs/superpowers/plans/
+/reports/
+/research_notes/
+/FINDINGS*.md
+/IDEAS*.md

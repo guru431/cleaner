@@ -16,7 +16,7 @@ from cleaner.ingest.extract import ExtractError
 def test_local_settings_have_defaults_and_round_trip(repo):
     assert local_settings(repo) == LocalSettings()
     wanted = LocalSettings(
-        "http://example:30000/v1", "qwen-27b-fast", frozenset({"llm.corp.example"}), False, "tencent/HunyuanOCR",
+        "http://10.20.0.10:30000/v1", "qwen-27b-fast", frozenset({"llm.corp.example"}), False, "tencent/HunyuanOCR",
     )
     save_local_settings(repo, wanted)
     assert local_settings(repo) == wanted

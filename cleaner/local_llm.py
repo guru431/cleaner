@@ -30,7 +30,7 @@ _OCR_MESSAGES = {
     "ocr_empty": "на странице не распознано ни одного знака",
     "ocr_bad_image": "распознавание не приняло изображение",
 }
-# Модель зрения с ответом OpenAI (HunyuanOCR на example): системная часть пустая, изображение — первым, указание — вторым,
+# Модель зрения с ответом OpenAI (HunyuanOCR на local-gateway): системная часть пустая, изображение — первым, указание — вторым,
 # как её учили. Указание — из translate (prompts/ocr_extract_hunyuan_v1.txt), проверенное на его корпусе страниц.
 _OCR_PROMPT = (
     "Extract all information from the document image and represent it as Markdown.\n"
@@ -42,7 +42,7 @@ _OCR_PROMPT = (
     "For text visible under stamps or seals, transcribe it normally.\n"
     "Output only the Markdown body — no preamble, no commentary."
 )
-_OCR_MAX_TOKENS = 16384                 # у HunyuanOCR на example контекст 32768, страница-картинка — несколько тысяч
+_OCR_MAX_TOKENS = 16384                 # у HunyuanOCR на local-gateway контекст 32768, страница-картинка — несколько тысяч
 
 
 class LocalLLMError(CompletionError):
@@ -54,7 +54,7 @@ class LocalLLMConfig:
     base_url: str          # OpenAI-совместимый адрес до /v1, например http://127.0.0.1:30000/v1
     model: str
     api_key: str
-    # Шлюз llm_routers (example) держит запрос local-chat, пока модель возвращается на карту после слота по требованию
+    # Шлюз llm_routers (local-gateway) держит запрос local-chat, пока модель возвращается на карту после слота по требованию
     # (распознавание скана снимает её) — до 420 с; клиент ждёт дольше.
     timeout: float = 450.0
     ocr_model: str = ""    # модель зрения с ответом OpenAI на маршруте /pages/ocr; пусто — служба ocr-ru
@@ -184,7 +184,7 @@ class LocalLLM:
         raise LocalLLMError("unavailable", "очередь распознавания занята слишком долго")
 
     def _ocr_chat(self, image: bytes, mime: str) -> str:
-        """Страница — сообщением с изображением на маршрут /pages/ocr: на example он ведёт в /v1/chat/completions HunyuanOCR, а
+        """Страница — сообщением с изображением на маршрут /pages/ocr: на local-gateway он ведёт в /v1/chat/completions HunyuanOCR, а
         слот модели поднимает и ждёт шлюз. Обрезанный по длине ответ — отказ, а не половина страницы; пустой ответ и карта
         блоков без текста (_layout_only) — страница без знаков, как у ocr-ru."""
         body = {

@@ -18,7 +18,7 @@ def chat_answer(content, finish="stop"):
 
 
 @pytest.mark.parametrize("url", [
-    "http://127.0.0.1:30000/v1", "http://localhost:30000/v1", "http://example:30000/v1",
+    "http://127.0.0.1:30000/v1", "http://localhost:30000/v1", "http://10.20.0.10:30000/v1",
     "https://192.168.41.41:30010/v1", "http://[::1]:30000/v1", "https://llm.corp.example/v1",
 ])
 def test_loopback_private_and_trusted_addresses_are_accepted(url):
@@ -106,7 +106,7 @@ VISION = LocalLLMConfig("http://127.0.0.1:4000/v1", "local-chat", "k-test-secret
 
 
 def test_page_goes_to_the_vision_model_when_one_is_set():
-    """FINDINGS 15.10.2026, P3: на example маршрут /pages/ocr ведёт в OpenAI-совместимый HunyuanOCR, а не в ocr-ru. С
+    """FINDINGS 15.10.2026, P3: на local-gateway маршрут /pages/ocr ведёт в OpenAI-совместимый HunyuanOCR, а не в ocr-ru. С
     моделью распознавания в настройках страница уходит туда же сообщением: изображение первым, указание вторым."""
     seen = []
 

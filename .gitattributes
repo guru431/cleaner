@@ -11,3 +11,14 @@
 *.css     text eol=lf
 *.js      text eol=lf
 *.md      text
+
+# Private source files stay in the private repository and never enter an archive.
+.claude export-ignore
+docs/private export-ignore
+docs/superpowers/plans export-ignore
+reports export-ignore
+research_notes export-ignore
+FINDINGS*.md export-ignore
+IDEAS*.md export-ignore
+deploy/hosts/*.conf export-ignore
+deploy/hosts/example.conf -export-ignore

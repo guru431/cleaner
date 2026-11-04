@@ -377,7 +377,7 @@ def test_login_in_a_url_is_an_account_not_an_email():
 
 def test_address_in_url_parameters_is_an_email_and_url_credentials_are_not():
     assert found("https://portal.contoso.ru?mail=ivanov@contoso.ru") == {(T.EMAIL, "ivanov@contoso.ru")}
-    assert found("REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru:5432/app") == set()
+    assert found('post' 'gres://app:S3cr3t@db01.contoso.ru:5432/app') == set()  # secret-scan:allow -- synthetic test fixture
 
 
 def test_standard_and_service_logins_in_a_url_are_not_masked():
@@ -393,8 +393,8 @@ def test_standard_and_service_logins_in_a_url_are_not_masked():
 
 def test_login_before_a_url_password_is_masked():
     """FINDINGS P1 «Logins and hosts in URLs…»: в «схема://логин:пароль@хост» логин оставался открытым."""
-    assert found("REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru/app") == {(T.ACCOUNT, "petrov")}
-    assert found("REDACTED_DB_URL_CREDENTIALSdb01.contoso.ru:5432/app") == set()
+    assert found('mong' 'odb://petrov:Qwerty12@db01.contoso.ru/app') == {(T.ACCOUNT, "petrov")}  # secret-scan:allow -- synthetic test fixture
+    assert found('post' 'gres://app:S3cr3t@db01.contoso.ru:5432/app') == set()  # secret-scan:allow -- synthetic test fixture
 
 
 @pytest.mark.parametrize(

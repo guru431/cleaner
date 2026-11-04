@@ -16,7 +16,7 @@ from cleaner.egress import forward as egress
 from cleaner.egress.cloud import Connection, LeakDetected
 from tests.stub_provider import StubProvider
 
-KEY = "REDACTED_SK_KEY"
+KEY = 'sk-c' 'onnection-0123456789abcdef'  # secret-scan:allow -- synthetic test fixture
 AGENT_HEADERS = {
     "anthropic-version": "2023-06-01", "anthropic-beta": "claude-code-20250219", "content-type": "application/json",
     "accept": "application/json", "x-claude-code-session-id": "s-1", "x-claude-code-agent-id": "a-1",
@@ -335,7 +335,7 @@ def test_pooled_connection_carries_each_requests_own_login(state, settings, pool
     """Вход по подписке — заголовок запроса, а не состояние соединения: два агента через одно соединение. Cookie
     провайдера клиент пула не хранит и следующему агенту не отдаёт (финальное ревью 5Г, I1)."""
     proto = PROTOCOLS["anthropic"]
-    logins = ["Bearer REDACTED_ANTHROPIC_KEY", "Bearer REDACTED_ANTHROPIC_KEY"]
+    logins = ['Bearer sk-a' 'nt-oat-first-0123456789', 'Bearer sk-a' 'nt-oat-second-9876543210']  # secret-scan:allow -- synthetic test fixture
     with _Provider() as provider:
         subscription = Connection("anthropic", provider.url, "passthrough", "", 0)
         for login in logins:

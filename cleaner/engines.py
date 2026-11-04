@@ -31,7 +31,7 @@ class LocalSettings:
     model: str = "qwen-27b-fast"               # qwen-27b рассуждает и упирается в 2048 токенов ответа слоя 5
     trusted: frozenset[str] = frozenset()      # узлы вне частных сетей, которым администратор доверяет явно
     schema: bool = True                        # схема JSON параметром response_format; False — только в тексте запроса
-    ocr_model: str = ""                        # модель зрения для сканов (example: tencent/HunyuanOCR); пусто — ocr-ru
+    ocr_model: str = ""                        # модель зрения для сканов (local-gateway: tencent/HunyuanOCR); пусто — ocr-ru
 
 
 def local_settings(repo: Repository) -> LocalSettings:

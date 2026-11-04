@@ -13,9 +13,9 @@ from tests.agent_bodies import model_turn
 from tests.stub_provider import StubProvider
 from tests.test_agent_responses import completed, message, text_events
 
-TOKEN = "REDACTED_ANTHROPIC_KEY"
+TOKEN = 'sk-a' 'nt-oat01-canary-0123456789abcdefghij'  # secret-scan:allow -- synthetic test fixture
 CHATGPT = "eyJhbGciOi.canary-chatgpt-token.0123456789"
-PROVIDER_KEY = "REDACTED_SK_KEY"
+PROVIDER_KEY = 'sk-p' 'rovider-canary-0123456789'  # secret-scan:allow -- synthetic test fixture
 TASK = "Проверь узел srv-dc01.corp.contoso.ru и почту i.ivanov@contoso.ru"
 CLAUDE = {
     "authorization": f"Bearer {TOKEN}", "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
