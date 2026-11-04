@@ -1,3 +1,4 @@
+.gitattributes text eol=lf
 *.py      text eol=lf
 *.sh      text eol=lf
 *.service text eol=lf
@@ -12,7 +13,7 @@
 *.js      text eol=lf
 *.md      text
 
-# Private source files stay in the private repository and never enter an archive.
+# Local private files must never enter a delivery archive.
 .claude export-ignore
 docs/private export-ignore
 docs/superpowers/plans export-ignore
