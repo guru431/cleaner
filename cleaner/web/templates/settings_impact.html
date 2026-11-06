@@ -1,0 +1,14 @@
+{% extends "_settings.html" %}
+{% block title %}Влияние настроек — Cleaner{% endblock %}
+{% block content %}
+<h1>Влияние общих настроек</h1>
+<p class="lead">Изменения ещё не применены. Подтверждение действует 10 минут и связано с текущими настройками и версиями чатов.</p>
+<section class="panel"><div class="panel-body">
+<p>Затронуто чатов: {{ counts.chats }}, текстов: {{ counts.items }}. Новых блокировок: {{ counts.blocked }}. Изменение числа замен: {{ counts.replacements }}.</p>
+<p class="sub">Оценка использует локальные правила и сохранённые находки моделей; модели не вызываются. Незавершённых элементов вне оценки: {{ counts.pending }}. Чатов агентов с замороженной отправленной историей: {{ counts.frozen }}; эта история не переписывается.</p>
+<p class="sub">Для чужих чатов показаны только общие счётчики. Применение меняет общую конфигурацию; уже сохранённые тексты пересчитываются при обычных действиях Cleaner.</p>
+</div></section>
+<section class="panel"><header class="panel-head"><h2 class="title">Собственный эталон, слои 1–3</h2></header><table class="grid"><thead><tr><th>Класс</th><th>Сейчас</th><th>После правки</th></tr></thead><tbody>{% for row in quality %}<tr><td>{{ row.title }}</td><td>{{ row.before }}</td><td>{{ row.after }}</td></tr>{% else %}<tr><td colspan="3">Эталон пуст</td></tr>{% endfor %}</tbody></table></section>
+{% if own %}<section class="panel"><header class="panel-head"><h2 class="title">Ваши тексты: первые {{ own | length }} различий</h2></header>{% for row in own %}<div class="panel-body"><p>Сейчас</p><pre>{{ row.before }}</pre><p>После правки</p><pre>{{ row.after }}</pre></div>{% endfor %}</section>{% endif %}
+<form method="post" action="/settings/impact/apply">{% include "_csrf.html" %}<input type="hidden" name="receipt" value="{{ receipt }}"><button class="primary">Подтвердить и применить</button> <a href="/settings/policies">Отменить</a></form>
+{% endblock %}

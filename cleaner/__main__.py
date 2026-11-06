@@ -274,7 +274,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
             unit = runner.UNIT_OPEN if source and source.get("converter") == datasets.CONVERTER else runner.UNIT_FILE
             examples = runner.jsonl_examples(path)
         else:
-            dataset, examples = runner.GOLD, runner.gold_examples(repo)
+            purpose = args.partition
+            dataset = f"gold:{purpose}" if purpose else runner.GOLD
+            examples = runner.gold_examples(repo, purpose)
         if not examples:
             raise ValueError("эталонный набор пуст: примеры сохраняются кнопкой «Сохранить как эталон» на экране проверки")
         done = runner.measure(repo, dataset, examples, args.layers, Engines(repo, cfg.models_dir), cfg.models_dir, unit, source)
@@ -349,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
     evaluate = commands.add_parser("eval", help="измерение качества на эталонном наборе (FR-12.5)")
     evaluate.add_argument("--layers", nargs="+", choices=("1-3", "1-4", "1-5"), default=["1-3", "1-4"])
     evaluate.add_argument("--jsonl", help="вместо эталонного набора — файл JSONL (открытые наборы, QA-4)")
+    evaluate.add_argument("--partition", choices=("tuning", "control"), default="", help="собственный набор: настройка или независимый контроль; отдельный baseline")
     evaluate.add_argument(
         "--save-baseline", action="store_true",
         help="сохранить замер как базовый для измеренных слоёв, если полнота не упала и набор тот же",

@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from cleaner.core.detect.base import DetectorError, load_builtin
+from cleaner import settings_impact
 from cleaner.core.detect.dictionary import PATTERN_TIMEOUT
 from cleaner.core.detect.llm import CompletionError
 from cleaner.core.types import EntityType, Policy
@@ -67,6 +68,28 @@ def _list(value: str) -> str:
     return value
 
 
+def _impact(request, viewer, operation):
+    try:
+        result = settings_impact.preview(repo_of(request), viewer.user.id, operation)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return page(request, "settings_impact.html", viewer, **result)
+
+
+@router.post("/impact/apply")
+def apply_impact(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    try:
+        settings_impact.apply(repo_of(request), viewer.user.id, form.get("receipt", ""))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return _redirect("/settings/policies")
+
+
+@router.post("/impact/undo")
+def preview_undo(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    return _impact(request, viewer, {"kind": "undo"})
+
+
 @router.get("")
 def index(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
     return page(request, "settings.html", viewer)
@@ -94,6 +117,8 @@ def save_policies(request: Request, form: dict[str, str] = Depends(get_form), vi
         except ValueError:
             raise HTTPException(400, "Неизвестная политика") from None
     current = repo.policies()
+    if form.get("action") == "impact":
+        return _impact(request, viewer, {"kind": "policies", "policies": {t.value: p.value for t, p in wanted.items()}})
     for type_, policy in wanted.items():
         if policy is not current[type_]:
             repo.set_policy(type_, policy)
@@ -122,6 +147,10 @@ def add_entry(request: Request, form: dict[str, str] = Depends(get_form), viewer
     repo = repo_of(request)
     if repo.in_dictionary(list_, value):
         raise HTTPException(400, DUPLICATE)
+    if form.get("action") == "impact":
+        row = {"id": "", "list": list_, "value": value, "type": type_.value if type_ else None,
+               "aliases": list(aliases), "comment": form.get("comment", "").strip()}
+        return _impact(request, viewer, {"kind": "add", "rows": [row]})
     repo.add_dictionary(list_, value, type_, aliases, form.get("comment", "").strip())
     repo.audit("dictionary_changed", viewer.user.id, action="add", list=list_)
     return _redirect("/settings/builtin" if form.get("back") == "builtin" else "/settings/dictionary")
@@ -133,6 +162,8 @@ def delete_entry(request: Request, entry_id: str, form: dict[str, str] = Depends
     row = next((r for r in repo.dictionary() if r.id == entry_id), None)
     if row is None:
         raise HTTPException(404, "Запись не найдена")
+    if form.get("action") == "impact":
+        return _impact(request, viewer, {"kind": "delete", "id": entry_id})
     repo.delete_dictionary(entry_id)
     repo.audit("dictionary_changed", viewer.user.id, action="delete", list=row.list)
     return _redirect("/settings/dictionary")
@@ -170,9 +201,13 @@ def import_csv(request: Request, form: dict[str, str] = Depends(get_form), viewe
     repo = repo_of(request)
     known = {row.value.lower() for row in repo.dictionary() if row.list == list_}
     new = [value for value in values if value.lower() not in known]
-    if form.get("action") == "save":
+    if form.get("action") in ("save", "impact"):
         if column not in headers:
             raise HTTPException(400, "Выберите колонку из первой строки файла")
+        if form.get("action") == "impact":
+            return _impact(request, viewer, {"kind": "add", "rows": [
+                {"id": "", "list": list_, "value": value, "type": type_.value if type_ else None, "aliases": [], "comment": ""}
+                for value in new]})
         repo.add_dictionary_many(list_, new, type_)
         repo.audit("dictionary_import", viewer.user.id, list=list_, count=len(new))
         return _redirect("/settings/dictionary")
@@ -489,7 +524,7 @@ def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
     classes = [
         {
             "title": title, "total": first["classes"][title][1],
-            "recalls": [runner.share(*layers[name]["classes"].get(title, (0, 0))) for name in names],
+            "recalls": [runner.confidence(*layers[name]["classes"].get(title, (0, 0))) for name in names],
             "target": "не задана" if target is None else f"{target:.2f}",
         }
         for title, _, target in CLASSES if title in first["classes"]
@@ -532,11 +567,16 @@ def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
             f"{str(source.get('sha256'))[:12]}; конвертер {source.get('converter')}",
         ))
     return {
-        "title": "Собственный набор" if dataset == runner.GOLD else f"Открытый набор «{dataset.removeprefix(runner.OPEN_PREFIX)}»",
+        "title": ("Собственный набор" if dataset == runner.GOLD else
+                  runner.PARTITIONS.get(dataset.removeprefix("gold:"), f"Открытый набор «{dataset.removeprefix(runner.OPEN_PREFIX)}»")),
         "measured_at": entry["measured_at"], "examples": entry["examples"], "unit": entry["unit"],
         "fingerprint": entry["fingerprint"][:12], "changed": current is not None and current != entry["fingerprint"],
         "versions": shown, "layers": names, "classes": classes, "quality": quality, "types": by_type,
         "drops": entry["drops"], "unchecked": entry["unchecked"], "warnings": entry.get("warnings", []),
+        "scenarios": [(dict(coverage.SCENARIOS).get(scenario, "Не указан"), title,
+                       [runner.confidence(*layers[n].get("scenarios", {}).get(scenario, {}).get(title, (0, 0))) for n in names])
+                      for scenario, counts in first.get("scenarios", {}).items() for title in counts],
+        "sources": first.get("sources", 0),
     }
 
 
@@ -551,6 +591,10 @@ def _measure(app, user_id: str, layers: list[str]) -> None:
     state["status"] = "running"
     try:
         done = runner.measure(repo, runner.GOLD, runner.gold_examples(repo), layers, engines, engines.models_dir)
+        for purpose in runner.PARTITIONS:
+            examples = runner.gold_examples(repo, purpose)
+            if examples:
+                runner.measure(repo, f"gold:{purpose}", examples, layers, engines, engines.models_dir)
     except DetectorError as exc:
         state.update(status="failed", error=f"Замер не выполнен: {exc}")
         repo.audit("eval_run", user_id, dataset=runner.GOLD, layers=layers, outcome="failed")
@@ -578,17 +622,22 @@ def gold(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
             "id": row.id, "created_at": row.created_at, "login": logins.get(row.user_id, "—"), "length": len(row.text),
             "types": ", ".join(f"{type_} — {count}" for type_, count in sorted(Counter(s["type"] for s in row.spans).items())),
             "scenario": dict(coverage.SCENARIOS).get(row.metadata.get("scenario"), "Не указан"),
+            "purpose": runner.PARTITIONS.get(row.metadata.get("purpose"), "Не назначено"),
         }
         for row in examples
     ]
     stored = runner.passport(repo)
-    current = runner.fingerprint([runner.example_from(r.text, r.spans) for r in examples], repo.global_key)
+    current = runner.fingerprint(runner.gold_examples(repo), repo.global_key)
     own = _passport_view(runner.GOLD, stored[runner.GOLD], current) if runner.GOLD in stored else None
     opened = [_passport_view(name, entry, None) for name, entry in sorted(stored.items()) if name.startswith(runner.OPEN_PREFIX)]
+    partitions = [_passport_view(f"gold:{purpose}", stored[f"gold:{purpose}"],
+                                runner.fingerprint(runner.gold_examples(repo, purpose), repo.global_key))
+                  for purpose in runner.PARTITIONS if f"gold:{purpose}" in stored]
     return page(
         request, "gold.html", viewer, rows=rows, target=GOLD_TARGET, own=own, opened=opened,
         measure=request.app.state.measure, measure_layers=_measure_layers(repo), engines=request.app.state.engines is not None,
         coverage=coverage.matrix(examples),
+        partitions=partitions,
     )
 
 

@@ -226,7 +226,8 @@ def test_gold_measure_runs_in_the_background_and_fills_the_passport(boss, ivan, 
     assert "Петров" not in page and "a@x" not in page
     assert "Слои 1-3" in page and "Слои 1-4" in page and "Слои 1-5" not in page            # слой 5 выключен по умолчанию
     fio = re.search(r"<td>ФИО</td><td class=\"num\">1</td>(.*?)</tr>", page).group(1)
-    assert re.findall(r'<td class="num mono">([^<]+)</td>', fio) == ["0.000 (0/1)", "1.000 (1/1)"]
+    from cleaner.eval.runner import confidence
+    assert re.findall(r'<td class="num mono">([^<]+)</td>', fio) == [confidence(0, 1), confidence(1, 1)]
     assert "Единица подсчёта: сущности разметки экрана проверки" in page and "QA-6 не проверена" in page
     assert "data-poll" not in page
     [event] = repo.audit_events("eval_run")

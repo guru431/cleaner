@@ -21,7 +21,7 @@ from cleaner.core.entities import hostmap, labels, ops, resolve
 from cleaner.core.leakcheck import Leak
 from cleaner.core.match import normalize
 from cleaner.core.pipeline import (
-    Layers, NotSendable, Outgoing, OutgoingContext, SanitizeResult, Turn, build_outgoing, probe_context, sanitize,
+    Layers, LocalContext, NotSendable, Outgoing, OutgoingContext, SanitizeResult, Turn, build_outgoing, probe_context, sanitize,
 )
 from cleaner.core.restore import RestoreResult, restore, restore_answers
 from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
@@ -855,6 +855,8 @@ class ChatService:
                 raise SendRefused(str(exc)) from None
             refused = "Последним в запросе должен быть вопрос: включите в запрос последний текст"
             return Preview(None, provider, sorted(skipped), candidates, excluded, refused)
+        if provider is not None:
+            outgoing.context = replace(outgoing.context, connection_binding=provider.binding())
         skipped += [(seqs[number], "ответ до первого вопроса") for number in outgoing.skipped]
         return Preview(outgoing, provider, sorted(skipped), candidates, excluded)
 
@@ -916,8 +918,9 @@ class ChatService:
         return item
 
     def run_send(
-        self, chat_id: str, item_id: str, user_id: str, context: OutgoingContext, connection: cloud.Connection,
+        self, chat_id: str, item_id: str, user_id: str, context: OutgoingContext | LocalContext, connection: cloud.Connection | None,
         in_request: int,
+        local_client=None,
     ) -> None:
         """Задание: поток ответа — в память для страницы, по окончании — в элемент чата. Обрыв сохраняет полученное.
         in_request — «замен в запросе» (FR-7.5) на момент отправки: для журнала, вместе со счётчиками восстановления."""
@@ -928,12 +931,18 @@ class ChatService:
         try:
             state, _ = self.repo.load_state(chat_id)
             settings = self.repo.settings()
-            stream = self.cloud_send(
-                context, connection, state, settings, cancel=live.cancel, outcome=outcome, on_open=live.on_open,
-            )
+            if local_client is None:
+                stream = self.cloud_send(
+                    context, connection, state, settings, cancel=live.cancel, outcome=outcome, on_open=live.on_open,
+                )
+            else:
+                messages = [{"role": m.role, "content": m.text} for m in context.messages]
+                stream = local_client.answer_stream(messages, max_tokens=LOCAL_ANSWER_TOKENS, cancel=live.cancel,
+                                                    outcome=outcome, on_open=live.on_open)
             for piece in stream:
-                live.append(piece)
-                if live.size() > self.max_text_chars:
+                available = max(0, self.max_text_chars - live.size())
+                live.append(piece[:available])
+                if len(piece) > available:
                     live.stop(f"Ответ длиннее {self.max_text_chars} знаков: дальше он не читается")
                     break
             if live.cancel.is_set():
@@ -943,9 +952,9 @@ class ChatService:
         except cloud.LeakDetected as exc:
             error = "В исходящем тексте найден оригинал: запрос не отправлен"
             self.repo.audit("leak", user_id, chat_id, count=exc.count, stage="send")
-        except ProviderError as exc:
+        except (ProviderError, CompletionError) as exc:
             error, aborted = str(exc), True
-            self.repo.audit("error", user_id, chat_id, kind="ProviderError", stage="send", status=exc.status)
+            self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="send", status=getattr(exc, "status", None))
         except Exception as exc:
             if isinstance(exc, KeyError) and self.repo.chat(chat_id) is None:
                 self.live.finish(item_id)
@@ -965,13 +974,13 @@ class ChatService:
             pass                                          # чат удалили
         finally:
             self.live.finish(item_id)
-        if text and state is not None:
+        if text and state is not None and local_client is None:
             self.repo.audit("restore", user_id, chat_id, **restore(state, text, settings).counters, in_request=in_request)
 
     def stop(self, chat_id: str, item_id: str) -> None:
         """FR-8.6: генерацию можно остановить; полученная часть сохраняется неполной."""
         item = self.repo.item(chat_id, item_id)
-        live = self.live.get(item_id) if item is not None and item.source == "api" else None
+        live = self.live.get(item_id) if item is not None and item.source in ("api", "local") else None
         if live is None:
             raise KeyError(item_id)
         live.stop(_STOPPED)
@@ -979,7 +988,7 @@ class ChatService:
     def stop_chat(self, chat_id: str) -> None:
         """Перед удалением чата: его идущие ответы прерываются, чтобы поток провайдера не читался впустую."""
         for item in self.repo.items(chat_id):
-            live = self.live.get(item.id) if item.kind == "answer" and item.source == "api" else None
+            live = self.live.get(item.id) if item.kind == "answer" and item.source in ("api", "local") else None
             if live is not None:
                 live.stop("Чат удалён")
 
@@ -1271,12 +1280,13 @@ class ChatService:
 
     # --- эталонный набор (FR-6.10, QA-1) --------------------------------------------------
 
-    def save_gold(self, chat_id: str, user_id: str, item_id: str, *, scenario: str = "", checks: tuple[str, ...] = ()) -> str:
+    def save_gold(self, chat_id: str, user_id: str, item_id: str, *, scenario: str = "", checks: tuple[str, ...] = (),
+                  purpose: str = "", source: str = "", secret_contexts: dict[str, str] | None = None) -> str:
         """Проверенный пользователем текст и итоговая разметка — копией под общим ключом."""
         from cleaner.eval.coverage import metadata
 
         try:
-            reviewed = metadata(scenario, checks)
+            reviewed = metadata(scenario, checks, purpose, source or f"chat:{chat_id}")
         except ValueError as exc:
             raise EditRefused(str(exc)) from None
         state, _ = self.repo.load_state(chat_id)
@@ -1286,6 +1296,9 @@ class ChatService:
         if item.status != "done":
             raise EditRefused("текст ещё не очищен")
         numbers: dict[str, int] = {}
+        secret_contexts = secret_contexts or {}
+        if any(value not in ("", "format_key", "free") for value in secret_contexts.values()):
+            raise EditRefused("Неизвестный вид эталонного секрета")
         spans = []
         for span in sorted(item.spans, key=lambda s: s["start"]):
             entity = state.entities.get(span["entity_id"])
@@ -1295,6 +1308,11 @@ class ChatService:
                 "start": span["start"], "end": span["end"], "type": entity.type.value,
                 "entity": numbers.setdefault(entity.id, len(numbers)), "origin": entity.origin,
             })
-        gold_id = self.repo.add_gold(user_id, item.original, spans, reviewed)
+            if entity.type is EntityType.SECRET:
+                spans[-1]["secret_context"] = secret_contexts.get(entity.id, "")
+        try:
+            gold_id = self.repo.add_gold(user_id, item.original, spans, reviewed)
+        except ValueError as exc:
+            raise EditRefused(str(exc)) from None
         self.repo.audit("gold_added", user_id, chat_id, spans=len(spans))
         return gold_id

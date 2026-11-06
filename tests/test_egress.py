@@ -72,6 +72,16 @@ def test_openai_request_and_stream(ctx, state, settings):
     assert body["messages"][1]["content"] == "Вопрос про <EMAIL_1>"
 
 
+@pytest.mark.parametrize("limit", ["EVENT_BYTES", "RESPONSE_BYTES"])
+def test_nontext_stream_is_bounded_before_json_parse(ctx, monkeypatch, limit):
+    from cleaner.egress import cloud
+    monkeypatch.setattr(cloud, limit, 100)
+    chunks = iter([b'data: {"metadata": "' + b'x' * 150, b'must not be read'])
+    with pytest.raises(ProviderError, match="предел"):
+        list(cloud._events(cloud._lines(chunks)))
+    assert next(chunks) == b'must not be read'
+
+
 def test_anthropic_request_and_stream(ctx, state, settings):
     recorder = Recorder(anthropic_chunks("Готово, ", "<EMAIL_1>"))
     conn = connection("anthropic", "https://llm.example/anthropic")

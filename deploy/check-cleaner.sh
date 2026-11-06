@@ -137,8 +137,8 @@ if bash /usr/local/sbin/cleaner-egress.sh check >"$WORK/egress-table.txt" 2>&1; 
 else
     bad "$(cat "$WORK/egress-table.txt") — выход наружу не ограничен"
 fi
-table=$(nft list table inet cleaner_egress 2>/dev/null || true)
-if grep -q "ip6 daddr ::1 return" <<< "$table" && ! grep -q "nfproto ipv6" <<< "$table"; then
+if nft -j list table inet cleaner_egress >"$WORK/egress-table.json" 2>/dev/null && \
+    "$APP/.venv/bin/python" /usr/local/sbin/cleaner-check-ipv6.py <"$WORK/egress-table.json"; then
     ok "IPv6 наружу отклоняется (пропускается только петля)"
 else
     bad "в таблице cleaner_egress нет правила IPv6 только для петли"

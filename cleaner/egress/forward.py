@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import socket
-import re
+import json
 import sys
 import threading
 from collections.abc import Iterator
@@ -18,17 +18,16 @@ from urllib.parse import urlsplit
 import httpx
 
 from cleaner.core.pipeline import AgentOutgoing, agent_transport, checked_leaks
+from cleaner.core.agent import coverage
 from cleaner.core.types import ChatState, Settings
 from cleaner.egress import ProviderError
 from cleaner.egress.cloud import Connection, LeakDetected, _headers, check_url
+from cleaner.egress.streaming import EVENT_BYTES, RESPONSE_BYTES, ResponseLimit, bounded_lines
 
 _TIMEOUT = httpx.Timeout(30.0, read=300.0)          # агент с рассуждениями молчит минутами до первого слова
 _PASSED = ("content-type", "request-id", "retry-after")      # заголовки провайдера агенту, если протокол не задал свои
 _LIMITS = httpx.Limits(max_connections=32, max_keepalive_connections=16, keepalive_expiry=60.0)
-RESPONSE_BYTES = 32 * 1024 * 1024
-EVENT_BYTES = 2 * 1024 * 1024
 EVENT_LINES = 32_768
-_LINEBREAK = re.compile(rb"\r\n|\r|\n")
 
 # Соединения с провайдером переиспользуются (замер 30.10.2026: установка TLS — 0,19–0,43 с на ход агента). Клиент — на
 # источник scheme://host:port, общий для потоков пула шлюза. Вход агента по подписке — заголовок запроса, не клиента.
@@ -92,37 +91,14 @@ class Upstream:
 
     def lines(self) -> Iterator[str]:
         secrets = tuple(secret.decode("utf-8") for secret in self._secrets)
-        pending = b""
-        total = 0
-        lines = 0
         try:
-            for chunk in self._response.iter_bytes():
-                total += len(chunk)
-                if total > RESPONSE_BYTES:
-                    raise ProviderLimit()
-                pending += chunk
-                start = 0
-                for boundary in _LINEBREAK.finditer(pending):
-                    if boundary.group() == b"\r" and boundary.end() == len(pending):
-                        break       # CRLF can be split across chunks.
-                    if boundary.start() - start > EVENT_BYTES:
-                        raise ProviderLimit()
-                    lines += 1
-                    if lines > EVENT_LINES:
-                        raise ProviderLimit()
-                    line = pending[start:boundary.start()].decode("utf-8", errors="replace")
-                    for secret in secrets:
-                        line = line.replace(secret, "***")
-                    yield line
-                    start = boundary.end()
-                pending = pending[start:]
-                if len(pending) > EVENT_BYTES:
-                    raise ProviderLimit()
-            if pending:
-                line = pending.rstrip(b"\r").decode("utf-8", errors="replace")
+            for line in bounded_lines(self._response.iter_bytes(), response_bytes=RESPONSE_BYTES,
+                                      event_bytes=EVENT_BYTES, max_lines=EVENT_LINES):
                 for secret in secrets:
                     line = line.replace(secret, "***")
                 yield line
+        except ResponseLimit:
+            raise ProviderLimit() from None
         except httpx.TimeoutException:
             raise ProviderTimeout() from None
         except (httpx.HTTPError, httpx.StreamError):
@@ -185,7 +161,9 @@ def forward(
     if not isinstance(out, AgentOutgoing):
         raise TypeError("egress.forward принимает только AgentOutgoing, собранный pipeline")
     query, transport_checked = agent_transport(out.query, out.headers, out.path)
-    leaks = checked_leaks((*out.checked, *transport_checked), state, settings)
+    protocol = out.protocol or ("anthropic" if "/messages" in out.path else "responses" if "/responses" in out.path else "chat")
+    body_checked = coverage.checked(json.loads(out.body), protocol, out.frozen)
+    leaks = checked_leaks((*out.checked, *transport_checked, *body_checked), state, settings)
     if leaks:
         raise LeakDetected(len(leaks))
     check_url(connection.base_url)

@@ -1,5 +1,6 @@
 """Отправка облачной модели и вопрос локальной модели (FR-8, FR-9.4) на уровне службы. Облако подменено."""
 import pytest
+from dataclasses import replace
 
 from cleaner.core.types import EntityType as T
 from cleaner.egress import ProviderError, cloud
@@ -95,6 +96,29 @@ def test_send_refuses_when_the_digest_differs(repo, chat, provider):
     with pytest.raises(SendRefused, match="изменился"):
         service.send(chat[1], chat[0], "0" * 64)
     assert [item.kind for item in repo.items(chat[1])] == ["input"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"base_url": "https://second.example/v1"}, {"protocol": "responses"},
+    {"extra_body": {"temperature": 0.3}}, {"api_key": "rotated-invented-key"},
+])
+def test_connection_edit_requires_a_fresh_preview(repo, chat, provider, changes):
+    fake = FakeCloud("x")
+    service = ready(repo, chat, provider, fake)
+    digest = service.outgoing(chat[1]).outgoing.context.digest()
+    edited = replace(provider, **changes)
+    repo.update_provider(edited, edited.api_key)
+    with pytest.raises(SendRefused, match="изменился"):
+        service.send(chat[1], chat[0], digest)
+    assert fake.calls == []
+
+
+def test_large_single_answer_chunk_keeps_only_the_allowed_prefix(repo, chat, provider):
+    fake = FakeCloud("a" * 10_000, "must not be read")
+    service = ready(repo, chat, provider, fake, max_text_chars=100)
+    send(service, chat)
+    stored = answer(repo, chat)
+    assert stored.status == "partial" and stored.original == "a" * 100
 
 
 def test_send_refuses_without_a_connection_or_while_a_text_is_processing(repo, chat, provider):

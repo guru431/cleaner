@@ -175,12 +175,20 @@ class AnthropicStream:
             if block.get("type") == "tool_use":
                 self.blocks[index] = _Block("tool_use", block)
                 return [dict(event, content_block=dict(block, input={}))] if block.get("input") else [event]
+            from cleaner.core.agent.walk import OPAQUE
+            if block.get("type") in OPAQUE:
+                self.blocks[index] = _Block("opaque", dict(block))
             return [event]
         block = self.blocks.get(index) if type_ in ("content_block_delta", "content_block_stop") else None
         if block is None:
             return self.cut() + [event] if type_ == "error" else [event]
         if type_ == "content_block_delta":
             delta = event.get("delta") or {}
+            if block.kind == "opaque":
+                for key in ("thinking", "signature"):
+                    if isinstance(delta.get(key), str):
+                        block.start[key] = block.start.get(key, "") + delta[key]
+                return [event]
             if block.kind == "text" and delta.get("type") == "text_delta":
                 block.parts.append(delta.get("text", ""))
                 return self._text_delta(block, index, block.restorer.feed(delta.get("text", "")))
@@ -199,6 +207,9 @@ class AnthropicStream:
 
     def _close(self, block: _Block, index: int) -> list[dict]:
         """Конец блока: остаток текста или аргументы целиком; пара — в pairs."""
+        if block.kind == "opaque":
+            self.pairs.append((dict(block.start), dict(block.start)))
+            return []
         if block.kind == "text":
             out = self._text_delta(block, index, block.restorer.finish())
             self.pairs.append(({"type": "text", "text": "".join(block.shown)}, {"type": "text", "text": "".join(block.parts)}))
@@ -248,5 +259,8 @@ class AnthropicStream:
                 self.pairs.append((dict(head, input=restored["input"]), dict(head, input=block.get("input", {}))))
             else:
                 restored = block
+                from cleaner.core.agent.walk import OPAQUE
+                if kind in OPAQUE:
+                    self.pairs.append((dict(block), dict(block)))
             content.append(restored)
         return dict(message, content=content)

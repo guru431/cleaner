@@ -10,7 +10,7 @@ import threading
 import uuid
 import weakref
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from cleaner.clock import Clock
@@ -167,6 +167,13 @@ class Provider:
     max_tokens: int = 4096
     extra_body: dict = field(default_factory=dict, hash=False)
     enabled: bool = True
+
+    def binding(self) -> str:
+        """Changing any connection parameter invalidates an approved request."""
+        return hashlib.sha256(json.dumps(asdict(self), sort_keys=True, default=str).encode()).hexdigest()
+
+    def allowed_models(self, key_models: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(m for m in self.models if not key_models or m in key_models) if self.enabled else ()
 
     @property
     def key_tail(self) -> str:
@@ -991,14 +998,19 @@ class Repository:
     def add_gold(self, user_id: str | None, text: str, spans: list[dict], metadata: dict | None = None) -> str:
         gold_id = uuid.uuid4().hex
         key = self.global_key
-        self._run(
-            "INSERT INTO gold(id, user_id, text_enc, spans_enc, created_at, metadata_enc) VALUES (?, ?, ?, ?, ?, ?)",
-            gold_id, user_id,
-            self._enc(key, text, f"gold.text:{gold_id}"),
-            self._enc(key, json.dumps(spans), f"gold.spans:{gold_id}"),
-            self._now(),
-            self._enc(key, json.dumps(metadata or {}), f"gold.metadata:{gold_id}"),
-        )
+        metadata = metadata or {}
+        with self.lock, transaction(self.conn):
+            if metadata.get("purpose"):
+                for row in self.gold():
+                    same_source = metadata.get("source") == row.metadata.get("source") or text == row.text
+                    if same_source and row.metadata.get("purpose") and row.metadata["purpose"] != metadata["purpose"]:
+                        raise ValueError("Примеры одного источника нельзя разделять между настройкой и контролем")
+            self.conn.execute(
+                "INSERT INTO gold(id, user_id, text_enc, spans_enc, created_at, metadata_enc) VALUES (?, ?, ?, ?, ?, ?)",
+                (gold_id, user_id, self._enc(key, text, f"gold.text:{gold_id}"),
+                 self._enc(key, json.dumps(spans), f"gold.spans:{gold_id}"), self._now(),
+                 self._enc(key, json.dumps(metadata), f"gold.metadata:{gold_id}")),
+            )
         return gold_id
 
     def gold(self) -> list[GoldRow]:

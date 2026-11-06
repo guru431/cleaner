@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import math
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -23,25 +24,30 @@ class GoldSpan:
     type: EntityType
     entity: int            # номер сущности в примере: защищена, только если скрыты все её упоминания
     origin: str = ""       # dictionary — значение из словаря организации (класс QA-3 «Словарь организации»)
+    secret_context: str = ""  # format_key | free; legacy annotations are explicitly unclassified
 
 
 @dataclass(frozen=True)
 class Example:
     text: str
     spans: tuple[GoldSpan, ...]
+    scenario: str = ""
+    source: str = ""
 
 
 Predicted = tuple[int, int, EntityType]
 Predict = Callable[[str], list[Predicted]]
 
 # Классы QA-3: название, отбор сущности (тип, происхождение), целевая полнота; None — цель не задана, значение измеряется.
-CLASSES: tuple[tuple[str, Callable[[EntityType, str], bool], float | None], ...] = (
-    ("Жёсткий формат и контрольная сумма", lambda t, o: t in {T.EMAIL, T.IP, T.MAC, T.INN, T.SNILS, T.OGRN, T.CARD}, 0.99),
-    ("Секреты", lambda t, o: t is T.SECRET, 0.99),
-    ("Словарь организации", lambda t, o: o == "dictionary", 1.00),
-    ("ФИО", lambda t, o: t is T.PERSON, 0.90),
-    ("Организации и почтовые адреса", lambda t, o: t in {T.ORG, T.ADDRESS}, 0.80),
-    ("Хосты и учётные записи", lambda t, o: t in {T.HOST, T.ACCOUNT}, None),
+CLASSES: tuple[tuple[str, Callable[[EntityType, str, str], bool], float | None], ...] = (
+    ("Жёсткий формат и контрольная сумма", lambda t, o, c: t in {T.EMAIL, T.IP, T.MAC, T.INN, T.SNILS, T.OGRN, T.CARD}, 0.99),
+    ("Секреты: формат или ключ", lambda t, o, c: t is T.SECRET and c == "format_key", 0.99),
+    ("Секреты: свободный контекст", lambda t, o, c: t is T.SECRET and c == "free", None),
+    ("Секреты: не классифицированы", lambda t, o, c: t is T.SECRET and c not in ("format_key", "free"), None),
+    ("Словарь организации", lambda t, o, c: o == "dictionary", 1.00),
+    ("ФИО", lambda t, o, c: t is T.PERSON, 0.90),
+    ("Организации и почтовые адреса", lambda t, o, c: t in {T.ORG, T.ADDRESS}, 0.80),
+    ("Хосты и учётные записи", lambda t, o, c: t in {T.HOST, T.ACCOUNT}, None),
 )
 _VERSION = re.compile(r"(?<![\w.])v?\d+\.\d+(?:\.\d+)?(?![\w.])")          # 2.4, 10.0.19045 — но не IPv4
 _ERROR = re.compile(
@@ -58,6 +64,8 @@ class Report:
     mentions: Counter = field(default_factory=Counter)           # тип -> упоминаний в эталоне
     mentions_hidden: Counter = field(default_factory=Counter)    # тип -> упоминаний, закрытых целиком
     classes: dict[str, list[int]] = field(default_factory=dict)  # класс QA-3 -> [скрыто, всего]
+    scenarios: dict[str, dict[str, list[int]]] = field(default_factory=dict)
+    sources: set[str] = field(default_factory=set)
     found: Counter = field(default_factory=Counter)              # тип найденного -> фрагментов
     correct: Counter = field(default_factory=Counter)            # тип найденного -> задевших эталон
     typed: Counter = field(default_factory=Counter)              # тип найденного -> задевших эталон того же типа
@@ -119,6 +127,8 @@ def _candidates(text: str) -> list[tuple[int, int]]:
 def evaluate(examples: Sequence[Example], predict: Predict) -> Report:
     report = Report()
     for example in examples:
+        if example.source:
+            report.sources.add(example.source)
         predicted = predict(example.text)
         ranges = [(start, end) for start, end, _ in predicted]
         gold = [(span.start, span.end) for span in example.spans]
@@ -134,8 +144,11 @@ def evaluate(examples: Sequence[Example], predict: Predict) -> Report:
             report.mentions[first.type] += len(mentions)
             report.mentions_hidden[first.type] += sum(closed)
             for title, belongs, _ in CLASSES:
-                if belongs(first.type, first.origin):
+                if any(belongs(m.type, m.origin, m.secret_context) for m in mentions):
                     counts = report.classes.setdefault(title, [0, 0])
+                    counts[0] += hidden
+                    counts[1] += 1
+                    counts = report.scenarios.setdefault(example.scenario, {}).setdefault(title, [0, 0])
                     counts[0] += hidden
                     counts[1] += 1
         for start, end, type_ in predicted:
@@ -156,3 +169,14 @@ def evaluate(examples: Sequence[Example], predict: Predict) -> Report:
 
 def recall_by_class(report: Report) -> dict[str, float]:
     return {title: hidden / total for title, (hidden, total) in report.classes.items() if total}
+
+
+def interval(hidden: int, total: int) -> tuple[float, float] | None:
+    """Descriptive 95% Wilson interval; entity dependence limits generalization."""
+    if not total:
+        return None
+    z = 1.959963984540054
+    p, denom = hidden / total, 1 + z * z / total
+    center = (p + z * z / (2 * total)) / denom
+    width = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total)) / denom
+    return max(0.0, center - width), min(1.0, center + width)

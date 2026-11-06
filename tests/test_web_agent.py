@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 import zlib
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -67,6 +68,16 @@ def test_messages_stream_through_the_gateway(agent, stub, header):
     sent = stub.requests[0]
     assert sent["path"] == "/v1/messages?beta=true" and "srv-dc01" not in json.dumps(sent["body"])
     assert agent.key not in json.dumps(sent["headers"])
+
+
+@pytest.mark.parametrize("base", ["/agent/anthropic", "/agent/openai"])
+def test_model_lists_intersect_current_provider_scope_and_hide_disabled_connections(agent, repo, base):
+    provider = repo.providers()[0]
+    repo.update_provider(replace(provider, models=("m-2", "m-3")), None)
+    response = agent.get(base + "/v1/models", headers={"x-cleaner-key": agent.key})
+    assert response.status_code == 200 and [m["id"] for m in response.json()["data"]] == ["m-2"]
+    repo.update_provider(replace(provider, enabled=False), None)
+    assert agent.get(base + "/v1/models", headers={"x-cleaner-key": agent.key}).json()["data"] == []
 
 
 def test_bodies_are_decoded_or_refused_in_anthropic_shape(agent, stub, monkeypatch):

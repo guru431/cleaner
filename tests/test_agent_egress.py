@@ -73,6 +73,20 @@ def test_forward_rechecks_leaks_before_sending(state, settings):
         assert stub.requests == []
 
 
+@pytest.mark.parametrize("extra", [
+    {"metadata": {"audit_note": "audit.person@contoso.ru"}},
+    {"system": [{"type": "text", "text": "safe", "cache_control": {"type": "ephemeral", "audit_note": "audit.person@contoso.ru"}}]},
+])
+def test_egress_checks_serialized_body_even_when_checked_is_empty(state, settings, extra):
+    out, _ = outgoing(state, settings)
+    sanitize(state, "audit.person@contoso.ru", settings)
+    body = {**json.loads(out.body), **extra}
+    changed = replace(out, body=json.dumps(body).encode(), checked=())
+    transport = httpx.MockTransport(lambda request: pytest.fail("unchecked data reached the transport"))
+    with pytest.raises((LeakDetected, ValueError)):
+        egress.forward(changed, connection("http://127.0.0.1"), state, settings, transport=transport)
+
+
 @pytest.mark.parametrize("auth_style", ["bearer", "x-api-key"])
 def test_agent_headers_and_keys_never_reach_the_provider(state, settings, auth_style):
     out, _ = outgoing(state, settings, checked=["вопрос"])

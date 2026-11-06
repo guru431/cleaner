@@ -89,6 +89,10 @@ class SendRequestIn(Body):
     receipt: str = Field(min_length=1, max_length=24_000_000)
 
 
+class LocalRequestIn(Body):
+    messages: list[RequestMessage] = Field(min_length=1, max_length=1000)
+
+
 def _request_caller(request: Request, chat_id: str, caller: ApiCaller = Depends(get_api_caller)) -> ApiCaller:
     # Ownership must be checked before body validation, including malformed bodies from another owner.
     api_writable_chat(request, chat_id, caller)
@@ -143,7 +147,7 @@ def answer_events(request: Request, chat_id: str, item_id: str,
     api_chat(request, chat_id, caller)
     repo, service = repo_of(request), service_of(request)
     item = repo.item(chat_id, item_id)
-    if item is None or item.kind != "answer" or item.source != "api":
+    if item is None or item.kind != "answer" or item.source not in ("api", "local"):
         raise HTTPException(404, "Ответ не найден")
     state, _ = repo.load_state(chat_id)
     settings = repo.settings()
@@ -160,7 +164,7 @@ def answer_events(request: Request, chat_id: str, item_id: str,
             if live is not None:
                 text = live.text()
                 if len(text) > seen:
-                    shown = await run_in_threadpool(restorer.feed, text[seen:])
+                    shown = text[seen:] if item.source == "local" else await run_in_threadpool(restorer.feed, text[seen:])
                     seen = len(text)
                     yield event("text", {"text": shown})
             if live is None or live.finished:
@@ -168,9 +172,9 @@ def answer_events(request: Request, chat_id: str, item_id: str,
                 if final is None:
                     yield event("done", {"status": "failed", "error": "Ответ удалён"})
                     return
-                result = await run_in_threadpool(restore_text, state, final.original, settings)
-                yield event("done", {"status": final.status, "text": result.text, "raw": final.original,
-                                     "counters": result.counters, "error": final.meta.get("error", "")})
+                result = None if item.source == "local" else await run_in_threadpool(restore_text, state, final.original, settings)
+                yield event("done", {"status": final.status, "text": result.text if result else final.original, "raw": final.original,
+                                     "counters": result.counters if result else {}, "error": final.meta.get("error", "")})
                 return
             yield ": keepalive\n\n"
             await asyncio.sleep(0.25)
@@ -183,10 +187,38 @@ def stop_answer(request: Request, chat_id: str, item_id: str,
                 caller: ApiCaller = Depends(get_api_caller)) -> Response:
     api_chat(request, chat_id, caller)
     item = repo_of(request).item(chat_id, item_id)
-    if item is None or item.kind != "answer" or item.source != "api":
+    if item is None or item.kind != "answer" or item.source not in ("api", "local"):
         raise HTTPException(404, "Ответ не найден")
-    service_of(request).stop(chat_id, item_id)
+    try:
+        service_of(request).stop(chat_id, item_id)
+    except KeyError:
+        pass  # Generation may finish between the ownership check and stop.
     return Response(status_code=204)
+
+
+@router.post("/chats/{chat_id}/local-requests")
+def prepare_local_request(request: Request, chat_id: str, body: LocalRequestIn,
+                          caller: ApiCaller = Depends(_request_caller)) -> Response:
+    if body.messages[-1].role != "user":
+        raise HTTPException(422, "Последним в запросе должен быть вопрос")
+    try:
+        result = IntegrationService.from_service(service_of(request)).prepare_local_request(
+            chat_id, caller.user.id, caller.key, [m.model_dump() for m in body.messages])
+    except TextTooLong as exc:
+        raise HTTPException(413, str(exc)) from None
+    except (SendRefused, EditRefused, DetectorError) as exc:
+        raise HTTPException(409, str(exc)) from None
+    return JSONResponse(result)
+
+
+@router.post("/chats/{chat_id}/local-requests/send", status_code=202)
+def send_local_request(request: Request, chat_id: str, body: SendRequestIn,
+                       caller: ApiCaller = Depends(_request_caller)) -> Response:
+    try:
+        item = IntegrationService.from_service(service_of(request)).send_local_request(chat_id, caller.user.id, caller.key, body.receipt)
+    except (SendRefused, EditRefused, DetectorError) as exc:
+        raise HTTPException(409, str(exc)) from None
+    return JSONResponse({"item_id": item.id}, status_code=202)
 
 
 def _text_result(view: InputView, state: ChatState) -> dict:

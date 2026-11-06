@@ -53,6 +53,11 @@ def _item_node(item: dict) -> dict:
     return {key: value for key, value in item.items() if key not in ("id", "status")}
 
 
+def _opaque_node(item: dict) -> dict:
+    # Codex adds content:null on replay; it carries no new data and does not change provenance.
+    return {key: value for key, value in item.items() if key != "content" or value is not None}
+
+
 def _call_node(item: dict) -> dict:
     node = _item_node(item)
     if "arguments" in node:
@@ -90,7 +95,7 @@ def responses_units(body: dict) -> list[Unit]:
         elif kind in RESULTS:
             units.append(Unit(path, "tool", "tool_result", _item_node(item)))
         elif kind in OPAQUE:
-            units.append(Unit(path, "assistant", "opaque", item))
+            units.append(Unit(path, "assistant", "opaque", _opaque_node(item)))
             if kind == "reasoning" and item.get("summary"):
                 units.append(Unit((*path, "summary"), "assistant", "reasoning", item["summary"]))
         elif kind == "additional_tools":
@@ -229,10 +234,18 @@ def placeholder(unit: Unit, reason: str) -> object:
 
 
 def model_kind(node: dict) -> str:
+    if node.get("type") in OPAQUE:
+        return "opaque"
     return "text" if node.get("type") == "output_text" else "tool_use"
 
 
 def rebuild(body: dict, replaced: dict) -> dict:
+    replaced = dict(replaced)
+    for path, node in replaced.items():
+        if len(path) == 2 and path[0] == "input" and isinstance(node, dict) and node.get("type") in OPAQUE:
+            old = body["input"][path[1]]
+            if "content" in old and old["content"] is None:
+                replaced[path] = dict(node, content=None)
     return walk.rebuild(body, replaced, KEEP)
 
 
@@ -376,6 +389,8 @@ class ResponsesStream:
         elif kind == "local_shell_call" and "action" in item:
             restored = dict(item, action=self._restore_exact(item["action"]))
             self._pair(item, restored)
+        elif kind in OPAQUE:
+            self.pairs.append((_opaque_node(item), dict(item)))
         if item_id is not None or output_index is not None:
             self.items[key] = restored
         return restored

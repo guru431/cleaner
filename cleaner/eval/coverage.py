@@ -17,12 +17,19 @@ CHECKS = (
 )
 
 
-def metadata(scenario: str = "", checks: Sequence[str] = ()) -> dict:
+def metadata(scenario: str = "", checks: Sequence[str] = (), purpose: str = "", source: str = "") -> dict:
     if scenario and scenario not in dict(SCENARIOS):
         raise ValueError("Неизвестный сценарий эталона")
     if set(checks) - dict(CHECKS).keys():
         raise ValueError("Неизвестная отметка проверки эталона")
-    return {"scenario": scenario, "checks": sorted(set(checks))}
+    if purpose not in ("", "tuning", "control"):
+        raise ValueError("Неизвестное назначение эталона")
+    result = {"scenario": scenario, "checks": sorted(set(checks))}
+    if purpose:
+        if not source or len(source) > 256:
+            raise ValueError("Укажите источник документа (до 256 знаков)")
+        result.update(purpose=purpose, source=source)
+    return result
 
 
 def matrix(examples: Sequence) -> dict:
@@ -39,7 +46,7 @@ def matrix(examples: Sequence) -> dict:
             entities.setdefault(span["entity"], []).append(span)
         repeated += sum(len(mentions) > 1 for mentions in entities.values())
         for title, belongs, _ in CLASSES:
-            if any(belongs(EntityType(s["type"]), s.get("origin", "")) for s in row.spans):
+            if any(belongs(EntityType(s["type"]), s.get("origin", ""), s.get("secret_context", "")) for s in row.spans):
                 counts[title, scenario] += 1
     return {
         "scenarios": scenarios,

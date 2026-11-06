@@ -20,6 +20,7 @@
       </tbody>
     </table>
   </section>
-  <button class="primary">Сохранить</button>
+  <button class="primary" name="action" value="impact">Оценить влияние</button>
 </form>
+<form method="post" action="/settings/impact/undo">{% include "_csrf.html" %}<button>Оценить возврат предыдущей конфигурации</button></form>
 {% endblock %}

@@ -13,7 +13,7 @@ import uuid
 from collections import Counter
 from dataclasses import asdict
 
-from cleaner.core.pipeline import Layers, Turn, build_outgoing, sanitize
+from cleaner.core.pipeline import Layers, Turn, build_outgoing, local_context, sanitize
 from cleaner.core.entities import ops
 from cleaner.core.types import EntityType, Span
 from cleaner.service import ChatService, SendRefused, _stricter, admitted, link
@@ -28,7 +28,7 @@ def provider_for(repo, key, model: str | None = None):
     provider = repo.provider(access.removeprefix("provider:")) if access.startswith("provider:") else None
     if provider is None or not provider.enabled:
         raise SendRefused("Для подключения Studio нужен ключ Cleaner с доступом к облачному подключению")
-    models = tuple(m for m in provider.models if not key.models or m in key.models)
+    models = provider.allowed_models(key.models)
     if model is not None and model not in models:
         raise SendRefused("Модель недоступна этому ключу Cleaner")
     return provider, models
@@ -36,7 +36,7 @@ def provider_for(repo, key, model: str | None = None):
 
 def _binding(provider) -> str:
     # A provider edit, including credential rotation, invalidates an already shown preview.
-    return hashlib.sha256(json.dumps(asdict(provider), sort_keys=True, default=str).encode()).hexdigest()
+    return provider.binding()
 
 
 class IntegrationService(ChatService):
@@ -47,6 +47,56 @@ class IntegrationService(ChatService):
         result = object.__new__(cls)
         result.__dict__ = service.__dict__
         return result
+
+    def _local_client(self):
+        if self.engines is None:
+            raise SendRefused("Локальная модель не подключена")
+        return self.engines.client()  # Revalidates SEC-12; credentials stay on the server.
+
+    @staticmethod
+    def _local_binding(client):
+        return hashlib.sha256(json.dumps(asdict(client.config), sort_keys=True).encode()).hexdigest()
+
+    @admitted("text")
+    def prepare_local_request(self, chat_id, user_id, key, messages):
+        self._check_length("".join(m["content"] for m in messages))
+        client = self._local_client()
+        version = []
+        self._apply(chat_id, lambda state, items, settings: ([], []), after=version.append)
+        payload = {"mode": "local", "key": key.id, "version": version[0], "messages": messages,
+                   "expires": self.repo.clock.now().timestamp() + RECEIPT_SECONDS, "local": self._local_binding(client)}
+        receipt = base64.urlsafe_b64encode(crypto.seal(self.repo.chat_secret(chat_id), json.dumps(payload).encode(),
+                                                     f"request:{chat_id}")).decode()
+        self.repo.audit("request_prepared", user_id, chat_id, route="local", messages=len(messages))
+        return {"receipt": receipt, "deliverable": True, "messages": messages, "counts": {}, "replacements": [],
+                "blocked": 0, "leaks": 0, "destination": {"url": client.config.base_url, "model": client.config.model},
+                "route": "local", "originals": True}
+
+    @admitted("local")
+    def send_local_request(self, chat_id, user_id, key, receipt):
+        try:
+            payload = json.loads(crypto.unseal(self.repo.chat_secret(chat_id),
+                                               base64.b64decode(receipt, altchars=b"-_", validate=True), f"request:{chat_id}"))
+        except (ValueError, crypto.CryptoError):
+            raise SendRefused("Предпросмотр недействителен") from None
+        client = self._local_client()
+        if (payload.get("mode") != "local" or payload["key"] != key.id or
+                payload["expires"] <= self.repo.clock.now().timestamp() or payload["local"] != self._local_binding(client)):
+            raise SendRefused("Локальное подключение или предпросмотр изменились: проверьте запрос ещё раз")
+        messages = payload["messages"]
+        context = local_context(chat_id, client.config.model, messages)
+
+        def work(state, items, settings):
+            if any(i.kind == "answer" and i.status in ("running", "queued") for i in items):
+                raise SendRefused("Предыдущий ответ ещё идёт")
+            return [Item(uuid.uuid4().hex, 0, "answer", "", None, source="local", status="running",
+                         meta={"model": client.config.model})], []
+
+        [item] = self._apply(chat_id, work, expected=payload["version"])
+        self.live.start(item.id)
+        self._submit(self.send_submit, self.run_send, chat_id, item.id, user_id, context, None, 0, client)
+        self.repo.audit("local_answer", user_id, chat_id, messages=len(messages), via="api")
+        return item
 
     def _build_request(self, state, settings, messages, provider, model, layers, cached=None):
         turns, models, replacements = [], [], []
@@ -131,6 +181,8 @@ class IntegrationService(ChatService):
             raise SendRefused("Предпросмотр недействителен: проверьте запрос ещё раз") from None
         if payload["key"] != key.id or payload["expires"] <= self.repo.clock.now().timestamp():
             raise SendRefused("Предпросмотр истёк: проверьте запрос ещё раз")
+        if payload.get("mode") == "local":
+            raise SendRefused("Локальный предпросмотр нельзя отправить в облако")
         provider, _ = provider_for(self.repo, key, payload["model"])
         if payload["provider"] != _binding(provider) or payload["layers"] != self.layers(chat_id):
             raise SendRefused("Подключение или слои изменились: проверьте запрос ещё раз")

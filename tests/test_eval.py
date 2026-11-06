@@ -57,6 +57,34 @@ def test_classes_follow_qa_3():
     assert recall_by_class(report) == {"Словарь организации": 1.0, "ФИО": 0.0, "Организации и почтовые адреса": 1.0}
 
 
+def test_secret_obligation_and_unclassified_legacy_are_separate():
+    from cleaner.eval.metrics import CLASSES, interval
+    text = "alpha beta gamma"
+    ex = Example(text, (GoldSpan(0, 5, T.SECRET, 0, secret_context="format_key"),
+                        GoldSpan(6, 10, T.SECRET, 1, secret_context="free"), GoldSpan(11, 16, T.SECRET, 2)))
+    report = evaluate([ex], lambda _: [(0, 10, T.SECRET)])
+    assert report.classes == {"Секреты: формат или ключ": [1, 1], "Секреты: свободный контекст": [1, 1],
+                              "Секреты: не классифицированы": [0, 1]}
+    assert {title: target for title, _, target in CLASSES}["Секреты: свободный контекст"] is None
+    assert interval(1, 1)[0] < 0.3 and interval(0, 0) is None
+
+
+def test_document_partitions_cannot_overlap_and_have_separate_baselines(repo):
+    import pytest
+    repo.add_gold(None, "one", [], {"source": "document-a", "purpose": "tuning", "scenario": "log"})
+    with pytest.raises(ValueError, match="источника"):
+        repo.add_gold(None, "two", [], {"source": "document-a", "purpose": "control"})
+    with pytest.raises(ValueError, match="источника"):
+        repo.add_gold(None, "one", [], {"source": "document-b", "purpose": "control"})
+    repo.add_gold(None, "three", [], {"source": "document-b", "purpose": "control"})
+    assert [e.text for e in runner.gold_examples(repo, "control")] == ["three"]
+    assert [e.text for e in runner.gold_examples(repo, "tuning")] == ["one"]
+    for purpose in ("tuning", "control"):
+        done = runner.measure(repo, f"gold:{purpose}", runner.gold_examples(repo, purpose), ["1-3"], None, None)
+        runner.save_baseline(repo, f"gold:{purpose}", done.results, done.fingerprint, done.examples)
+    assert set(runner.baselines(repo)) == {"gold:tuning", "gold:control"}
+
+
 def test_layers_1_to_3_on_a_jsonl_set(tmp_path, settings):
     path = tmp_path / "set.jsonl"
     record = {"text": "почта a@x.example", "spans": [{"start": 6, "end": 17, "type": "EMAIL", "entity": 0}]}

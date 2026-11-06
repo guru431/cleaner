@@ -28,6 +28,17 @@ def test_no_key_is_401_json(api):
     assert response.json() == {"error": {"code": 401, "message": "Нужен действующий ключ доступа"}}
 
 
+def test_stopping_an_already_finished_answer_is_idempotent(api, repo):
+    from cleaner.storage.repo import Item
+    program = api()
+    chat_id = chat(program)
+    item = Item("finished-answer", 0, "answer", "Сохранено", None, source="api", status="done")
+    repo.add_item(chat_id, item)
+    for _ in range(2):
+        assert program.post(f"/api/v1/chats/{chat_id}/answers/{item.id}/stop").status_code == 204
+    assert repo.item(chat_id, item.id).original == "Сохранено"
+
+
 def test_rule_without_preview_survives_a_concurrent_text(api, repo, monkeypatch):
     from cleaner.service import ChatService
 

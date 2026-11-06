@@ -239,6 +239,7 @@ if [[ -f "$UNIT" ]] && ! cmp -s "$SRC/deploy/cleaner.service" "$UNIT"; then
 fi
 install -o root -g root -m 0644 "$SRC/deploy/cleaner.service" "$UNIT"
 install -o root -g root -m 0755 "$SRC/deploy/check-cleaner.sh" "$CHECK"
+install -o root -g root -m 0644 "$SRC/deploy/check_ipv6.py" /usr/local/sbin/cleaner-check-ipv6.py
 # Границы выхода наружу (этап 3): цепочка ставится до перезапуска службы — без неё служба не стартует.
 install -o root -g root -m 0755 "$SRC/deploy/cleaner-egress.sh" "$EGRESS"
 install -o root -g root -m 0644 "$SRC/deploy/cleaner-egress.service" "$EGRESS_UNIT"

@@ -10,6 +10,7 @@
     {% else %}<span class="badge good">ни один класс не упал против базового замера</span>{% endif %}
   </p>
   <p class="sub">Единица подсчёта: {{ p.unit }}. Точность — по пересечению: найденное засчитывается, если задело любой эталонный фрагмент, без учёта типа и лишнего захвата.</p>
+  <p class="sub">Интервал 95% — описательный интервал Wilson по сущностям. Зависимость сущностей одного документа может сужать его: это не гарантия полноты на будущих данных. Источников: {{ p.sources }}; малое число источников и пробелы сценариев ограничивают выводы.</p>
   {% for line in p.drops %}<p class="flash bad">Полнота упала: {{ line }}</p>{% endfor %}
   {% for line in p.unchecked %}<p class="flash warn">Не проверено: {{ line }}</p>{% endfor %}
   {% for line in p.warnings %}<p class="flash warn">Полезность: {{ line }}</p>{% endfor %}
@@ -29,6 +30,10 @@
   {% endfor %}
   </tbody>
 </table>
+{% if p.scenarios %}
+<div class="table-scroll"><table class="grid"><thead><tr><th>Сценарий</th><th>Класс</th>{% for name in p.layers %}<th>Слои {{ name }}: скрыто / всего, интервал 95%</th>{% endfor %}</tr></thead>
+<tbody>{% for scenario, title, values in p.scenarios %}<tr><td>{{ scenario }}</td><td>{{ title }}</td>{% for value in values %}<td>{{ value }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div>
+{% endif %}
 <details class="panel">
   <summary class="panel-head"><h3 class="title">По типам: полнота по сущностям, по упоминаниям, точность по пересечению</h3></summary>
   <table class="grid">
@@ -75,6 +80,8 @@
   {% endif %}
   {% if own %}{{ passport(own) }}{% elif rows %}<div class="panel-body"><p class="muted">Замеров собственного набора ещё не было.</p></div>{% endif %}
 </section>
+<p class="sub">Контрольная часть хранится отдельно от настройки, со своим базовым замером. Примеры без назначения входят только в общий QA-6. Число примеров само по себе не доказывает выполнение QA-3; для контрольной части нужны разные источники и сценарии.</p>
+{% for p in partitions %}<section class="panel"><header class="panel-head"><h2 class="title">{{ p.title }}</h2></header>{{ passport(p) }}</section>{% endfor %}
 {% for p in opened %}
 <section class="panel">
   <header class="panel-head"><h2 class="title">{{ p.title }}</h2><span class="state">для сравнения (QA-4), не выполнение QA-1</span></header>
@@ -84,15 +91,15 @@
 <section class="panel">
   <header class="panel-head"><h2 class="title">Примеры</h2></header>
   <table class="grid">
-    <thead><tr><th>Сохранён</th><th>Кем</th><th>Сценарий</th><th class="num">Знаков</th><th>Разметка</th><th></th></tr></thead>
+    <thead><tr><th>Сохранён</th><th>Кем</th><th>Сценарий</th><th>Назначение</th><th class="num">Знаков</th><th>Разметка</th><th></th></tr></thead>
     <tbody>
     {% for row in rows %}
     <tr>
-      <td class="mono nowrap">{{ row.created_at | local(tz) }}</td><td>{{ row.login }}</td><td>{{ row.scenario }}</td><td class="num">{{ row.length }}</td><td>{{ row.types }}</td>
+      <td class="mono nowrap">{{ row.created_at | local(tz) }}</td><td>{{ row.login }}</td><td>{{ row.scenario }}</td><td>{{ row.purpose }}</td><td class="num">{{ row.length }}</td><td>{{ row.types }}</td>
       <td class="actions"><form method="post" action="/settings/gold/{{ row.id }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form></td>
     </tr>
     {% else %}
-    <tr><td colspan="6" class="empty">Примеров пока нет</td></tr>
+    <tr><td colspan="7" class="empty">Примеров пока нет</td></tr>
     {% endfor %}
     </tbody>
   </table>

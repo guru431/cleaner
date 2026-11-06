@@ -24,6 +24,7 @@ from cleaner.core.pipeline import OutgoingContext
 from cleaner.core.types import ChatState, Settings
 from cleaner.egress import ProviderError, StreamEnd
 from cleaner.egress.protocols import anthropic, openai, provider_error, responses
+from cleaner.egress.streaming import EVENT_BYTES, RESPONSE_BYTES, bounded_lines
 
 PROTOCOLS = {"openai": openai, "anthropic": anthropic, "responses": responses}
 # passthrough — доступ шлюза по подписке: ключа подключения нет, вход агента уже в заголовках запроса (раздел 9.4).
@@ -135,6 +136,11 @@ def _error(response: httpx.Response, key: str) -> ProviderError:
 _DONE: dict = {}          # «data: [DONE]» — конец ответа OpenAI-совместимого провайдера
 
 
+def _lines(chunks: Iterator[bytes]) -> Iterator[str]:
+    """Bound decompressed bytes and each SSE line before decoding or parsing JSON."""
+    yield from bounded_lines(chunks, response_bytes=RESPONSE_BYTES, event_bytes=EVENT_BYTES)
+
+
 def _events(lines: Iterator[str]) -> Iterator[dict]:
     """События потокового ответа: строки «data: {…}»; «data: [DONE]» отдаётся как _DONE."""
     for line in lines:
@@ -185,7 +191,7 @@ def send(
                 if response.status_code >= 300:
                     raise _error(response, key)
                 ended = False
-                for event in _events(response.iter_lines()):
+                for event in _events(_lines(response.iter_bytes())):
                     if cancel is not None and cancel.is_set():
                         return
                     if event is _DONE or protocol.finished(event):

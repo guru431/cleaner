@@ -301,6 +301,8 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
         risk=repo_of(request).item_risk(chat_id, item_id) if item.risk_status == "done" else None, risk_kinds=KINDS,
         undo=repo_of(request).undo_action(chat_id), undo_names=UNDOABLE, next_review=next_review,
         transfer="send" if provider_id else "manual",
+        gold_secrets=[(entity.id, names.get(entity.id, ["Секрет"])[0]) for entity in state.entities.values()
+                      if entity.type is EntityType.SECRET and any(s["entity_id"] == entity.id for s in item.spans)],
     )
 
 
@@ -325,6 +327,8 @@ def save_gold(request: Request, chat_id: str, item_id: str, form: dict[str, str]
         service_of(request).save_gold(
             chat_id, viewer.user.id, item_id, scenario=form.get("scenario", ""),
             checks=tuple(key for key, _ in CHECKS if form.get(key) == "yes"),
+            purpose=form.get("purpose", ""), source=form.get("source", "").strip(),
+            secret_contexts={key.removeprefix("secret-"): value for key, value in form.items() if key.startswith("secret-")},
         )
     except EditRefused as exc:
         raise HTTPException(400, str(exc)) from None

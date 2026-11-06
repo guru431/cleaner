@@ -234,4 +234,4 @@ def test_complete_message_restores_text_and_tool_input(chat):
     assert out["content"][0] == message["content"][0]
     assert out["content"][1]["text"] == "Узел srv-dc01.corp.contoso.ru, password=<SECRET_1>"
     assert out["content"][2]["input"] == {"command": "ssh srv-dc01.corp.contoso.ru password=Hunter2Hunter2"}
-    assert [wire for _, wire in stream.pairs] == message["content"][1:]
+    assert [wire for _, wire in stream.pairs] == message["content"]

@@ -18,12 +18,13 @@ from cleaner import models
 from cleaner.core.pipeline import Layers, sanitize
 from cleaner.core.types import ChatState, EntityType, Settings
 from cleaner.engines import local_settings
-from cleaner.eval.metrics import CLASSES, Example, GoldSpan, Predict, Report, evaluate, recall_by_class
+from cleaner.eval.metrics import CLASSES, Example, GoldSpan, Predict, Report, evaluate, interval, recall_by_class
 
 LAYER_SETS = ("1-3", "1-4", "1-5")
 BASELINE_KEY = "eval.baseline"
 PASSPORT_KEY = "eval.passport"
 GOLD = "gold"                       # собственный набор; открытые — «open:<имя набора из манифеста>»
+PARTITIONS = {"tuning": "Для настройки", "control": "Контрольный"}
 OPEN_PREFIX = "open:"
 UNIT_GOLD = "сущности разметки экрана проверки (QA-2: защищена, только если скрыты все её упоминания)"
 UNIT_OPEN = (
@@ -34,15 +35,24 @@ UNIT_FILE = "номера сущностей из файла: снимок бе�
 _CODE = ("core", "data", "eval")     # каталоги пакета, от которых зависит замер
 
 
-def example_from(text: str, spans: Sequence[dict]) -> Example:
+def example_from(text: str, spans: Sequence[dict], metadata: dict | None = None) -> Example:
+    metadata = metadata or {}
     return Example(text, tuple(
-        GoldSpan(int(s["start"]), int(s["end"]), EntityType(s["type"]), int(s["entity"]), s.get("origin", ""))
+        GoldSpan(int(s["start"]), int(s["end"]), EntityType(s["type"]), int(s["entity"]), s.get("origin", ""), s.get("secret_context", ""))
         for s in spans
-    ))
+    ), metadata.get("scenario", ""), metadata.get("source", ""))
 
 
-def gold_examples(repo) -> list[Example]:
-    return [example_from(row.text, row.spans) for row in repo.gold()]
+def gold_examples(repo, purpose: str = "") -> list[Example]:
+    rows = repo.gold()
+    assignments = {}
+    for row in rows:
+        source, part = row.metadata.get("source"), row.metadata.get("purpose")
+        if source and part:
+            if source in assignments and assignments[source] != part:
+                raise ValueError("Примеры одного источника попали в разные части эталона")
+            assignments[source] = part
+    return [example_from(row.text, row.spans, row.metadata) for row in rows if not purpose or row.metadata.get("purpose") == purpose]
 
 
 def jsonl_examples(path: Path) -> list[Example]:
@@ -81,6 +91,11 @@ def share(part: int, whole: int) -> str:
     return f"{part / whole:.3f} ({part}/{whole})" if whole else "—"
 
 
+def confidence(part: int, whole: int) -> str:
+    bounds = interval(part, whole)
+    return share(part, whole) + (f"; 95% [{bounds[0]:.3f}, {bounds[1]:.3f}]" if bounds else "")
+
+
 def format_results(results: dict[str, Report], count: int) -> str:
     lines = [
         f"Примеров: {count}",
@@ -107,7 +122,9 @@ def format_results(results: dict[str, Report], count: int) -> str:
                 verdict = "цель не задана" if target is None else (
                     f"{target:.2f} — достигнута" if recalls[title] >= target else f"{target:.2f} — не достигнута"
                 )
-                lines.append(f"{title} | {share(*report.classes[title])} | {verdict}")
+                lines.append(f"{title} | {confidence(*report.classes[title])} | {verdict}")
+        lines.append("95% Wilson — описательный интервал по сущностям, зависимость внутри документа ограничивает перенос. "
+                     f"Источников: {len(report.sources)}; объём и разнообразие контрольного набора не заменяются точечной долей.")
         lines.append(
             f"Скрыто знаков вне эталона: {share(report.chars_outside, report.chars_masked)} от скрытых, "
             f"{share(report.chars_outside, report.chars_free)} от текста вне эталона"
@@ -133,7 +150,7 @@ def fingerprint(examples: Sequence[Example], key: bytes) -> str:
     """Отпечаток набора: тексты и разметка, порядок примеров не важен."""
     digests = sorted(
         hashlib.sha256(json.dumps(
-            [example.text, [[s.start, s.end, s.type.value, s.entity, s.origin] for s in example.spans]],
+            [example.text, [[s.start, s.end, s.type.value, s.entity, s.origin, s.secret_context] for s in example.spans], example.scenario, example.source],
             ensure_ascii=False,
         ).encode("utf-8")).hexdigest()
         for example in examples
@@ -185,6 +202,8 @@ def summary(report: Report) -> dict:
     types = sorted(set(report.entities) | set(report.found), key=lambda t: t.value)
     return {
         "classes": {title: list(counts) for title, counts in report.classes.items()},
+        "scenarios": report.scenarios,
+        "sources": len(report.sources),
         "types": {
             type_.value: {
                 "entities": [report.protected[type_], report.entities[type_]],

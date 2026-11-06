@@ -113,6 +113,68 @@ def test_known_beta_switch_is_canonicalized(gateway):
     assert sent[0].url.query == b"beta=true"
 
 
+@pytest.mark.parametrize("repeated", [False, True])
+def test_cache_control_cannot_add_data_to_a_new_or_frozen_block(gateway, repeated):
+    make, sent = gateway
+    service, call = make("anthropic")
+    block = {"type": "text", "text": EMAIL, "cache_control": {"type": "ephemeral"}}
+    call = replace(call, body={**call.body, "messages": [{"role": "user", "content": [block]}]})
+    if repeated:
+        service.handle(call)
+        sent.clear()
+    block["cache_control"]["audit_note"] = EMAIL
+    with pytest.raises(AgentRefused) as refused:
+        service.handle(call)
+    assert refused.value.status == 400 and sent == []
+
+
+@pytest.mark.parametrize("protocol,extra", [
+    ("anthropic", {"system": [{"type": "text", "text": "x-anthropic-billing-header: " + EMAIL}]}),
+    ("anthropic", {"messages": [{"role": "user", "content": [
+        {"type": "text", "text": EMAIL}, {"type": "thinking", "thinking": EMAIL},
+    ]}]}),
+    ("responses", {"input": [{"role": "user", "content": EMAIL}, {"type": "reasoning", "encrypted_content": EMAIL}]}),
+])
+def test_unverified_opaque_data_cannot_bypass_sec2(gateway, protocol, extra):
+    make, sent = gateway
+    service, call = make(protocol, **extra)
+    with pytest.raises(AgentRefused) as refused:
+        service.handle(call)
+    assert refused.value.status == 400 and sent == []
+
+
+def test_provider_model_removal_revokes_existing_agent_key(gateway, repo):
+    make, sent = gateway
+    service, call = make()
+    provider = repo.provider(call.key.upstream.removeprefix("provider:"))
+    repo.update_provider(replace(provider, models=("another-model",)), None)
+    with pytest.raises(AgentRefused) as refused:
+        service.handle(call)
+    assert refused.value.status == 400 and sent == []
+
+
+def test_signed_provider_reasoning_keeps_its_provenance_but_an_edit_does_not(gateway):
+    make, sent = gateway
+    service, call = make("anthropic")
+    reasoning = {"type": "thinking", "thinking": EMAIL, "signature": "provider-signature"}
+
+    def receive(request):
+        sent.append(request)
+        return httpx.Response(200, json={"content": [reasoning]})
+
+    service.forward = partial(egress.forward, transport=httpx.MockTransport(receive))
+    service.handle(call)
+    history = {"role": "assistant", "content": [reasoning]}
+    second = replace(call, body={**call.body, "messages": [*call.body["messages"], history]})
+    service.handle(second)
+    assert json.loads(sent[-1].content)["messages"][-1]["content"] == [reasoning]
+    edited = {**reasoning, "thinking": EMAIL + " new"}
+    second = replace(second, body={**second.body, "messages": [*call.body["messages"], {"role": "assistant", "content": [edited]}]})
+    with pytest.raises(AgentRefused):
+        service.handle(second)
+    assert len(sent) == 2
+
+
 @pytest.mark.parametrize("protocol", PROTOCOLS)
 def test_independent_sessions_share_no_frozen_blocks_and_resume_keeps_its_own(gateway, repo, protocol):
     make, sent = gateway

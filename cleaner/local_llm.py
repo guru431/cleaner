@@ -142,6 +142,40 @@ class LocalLLM:
         """Ответ на вопрос пользователя (FR-9.4) и признак обрезки по длине: обрезанный ответ полезнее отказа."""
         return self._chat(messages, max_tokens, None)
 
+    def answer_stream(self, messages, *, max_tokens, cancel, outcome, on_open):
+        """Explicit local consultation, bounded SSE with the same cancellation contract as cloud answers."""
+        from cleaner.egress import cloud
+        from cleaner.egress import ProviderError
+        from cleaner.egress.protocols import openai
+        if cancel.is_set():
+            return
+        body = {"model": self.config.model, "messages": messages, "temperature": 0,
+                "max_tokens": max_tokens, "stream": True}
+        try:
+            with self._client.stream("POST", f"{self._base}/chat/completions", json=body, timeout=self.config.timeout) as response:
+                on_open(response.close)
+                if response.status_code >= 300:
+                    raise LocalLLMError("http", f"локальная модель ответила {response.status_code}")
+                ended = False
+                for event in cloud._events(cloud._lines(response.iter_bytes())):
+                    if cancel.is_set():
+                        return
+                    if event is cloud._DONE or openai.finished(event):
+                        ended = True
+                    if openai.stopped_by_length(event):
+                        outcome["truncated"] = True
+                    if event is not cloud._DONE:
+                        piece = openai.text(event)
+                        if piece:
+                            yield piece
+                if not ended:
+                    raise LocalLLMError("unavailable", "поток локальной модели оборвался")
+        except (httpx.HTTPError, httpx.StreamError):
+            if not cancel.is_set():
+                raise LocalLLMError("unavailable", "локальная модель недоступна") from None
+        except ProviderError:
+            raise LocalLLMError("bad_response", "локальная модель отказала или превысила предел ответа") from None
+
     def _chat(self, messages: list[dict[str, str]], max_tokens: int, json_schema: dict | None) -> tuple[str, bool]:
         body: dict = {"model": self.config.model, "messages": messages, "temperature": 0, "max_tokens": max_tokens}
         if json_schema is not None:

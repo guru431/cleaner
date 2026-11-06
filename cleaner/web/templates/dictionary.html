@@ -17,7 +17,7 @@
         <small class="hint">По одному в строке</small>
       </span></label>
       <label class="field"><span>Комментарий</span><input name="comment"></label>
-      <div class="buttons"><button class="primary">Добавить</button></div>
+      <div class="buttons"><button class="primary" name="action" value="impact">Оценить добавление</button></div>
     </form>
   </div>
 </section>
@@ -32,7 +32,7 @@
     <tr>
       <td class="mono">{{ r.value }}</td><td class="nowrap">{{ types[r.type] if r.type else "" }}</td>
       <td class="mono">{{ r.aliases | join(", ") }}</td><td>{{ r.comment }}</td>
-      <td class="actions"><form method="post" action="/settings/dictionary/{{ r.id }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form></td>
+      <td class="actions"><form method="post" action="/settings/dictionary/{{ r.id }}/delete">{% include "_csrf.html" %}<button class="danger" name="action" value="impact">Оценить удаление</button></form></td>
     </tr>
     {% else %}
     <tr><td colspan="5" class="empty">Пусто</td></tr>

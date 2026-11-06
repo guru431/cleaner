@@ -410,6 +410,18 @@ class OutMessage:
 
 
 @dataclass(frozen=True)
+class LocalContext:
+    """Original messages approved for the local client; cloud egress rejects this type."""
+    chat_id: str
+    model: str
+    messages: tuple[OutMessage, ...]
+
+
+def local_context(chat_id: str, model: str, messages: list[dict]) -> LocalContext:
+    return LocalContext(chat_id, model, tuple(OutMessage(m["role"], m["content"]) for m in messages))
+
+
+@dataclass(frozen=True)
 class OutgoingContext:
     """Всё, что уходит провайдеру. Создаётся только в этом модуле (SEC-1): у egress другого входа нет."""
 
@@ -418,13 +430,14 @@ class OutgoingContext:
     model: str
     system: str
     messages: tuple[OutMessage, ...]
+    connection_binding: str = ""
 
     def texts(self) -> list[str]:
         return [self.system, *(message.text for message in self.messages)]
 
     def digest(self) -> str:
         """Отпечаток показанного на экране подтверждения: отправляется только он (FR-8.4)."""
-        payload = [self.provider_id, self.model, self.system, [[m.role, m.text] for m in self.messages]]
+        payload = [self.provider_id, self.model, self.system, [[m.role, m.text] for m in self.messages], self.connection_binding]
         return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -519,6 +532,8 @@ class AgentOutgoing:
     headers: tuple[tuple[str, str], ...] = field(repr=False)        # бывает токен подписки агента
     body: bytes
     checked: tuple[str, ...]
+    protocol: str = ""
+    frozen: tuple[str, ...] = ()
 
 
 def checked_leaks(checked: list[str] | tuple[str, ...], state: ChatState, settings: Settings) -> list[Leak]:
@@ -530,6 +545,7 @@ def checked_leaks(checked: list[str] | tuple[str, ...], state: ChatState, settin
 def build_agent_outgoing(
     state: ChatState, settings: Settings, *, chat_id: str, provider_id: str, path: str, query: str,
     headers: Mapping[str, str], allowed: frozenset[str], prefixes: tuple[str, ...] = (), body: dict, checked: list[str],
+    protocol: str = "", frozen: tuple[str, ...] = (),
 ) -> tuple[AgentOutgoing, list[Leak]]:
     """Заголовки агента — только из списка протокола (allowed) и с его началами имён (prefixes); остальные отбрасываются,
     ключи агента и X-Cleaner-Key тоже. Значение не из ASCII заголовком HTTP не отправить — такой заголовок отбрасывается,
@@ -541,7 +557,10 @@ def build_agent_outgoing(
     )
     raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     _, transport = agent_transport(query, kept, path)
-    out = AgentOutgoing(chat_id, provider_id, path, query, kept, raw, (*checked, *transport))
+    if protocol:
+        from cleaner.core.agent.coverage import checked as body_checked
+        checked = [*checked, *body_checked(body, protocol, frozen)]
+    out = AgentOutgoing(chat_id, provider_id, path, query, kept, raw, (*checked, *transport), protocol, frozen)
     return out, checked_leaks(out.checked, state, settings)
 
 

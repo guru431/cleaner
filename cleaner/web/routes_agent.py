@@ -168,7 +168,7 @@ def _model_names(request: Request, caller: ApiCaller) -> list[str]:
     provider = repo_of(request).provider(provider_id) if kind == "provider" else None
     if provider is None:
         raise AgentRefused(403, "permission_error", "Cleaner: у ключа нет доступа к модели — он только для /api/v1")
-    return list(caller.key.models or provider.models)
+    return list(provider.allowed_models(caller.key.models))
 
 
 @router.get("/v1/models")

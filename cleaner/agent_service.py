@@ -266,8 +266,8 @@ class AgentService:
                 call, 400, "invalid_request_error", "Cleaner: подключение ключа удалено или выключено", "connection_gone",
             )
         model = call.body.get("model")
-        allowed = call.key.models or provider.models
-        if allowed and model not in allowed:
+        allowed = provider.allowed_models(call.key.models)
+        if model not in allowed:
             raise self._refuse(call, 400, "invalid_request_error", "Cleaner: эта модель ключу не разрешена", "model")
         if provider.protocol != proto.provider_protocol:
             raise self._refuse(
@@ -429,12 +429,20 @@ class AgentService:
         settings: Settings, layers: pipeline.Layers,
     ) -> tuple[_Prepared, list[LedgerEntry]]:
         secret = self.repo.chat_secret(chat_id)
+        from cleaner.core.agent import coverage
+        try:
+            coverage.validate(call.body)
+        except ValueError:
+            raise self._refuse(call, 400, "invalid_request_error", "Cleaner: неверный cache_control", "cache_control", chat_id=chat_id) from None
         units = proto.units(call.body)
         digests = {unit.path: ledger.block_digest(secret, proto.name, unit.role, unit.kind, unit.node) for unit in units}
         groups: dict[str, list[walk.Unit]] = {"in": [], "out": []}
         for unit in units:
-            if unit.kind != "opaque":       # подписанные рассуждения и блоки провайдера — как есть (7.2.3)
-                groups["out" if proto.is_model_block(unit) else "in"].append(unit)
+            try:
+                coverage.validate_opaque(unit)
+            except ValueError:
+                raise self._refuse(call, 400, "invalid_request_error", "Cleaner: неверный непрозрачный блок", "opaque", chat_id=chat_id) from None
+            groups["out" if proto.is_model_block(unit) or unit.kind == "opaque" and unit.role == "assistant" else "in"].append(unit)
         known = {
             direction: self.repo.ledger_get(chat_id, conv_id, direction, [digests[u.path] for u in group])
             for direction, group in groups.items()
@@ -463,7 +471,10 @@ class AgentService:
             for direction, unit in fresh:
                 node, withheld, counts = self._new(proto, unit, direction, state, settings, layers)
                 replaced[unit.path] = node
-                checked += walk.checked_strings(unit.kind, node)
+                # Opaque Responses items may contain a separately cleaned summary. Inspect their final
+                # rebuilt representation in coverage.checked, after all child replacements are applied.
+                if unit.kind != "opaque":
+                    checked += walk.checked_strings(unit.kind, node)
                 # The unfamiliar envelope name is outside unit.node. Check it for new units, while a frozen
                 # unit (including its original field name) retains the conversation's existing exception.
                 if unit.kind == "other" and isinstance(unit.path[-1], str):
@@ -475,12 +486,20 @@ class AgentService:
                 result.replaced.update(counts)
                 if withheld:
                     result.withheld[withheld] += 1
-            body = proto.add_instruction(proto.rebuild(call.body, replaced), pipeline.system_prompt(state.label_style))
+            body = proto.rebuild(call.body, replaced)
+            frozen = [coverage.identity(unit) for unit in proto.units(body) if unit.path in repeated]
+            instruction = pipeline.system_prompt(state.label_style)
+            body = proto.add_instruction(body, instruction)
+            for unit in proto.units(body):
+                if unit.kind == "text" and isinstance(unit.node, dict) and unit.node.get("text") == instruction:
+                    frozen.append(coverage.identity(unit))
+                elif proto.name == "anthropic" and unit.path == ("system",) and unit.path in repeated:
+                    frozen.append(coverage.identity(unit))
             try:
                 out, leaks = pipeline.build_agent_outgoing(
                     state, settings, chat_id=chat_id, provider_id=access.id, path=call.path, query=call.query,
                     headers={**call.headers, **session}, allowed=access.headers | session.keys(), prefixes=proto.header_prefixes,
-                    body=body, checked=checked,
+                    body=body, checked=checked, protocol=proto.name, frozen=tuple(frozen),
                 )
             except ValueError:
                 raise self._refuse(call, 400, "invalid_request_error", "Cleaner: неподдерживаемые параметры URL", "query", chat_id=chat_id) from None

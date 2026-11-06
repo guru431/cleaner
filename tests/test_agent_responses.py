@@ -136,7 +136,7 @@ class Gateway:
     def __init__(self, repo, engines, clock, stub):
         self.repo, self.stub = repo, stub
         self.user_id = repo.create_user("ivan", "hash", "user")
-        provider = repo.add_provider(Provider("", "Заглушка", "responses", f"{stub.url}/v1", "bearer", STUB_KEY, ()))
+        provider = repo.add_provider(Provider("", "Заглушка", "responses", f"{stub.url}/v1", "bearer", STUB_KEY, ("m-1", "gpt-5.5", "gpt-6.1-sol")))
         self.key_id = repo.add_api_key(self.user_id, "агент", "h1", "aaaa", upstream=f"provider:{provider}", models=())
         self.service = AgentService(repo, engines, clock)
 

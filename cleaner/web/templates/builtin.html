@@ -12,7 +12,7 @@
       <input type="hidden" name="back" value="builtin">
       <input name="value" placeholder="Домен, имя узла или учётная запись" required aria-label="Значение">
       <input name="comment" placeholder="Комментарий" aria-label="Комментарий">
-      <button class="primary">Добавить</button>
+      <button class="primary" name="action" value="impact">Оценить добавление</button>
     </form>
     <p class="muted">Добавлено вами: {% for r in never %}<span class="mono">{{ r.value }}</span>{% if not loop.last %}, {% endif %}{% else %}ничего{% endfor %}</p>
   </div>
