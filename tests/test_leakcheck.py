@@ -151,6 +151,26 @@ def test_known_email_written_with_an_escaped_at_is_a_leak(state, settings, text,
     assert leaked(text, state, settings) == ([(found, email.id)] if found else [])
 
 
+@pytest.mark.parametrize("known, text, found", [
+    ("почта ivanov@contoso.ru", "GET /?email=ivanov%40contoso.ru HTTP/1.1", "ivanov%40contoso.ru"),
+    ("ссылка ?email=ivanov%40contoso.ru", "почта Ivanov@contoso.ru.", "Ivanov@contoso.ru"),
+], ids=["encoded_text", "encoded_form"])
+def test_known_email_written_with_an_encoded_at_is_a_leak(state, settings, known, text, found):
+    """«%40» в адресе и журнале веб-сервера — «@»: известный ящик в другой записи — утечка."""
+    sanitize(state, known, settings)
+    [email] = state.entities.values()
+    assert leaked(text, state, settings) == [(found, email.id)]
+
+
+def test_value_of_an_entity_and_the_dictionary_is_one_leak(state):
+    """Значение, которое нашли и написание сущности, и словарь, — одна утечка на месте: счётчик LeakDetected не
+    удваивается. Находка сущности важнее: по ней видно, чьё значение ушло."""
+    add(state, "org", T.ORG, "contoso")
+    always = Settings(always=(DictEntry(T.ORG, "contoso"),))
+    text = "письмо от contoso и contoso"
+    assert leaked(text, state, always) == [("contoso", "org"), ("contoso", "org")] == fresh(text, state, always)
+
+
 def test_replacement_and_other_addresses_are_not_leaks(state, settings):
     """Подмена в другой записи — подмена, как на шаге 1, даже если совпала с настоящим адресом другой сущности
     (позже в чате появился адрес, равный выданной подмене); адрес не из чата, адрес внутри цепочки через двоеточие

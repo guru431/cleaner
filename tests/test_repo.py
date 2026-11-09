@@ -105,6 +105,23 @@ def test_settings_from_dictionary_patterns_and_policies(repo):
     assert kept
 
 
+def test_settings_apply_internal_suffixes_added_by_the_admin(repo):
+    """Дополнения внутренних суффиксов действуют в любом пути, который берёт настройки из базы (cleaner eval, verify и
+    другие команды), а не только в веб-службе после старта."""
+    from cleaner.core.entities import hostmap
+
+    repo.set_setting("internal_suffixes.extra", '["lcl"]')
+    try:
+        assert not hostmap.has_known_suffix("srv01.romashka.lcl")
+        repo.settings()
+        assert hostmap.has_known_suffix("srv01.romashka.lcl")
+        repo.set_setting("internal_suffixes.extra", "[]")
+        repo.settings()
+        assert not hostmap.has_known_suffix("srv01.romashka.lcl")
+    finally:
+        hostmap.set_extra_suffixes(())
+
+
 def test_import_writes_all_values_at_once(repo):
     assert repo.add_dictionary_many("always", ["srv1.corp.example", "srv2.corp.example"], T.HOST) == 2
     assert sorted((r.list, r.type, r.value) for r in repo.dictionary()) == [

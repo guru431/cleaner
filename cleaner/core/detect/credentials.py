@@ -10,7 +10,10 @@ import bisect
 import re
 
 from cleaner.core.detect.base import DetectContext
-from cleaner.core.detect.secrets import _PROSE_WORDS, _TRAILING, _looks_like_password
+from cleaner.core.detect.rules import _URL_SERVICE_LOGINS
+from cleaner.core.detect.secrets import (
+    _CURL, _NET_USER, _PROSE_WORDS, _TRAILING, _looks_like_password, _net_user_password, _value as _secret_value,
+)
 from cleaner.core.types import EntityType, Span
 
 name = "secrets"
@@ -227,5 +230,24 @@ def _pairs(text: str, ctx: DetectContext) -> list[Span]:
     return spans
 
 
+def _commands(text: str, ctx: DetectContext) -> list[Span]:
+    """Имя пары в «curl -u имя:пароль» и «net user имя пароль» — там, где слой секретов скрыл пароль. Служебные входы
+    адреса («git», «x-access-token», rules._URL_SERVICE_LOGINS) человека не выдают, как и в «https://git@…»."""
+    spans = []
+    for pattern, password, groups in (
+        (_CURL, lambda m: _secret_value(m, minimum=2), ("dlogin", "slogin", "blogin")),
+        (_NET_USER, _net_user_password, ("qlogin", "login")),
+    ):
+        for m in pattern.finditer(text):
+            group = next(group for group in groups if m.group(group) is not None)
+            login = m.group(group)
+            if password(m) and login.lower() not in _URL_SERVICE_LOGINS and _login(login, ctx, english=False):
+                spans.append(_account(*m.span(group), text))
+    return spans
+
+
 def detect(text: str, ctx: DetectContext) -> list[Span]:
-    return _keyed(text, ctx) + _after_login_word(text, ctx) + _windows_event(text, ctx) + _sshd(text, ctx) + _pairs(text, ctx)
+    return (
+        _keyed(text, ctx) + _after_login_word(text, ctx) + _windows_event(text, ctx) + _sshd(text, ctx)
+        + _pairs(text, ctx) + _commands(text, ctx)
+    )

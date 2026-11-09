@@ -15,6 +15,7 @@ DICTIONARY = (DictEntry(T.TERM, "Заря-Восток", ("Zarya-Vostok",)),)
 # Тексты проверки 28.10.2026: на нынешнем ядре разные написания восстанавливались первым встреченным.
 SPELLINGS = {
     "email": "a ivan.petrov@contoso.ru b Ivan.Petrov@Contoso.RU",
+    "email_encoded": "a ivan.petrov@contoso.ru b GET /?to=ivan.petrov%40contoso.ru c ivan.petrov%40Contoso.ru",
     "phone": "a +7 916 123-45-67 b 89161234567 c +7(916)1234567",
     "ipv4": "a 10.1.2.5 b 010.001.002.005",
     "ipv6": "a 2a00:1450:4010::65 b 2A00:1450:4010:0:0:0:0:65",

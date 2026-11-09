@@ -14,8 +14,10 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from cleaner.clock import Clock
+from cleaner.core import cache
 from cleaner.core.agent import ledger
 from cleaner.core.detect import dictionary
+from cleaner.core.entities import hostmap
 from cleaner.core.types import ChatState, CustomPattern, EntityType, Policy, Settings, default_policies
 from cleaner.storage import crypto
 from cleaner.storage.codec import state_from_json, state_to_json
@@ -32,6 +34,7 @@ class CheckpointBusy(Exception):
 
 
 _CHECKPOINT_ATTEMPTS = 3            # каждая попытка сама ждёт читателей до busy_timeout (5 с)
+SUFFIXES_KEY = "internal_suffixes.extra"        # внутренние суффиксы администратора (FR-10.5), список JSON
 
 
 # Слои 4 и 5 по умолчанию для чатов без явного решения (FR-3.8). Слой 4 включён по умолчанию;
@@ -1177,7 +1180,10 @@ class Repository:
         self._run("INSERT OR REPLACE INTO policies(type, policy) VALUES (?, ?)", type_.value, policy.value)
 
     def settings(self) -> Settings:
-        """Настройки ядра. Значения «никогда не скрывать» приводятся к нижнему регистру здесь, на границе."""
+        """Настройки ядра. Значения «никогда не скрывать» приводятся к нижнему регистру здесь, на границе. Здесь же
+        применяются внутренние суффиксы, добавленные администратором (_apply_suffixes): их читает любой путь, который берёт
+        настройки из базы, — веб-служба, шлюз и команды (eval, verify)."""
+        self._apply_suffixes()
         rows = self.dictionary()
         always = tuple(
             dictionary.entry(r.type, r.value, r.aliases, r.inflect) for r in rows if r.list == "always" and r.type is not None
@@ -1185,6 +1191,13 @@ class Repository:
         never = frozenset(v.strip().lower() for r in rows if r.list == "never" for v in (r.value, *r.aliases) if v.strip())
         patterns = tuple(CustomPattern(p.name, p.regex, p.type) for p in self.patterns() if p.enabled)
         return Settings(always=always, never=never, patterns=patterns, policies=self.policies())
+
+    def _apply_suffixes(self) -> None:
+        """Внутренние суффиксы из базы (ключ — routes_settings.SUFFIXES_KEY) — для всей службы, как встроенный список.
+        Строковые кэши сбрасываются, только если список изменился: ответы о доменных именах меток зависят от него."""
+        raw = self.setting(SUFFIXES_KEY)
+        if hostmap.set_extra_suffixes(tuple(json.loads(raw)) if raw else ()):
+            cache.clear_strings()
 
     # --- журнал и копия --------------------------------------------------------
 

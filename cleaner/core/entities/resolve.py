@@ -28,6 +28,7 @@ _NAME = re.compile(r"[\w-]+(?:\.[\w-]+)*")
 # Подмена имени в тексте. Номера длиннее двадцати цифр счётчик не выдаст, и дальше цепочка цифр не берётся: все её
 # начала собирались бы квадратичное время.
 _ISSUED_NAME = re.compile(r"(host|sub|domain)-([0-9]{1,20})")
+_ENCODED_MAIL = re.compile(r"%40|%2b")      # в адресе, приведённом к нижнему регистру
 
 
 @dataclass(frozen=True)
@@ -46,10 +47,15 @@ class ResolvedSpan:
 def canonical_key(type_: EntityType, value: str) -> str:
     """Ключ, по которому разные написания одного значения сводятся к одной сущности."""
     if type_ is T.EMAIL:
-        return value.lower()
+        # «%40» и «%2B» в ссылке и журнале веб-сервера — «@» и «+» (слой 1): «ivanov%40contoso.ru» — тот же ящик.
+        return _ENCODED_MAIL.sub(lambda m: "@" if m.group() == "%40" else "+", value.lower())
     if type_ is T.PHONE:
+        # «8 …» и десять цифр без кода страны («903 111-22-33») — российский номер, как «+7 …» (у поиска по цифрам —
+        # последние десять, match.digit_keys). Номер с «+» и другим кодом страны остаётся своими цифрами.
         digits = re.sub(r"\D", "", value)
-        return "7" + digits[1:] if len(digits) == 11 and digits[0] == "8" else digits
+        if len(digits) == 11 and digits[0] == "8":
+            return "7" + digits[1:]
+        return "7" + digits if len(digits) == 10 and not value.lstrip().startswith("+") else digits
     if type_ in _DIGIT_TYPES:
         return re.sub(r"\D", "", value)
     if type_ is T.BANK_ACCOUNT:
@@ -66,6 +72,12 @@ def canonical_key(type_: EntityType, value: str) -> str:
     if type_ is T.ADDRESS:
         return " ".join(re.sub(r"[^\w\s]", " ", normalize(value)).split())
     return normalize(value)
+
+
+def _legacy(type_: EntityType, key: str) -> str | None:
+    """Ключ, которым то же значение записано в чатах до 09.11.2026: у телефона из десяти цифр без кода страны ключ был без
+    «7». Сохранённые ключи не переписываются — новый ключ сравнивается и с прежним."""
+    return key[1:] if type_ is T.PHONE and len(key) == 11 and key[0] == "7" else None
 
 
 def _ip_text(value: str) -> str:
@@ -106,9 +118,12 @@ class Resolver:
         # же значения другой, и сущность получила бы новую метку. Поэтому её написание с невидимыми знаками ведёт к
         # ней и по сегодняшнему ключу: так находится и сущность, в которую значение влито объединением, — написания
         # влитой переходят к ней. Ключ, уже занятый другой сущностью, остаётся за той.
+        # Так же — адрес с «%40» (до 09.11.2026 его ключ был с «%40», canonical_key): ключи сохранённых чатов не
+        # переписываются, сравнение идёт по сегодняшнему ключу написаний. Телефон находит _legacy.
         for entity in () if self.written else state.entities.values():
+            encoded = entity.type is T.EMAIL
             for form in entity.forms:
-                if has_invisible(form):
+                if has_invisible(form) or (encoded and "%" in form):
                     self.index.setdefault((entity.type, canonical_key(entity.type, form)), entity)
         self.alias: dict[tuple[EntityType, str], str] = {}
         for entry in () if self.written else settings.always:
@@ -181,14 +196,21 @@ class Resolver:
     def _entity(
         self, type_: EntityType, key: str, value: str, origin: str, searchable: bool = True, forms: tuple[str, ...] = (),
     ) -> Entity:
-        merged_into = self.state.key_alias.get(f"{type_.value}:{key}")
-        entity = self.state.entities.get(merged_into) if merged_into else self.index.get((type_, key))
+        entity = self._known(type_, key)
+        legacy = _legacy(type_, key) if entity is None and not self.written else None
+        if legacy is not None:
+            entity = self._known(type_, legacy)
         if entity is None:
             entity = Entity(uuid4().hex, type_, self._next(type_), key, value, origin)
             self.state.entities[entity.id] = entity
             self.index[(type_, key)] = entity
         self._remember(entity, value, searchable, forms)
         return entity
+
+    def _known(self, type_: EntityType, key: str) -> Entity | None:
+        """Сущность чата с этим ключом — или та, в которую её влили объединением."""
+        merged_into = self.state.key_alias.get(f"{type_.value}:{key}")
+        return self.state.entities.get(merged_into) if merged_into else self.index.get((type_, key))
 
     def _remember(self, entity: Entity, value: str, searchable: bool, forms: tuple[str, ...]) -> None:
         """Искомые написания: значение — или написания находок, слитых в него (MergedSpan.forms). Написание находки, уже

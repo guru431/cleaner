@@ -28,7 +28,15 @@ _FORMAT_OR_STRESS = regex.compile(r"[\p{Cf}" + _STRESS + "]+")
 # «\.» — точка: имя в регулярном выражении, шаблоне grep, настройке nginx («^srv01\.contoso\.ru$») — то же имя, и «\\.» —
 # то же выражение внутри строки JSON, Java, C# (hostmap.dotted). Три обратные косые и больше точку не экранируют. «\@» —
 # «@» адреса в строке Perl и PHP и в выражении Perl («ivanov\@contoso.ru», слой 1); «\\@» — обратная косая и массив Perl.
-_ESCAPED = re.compile(r"(?<!\\)(?:\\{1,2}(?=\.)|\\(?=@))")
+# «%40» и «%2b» — «@» и «+» адреса в ссылке и журнале веб-сервера («?email=ivanov%40contoso.ru», слой 1; текст уже в нижнем
+# регистре): группа encoded, знак накрывает все три.
+_ESCAPED = re.compile(r"(?<!\\)(?:\\{1,2}(?=\.)|\\(?=@))|(?P<encoded>%40|%2b)")
+_DECODED = {"%40": "@", "%2b": "+"}
+
+
+def _unescape(needle: str) -> str:
+    """Написание в виде для сравнения без экранирований _ESCAPED."""
+    return _ESCAPED.sub(lambda m: _DECODED.get(m.group("encoded"), ""), needle)
 
 
 def _lower(text: str) -> str:
@@ -142,13 +150,19 @@ def has_invisible(text: str) -> bool:
 
 
 def _unescaped(lowered: str, starts: list[int], ends: list[int]) -> tuple[str, list[int], list[int]]:
-    """Нормализованный текст, в котором «\\.» и «\\\\.» — точка, а «\\@» — «@» (_ESCAPED): обратные косые выпадают, знак
-    накрывает и их."""
+    """Нормализованный текст, в котором «\\.» и «\\\\.» — точка, «\\@» — «@», «%40» и «%2b» — «@» и «+» (_ESCAPED):
+    обратные косые выпадают, знак накрывает и их, а раскодированный — всю свою запись."""
     pieces: list[str] = []
     kept_starts: list[int] = []
     kept_ends: list[int] = []
     position = 0
     for m in _ESCAPED.finditer(lowered):
+        if m.group("encoded"):
+            pieces += [lowered[position:m.start()], _DECODED[m.group("encoded")]]
+            kept_starts += [*starts[position:m.start()], starts[m.start()]]
+            kept_ends += [*ends[position:m.start()], ends[m.end() - 1]]
+            position = m.end()
+            continue
         slash, sign = m.start(), m.end()
         pieces += [lowered[position:slash], lowered[sign]]
         kept_starts += [*starts[position:slash], starts[slash]]
@@ -189,7 +203,7 @@ def _needle(form: str) -> str:
         return _NEEDLES[form]
     except KeyError:
         pass
-    needle = _ESCAPED.sub("", _normalize(form)[0])
+    needle = _unescape(_normalize(form)[0])
     if len(_NEEDLES) >= _NEEDLES_MAX:
         _NEEDLES.clear()
     _NEEDLES[form] = needle
@@ -398,7 +412,7 @@ class Digits(Generic[T]):
 
 def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int, int, T]]:
     """Все вхождения написаний без учёта регистра, «ё/е», вида пробелов и формы записи букв; «\\.» и «\\\\.» — точка,
-    «\\@» — «@».
+    «\\@» и «%40» — «@», «%2B» — «+».
 
     forms — тройки (написание, режим границ, полезная нагрузка). Режимы:
     strict — рядом нет букв, цифр, «_» и «-»; letters — рядом нет букв; none — где угодно.
@@ -414,7 +428,7 @@ def _find(
     if not (index or long or loose):
         return []
     lowered, starts, ends = _normalize(text)
-    if "\\." in lowered or "\\@" in lowered:
+    if "\\." in lowered or "\\@" in lowered or "%40" in lowered or "%2b" in lowered:
         lowered, starts, ends = _unescaped(lowered, starts, ends)
     hits: list[tuple[int, int, T]] = []
     for token in _TOKEN.finditer(lowered):

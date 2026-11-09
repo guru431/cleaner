@@ -140,6 +140,14 @@ _CLI = re.compile(
 # первое слово после пути, кроме параметров и «*» (запрос пароля). «mysql -pпароль» — только слитно:
 # «-p имя» — запрос пароля и имя базы, «-P» — порт; не дальше двадцати слов и не за «|», «;», «&».
 # «sshpass -p пароль»; ключ приложения в web.config — <add key="…Password" value="…"/>.
+# «curl -u имя:пароль» (--user, у прокси -U и --proxy-user) — пароль после первого «:»; без «:» curl спросит пароль. Имя
+# (группы dlogin, slogin, blogin) — учётная запись пары (credentials).
+_CURL = re.compile(
+    r"c(?<![\w-]c)url(?:\.exe)?(?:[ \t]+(?!-[uU]|--(?:proxy-)?user)[^\s|;&]++){0,20}?"
+    r"[ \t]+(?:-[uU][ \t]*+|--(?:proxy-)?user(?:[ \t]++|=))"
+    rf"""(?:"(?P<dlogin>[^":\r\n]*+):(?P<dq>[^"\r\n]+)"|'(?P<slogin>[^':\r\n]*+):(?P<sq>[^'\r\n]+)'"""
+    rf"""|(?P<blogin>[^\s:"']*+):{_BARE})"""
+)
 _COMMANDS = (
     re.compile(
         r"n(?<![\w-]n)et[ \t]+use[ \t]+(?:(?:[a-z]:|\*)[ \t]+)?\\\\[^\s\\]+\\\S+(?:[ \t]+/\S+)*[ \t]+(?![/*])"
@@ -148,12 +156,7 @@ _COMMANDS = (
     ),
     re.compile(r"m(?<![\w-]m)(?:ysql|ariadb)[\w.-]*(?:[ \t]+(?!-p)[^\s|;&]++){0,20}?[ \t]+-p" + _VALUE),
     re.compile(r"s(?<![\w-]s)shpass[ \t]+-p[ \t]*" + _VALUE),
-    # «curl -u имя:пароль» (--user, у прокси -U и --proxy-user) — пароль после первого «:»; без «:» curl спросит пароль.
-    re.compile(
-        r"c(?<![\w-]c)url(?:\.exe)?(?:[ \t]+(?!-[uU]|--(?:proxy-)?user)[^\s|;&]++){0,20}?"
-        r"[ \t]+(?:-[uU][ \t]*+|--(?:proxy-)?user(?:[ \t]++|=))"
-        rf"""(?:"[^":\r\n]*+:(?P<dq>[^"\r\n]+)"|'[^':\r\n]*+:(?P<sq>[^'\r\n]+)'|[^\s:"']*+:{_BARE})"""
-    ),
+    _CURL,
     # «sqlcmd -P пароль» и bcp, слитно или через пробел («-p» у sqlcmd — статистика); следующий флаг — не пароль.
     re.compile(
         r"[sSbB](?<![\w-][sSbB])(?i:(?<=[sS])qlcmd|(?<=[bB])cp)(?:\.exe)?(?:[ \t]+(?!-P)[^\s|;&]++){0,30}?"
@@ -179,9 +182,11 @@ _COMMANDS = (
     ),
 )
 # «net user имя пароль» — второе слово после «user», кроме параметров и «*» (запрос пароля). Флага перед паролем нет,
-# поэтому слово прозы («net user ivanov покажет сведения») — не пароль (_prose_word).
+# поэтому слово прозы («net user ivanov покажет сведения») — не пароль (_net_user_password). Имя (группы qlogin, login) —
+# учётная запись пары (credentials).
 _NET_USER = re.compile(
-    r"n(?<![\w-]n)et[ \t]+user[ \t]+(?:\"[^\"\r\n]+\"|(?![/*\"])\S++)[ \t]+(?![/*])" + _VALUE, re.IGNORECASE
+    r"n(?<![\w-]n)et[ \t]+user[ \t]+(?:\"(?P<qlogin>[^\"\r\n]+)\"|(?P<login>(?![/*\"])\S++))[ \t]+(?![/*])" + _VALUE,
+    re.IGNORECASE,
 )
 # Поле «auth» файла config.json Docker — base64 от «имя:пароль»; значение без «:» после раскодирования — не оно.
 _DOCKER_AUTH = re.compile(r'"auth"[ \t]*:[ \t]*"(?P<dq>[A-Za-z0-9+/]{4,}={0,2})"')
@@ -662,6 +667,14 @@ def _not_a_value(key: str, value: str) -> bool:
     )
 
 
+def _net_user_password(m: re.Match[str]) -> tuple[int, int] | None:
+    """Границы пароля в «net user имя пароль» (_NET_USER) или None. Русское слово или слово прозы без кавычек —
+    продолжение фразы, а не пароль: цена — такой пароль открыт."""
+    bounds = _value(m, minimum=2)
+    word = m.string[bounds[0]:bounds[1]].rstrip(_TRAILING).lower() if bounds and m.group("bare") is not None else ""
+    return bounds if bounds and not (_RUSSIAN_WORD.fullmatch(word) or word in _PROSE_WORDS) else None
+
+
 def _docker_auth(value: str) -> bool:
     """Значение поля «auth» — base64 от «имя:пароль» с непустым паролем."""
     try:
@@ -726,10 +739,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             if bounds and not (pattern in (_AUTH, _BEARER) and _WORDS.fullmatch(text, *bounds)):
                 spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _NET_USER.finditer(text):
-        bounds = _value(m, minimum=2)
-        # Русское слово или слово прозы без кавычек — продолжение фразы, а не пароль: цена — такой пароль открыт.
-        word = text[bounds[0]:bounds[1]].rstrip(_TRAILING).lower() if bounds and m.group("bare") is not None else ""
-        if bounds and not (_RUSSIAN_WORD.fullmatch(word) or word in _PROSE_WORDS):
+        if bounds := _net_user_password(m):
             spans.append(Span(*bounds, EntityType.SECRET, name))
     for m in _DOCKER_AUTH.finditer(text):
         if _docker_auth(m.group("dq")):

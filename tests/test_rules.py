@@ -550,3 +550,22 @@ def test_inn_next_to_a_driving_licence_stays_an_inn():
     result = found("Водительское удостоверение 5023 987654, ИНН 7707083893")
     assert {(T.PASSPORT, "5023 987654"), (T.INN, "7707083893")} <= result
     assert (T.PASSPORT, "7707083893") not in result
+    assert T.PHONE not in types("Водительское удостоверение 5023 987654, ИНН 7707083893")
+
+
+@pytest.mark.parametrize("text", [
+    "Водительское удостоверение 495 123-45-67", "пользователь 495 123-45-67", "у пользователя 4951234567",
+    "автомобиль 495 123-45-67", "телевизор 495 123-45-67", "тело 495 123-45-67",
+])
+def test_phone_words_inside_other_words_are_not_phone_context(text):
+    """«тел» внутри «водитель», «пользователь», «моб» внутри «автомобиль» — не слова о телефоне."""
+    assert T.PHONE not in types(text)
+
+
+@pytest.mark.parametrize("text", [
+    "тел. 495 123-45-67", "Тел: 4951234567", "тел 495 123-45-67", "телефон 495 123-45-67", "телефона: 495 123-45-67",
+    "моб. 916 123-45-67", "мобильный 916 123-45-67", "позвоните 495 123-45-67", "phone: 495 123 45 67",
+    "Telephone 495 123 45 67", "номер 495 123-45-67", "тел./факс 495 123-45-67",
+])
+def test_phone_words_as_words_are_phone_context(text):
+    assert T.PHONE in types(text)
