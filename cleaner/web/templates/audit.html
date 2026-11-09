@@ -9,6 +9,7 @@
   <label>с <input type="date" name="since" value="{{ since }}"></label>
   <label>по <input type="date" name="until" value="{{ until }}"></label>
   <button>Показать</button>
+  <button formaction="/settings/audit/export" title="Все строки с этим отбором, без предела страницы; выгрузка записывается в журнал">Выгрузить CSV</button>
 </form>
 <section class="panel">
   <table class="grid">

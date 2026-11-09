@@ -19,6 +19,14 @@ from cleaner.storage.repo import Provider, Repository
 from cleaner.web import auth
 
 
+@pytest.fixture(autouse=True)
+def guards(monkeypatch):
+    """Сторож выхода в сеть ставит перехватчик аудита, которого не снять: в процессе тестов — только запись вызова."""
+    calls = []
+    monkeypatch.setattr(cli, "_guard_network", calls.append)
+    return calls
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     """Каталог установки: cleaner.toml и файл с паролем; быстрый Argon2; ключа в окружении нет."""
@@ -91,6 +99,39 @@ def test_users_key_export_import_and_backup(home, monkeypatch, clock):
     assert main(["backup", str(home / "copy.db")]) == 1                           # существующий файл не трогается
 
 
+def test_key_rotate_rewraps_the_keys_and_the_old_key_no_longer_opens_the_base(home, monkeypatch, clock):
+    """Идея «Смена главного ключа»: обёртки ключей чатов и общего ключа — новым ключом одной транзакцией, затем
+    контрольная точка WAL; содержимое читается новым ключом, прежний не открывает ни базу, ни её файлы."""
+    key = init(home)
+    database = home / "data" / "cleaner.db"
+    repo = open_repo(database, key, clock)
+    chat = repo.create_chat(repo.users()[0].id, "Вымышленный чат")
+    repo.add_dictionary("never", "вымышленное-значение")
+    old_wrap = repo.conn.execute("SELECT dek_wrapped FROM chats").fetchone()[0]
+    old_global = repo.setting("global_dek")
+    repo.conn.close()
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, crypto.encode_key(crypto.new_key()))       # не тот ключ: ничего не меняется
+    assert main(["key", "rotate", "--env-file", str(home / "new.env")]) == 1
+    assert not (home / "new.env").exists()
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    assert main(["key", "rotate", "--env-file", str(home / "new.env")]) == 0
+    name, new_key = (home / "new.env").read_text(encoding="ascii").strip().split("=", 1)
+    assert name == crypto.MASTER_KEY_ENV and new_key != key
+    fresh = open_repo(database, new_key, clock)
+    assert fresh.chat(chat).title == "Вымышленный чат"
+    assert [row.value for row in fresh.dictionary()] == ["вымышленное-значение"]
+    assert fresh.audit_events(limit=1)[0].details == {"chats": 1, "wal": "truncated", "by": "cli"}
+    fresh.conn.close()
+    stale = db.connect(database)
+    try:
+        with pytest.raises(crypto.CryptoError):
+            Repository(stale, crypto.master_key_from_env({crypto.MASTER_KEY_ENV: key}), clock)
+    finally:
+        stale.close()
+    raw = b"".join(path.read_bytes() for path in (home / "data").glob("cleaner.db*"))
+    assert old_wrap not in raw and old_global.encode("ascii") not in raw
+
+
 def test_apikey_add_list_disable(home, monkeypatch, capsys, clock):
     """FR-13.1: ключ выпускается командой для проектов, которые заводятся сценарием; печатается один раз."""
     key = init(home)
@@ -160,7 +201,7 @@ def test_apikey_add_gateway_key(home, monkeypatch, capsys, clock):
     repo.conn.close()
 
 
-def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monkeypatch):
+def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monkeypatch, guards):
     for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY", "DO_NOT_TRACK", "TOKENIZERS_PARALLELISM"):
         monkeypatch.setenv(name, "")
     monkeypatch.setenv(crypto.MASTER_KEY_ENV, init(home))
@@ -173,9 +214,44 @@ def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monk
     assert main(["serve"]) == 0
     [kwargs] = calls
     assert (kwargs["host"], kwargs["ssl_certfile"], kwargs["access_log"]) == ("10.20.0.10", "c.pem", False)
+    assert len(guards) == 1                                  # сторож выхода в сеть — до запуска службы
     assert os.environ["HF_HUB_OFFLINE"] == "1" and os.environ["TRANSFORMERS_OFFLINE"] == "1"
     # Обзор плана 2+4, m-7: предупреждения Docling бывают с текстом ячеек документа — в журнал службы они не идут.
     assert all(logging.getLogger(name).level == logging.CRITICAL for name in ("docling", "transformers", "gliner"))
+
+
+def test_serve_records_the_code_fingerprint_and_guards_the_settings_hosts(home, monkeypatch, guards, offline_env, capsys, clock):
+    """Идеи «Видимый отпечаток установленного кода» и «Сторож выхода в сеть»: запуск — событие журнала и строка
+    журнала службы с отпечатком; сторож разрешает шлюз, включённые подключения и подписки действующих ключей."""
+    from cleaner import version
+
+    key = init(home)
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: None)
+    capsys.readouterr()
+    assert main(["serve"]) == 0
+    build = version.current()
+    assert f"Код: {build.short} от {build.date}" in capsys.readouterr().err
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    try:
+        [started] = repo.audit_events("service_started")
+        assert started.details == {"code": build.digest, "date": build.date}
+        on = repo.add_provider(Provider("", "Вкл", "openai", "https://llm.example/v1", "bearer", "sk-1", ("m",)))
+        repo.add_provider(Provider("", "Выкл", "openai", "https://off.example/v1", "bearer", "sk-2", ("m",), enabled=False))
+        owner = repo.users()[0].id
+        repo.add_api_key(owner, "агент", auth.token_hash("ck_a"), "ck_a", "claude-subscription")
+        repo.disable_api_key(repo.add_api_key(owner, "старый", auth.token_hash("ck_b"), "ck_b", "chatgpt-subscription"))
+        assert on and sorted(cli._egress_targets(repo)) == ["127.0.0.1", "api.anthropic.com", "llm.example"]
+    finally:
+        repo.conn.close()
+
+
+def test_verify_prints_the_code_fingerprint_first(capsys):
+    from cleaner import version
+
+    assert main(["verify"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == version.current().line() and lines[-1].startswith("OK:")
 
 
 @pytest.fixture

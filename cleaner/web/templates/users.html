@@ -2,7 +2,7 @@
 {% block title %}Пользователи — Cleaner{% endblock %}
 {% block content %}
 <h1>Пользователи</h1>
-<p class="lead">Смена пароля и отключение закрывают все сессии пользователя.</p>
+<p class="lead">Смена пароля и отключение закрывают все сессии пользователя. Удалить можно только отключённую учётную запись.</p>
 <section class="panel">
   <table class="grid">
     <thead><tr><th>Логин</th><th>Роль</th><th>Состояние</th><th>Новый пароль</th><th></th></tr></thead>
@@ -27,6 +27,20 @@
           <input type="hidden" name="disabled" value="{{ 'no' if u.disabled else 'yes' }}">
           <button{% if not u.disabled %} class="danger"{% endif %}>{{ "Включить" if u.disabled else "Отключить" }}</button>
         </form>
+        {% if u.disabled %}
+        <details class="menu">
+          <summary class="btn">Удалить…</summary>
+          <div class="pop">
+            <strong class="menu-group">Удаление «{{ u.login }}»</strong>
+            <form method="post" action="/settings/users/{{ u.id }}/delete">
+              {% include "_csrf.html" %}
+              <label class="field"><span>Логин для подтверждения</span><input name="confirm" autocomplete="off" required aria-label="Логин {{ u.login }} для подтверждения"></label>
+              <small class="hint">Учётная запись, её ключи доступа и все её чаты удаляются безвозвратно, вместе с таблицами замен и ключами.</small>
+              <button class="danger">Удалить вместе с чатами</button>
+            </form>
+          </div>
+        </details>
+        {% endif %}
       </td>
     </tr>
     {% endfor %}

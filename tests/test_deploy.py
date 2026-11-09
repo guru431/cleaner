@@ -255,3 +255,36 @@ def test_installer_copies_the_database_before_the_new_version_and_rollback_resto
     rollback = text[text.index("rollback() {"):text.index("trap 'rollback")]
     assert 'install -o cleaner -g cleaner -m 0600 "$DB_BACKUP" "$DATA/cleaner.db"' in rollback
     assert text.index('DB_BACKUP="$DATA/cleaner.db.bak-$STAMP"') < text.index("systemctl restart cleaner.service\ncode=")
+
+
+def test_check_compares_the_code_on_disk_with_the_code_the_service_started_with():
+    """Идея «Видимый отпечаток установленного кода»: verify печатает отпечаток первой строкой, служба — при старте;
+    шаблоны sed проверки совпадают с тем, что печатает код, а установщик сохраняет время файлов (дату отпечатка)."""
+    import re as regex_module
+
+    from cleaner import version
+
+    text = (DEPLOY / "check-cleaner.sh").read_text(encoding="utf-8")
+    build = version.current()
+    verify_line = build.line()
+    start_line = f"Cleaner: служба запущена. {build.line()}"
+    for pattern, line in (
+        (r"s/^Код: \([0-9a-f]\{12\}\) от \([0-9-]*\) .*/\1 от \2/p", verify_line),
+        (r"s/^Cleaner: служба запущена\. Код: \([0-9a-f]\{12\}\) от \([0-9-]*\) .*/\1 от \2/p", start_line),
+    ):
+        assert pattern in text
+        sed_regex = pattern[2:pattern.index("/", 2)].replace(r"\(", "(").replace(r"\)", ")").replace(r"\{12\}", "{12}")
+        assert regex_module.match(sed_regex, line), line
+    assert "cp -r --preserve=timestamps \"$SRC/cleaner\"" in (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+
+
+def test_installer_removes_database_copies_once_the_service_answers():
+    """Аудит 09.11.2026: копия базы хранит удалённые чаты вместе с обёрнутыми ключами, а главный ключ тот же (FR-1.4,
+    AC-1.10). Копия нужна только откату этого прогона: после ответа службы она и копии прежних прогонов стираются."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    answered = text.index('[[ "$code" == "200" ]] || rollback')
+    removal = text.index('shred -u -- "$DATA"/cleaner.db.bak-*')
+    assert answered < removal < text.index('log "служба отвечает:')
+    # Копий прежних прогонов больше не накапливается: нет «трёх последних» у базы.
+    copy = text[text.index("# --- копия базы"):text.index("# --- самопроверка")]
+    assert "cleaner.db.bak-*" not in copy

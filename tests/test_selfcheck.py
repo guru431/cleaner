@@ -18,4 +18,5 @@ def test_selfcheck_fails_when_a_layer_finds_nothing(monkeypatch):
 
 def test_command_line_entry_point(capsys):
     assert main(["verify"]) == 0
-    assert capsys.readouterr().out.startswith("OK")
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("Код: ") and lines[-1].startswith("OK")     # итог — последней строкой (check-cleaner.sh)

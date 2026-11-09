@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
+from cleaner import version
 from cleaner.queueing import Reservation
 from cleaner.service import ChatService
 from cleaner.storage.repo import ApiKey, Chat, Repository, Session, User
@@ -21,6 +22,10 @@ from cleaner.web import auth
 
 SESSION_COOKIE = "cleaner_session"
 IDLE = timedelta(hours=8)
+# Абсолютный срок сессии от входа. Опрос открытой страницы (задания, ответ облака) обновляет простой, и без предела
+# сессия, как и украденная cookie, жила бы вечно. 12 часов — рабочий день с запасом: днём сессию это не обрывает,
+# а до следующего утра она не доживёт и с открытой вкладкой.
+MAX_AGE = timedelta(hours=12)
 # Предел тела запроса (app.BodyLimit) и одного поля формы: 500 000 знаков даже четырёхбайтных —
 # около 6 МБ в закодированной форме. У Starlette поле формы по умолчанию не больше 1 МБ.
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -36,6 +41,7 @@ def _local(iso: str, tz: tzinfo) -> str:
 
 
 templates.env.filters["local"] = _local
+templates.env.globals["build"] = version.current          # подвал страниц: отпечаток кода службы
 
 
 class LoginRequired(Exception):
@@ -87,8 +93,9 @@ def get_viewer(request: Request) -> Viewer:
     if session is None:
         raise LoginRequired()
     user = repo.user(session.user_id)
-    idle = request.app.state.clock.now() - datetime.fromisoformat(session.last_seen_at)
-    if user is None or user.disabled or idle > IDLE:
+    now = request.app.state.clock.now()
+    idle = now - datetime.fromisoformat(session.last_seen_at)
+    if user is None or user.disabled or idle > IDLE or now - datetime.fromisoformat(session.created_at) > MAX_AGE:
         repo.delete_session(session.token_hash)
         raise LoginRequired()
     repo.touch_session(session.token_hash)

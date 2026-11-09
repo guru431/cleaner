@@ -12,8 +12,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from cleaner import config
+from cleaner import config, version
 from cleaner.agent_service import gateway_access
 from cleaner.clock import SystemClock
 from cleaner.config import Config
@@ -121,6 +122,28 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _egress_targets(repo: Repository) -> list[str]:
+    """Узлы, к которым службе можно: локальный шлюз (и распознавание на нём), включённые подключения, подписки
+    действующих ключей шлюза. Читается из базы при каждой проверке сторожа: правка настроек действует сразу."""
+    from cleaner.agent_service import SUBSCRIPTIONS
+    from cleaner.engines import local_settings
+
+    urls = [local_settings(repo).url, *(provider.base_url for provider in repo.providers() if provider.enabled)]
+    used = {key.upstream for key in repo.api_keys() if not key.disabled}
+    urls += [url for access, (_, url) in SUBSCRIPTIONS.items() if access in used]
+    return [urlsplit(url).hostname or "" for url in urls]
+
+
+def _guard_network(repo: Repository) -> None:
+    """Сторож выхода в сеть (egress.watch) — только в процессе службы: снять его нельзя, тесты подменяют эту функцию."""
+    from cleaner.egress import watch
+
+    def report(kind: str, port: object, origin: str) -> None:
+        repo.audit("egress_refused", kind=kind, port=port, origin=origin)
+
+    watch.install(watch.Watch(lambda: _egress_targets(repo), report))
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     _offline()
     _quiet_libraries()
@@ -132,6 +155,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     cfg = _config(args)
     config.check_transport(cfg)
     with _repository(cfg) as repo:
+        # Отпечаток считается до работы: замена файлов под службой его не меняет. Строку журнала службы сверяет с
+        # кодом на диске check-cleaner.sh.
+        build = version.current()
+        repo.audit("service_started", code=build.digest, date=build.date)
+        print(f"Cleaner: служба запущена. {build.line()}", file=sys.stderr, flush=True)
+        _guard_network(repo)
         app = create_app(
             repo, SystemClock(), secure_cookies=bool(cfg.tls_cert), max_text_chars=cfg.max_text_chars,
             tz=timezone(timedelta(hours=cfg.utc_offset_hours)),
@@ -209,7 +238,43 @@ def cmd_apikey(args: argparse.Namespace) -> int:
     return 0
 
 
+def _rotate_key(args: argparse.Namespace) -> int:
+    """Новый главный ключ: сначала в новый файл окружения (базу, перешифрованную ключом, которого нигде нет, не открыть),
+    затем перешифровка обёрток одной транзакцией. Не удалась — база под прежним ключом, новый файл удаляется.
+    Службу на время смены останавливают: она держит прежний ключ в памяти (docs/deployment.md)."""
+    if not args.env_file:
+        raise ValueError("для rotate укажите --env-file: новый файл для нового ключа")
+    env_file, key = Path(args.env_file), crypto.new_key()
+    _write_private(env_file, f"{crypto.key_line(key)}\n".encode("ascii"))
+    committed = False
+    try:
+        with _repository(_config(args)) as repo:
+            chats = repo.rotate_master(key)
+            committed = True
+            truncated = repo.truncate_wal()
+            repo.audit("master_key_rotated", chats=chats, wal="truncated" if truncated else "busy", by="cli")
+    except BaseException:
+        if not committed:                   # база под прежним ключом: новый ключ ничего не открывает
+            with suppress(OSError):
+                env_file.unlink()
+        raise
+    print(f"Главный ключ сменён: новый — в {env_file}, прежний базу больше не открывает. Ключей чатов: {chats}.")
+    print("Подставьте его в окружение службы и выгрузите заново: python -m cleaner key export <файл>")
+    if not truncated:
+        print(
+            "ошибка: журнал WAL не усечён — базу держит другое соединение (служба, backup, eval), и прежние обёртки "
+            "ключей остаются в cleaner.db-wal до контрольной точки. Остановите его и выполните rotate ещё раз — уже "
+            "с новым ключом в окружении.", file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def cmd_key(args: argparse.Namespace) -> int:
+    if args.action == "rotate":
+        return _rotate_key(args)
+    if not args.file:
+        raise ValueError(f"для {args.action} укажите файл ключа")
     passphrase = _secret(args.passphrase_file, "Пароль файла ключа: ")
     if args.action == "export":
         if len(passphrase) < auth.MIN_PASSWORD:
@@ -333,11 +398,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     apikey.add_argument("--model", action="append", default=[], help="add: разрешённая модель подключения или подписки (можно несколько; нет — все)")
 
-    key = commands.add_parser("key", help="выгрузка и загрузка главного ключа")
-    key.add_argument("action", choices=("export", "import"))
-    key.add_argument("file", help="файл ключа, защищённый паролем")
+    key = commands.add_parser("key", help="выгрузка, загрузка и смена главного ключа")
+    key.add_argument("action", choices=("export", "import", "rotate"))
+    key.add_argument("file", nargs="?", default="", help="export, import: файл ключа, защищённый паролем")
     key.add_argument("--passphrase-file", help="пароль файла ключа — первой строкой файла")
-    key.add_argument("--env-file", help="для import: новый файл окружения для ключа")
+    key.add_argument("--env-file", help="для import и rotate: новый файл окружения для ключа")
 
     backup = commands.add_parser("backup", help="копия базы без остановки службы")
     backup.add_argument("target", help="новый файл копии")
@@ -365,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify":
         from cleaner import selfcheck
 
+        print(version.current().line())          # первой строкой: последнюю check-cleaner.sh берёт как итог
         return selfcheck.run(print)
     handlers = {
         "init": cmd_init, "serve": cmd_serve, "user": cmd_user, "key": cmd_key, "backup": cmd_backup, "models": cmd_models,

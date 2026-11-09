@@ -56,6 +56,7 @@ class Session:
     user_id: str
     csrf: str
     last_seen_at: str
+    created_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,32 @@ class Repository:
         self._run("INSERT INTO settings(key, value) VALUES ('global_dek', ?)", sealed)
         return key
 
+    def truncate_wal(self) -> bool:
+        """Контрольная точка с усечением журнала WAL, как у delete_chat: False — её не пустило другое соединение."""
+        for _ in range(_CHECKPOINT_ATTEMPTS):
+            with self.lock:
+                if not self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
+                    return True
+        return False
+
+    def rotate_master(self, new_master: bytes) -> int:
+        """Смена главного ключа (cleaner key rotate): обёртки ключей чатов и общего ключа перешифровываются новым
+        ключом одной транзакцией — не открылась прежним хоть одна, не меняется ничего; исключение отсюда — база под
+        прежним ключом. Содержимое под ключами чатов и общим ключом не трогается. После неё вызывающий выполняет
+        truncate_wal(): до контрольной точки прежние обёртки лежат в WAL и открываются прежним ключом.
+        Возвращает число чатов."""
+        with self.lock:
+            with transaction(self.conn):
+                rows = self.conn.execute("SELECT id, dek_wrapped FROM chats").fetchall()
+                for row in rows:
+                    aad = f"chat-dek:{row['id']}"
+                    wrapped = crypto.seal(new_master, crypto.unseal(self.master, row["dek_wrapped"], aad), aad)
+                    self.conn.execute("UPDATE chats SET dek_wrapped = ? WHERE id = ?", (wrapped, row["id"]))
+                sealed = base64.b64encode(crypto.seal(new_master, self.global_key, "global-dek")).decode("ascii")
+                self.conn.execute("UPDATE settings SET value = ? WHERE key = 'global_dek'", (sealed,))
+            self.master = new_master
+        return len(rows)
+
     # --- пользователи и сессии ---------------------------------------------
 
     @staticmethod
@@ -284,6 +311,24 @@ class Repository:
             if disabled:
                 self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
 
+    def chat_ids(self, user_id: str) -> list[str]:
+        """Чаты пользователя без расшифровки названий."""
+        return [row["id"] for row in self._all("SELECT id FROM chats WHERE user_id = ? ORDER BY id", user_id)]
+
+    def delete_user(self, user_id: str) -> bool:
+        """Удаление отключённой учётной записи, у которой уже нет чатов: их удаляет вызывающий через
+        ChatService.delete_chat (задания, кэши, журнал), а каскадом схемы уходят только сессии и ключи доступа.
+        Затем контрольная точка с усечением журнала WAL; не вышла — CheckpointBusy, а запись уже удалена.
+        False — записи нет, она включена или у неё появились чаты."""
+        with self.lock:
+            deleted = self._run(
+                "DELETE FROM users WHERE id = ? AND disabled = 1 AND NOT EXISTS (SELECT 1 FROM chats WHERE user_id = ?)",
+                user_id, user_id,
+            ) == 1
+        if deleted and not self.truncate_wal():
+            raise CheckpointBusy(user_id)
+        return deleted
+
     def create_session(self, token_hash: str, user_id: str, csrf: str, password_hash: str) -> bool:
         """Сессия — одной записью и только для того хэша пароля, что проверен при входе, у включённой учётной
         записи. Пока Argon2 проверял пароль, его могли сменить, а запись — отключить: сессии они уже закрыли,
@@ -295,9 +340,24 @@ class Repository:
             token_hash, user_id, csrf, now, now, user_id, password_hash,
         ) == 1
 
+    @staticmethod
+    def _session(row: sqlite3.Row) -> Session:
+        return Session(row["token_hash"], row["user_id"], row["csrf"], row["last_seen_at"], row["created_at"])
+
     def session(self, token_hash: str) -> Session | None:
         row = self._one("SELECT * FROM sessions WHERE token_hash = ?", token_hash)
-        return None if row is None else Session(row["token_hash"], row["user_id"], row["csrf"], row["last_seen_at"])
+        return None if row is None else self._session(row)
+
+    def sessions(self, user_id: str) -> list[Session]:
+        """Сессии пользователя, свежие первыми."""
+        return [
+            self._session(row)
+            for row in self._all("SELECT * FROM sessions WHERE user_id = ? ORDER BY last_seen_at DESC, created_at DESC", user_id)
+        ]
+
+    def delete_sessions(self, user_id: str) -> int:
+        """«Выйти на всех устройствах»: все сессии пользователя; число закрытых."""
+        return self._run("DELETE FROM sessions WHERE user_id = ?", user_id)
 
     def touch_session(self, token_hash: str) -> None:
         self._run("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", self._now(), token_hash)
@@ -1127,16 +1187,19 @@ class Repository:
 
     def audit_events(
         self, event: str | None = None, user_id: str | None = None,
-        since: str | None = None, before: str | None = None, limit: int = 200,
+        since: str | None = None, before: str | None = None, limit: int | None = 200,
     ) -> list[AuditRow]:
-        """Свежие первыми. since и before — начало строки ISO: «2026-10-14» отбирает с начала суток (UTC)."""
+        """Свежие первыми. since и before — начало строки ISO: «2026-10-14» отбирает с начала суток (UTC).
+        limit None — без предела (выгрузка CSV)."""
         sql, args = "SELECT * FROM audit WHERE 1 = 1", []
         for condition, value in (("event = ?", event), ("user_id = ?", user_id), ("ts >= ?", since), ("ts < ?", before)):
             if value:
                 sql += f" AND {condition}"
                 args.append(value)
-        sql += " ORDER BY id DESC LIMIT ?"
-        args.append(limit)
+        sql += " ORDER BY id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
         return [
             AuditRow(row["id"], row["ts"], row["user_id"], row["chat_id"], row["event"], json.loads(row["details"]))
             for row in self._all(sql, *args)

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Мои сессии — Cleaner{% endblock %}
+{% block main %}
+<h1>Мои сессии</h1>
+<p class="lead">Сессия закрывается после {{ idle_hours }} ч без действий и не позже чем через {{ max_age_hours }} ч после входа.
+Адреса и браузеры не записываются. <a href="/account/password">Сменить пароль</a></p>
+<section class="panel">
+  <table class="grid">
+    <thead><tr><th>Вход</th><th>Последнее действие</th><th>Истечёт</th><th></th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+    <tr class="session{% if row.current %} current{% endif %}">
+      <td class="mono nowrap">{{ row.created_at | local(tz) }}</td>
+      <td class="mono nowrap">{{ row.last_seen_at | local(tz) }}</td>
+      <td class="mono nowrap">{{ row.expires_at | local(tz) }}</td>
+      <td>{% if row.current %}<span class="badge good">эта</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+<form method="post" action="/account/sessions/logout-all">
+  {% include "_csrf.html" %}
+  <button class="danger">Выйти на всех устройствах</button>
+  <small class="hint">Закрывает все ваши сессии, включая эту.</small>
+</form>
+{% endblock %}

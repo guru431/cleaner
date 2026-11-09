@@ -152,6 +152,30 @@ def test_users_are_created_given_new_passwords_and_disabled(boss, browser, repo)
     assert {"user_created", "password_changed", "user_disabled"} <= {e.event for e in repo.audit_events()}
 
 
+def test_disabled_account_is_deleted_with_all_its_chats(boss, browser, repo, app):
+    """Идея «Удаление учётной записи вместе с её чатами»: только отключённая запись, с подтверждением логином; чаты —
+    через ChatService.delete_chat (ключи чатов стёрты, журнал WAL усечён), в журнал — событие без данных."""
+    other = browser()
+    petr = other.user("petr")
+    other.login("petr")
+    chats = [other.chat("Первый"), other.chat("Второй")]
+    assert boss.post(f"/settings/users/{petr}/delete", confirm="petr").status_code == 400      # ещё включён
+    boss.post(f"/settings/users/{petr}/disable", disabled="yes")
+    assert boss.post(f"/settings/users/{petr}/delete", confirm="ivan").status_code == 400      # не тот логин
+    assert repo.user(petr) is not None and all(repo.chat(chat) for chat in chats)
+    assert "Удалить вместе с чатами" in boss.get("/settings/users").text
+    deleted = []
+    app.state.service.stop_chat = deleted.append              # путь ChatService.delete_chat, а не каскад схемы
+    assert boss.post(f"/settings/users/{petr}/delete", confirm="petr").status_code == 303
+    assert sorted(deleted) == sorted(chats)
+    assert repo.user(petr) is None and repo.chat_ids(petr) == [] and not any(repo.chat(chat) for chat in chats)
+    assert repo.conn.execute("SELECT COUNT(*) FROM chats WHERE user_id = ?", (petr,)).fetchone()[0] == 0
+    [event] = repo.audit_events("user_deleted")
+    assert (event.user_id, event.details) == (repo.user_by_login("boss").id, {"target": petr, "chats": 2})
+    assert len(repo.audit_events("chat_deleted")) == 2
+    assert boss.post(f"/settings/users/{petr}/delete", confirm="petr").status_code == 404
+
+
 def test_every_password_form_names_whose_password_it_is(boss):
     """Форма нового пароля без поля логина: менеджер паролей браузера записал бы новый пароль пользователя к учётной
     записи вошедшего администратора. Логин строки — скрытым полем без name: на сервер он не уходит."""
@@ -179,6 +203,33 @@ def test_audit_is_filtered_by_event_user_and_day(browser, repo, clock):
     assert events(since="2026-10-15") == ["login"]
     assert events(until="2026-10-14") == ["restore"]
     assert admin.get("/settings/audit", since="вчера").status_code == 400
+
+
+def test_audit_is_exported_as_csv_with_the_current_filter(browser, repo, clock):
+    """Идея «Выгрузка журнала в CSV за период»: тот же отбор, что на странице, без предела в 500 строк; ячейки,
+    которые таблица сочла бы формулой, обезврежены; сама выгрузка — событие журнала."""
+    import csv
+    import io
+
+    ivan = repo.create_user("=HYPERLINK(\"x\")", "hash", "user")
+    for _ in range(501):
+        repo.audit("restore", ivan, restored=2)                               # 14.10
+    repo.audit("leak", ivan, note="@SUM(1)")
+    clock.advance(days=1)
+    admin = browser()
+    admin.user("boss", "admin")
+    admin.login("boss")                                                       # 15.10
+    response = admin.get("/settings/audit/export", user=ivan, until="2026-10-14")
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/csv")
+    assert "attachment" in response.headers["content-disposition"]
+    rows = list(csv.reader(io.StringIO(response.content.decode("utf-8-sig"))))
+    assert rows[0] == ["time_utc", "login", "user_id", "chat_id", "event", "details"]
+    assert len(rows) == 1 + 502 and {row[4] for row in rows[1:]} == {"restore", "leak"}
+    assert rows[1][1] == "'=HYPERLINK(\"x\")" and rows[1][5] == '{"note": "@SUM(1)"}'
+    assert all(not cell.startswith(("=", "+", "-", "@", "\t", "\r")) for row in rows for cell in row)
+    [event] = repo.audit_events("audit_export")
+    assert event.details == {"rows": 502, "filter": {"event": "", "user": ivan, "since": "", "until": "2026-10-14"}}
+    assert browser().get("/settings/audit/export").status_code == 303                 # без входа — на страницу входа
 
 
 def test_audit_filter_lists_every_event_the_service_writes():
