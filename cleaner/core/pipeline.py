@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl, urlencode
 
 from cleaner.core import leakcheck, restore, surrogates
 from cleaner.core.detect import dictionary, infra, ner, orgs, rules, secrets
+from cleaner.core.detect import credentials
 from cleaner.core.detect.base import DetectContext, Detector
 from cleaner.core.detect.merge import MergedSpan, merge
 from cleaner.core.entities import hostmap, labels, netmap, ops
@@ -22,7 +23,7 @@ from cleaner.core.leakcheck import Leak
 from cleaner.core.match import normalize
 from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
 
-DETECTORS = (rules, secrets, infra, dictionary, orgs)
+DETECTORS = (rules, secrets, infra, dictionary, orgs, credentials)
 
 # Второй проход ищет написания сущностей, найденных в этом же тексте; третий — страховка.
 _MAX_PASSES = 3
