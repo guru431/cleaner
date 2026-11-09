@@ -139,6 +139,25 @@ def test_server_switch_of_a_remote_command_names_a_host(text, host):
     assert (T.HOST, host) in found(text)
 
 
+@pytest.mark.parametrize(
+    "text, hosts",
+    [
+        ('Invoke-Command -ComputerName "SRV-APP01" -ScriptBlock { hostname }', {"SRV-APP01"}),
+        ("Get-Service -ComputerName:BUH-PC07", {"BUH-PC07"}),
+        ('Get-ADUser -Server "DC01" -Identity x', {"DC01"}),
+        ('schtasks /query /S "BUH-PC07"', {"BUH-PC07"}),
+        ("Restart-Computer -ComputerName SRV-APP01,SRV-APP02,BUH-PC07 -Force", {"SRV-APP01", "SRV-APP02", "BUH-PC07"}),
+        ("Restart-Computer -ComputerName 'SRV-APP01', \"BUH-PC07\" -Force", {"SRV-APP01", "BUH-PC07"}),
+        ("Invoke-Command -ComputerName WS-0142, затем перезапустите", {"WS-0142"}),
+        (r'Get-ChildItem -Server "C:\Temp"', set()),
+    ],
+)
+def test_quoted_colon_and_listed_computer_names(text, hosts):
+    """FINDINGS P2 «значения -ComputerName, -Server, /S в кавычках, через двоеточие и списком»: каждый узел — фрагмент.
+    Слово через запятую с пробелом без кавычек — продолжение текста, а не узел списка."""
+    assert {value for type_, value in found(text) if type_ is T.HOST} == hosts
+
+
 def test_zero_padded_address_is_found():
     result = found("узлы 010.001.002.005 и 192.168.001.010")
     assert {(T.IP, "010.001.002.005"), (T.IP, "192.168.001.010")} <= result
@@ -259,6 +278,14 @@ def test_json_escaped_backslashes():
     assert "Users" not in {value for _, value in result}
 
 
+def test_domain_login_in_url_encoding():
+    """FINDINGS P2 «DOMAIN\\login в URL-кодировке»: «%5C» — обратная косая в журнале веб-сервера и адресе возврата."""
+    for text in ("GET /login?user=CONTOSO%5Civanov&next=/", "user=CONTOSO%5civanov"):
+        result = found(text)
+        assert (T.DOMAIN, "CONTOSO") in result and accounts(text) == {"ivanov"}, text
+    assert accounts("path=CONTOSO%5Cshare%5Creport") == set()
+
+
 def test_domain_login_before_an_escaped_line_break_in_json():
     """Приёмка 5В: вывод команды внутри строки JSON (Codex в «code mode» отдаёт результат exec так) — перевод строки
     записан знаками «\\r\\n», обратная косая между доменом и входом удвоена. Экранирование после входа — не продолжение
@@ -292,6 +319,19 @@ def test_colon_chains_after_a_label_are_not_addresses():
     assert values("Время:12:30:45, MAC:00:1A:2B:3C:4D:5E, ключ:1:2:3:4:5:6:7:8:9, ab:cd:ef:1:2:3:4:5:6") == set()
 
 
+def test_ipv6_with_an_embedded_ipv4_is_one_address():
+    """FINDINGS P3 «IPv6 со встроенным IPv4»: «::ffff:127» становился адресом IPv6, а «.0.0.1» оставался рядом. Адрес IPv4
+    в записи «::ffff:…» — тот же адрес: его сущность и подмена — как у адреса IPv4, петля остаётся открытой."""
+    assert found("from ::ffff:127.0.0.1") == set()
+    state = ChatState(chat_id="mapped", net_key=bytes(32))
+    sanitized = sanitize(state, "from ::ffff:10.20.30.40, затем 10.20.30.40", Settings()).sanitized
+    assert "10.20.30.40" not in sanitized
+    mapped, _, plain = sanitized.removeprefix("from ::ffff:").partition(", затем ")
+    assert mapped == plain
+    sanitized = sanitize(state, "NAT64 64:ff9b::10.1.2.3 отвечает", Settings()).sanitized
+    assert "ff9b" not in sanitized and "10.1.2.3" not in sanitized
+
+
 def test_ipv6_after_a_label_is_masked_and_restored():
     state = ChatState(chat_id="ipv6", net_key=bytes(32))
     text = "Source:f54a:d0a2:e874:66d7:ad66:a1be:9367:6a02."
@@ -314,6 +354,17 @@ def test_sid_and_dn():
     assert (T.SID, "S-1-5-21-1004336348-1177238915-682003330-1104") in result
     assert "S-1-5-18" not in {value for _, value in result}
     assert (T.DN, "CN=Ivan Petrov,OU=IT,DC=contoso,DC=ru") in result
+
+
+@pytest.mark.parametrize(
+    "dn",
+    [r"CN=Ivanov\, Ivan,OU=Accounting,DC=contoso,DC=ru", r"CN=Ivanov\\, Ivan,OU=Accounting,DC=contoso,DC=ru"],
+    ids=["rfc4514", "json"],
+)
+def test_dn_with_an_escaped_comma_is_one_fragment(dn):
+    """FINDINGS P1 «LDAP-имя с экранированной запятой»: «CN=Фамилия\\, Имя» обычен в AD, и фамилия оставалась открытой."""
+    assert found(f'объект "{dn}" найден') == {(T.DN, dn)}
+    assert found("CN=a\\," * 5000) == set()     # без DC — не имя; откат линейный (сторож скорости — test_long_input)
 
 
 @pytest.mark.parametrize(
@@ -588,6 +639,19 @@ def test_placeholder_login_in_a_profile_path_is_not_an_account():
     for text in ('mkdir "/Users/name/My Documents"', "/home/user/app", r"C:\Users\username\Desktop"):
         assert accounts(text) == set(), text
     assert accounts("/home/ivanov/app") == {"ivanov"}
+
+
+@pytest.mark.parametrize(
+    "text, login",
+    [
+        ("/c/Users/ivanov/AppData/Local/Temp", "ivanov"), ("cd /mnt/c/Users/ivanov", "ivanov"),
+        ("ls /c/Users/i.petrov/Documents", "i.petrov"), ("/cygdrive/d/Users/ivanov/x", "ivanov"),
+    ],
+)
+def test_profile_path_of_git_bash_msys_wsl_and_cygwin(text, login):
+    """FINDINGS P2 «путь профиля в записи Git Bash, MSYS, WSL и Cygwin»: Git Bash — оболочка Claude Code на Windows."""
+    assert accounts(text) == {login}
+    assert accounts("https://contoso.example/a/users/ivanov") == set()
 
 
 def _strings(value) -> list[str]:

@@ -18,10 +18,12 @@ name = "infra"
 _IPV4 = re.compile(r"(?<![\w.])\d{1,3}(\\{0,2}\.)\d{1,3}\1\d{1,3}\1\d{1,3}(?:/\d{1,2})?(?!\w|\\{0,2}\.\d)")
 # Адрес не начинается внутри другой записи через двоеточие, но может стоять сразу за подписью
 # («Source:f54a:…», «IPv6:2a00:…»): за словом, которое не может быть группой адреса, — с буквой
-# не из 0-9a-f или длиннее четырёх знаков. Подпись во фрагмент не входит.
+# не из 0-9a-f или длиннее четырёх знаков. Подпись во фрагмент не входит. Последние 32 бита бывают записаны адресом IPv4
+# («::ffff:10.20.30.40», NAT64 «64:ff9b::10.1.2.3») — адрес целиком, а не «::ffff:10» и число за ним.
 _IPV6 = re.compile(
     r"(?<![\w:.])(?:(?=\w*[^\W\dA-Fa-f])\w+:|\w{5,}:)?"
-    r"(?P<addr>(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![\w:])"
+    r"(?P<addr>(?:[0-9A-Fa-f]{0,4}:){2,6}\d{1,3}(?:\.\d{1,3}){3}(?![\w.])"
+    r"|(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:]))"
 )
 # Слово перед числом, по которому видно, что это номер версии; «ver» внутри «server» не считается.
 _VERSION_BEFORE = re.compile(
@@ -42,15 +44,20 @@ _URL_HOST = re.compile(
 # JSON (_ESCAPED), а не узлы «bportal» и «.corp».
 _UNC_HOST = re.compile(r"(?<![\\\w:])\\\\(?:\\\\)?(?P<host>\w[\w.-]*)(?=\\(?!\\?\.))")
 _HOST_PREFIX = re.compile(r"[\w.-]*")     # имя узла без знаков за ним: «», «”», «**», «}», «…»
-# Буква диска после ключа — не узел («dir /s C:\Temp»).
-_PARAM_HOST = re.compile(r"(?<![\w-])(?:-ComputerName|-Server|-cn)[ \t]+(?![a-z]:)(?P<host>[\w.-]+)", re.IGNORECASE)
+# Буква диска после ключа — не узел («dir /s C:\Temp»). Узел бывает в кавычках, через двоеточие («-ComputerName:PC07») и
+# списком через запятую («-ComputerName SRV01,SRV02», «'SRV01', 'SRV02'»): фрагмент — каждый узел. Пробел после запятой —
+# только перед кавычкой: «-ComputerName WS-0142, затем …» — продолжение текста, а не узел.
+_HOST_ITEM = r"[\"']?(?![a-z]:)[\w.-]+[\"']?"
+_HOST_LIST = rf"(?P<hosts>{_HOST_ITEM}(?:,(?:[ \t]*(?=[\"']))?{_HOST_ITEM})*)"
+_LIST_HOST = re.compile(r"[\w.-]+")
+_PARAM_HOST = re.compile(rf"(?<![\w-])(?:-ComputerName|-Server|-cn)(?::|[ \t]+){_HOST_LIST}", re.IGNORECASE)
 # «/S имя» — компьютер только у команд, которые принимают его этим ключом, и в той же команде: у dir,
 # xcopy, findstr, del, robocopy, reg «/S» — подкаталоги («dir /s logs»), у shutdown — выключение.
 # Аргументов до ключа не больше тридцати: иначе цепочка «schtasks schtasks …» без ключа давала бы
 # квадратичный перебор.
 _REMOTE_SWITCH = re.compile(
     r"(?<![\w-])(?:schtasks|systeminfo|tasklist|taskkill|gpresult|getmac|driverquery|eventcreate|openfiles"
-    r"|waitfor|setx|takeown)(?:\.exe)?(?:[ \t]+[^\s|&;]+){0,30}?[ \t]+/S[ \t]+(?![a-z]:)(?P<host>[\w.-]+)",
+    rf"|waitfor|setx|takeown)(?:\.exe)?(?:[ \t]+[^\s|&;]+){{0,30}}?[ \t]+/S[ \t]+{_HOST_LIST}",
     re.IGNORECASE,
 )
 _MACHINE = re.compile(r"(?<![\w.$-])(?P<host>(?=[A-Za-z-]*\d)[A-Za-z0-9][A-Za-z0-9-]{1,14})\$(?![\w$])")
@@ -85,9 +92,11 @@ _NAME_PART = re.compile(r"[^.\\]+")         # часть имени через �
 # бывает удвоена (журналы JSON). Имя входа может быть и кириллицей («CORP\иванов»). Косая после входа —
 # продолжение пути, а не учётная запись; в строке JSON (косая удвоена) путь — снова «\\», а одна косая —
 # экранирование: «CONTOSO\\ivanov\r\n» — вывод команды, который Codex отдаёт строкой JSON (приёмка 5В).
+# В адресе и журнале веб-сервера косая записана «%5C» («user=CONTOSO%5Civanov»); «%5C» после входа — путь.
 _DOMAIN_LOGIN = re.compile(
     r"(?<![\w\\./-])(?P<dom>[A-Za-z][A-Za-z0-9-]{1,14})"
-    r"(?:\\(?P<login>\w[\w.$-]{0,63})(?![\w\\])|\\\\(?P<jlogin>\w[\w.$-]{0,63})(?!\w|\\\\))"
+    r"(?:\\(?P<login>\w[\w.$-]{0,63})(?![\w\\])|\\\\(?P<jlogin>\w[\w.$-]{0,63})(?!\w|\\\\)"
+    r"|%5[Cc](?P<ulogin>\w[\w.$-]{0,63})(?![\w\\]|%5[Cc]))"
 )
 # Корни реестра в коротком виде («reg query HKLM\Software /s») — не домены, а раздел за ними — не вход.
 # Длинные («HKEY_LOCAL_MACHINE\…») шаблон домена не берёт: в нём нет «_».
@@ -101,8 +110,10 @@ _FILE_EXT = re.compile(
 # кавычка, знак препинания перед пробелом или концом текста либо конец строки; иначе — до пробела,
 # а знак препинания и кавычка в конце отрезаются. Дефис и апостроф между буквами — внутри слова
 # («Petrov-Vodkin», «O'Brien», «Il'ya»), апостроф перед буквой закрывающей кавычкой не считается.
+# Диск в записи Git Bash и MSYS — «/c/Users/», WSL — «/mnt/c/Users/», Cygwin — «/cygdrive/c/Users/».
 _PROFILE = re.compile(
-    r"(?:\b[a-z]:\\{1,2}Users\\{1,2}|(?<![\w.\\])\\{1,2}Users\\{1,2}|(?<![\w.])/home/|(?<![\w.])/Users/)"
+    r"(?:\b[a-z]:\\{1,2}Users\\{1,2}|(?<![\w.\\])\\{1,2}Users\\{1,2}|(?<![\w.])/home/|(?<![\w.])/Users/"
+    r"|(?<![\w.])(?:/mnt|/cygdrive)?/[a-z]/Users/)"
     r"(?:(?P<spaced>[^\W\d_]+(?:[-'’][^\W\d_]+)*(?: [^\W\d_]+(?:[-'’][^\W\d_]+)*){1,2})"
     r"(?=[\\/\"`]|['’](?![^\W\d_])|[.,;:!?)]+(?:\s|$)|[ \t]*(?:\r?\n|$))"
     r"|(?P<login>[^\\/\s:*?\"<>|]+))",
@@ -114,9 +125,11 @@ _PROFILE_PLACEHOLDERS = frozenset(
     {"name", "username", "user", "yourname", "your_name", "you", "login", "имя", "логин", "пользователь"}
 )
 _SID = re.compile(r"(?<![\w-])S-1-5-21-\d+-\d+-\d+(?:-\d+)?(?![\w-])")
-# Число компонентов ограничено: без предела цепочка «CN=a,CN=a,…» без DC даёт квадратичный перебор.
+# Число компонентов ограничено: без предела цепочка «CN=a,CN=a,…» без DC даёт квадратичный перебор. Знак значения
+# бывает экранирован (RFC 4514): «CN=Ivanov\, Ivan» — фамилия и имя, в строке JSON — «\\,». Значение берётся без отката
+# («++»): иначе разбиения цепочки обратных косых перебирались бы.
 _DN = re.compile(
-    r"(?<![\w=])(?:(?:CN|OU|O|L|ST|C)=[^,;\r\n\"<>=]+,\s*){1,16}DC=[\w-]+(?:,\s*DC=[\w-]+){0,8}"
+    r"(?<![\w=])(?:(?:CN|OU|O|L|ST|C)=(?:\\{1,2}[^\r\n]|[^\\,;\r\n\"<>=])++,\s*){1,16}DC=[\w-]+(?:,\s*DC=[\w-]+){0,8}"
     r"|(?<![\w=])DC=[\w-]+(?:,\s*DC=[\w-]+){1,8}",
     re.IGNORECASE,
 )
@@ -151,6 +164,8 @@ def _ipv6(text: str) -> Iterator[Span]:
             ip = ipaddress.IPv6Address(candidate)
         except ValueError:
             continue
+        if ip.ipv4_mapped is not None:
+            continue        # «::ffff:» и адрес IPv4: адрес находит _ipv4 — та же сущность, что без «::ffff:», петля открыта
         if netmap.is_maskable(ip):
             start = m.start("addr")
             yield Span(start, start + len(candidate), EntityType.IP, name, validated=True)
@@ -252,16 +267,25 @@ def _plain_runs(value: str, start: int) -> Iterator[tuple[int, int]]:
         yield run, end
 
 
+def _named(m: re.Match) -> Iterator[tuple[int, str]]:
+    """Позиции и записи узлов совпадения: один узел или каждый узел списка (_HOST_LIST)."""
+    if m.re.groupindex.get("hosts") is None:
+        yield m.start("host"), m.group("host")
+        return
+    for host in _LIST_HOST.finditer(m.group("hosts")):
+        yield m.start("hosts") + host.start(), host.group()
+
+
 def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
     for pattern in (_URL_HOST, _UNC_HOST, _PARAM_HOST, _REMOTE_SWITCH):
         for m in pattern.finditer(text):
-            value = _HOST_PREFIX.match(m.group("host")).group().rstrip(".")     # «…contoso.ru», «…ru,»
-            if not re.fullmatch(r"[\w.-]+", value) or _is_address(value):
-                continue
-            if well_known(value, ctx) and not _under_issued(value, ctx):
-                continue
-            start = m.start("host")
-            yield Span(start, start + len(value), _name_type(value), name)
+            for start, host in _named(m):
+                value = _HOST_PREFIX.match(host).group().rstrip(".")     # «…contoso.ru», «…ru,»
+                if not re.fullmatch(r"[\w.-]+", value) or _is_address(value):
+                    continue
+                if well_known(value, ctx) and not _under_issued(value, ctx):
+                    continue
+                yield Span(start, start + len(value), _name_type(value), name)
     for m in _MACHINE.finditer(text):
         if not m.group("host").isdigit():
             yield Span(m.start("host"), m.end("host"), EntityType.HOST, name)
@@ -309,7 +333,7 @@ def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:
     # Имя NetBIOS домена Active Directory обычно — первая часть его имени DNS: «contoso» у «contoso.ru».
     known_domains.update([name.split(".", 1)[0] for name in known_domains if "." in name])
     for m in _DOMAIN_LOGIN.finditer(text):
-        group = "login" if m.group("login") is not None else "jlogin"
+        group = next(group for group in ("login", "jlogin", "ulogin") if m.group(group) is not None)
         dom, login = m.group("dom"), m.group(group).rstrip(".-")
         if dom.lower() in builtin or dom.lower() in _REGISTRY_HIVES or not (dom.isupper() or dom.lower() in known_domains):
             continue
