@@ -237,8 +237,14 @@ def check(text: str, state: ChatState, settings: Settings) -> list[Leak]:
     for start, end, _ in index.opened.find("".join(chars)):
         chars[start:end] = " " * (end - start)
     remaining = "".join(chars)
-    found = {Leak(start, end, payload) for start, end, payload in index.entities.find(remaining)}
-    found |= {Leak(start, end, None) for start, end, _ in index.always.find(remaining)}
+    # Одно место — одна утечка: значение, которое нашли и написание сущности, и словарь, удваивало счётчик утечек
+    # (LeakDetected). Сущность важнее словаря — по ней видно, чьё значение ушло; из сущностей — первая по порядку.
+    places: dict[tuple[int, int], Leak] = {}
+    for start, end, payload in index.entities.find(remaining):
+        places.setdefault((start, end), Leak(start, end, payload))
+    for start, end, _ in index.always.find(remaining):
+        places.setdefault((start, end), Leak(start, end, None))
+    found = set(places.values())
     if index.keys:
         found |= _other_notations(remaining, index.keys, state, found)
     if index.digits.keys:

@@ -338,6 +338,23 @@ def test_logins_before_an_escaped_at_in_urls_keep_their_own_labels(state, settin
     assert restore(state, "входы <ACCOUNT_1> и <ACCOUNT_2>", settings).text == "входы ivanov и petrov"
 
 
+def test_email_with_an_encoded_at_and_a_short_phone_are_the_same_entities(state, settings):
+    """«ivanov%40contoso.ru» в адресе — тот же ящик, что ivanov@contoso.ru; «9031112233» — тот же номер, что «+7 (903) 111-22-33».
+    Часть рядом с выданной подменой домена — имя ящика без «%40»."""
+    assert sanitize(state, "почта ivanov@contoso.ru, тел. +7 (903) 111-22-33", settings).sanitized == (
+        "почта <EMAIL_1>, тел. <PHONE_1>"
+    )
+    assert sanitize(state, "GET /?email=Ivanov%40contoso.ru&tel=9031112233", settings).sanitized == (
+        "GET /?email=<EMAIL_1>&tel=<PHONE_1>"
+    )
+    sanitize(state, "Сервер srv-dc01.contoso.ru", settings)
+    assert sanitize(state, "GET /?email=petrov%40domain-1.example", settings).sanitized == (
+        "GET /?email=<ACCOUNT_1>%40domain-1.example"
+    )
+    assert {e.key for e in state.entities.values() if e.type is T.ACCOUNT} == {"petrov"}
+    assert restore(state, "?email=<ACCOUNT_1>%40domain-1.example", settings).text == "?email=petrov%40contoso.ru"
+
+
 def test_new_values_next_to_an_issued_surrogate_are_masked(state, settings):
     """Обзор пакета исправлений 1А, P1: часть составной записи вне выданной замены скрывается."""
     sanitize(state, r"Сервер srv-dc01.contoso.ru, учётка CONTOSO\ivanov", settings)

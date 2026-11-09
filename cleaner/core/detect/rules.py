@@ -140,7 +140,10 @@ _DATE_WORDS = re.compile(
     re.IGNORECASE,
 )
 
-_PHONE_WORDS = ("тел", "моб", "phone", "tel.", "tel:", "звон", "номер")
+# Слова о телефоне. «тел» и «моб» — только с начала слова и «тел» — отдельно или в «телеф…»: внутри «водитель»,
+# «пользователь», «автомобиль» и в «телевизор», «тело» это не они. «звон» и «phone» — и внутри слова («позвоните»,
+# «telephone»).
+_PHONE_WORDS = re.compile(r"(?<!\w)(?:тел(?:еф|(?!\w))|моб|номер|tel[.:])|звон|phone", re.IGNORECASE)
 _ACCOUNT_WORDS = ("счёт", "счет", "р/с", "к/с", "account")
 _PASSPORT_CONTEXT = ("паспорт", "серия", "выдан")
 _OMS_WORDS = ("полис", "омс")
@@ -152,6 +155,14 @@ Add = Callable[..., None]
 def _near(text: str, start: int, end: int, words: tuple[str, ...]) -> bool:
     around = (text[max(0, start - _BEFORE):start] + " " + text[end:end + _AFTER]).lower()
     return any(word in around for word in words)
+
+
+def _phone_near(text: str, start: int, end: int) -> bool:
+    """Слово о телефоне в окне вокруг номера. Ищется в самом тексте: граница слова видна и на краю окна («…итель» от
+    «водитель» в начале окна — не «тел»)."""
+    return bool(
+        _PHONE_WORDS.search(text, max(0, start - _BEFORE), start) or _PHONE_WORDS.search(text, end, end + _AFTER)
+    )
 
 
 def _document_near(text: str, start: int, end: int) -> bool:
@@ -386,7 +397,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             if 8 <= len(_digits(m.group())) <= 15 and not _DATE_INSIDE.search(m.group()):
                 add(m.start(), m.end(), EntityType.PHONE)
     for m in _PHONE_LOCAL.finditer(text):
-        if _near(text, m.start(), m.end(), _PHONE_WORDS):
+        if _phone_near(text, m.start(), m.end()):
             add(m.start(), m.end(), EntityType.PHONE)
     for m in _DIGIT_RUN.finditer(text):
         _cards(text, m, add)

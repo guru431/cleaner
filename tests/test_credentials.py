@@ -14,6 +14,36 @@ def found(text: str) -> set[tuple[str, str]]:
 
 
 @pytest.mark.parametrize(
+    "text, login",
+    [
+        ("curl -u ivanov:Qwerty123 https://api.example/v1", "ivanov"),
+        ("curl -s -X POST -ui.petrova:Qwerty123 https://api.example/v1", "i.petrova"),
+        ('curl --user "ivanov:S3cr3t pass" https://api.example/v1', "ivanov"),
+        ("curl --user=svc_crm:Qwerty123 https://api.example/v1", "svc_crm"),
+        ("curl.exe -x proxy:3128 -U ivanov:Qwerty123 https://api.example/v1", "ivanov"),
+        ("net user ivanov Qwerty123 /add", "ivanov"),
+        ("net user i.petrova Qwerty123 /domain", "i.petrova"),
+    ],
+)
+def test_login_of_a_command_pair_is_an_account(text, login):
+    """Логин пары в «curl -u имя:пароль» и «net user имя пароль»: пароль скрывает слой секретов, имя — учётная запись."""
+    assert ("ACCOUNT", login) in found(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "curl -u admin:Qwerty123 https://api.example/v1", "curl -u user:Qwerty123 https://api.example/v1",
+        "curl -u git:Qwerty123 https://git.example/", 'curl -u "$API_USER:$API_PASS" https://api.example/v1',
+        "curl -u ivanov https://api.example/v1", "net user Administrator Qwerty123", "net user ivanov /domain",
+        "Команда net user ivanov покажет сведения", "net user username password",
+    ],
+)
+def test_command_without_a_pair_or_with_a_service_login_has_no_account(text):
+    assert not {value for type_, value in found(text) if type_ == "ACCOUNT"}
+
+
+@pytest.mark.parametrize(
     "text, value",
     [
         ("логин i.petrova, пароль Qwerty123", "i.petrova"),

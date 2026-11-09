@@ -34,18 +34,20 @@ _extract = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, extra_suff
 extra_suffixes: tuple[str, ...] = ()
 
 
-def set_extra_suffixes(values: tuple[str, ...]) -> None:
+def set_extra_suffixes(values: tuple[str, ...]) -> bool:
     """Дополнения администратора к внутренним суффиксам (страница встроенных списков). Список один на службу, как и
-    встроенный; ответы has_known_suffix сбрасываются, остальные строковые кэши — cache.clear_strings."""
+    встроенный; ответы has_known_suffix сбрасываются, остальные строковые кэши — cache.clear_strings. True — список
+    изменился."""
     global _extract, extra_suffixes
     values = tuple(dict.fromkeys(value for value in values if value not in INTERNAL_SUFFIXES))
     if values == extra_suffixes:
-        return
+        return False
     _extract = tldextract.TLDExtract(
         suffix_list_urls=(), cache_dir=None, extra_suffixes=INTERNAL_SUFFIXES + values
     )
     extra_suffixes = values
     has_known_suffix.cache_clear()
+    return True
 
 
 def split_name(name: str) -> tuple[list[str], str]:

@@ -40,6 +40,22 @@ def test_canonical_keys_join_notations():
     assert canonical_key(T.ACCOUNT, r"CONTOSO\Ivanov") == "ivanov"
     assert canonical_key(T.ORG, "ООО «Ромашка»") == canonical_key(T.ORG, "ромашка")
     assert canonical_key(T.PASSPORT, "45 08 123456") == canonical_key(T.PASSPORT, "4508 номер 123456")
+    assert canonical_key(T.EMAIL, "Ivanov%40Contoso.ru") == canonical_key(T.EMAIL, "ivanov@contoso.ru")
+    assert canonical_key(T.EMAIL, "i%2bivanov%40contoso.ru") == canonical_key(T.EMAIL, "i+ivanov@contoso.ru")
+    assert canonical_key(T.PHONE, "9031112233") == canonical_key(T.PHONE, "+7 (903) 111-22-33")
+    assert canonical_key(T.PHONE, "(903) 111-22-33") == canonical_key(T.PHONE, "8 903 111 22 33")
+    assert canonical_key(T.PHONE, "+49 30 1234567") != canonical_key(T.PHONE, "+7 493 012-34-56")
+
+
+def test_phone_entities_of_saved_chats_keep_their_labels(state):
+    """Ключ десяти цифр без кода страны — с «7», как у «+7 …» и «8 …». Сущность, сохранённая со старым ключом (десять
+    цифр), находится по написанию: ключи сохранённых чатов не переписываются, сравнение идёт по новому ключу."""
+    assert resolve(state, "тел. 903 111-22-33", ("903 111-22-33", T.PHONE)) == ["<PHONE_1>"]
+    [entity] = state.entities.values()
+    entity.key = "9031112233"                       # так ключ записан до 09.11.2026
+    assert resolve(state, "звоните +7 903 111-22-33", ("+7 903 111-22-33", T.PHONE)) == ["<PHONE_1>"]
+    assert resolve(state, "или 9031112233", ("9031112233", T.PHONE)) == ["<PHONE_1>"]
+    assert len(state.entities) == 1
 
 
 def test_square_label_style(state):

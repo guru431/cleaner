@@ -51,6 +51,15 @@ _ROLE_MAILBOXES = frozenset({
 _CHECKED_SEPARATOR = "\n\x00\n"         # между строками одного прохода проверки утечек (checked_leaks)
 
 
+def _at_sign(text: str, start: int, end: int) -> tuple[int, int]:
+    """«@» адреса в text[start:end] и его длина: «@» или «%40» в ссылке и журнале веб-сервера (слой 1); (-1, 0) — нет."""
+    at = text.find("@", start, end)
+    if at >= 0:
+        return at, 1
+    at = text.find("%40", start, end)
+    return (at, 3) if at >= 0 else (-1, 0)
+
+
 def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext) -> MergedSpan | None:
     """Часть записи между заменами, без разделителей по краям; None — скрывать нечего."""
     while start < end and text[start] in _SEPARATORS:
@@ -67,7 +76,7 @@ def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext
     if span.type is EntityType.DN:
         # Имя атрибута без значения («CN=» перед заменой) ничего не выдаёт.
         return MergedSpan(start, end, EntityType.DN, span.sources) if "=" in value else None
-    if (span.type is EntityType.EMAIL or span.mail) and "@" not in text[span.start:start]:
+    if (span.type is EntityType.EMAIL or span.mail) and _at_sign(text, span.start, start)[0] < 0:
         if value.lower() in ctx.builtin.builtin_accounts | _ROLE_MAILBOXES:
             return None
         return MergedSpan(start, end, EntityType.ACCOUNT, span.sources)    # имя до «@»
@@ -128,9 +137,9 @@ def _outside(
     if span.type not in _SPLIT and not span.ruled:
         return []
     bounds = ranges[first:last]
-    at = text.find("@", span.start, span.end) if span.type is EntityType.EMAIL or span.mail else -1
+    at, sign = _at_sign(text, span.start, span.end) if span.type is EntityType.EMAIL or span.mail else (-1, 0)
     if at >= 0:
-        bounds = sorted([*bounds, (at, at + 1)])        # имя входа и имя узла — разные части, и рядом с заменой
+        bounds = sorted([*bounds, (at, at + sign)])     # имя входа и имя узла — разные части, и рядом с заменой
     pieces, position = [], span.start
     for start, end in [*bounds, (span.end, span.end)]:
         if start > position:
