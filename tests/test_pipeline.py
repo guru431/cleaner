@@ -1347,3 +1347,14 @@ def test_failing_model_layer_stops_sanitizing_and_changes_nothing(state, setting
     with pytest.raises(DetectorError):
         sanitize(state, "почта a@x.example", settings, Layers(ner=Broken()))
     assert state.entities == {}
+
+
+def test_checked_strings_do_not_join_into_a_leak_across_their_boundary(state):
+    """FINDINGS «`checked_leaks` находит «утечку» на стыке двух блоков»: строки проверяются одним проходом, но значение
+    словаря, которое начинается в одной строке и кончается в следующей, — не утечка: такого текста провайдер не получит.
+    В одной строке оно по-прежнему утечка."""
+    from cleaner.core.pipeline import checked_leaks
+
+    always = Settings(always=(DictEntry(T.PERSON, "Анна Смирнова"),))
+    assert checked_leaks(["отчёт подготовила Анна", "Смирнова — бухгалтер"], state, always) == []
+    assert len(checked_leaks(["отчёт", "подготовила Анна\n\nСмирнова"], state, always)) == 1
