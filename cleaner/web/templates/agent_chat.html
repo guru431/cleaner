@@ -30,6 +30,7 @@
       <details{% if selected_request and selected_request.id == receipt.id %} open{% endif %}>
         <summary>{{ receipt.time | local(tz) }} · {{ receipt.protocol }} · {{ receipt.model }} · {{ receipt.status }} · {{ receipt.ms_total }} мс</summary>
         <p>Доступ: {{ receipt.access }}. Новых блоков: {{ receipt.new }}, повторённых: {{ receipt.repeated }}, удержанных: {{ receipt.withheld.values() | sum }}. Слои: {{ receipt.layers | join(", ") }}.{% if receipt.reason %} Причина отказа или обрыва: <code>{{ receipt.reason }}</code>.{% endif %}</p>
+        {% include "_agent_receipt_notes.html" %}
         <p>Проверяемые каналы: {{ receipt.channels | join("; ") }}. Заголовки: {{ receipt.headers | join(", ") or "—" }}. Параметры URL: {{ receipt.parameters | join(", ") or "—" }}. Учётные данные передаются отдельно: {{ receipt.credential_channel }}.</p>
         <p><a href="?request={{ receipt.id }}">Показать блоки этого запроса</a> · <span class="mono">{{ receipt.id[:12] }}</span></p>
       </details>

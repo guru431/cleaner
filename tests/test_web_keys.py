@@ -149,6 +149,12 @@ def test_gateway_key_needs_an_enabled_connection_and_its_models(ivan, repo):
     assert response.status_code == 200
     [key] = repo.api_keys()
     assert (key.upstream, key.models, key.layers) == (f"provider:{ids['anthropic']}", ("m-2",), {"ner": True, "llm": False})
+    assert key.hold_secrets is True         # секреты в адресах чужих узлов не восстанавливаются, пока не отмечено иное
+    issue_page(ivan, name="агент 2", provider=ids["anthropic"], restore_foreign="1")
+    second = next(stored for stored in repo.api_keys() if stored.name == "агент 2")
+    assert second.hold_secrets is False
+    assert ivan.get("/keys").text.count("секреты в адресах чужих узлов восстанавливаются") == 1
+    repo.disable_api_key(second.id)
     page = ivan.get("/keys").text
     assert "DeepSeek: m-2" in page and page.count("только API") == 1         # только пункт формы
     issue(ivan, "скрипт")

@@ -21,7 +21,7 @@ from cleaner.core.agent import ledger, walk
 from cleaner.core.agent.protocol import PROTOCOLS, GatewayProtocol, ProtocolStream
 from cleaner.core.detect import dictionary
 from cleaner.core.detect.base import DetectorError
-from cleaner.core.restore import RestoreLimit
+from cleaner.core.restore import RestoreLimit, SecretGuard
 from cleaner.core.types import ChatState, Entity, Policy, Settings
 from cleaner.egress import ProviderError, cloud, forward as egress
 from cleaner.storage.repo import ApiKey, CheckpointBusy, LedgerEntry, Repository, StaleState, User
@@ -112,6 +112,7 @@ class _Prepared:
     withheld: Counter = field(default_factory=Counter)
     replaced: Counter = field(default_factory=Counter)
     blocks: list[dict] = field(default_factory=list)
+    guard: SecretGuard | None = None    # секреты в адресах чужих узлов в аргументах ответа (настройка ключа)
 
 
 def _snapshot(state: ChatState) -> ChatState:
@@ -389,6 +390,8 @@ class AgentService:
             "new": prepared.new if prepared else 0,
             "repeated": sum(map(len, prepared.repeated.values())) if prepared else 0,
             "withheld": dict(prepared.withheld) if prepared else {}, "blocks": prepared.blocks if prepared else [],
+            # Секреты и учётные записи, оставленные заменой в адресах чужих узлов в аргументах инструментов.
+            "held_secrets": prepared.guard.held if prepared and prepared.guard else 0,
             "channels": ["JSON: новые значения и ключи объектов", "JSON: служебные параметры", "URL: разобранные параметры", "HTTP: разрешённые заголовки"],
             "headers": sorted(name for name, _ in out.headers) if out else [],
             "parameters": ["beta"] if out and out.query else [],
@@ -623,6 +626,8 @@ class AgentService:
             self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=upstream.status)
             return AgentReply(upstream.status, dict(upstream.headers), body=raw)
         stream = proto.stream(prepared.state, prepared.settings)
+        if call.key.hold_secrets:
+            stream.budget.guard = prepared.guard = SecretGuard(prepared.out.body)
         if not call.body.get("stream"):
             try:
                 raw = upstream.read(_BODY_BYTES)

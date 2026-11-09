@@ -11,7 +11,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-from cleaner.core.restore import RestoreLimit, originals, safe_cut
+from cleaner.core.restore import RestoreLimit, SecretGuard, originals, safe_cut
 from cleaner.core.types import ChatState, EntityType, Settings
 
 _TYPES = "|".join(t.value.replace("_", r"\\?_") for t in sorted(EntityType, key=lambda t: -len(t.value)))
@@ -32,9 +32,11 @@ class RestorationBudget:
     def __init__(self):
         self.remaining = RESTORED_BYTES
         self.arguments = ARGUMENT_BYTES
+        self.guard: SecretGuard | None = None       # настройка ключа: секреты в адресах чужих узлов не восстанавливаются
 
     def original(self, state: ChatState, settings: Settings, *, exact: bool = False) -> Callable[[str], str]:
-        restore = originals(state, settings, exact=exact, max_bytes=ARGUMENT_BYTES if exact else RESTORED_BYTES)
+        restore = originals(state, settings, exact=exact, max_bytes=ARGUMENT_BYTES if exact else RESTORED_BYTES,
+                            guard=self.guard if exact else None)
 
         def checked(value: str) -> str:
             result = restore(value)
