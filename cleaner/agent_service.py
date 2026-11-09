@@ -528,12 +528,14 @@ class AgentService:
         except ValueError:
             raise self._refuse(call, 400, "invalid_request_error", "Cleaner: неверный cache_control", "cache_control", chat_id=chat_id) from None
         units = proto.units(call.body)
-        digests = {unit.path: _digest(secret, proto, unit.role, unit.kind, unit.node) for unit in units}
+        digests: dict[walk.Path, str] = {}
         # Записи до сведения узлов (ledger_node) — под прежним отпечатком: разговор, начатый до него, повторяется дословно.
-        legacy = {
-            unit.path: digest for unit in units
-            if (digest := ledger.block_digest(secret, proto.name, unit.role, unit.kind, unit.node)) != digests[unit.path]
-        }
+        legacy: dict[walk.Path, str] = {}
+        for unit in units:
+            node = proto.ledger_node(unit.role, unit.kind, unit.node)
+            digests[unit.path] = ledger.block_digest(secret, proto.name, unit.role, unit.kind, node)
+            if node is not unit.node:
+                legacy[unit.path] = ledger.block_digest(secret, proto.name, unit.role, unit.kind, unit.node)
         groups: dict[str, list[walk.Unit]] = {"in": [], "out": []}
         for unit in units:
             try:
