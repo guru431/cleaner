@@ -180,6 +180,27 @@ def models(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Res
     })
 
 
+def _check(request: Request, caller: ApiCaller, family: str) -> Response:
+    """Самопроверка агента (раздел 14): ключ, доступ, протокол, модель (?model=…), слои, TLS и доступность провайдера —
+    без текста пользователя. Вход подписки — Authorization, если это не сам ключ Cleaner."""
+    login = request.headers.get("authorization", "").strip().partition(" ")[2].strip()
+    result = _agent(request).check(
+        caller.key, caller.user, family, model=request.query_params.get("model", "")[:200],
+        tls=request.url.scheme == "https", login=bool(login) and not login.startswith("ck_"),
+    )
+    return JSONResponse(result, headers={"cache-control": "no-store"})
+
+
+@router.get("/v1/cleaner/check")
+def anthropic_check(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Response:
+    return _check(request, caller, "anthropic")
+
+
+@openai_router.get("/v1/cleaner/check")
+def openai_check(request: Request, caller: ApiCaller = Depends(get_api_caller)) -> Response:
+    return _check(request, caller, "openai")
+
+
 @router.api_route("/api/hello", methods=["GET", "HEAD"], status_code=204)
 def hello() -> Response:
     """Проверка связи Claude Code при запуске (HEAD) — без ключа и без обращения к провайдеру."""

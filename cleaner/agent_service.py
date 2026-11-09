@@ -187,12 +187,13 @@ def gateway_access(
 class AgentService:
     def __init__(
         self, repo: Repository, engines: Any, clock: Clock, forward: Callable[..., egress.Upstream] = egress.forward,
-        subscription_urls: Mapping[str, str] | None = None,
+        subscription_urls: Mapping[str, str] | None = None, reach: Callable[[str], int] = egress.reach,
     ):
         self.repo = repo
         self.engines = engines          # cleaner.engines.Engines или заглушка тестов; None — без слоёв 4–5
         self.clock = clock
         self.forward = forward
+        self.reach = reach              # самопроверка: доступен ли провайдер (GET без данных)
         # Только для тестов: заглушка вместо закреплённых адресов подписок.
         self.subscription_urls = {access: url for access, (_, url) in SUBSCRIPTIONS.items()} | dict(subscription_urls or {})
         self._guard = threading.Lock()
@@ -256,6 +257,67 @@ class AgentService:
         refused = AgentRefused(status, kind, message, headers)
         refused.reason = reason
         return refused
+
+    # --- самопроверка агента ------------------------------------------------------------
+
+    def check(self, key: ApiKey, user: User, family: str, *, model: str = "", tls: bool, login: bool) -> dict:
+        """Самопроверка (маршрут …/v1/cleaner/check, раздел 14): ключ, доступ, протокол, модель, слои, TLS и доступность
+        провайдера. Текста пользователя нет ни в запросе, ни в ответе: провайдеру уходит только GET по адресу подключения,
+        без ключа. family — anthropic | openai (путь маршрута); ok у проверки: True, False или None — не проверить отсюда."""
+        checks: list[dict] = []
+
+        def add(name: str, ok: bool | None, detail: str) -> None:
+            checks.append({"name": name, "ok": ok, "detail": detail})
+
+        add("key", True, "ключ действует")
+        url, protocol, allowed = "", "", ()
+        if not key.upstream:
+            add("access", False, "у ключа нет доступа к модели — он только для /api/v1")
+        elif key.upstream in SUBSCRIPTIONS:
+            protocol, url = SUBSCRIPTIONS[key.upstream][0], self.subscription_urls[key.upstream]
+            add("access", user.role == "admin", "подписка" if user.role == "admin" else "доступ по подписке — только у администратора")
+            allowed = key.models
+            add("login", True if login else None,
+                "агент прислал вход подписки" if login else "вход подписки агента проверяется на первом запросе")
+        else:
+            kind, _, provider_id = key.upstream.partition(":")
+            provider = self.repo.provider(provider_id) if kind == "provider" else None
+            if provider is None or not provider.enabled:
+                add("access", False, "подключение ключа удалено или выключено")
+            else:
+                add("access", True, "подключение Cleaner")
+                protocol, url, allowed = provider.protocol, provider.base_url, provider.allowed_models(key.models)
+        if protocol:
+            wanted = ("anthropic",) if family == "anthropic" else ("openai", "responses")
+            endpoint = {"anthropic": "/agent/anthropic", "openai": "/agent/openai/v1/chat/completions",
+                        "responses": "/agent/openai/v1/responses"}[protocol]
+            add("protocol", protocol in wanted, f"агенту — {endpoint}")
+            if model:
+                add("model", not allowed or model in allowed, "модель разрешена ключу" if not allowed or model in allowed
+                    else "модель не разрешена ключу")
+            else:
+                add("model", True, f"разрешены: {', '.join(allowed)}" if allowed else "разрешены все модели")
+        layers = [name for name in ("ner", "llm") if key.layers.get(name)]
+        if layers:
+            try:
+                if self.engines is None:
+                    raise DetectorError("слоёв 4–5 в службе нет")
+                for name in layers:
+                    getattr(self.engines, name)()
+                add("layers", True, "слои 4–5 ключа доступны")
+            except DetectorError:
+                add("layers", False, "включённый для ключа слой очистки недоступен — запросы получат 503")
+        add("tls", True if tls else None, "соединение по TLS: сертификат службы принят" if tls else "служба работает без TLS")
+        if url:
+            try:
+                status = self.reach(url)
+            except egress.ProviderTimeout:
+                add("provider", False, "провайдер не ответил вовремя")
+            except (ProviderError, ValueError):
+                add("provider", False, "провайдер недоступен")
+            else:
+                add("provider", status < 500, f"провайдер ответил HTTP {status}")
+        return {"ok": all(item["ok"] is not False for item in checks), "checks": checks}
 
     # --- запрос ------------------------------------------------------------------------
 

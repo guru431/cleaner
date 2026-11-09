@@ -158,10 +158,18 @@ def _page(request: Request, viewer: Viewer, issued: str = "", issued_key: ApiKey
         guard = "" if key.hold_secrets else " · секреты в адресах чужих узлов восстанавливаются"
         details[key.id] = f"{protocol} · слои {layer_text}{guard} · автоматическая отправка" if key.upstream else "Слои по настройкам чата"
     settings = _agent_settings(request, issued, issued_key, providers) if issued and issued_key and issued_key.upstream else []
+    check = ""
+    if settings:
+        # Самопроверка агента (…/v1/cleaner/check): маршрут того протокола, на котором агент говорит со шлюзом.
+        provider = provider_by_upstream.get(issued_key.upstream)
+        anthropic = issued_key.upstream == "claude-subscription" or (provider is not None and provider.protocol == "anthropic")
+        cacert = f'--cacert "{CERT}" ' if request.app.state.cert_file else ""
+        check = (f'curl {cacert}-H "X-Cleaner-Key: {issued}" '
+                 f'{request.base_url}agent/{"anthropic" if anthropic else "openai"}/v1/cleaner/check')
     return page(
         request, "keys.html", viewer, keys=keys, logins=logins, issued=issued, endpoint=f"{request.base_url}api/v1/chats",
         access=access, gateway=gateway, protocols=PROTOCOL_LABELS, agent_settings=settings, cert=bool(request.app.state.cert_file),
-        subscriptions=SUBSCRIPTION_OPTIONS if viewer.is_admin else {}, key_details=details,
+        subscriptions=SUBSCRIPTION_OPTIONS if viewer.is_admin else {}, key_details=details, check_command=check,
     )
 
 
