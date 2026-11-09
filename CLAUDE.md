@@ -2,7 +2,8 @@
 
 Локальная очистка чувствительных данных перед обращением к облачным LLM.
 Требования — [TZ.md](TZ.md), устройство — [спецификация](docs/superpowers/specs/2026-10-13-cleaner-design.md).
-Установка — [docs/deployment.md](docs/deployment.md), публикация — [docs/publication.md](docs/publication.md).
+Установка — [docs/deployment.md](docs/deployment.md), публикация — [docs/publication.md](docs/publication.md),
+контроль качества (эталон, `eval`, базовые замеры) — [docs/quality-control.md](docs/quality-control.md).
 
 ## Tests
 

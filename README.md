@@ -68,6 +68,7 @@ python -m cleaner serve
 - [TZ.md](TZ.md) — требования.
 - [Спецификация](docs/superpowers/specs/2026-10-13-cleaner-design.md) — устройство.
 - [Шлюз агентов](docs/superpowers/specs/2026-10-28-cleaner-api-agents-design.md) — протоколы и ограничения.
+- [Контроль качества](docs/quality-control.md) — эталонный набор, замеры и базовые замеры (`eval`).
 - [CLAUDE.md](CLAUDE.md) и [AGENTS.md](AGENTS.md) — правила разработки.
 - [Публикация](docs/publication.md) — граница между приватной и публичной историей.
 
