@@ -84,7 +84,7 @@ class Watch:
         self._targets = targets
         self._report = report
         self._resolve = resolve
-        self._resolved: dict[str, set[str]] = {}
+        self._resolved: dict[str, dict[str, None]] = {}      # имя → адреса в порядке получения (старые — первыми)
         self._reported: set[tuple[str, object, str]] = set()
         self._lock = threading.Lock()
         self._inside = threading.local()
@@ -106,11 +106,15 @@ class Watch:
         self._remember(name, found)
 
     def _remember(self, name: str, found: set[str]) -> None:
+        """Сверх предела вытесняются самые старые адреса, а не все: иначе ответ соседнему потоку стёр бы адрес, к
+        которому этот поток соединяется сразу после своего getaddrinfo."""
         with self._lock:
-            known = self._resolved.setdefault(name, set())
-            if len(known | found) > _KEEP_ADDRESSES:
-                known.clear()
-            known |= found
+            known = self._resolved.setdefault(name, {})
+            for address in found:
+                known.pop(address, None)
+                known[address] = None
+            for address in list(known)[:max(0, len(known) - _KEEP_ADDRESSES)]:
+                del known[address]
 
     def wrap(self, getaddrinfo: Callable[..., list]) -> Callable[..., list]:
         """socket.getaddrinfo, который запоминает и ответ вызывающему. Балансировка DNS отдаёт на каждый запрос свой

@@ -112,6 +112,27 @@ def test_address_from_the_callers_own_lookup_passes_when_dns_rotates():
     assert len(reports) == 2 and answers == [PROVIDER, PROVIDER]
 
 
+def test_full_address_list_drops_the_oldest_not_a_neighbours_fresh_answer():
+    """Переполнение списка адресов имени вытесняет самые старые: ответ соседнему потоку не стирает адреса, которые
+    этот поток получил только что и к которым сейчас соединится."""
+    pool, calls = [f"198.51.100.{n}" for n in range(1, 101)], []
+
+    def resolve(name, port, *args, **kwargs):           # без события аудита: только ответы вызывающим
+        first = len(calls) * 4
+        calls.append(name)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (pool[first + n], port)) for n in range(4)]
+
+    watch = Watch(lambda: [PROVIDER], lambda *event: None, resolve)
+    for _ in range(15):
+        watch.wrap(resolve)(PROVIDER, 443)              # 60 адресов
+    mine = watch.wrap(resolve)(PROVIDER, 443)           # 64 — список полон
+    watch.wrap(resolve)(PROVIDER, 443)                  # соседний поток: 68 — сверх предела
+    for info in mine:
+        watch.hook("socket.connect", (None, info[4]))
+    with pytest.raises(EgressRefused):                  # вытеснен самый старый ответ
+        watch.hook("socket.connect", (None, (pool[0], 443)))
+
+
 _PROCESS = """
 import asyncio, socket
 from cleaner.egress import watch
