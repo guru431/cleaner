@@ -9,7 +9,8 @@ import sqlite3
 import threading
 import uuid
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -217,6 +218,8 @@ class Repository:
         self.lock = threading.RLock()            # одно соединение на процесс: доступ по очереди
         self.global_key = self._load_global_key()
         self._chat_delete_hooks: list[weakref.WeakMethod] = []
+        self._readers = 0                         # открытые снимки reading()
+        self._wal_due = False                     # усечение WAL отложено до закрытия снимков
 
     # --- служебное ---------------------------------------------------------
 
@@ -253,13 +256,35 @@ class Repository:
         self._run("INSERT INTO settings(key, value) VALUES ('global_dek', ?)", sealed)
         return key
 
-    def truncate_wal(self) -> bool:
-        """Контрольная точка с усечением журнала WAL, как у delete_chat: False — её не пустило другое соединение."""
+    def truncate_wal(self) -> str:
+        """Контрольная точка с усечением журнала WAL: truncated; busy — её не пустило другое соединение (копия, eval).
+        deferred — открыт снимок этого же процесса (reading): его не ждут три раза по busy_timeout под общим замком,
+        а усекают при его закрытии. Занята — ещё попытка; между попытками замок отпущен, чтобы служба не стояла."""
         for _ in range(_CHECKPOINT_ATTEMPTS):
             with self.lock:
+                if self._readers:
+                    self._wal_due = True
+                    return "deferred"
                 if not self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
-                    return True
-        return False
+                    self._wal_due = False
+                    return "truncated"
+        return "busy"
+
+    @contextmanager
+    def reading(self) -> Iterator[None]:
+        """Снимок базы другим соединением этого процесса (оценка влияния настроек) открывается и закрывается внутри:
+        пока он открыт, усечение WAL откладывается (truncate_wal), после закрытия последнего — выполняется.
+        Не вышло и тогда — событие error CheckpointBusy, как у удаления."""
+        with self.lock:
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self.lock:
+                self._readers -= 1
+                due = self._wal_due and not self._readers
+            if due and self.truncate_wal() == "busy":
+                self.audit("error", kind=CheckpointBusy.__name__, stage="deferred")
 
     def rotate_master(self, new_master: bytes) -> int:
         """Смена главного ключа (cleaner key rotate): обёртки ключей чатов и общего ключа перешифровываются новым
@@ -331,7 +356,7 @@ class Repository:
                 "DELETE FROM users WHERE id = ? AND disabled = 1 AND NOT EXISTS (SELECT 1 FROM chats WHERE user_id = ?)",
                 user_id, user_id,
             ) == 1
-        if deleted and not self.truncate_wal():
+        if deleted and self.truncate_wal() == "busy":
             raise CheckpointBusy(user_id)
         return deleted
 
@@ -447,24 +472,22 @@ class Repository:
         for _, callback in alive:
             callback(chat_id)
 
-    def delete_chat(self, chat_id: str) -> None:
+    def delete_chat(self, chat_id: str) -> str:
         """Строки чата и его ключ удаляются (элементы — каскадом схемы: items.chat_id ON DELETE CASCADE, foreign_keys
         включает db.connect); secure_delete перезаписывает их на диске (FR-1.4).
 
         Копии страниц с ключом чата остаются в файле журнала WAL до контрольной точки, а соединение
-        службы живёт долго: контрольная точка с усечением журнала выполняется сразу. Занята (первый
-        столбец ответа — 1) — ещё попытка; между попытками замок отпущен, чтобы служба не стояла.
+        службы живёт долго: контрольная точка с усечением журнала выполняется сразу (truncate_wal).
+        Возвращает truncated или deferred — усечение отложено до закрытия снимка оценки этого процесса.
         Не вышло — CheckpointBusy: чат удалён, а молчать о копиях в журнале нельзя.
         """
         with self.lock:
             self.conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
         self._forget_chat(chat_id)
-        for _ in range(_CHECKPOINT_ATTEMPTS):
-            with self.lock:
-                busy = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
-            if not busy:
-                return
-        raise CheckpointBusy(chat_id)
+        wal = self.truncate_wal()
+        if wal == "busy":
+            raise CheckpointBusy(chat_id)
+        return wal
 
     def chat_version(self, chat_id: str) -> int:
         """Версия состояния без расшифровки: по ней шлюз узнаёт, годится ли состояние, которое он держит в памяти."""

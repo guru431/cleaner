@@ -62,6 +62,37 @@ def _repository(cfg: Config, master: bytes | None = None, create: bool = False) 
         conn.close()
 
 
+@contextmanager
+def _service_lock(cfg: Config, busy: str) -> Iterator[None]:
+    """Замок службы: файл cleaner.db.lock рядом с базой под исключительной блокировкой ОС — у serve на всё время работы,
+    у key rotate на время смены. Блокировки SQLite этого не дают: простаивающее соединение службы не держит их и не
+    мешает ни транзакции смены, ни усечению WAL, а служба, держащая прежний ключ в памяти, обёртывала бы им ключи новых
+    чатов. Блокировку снимает и завершение процесса; занята — ValueError(busy). Файл не удаляется: удаление замка
+    между открытием и блокировкой у другого процесса дало бы два замка."""
+    if not cfg.db_path.exists():
+        raise ValueError(f"базы нет: {cfg.db_path}; сначала выполните init")
+    fd = os.open(f"{cfg.db_path}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ValueError(busy) from None
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)        # сразу, а не когда ОС освободит замок закрытого файла
+    finally:
+        os.close(fd)
+
+
 # Библиотеки моделей не обращаются в интернет (NFR-2, раздел 2 спецификации); на сервере то же задаёт юнит.
 OFFLINE = {
     "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1",
@@ -156,7 +187,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     cfg = _config(args)
     config.check_transport(cfg)
-    with _repository(cfg) as repo:
+    busy = "база занята: работает другая служба или смена главного ключа (key rotate)"
+    with _service_lock(cfg, busy), _repository(cfg) as repo:
         # Отпечаток считается до работы: замена файлов под службой его не меняет. Строку журнала службы сверяет с
         # кодом на диске check-cleaner.sh.
         build = version.current()
@@ -243,28 +275,33 @@ def cmd_apikey(args: argparse.Namespace) -> int:
 def _rotate_key(args: argparse.Namespace) -> int:
     """Новый главный ключ: сначала в новый файл окружения (базу, перешифрованную ключом, которого нигде нет, не открыть),
     затем перешифровка обёрток одной транзакцией. Не удалась — база под прежним ключом, новый файл удаляется.
-    Службу на время смены останавливают: она держит прежний ключ в памяти (docs/deployment.md)."""
+    Службу на время смены останавливают: она держит прежний ключ в памяти (docs/deployment.md). Работает — отказ до
+    создания файла (замок службы); пока идёт смена, служба не стартует."""
     if not args.env_file:
         raise ValueError("для rotate укажите --env-file: новый файл для нового ключа")
-    env_file, key = Path(args.env_file), crypto.new_key()
-    _write_private(env_file, f"{crypto.key_line(key)}\n".encode("ascii"))
-    committed = False
-    try:
-        with _repository(_config(args)) as repo:
-            chats = repo.rotate_master(key)
-            committed = True
-            truncated = repo.truncate_wal()
-            repo.audit("master_key_rotated", chats=chats, wal="truncated" if truncated else "busy", by="cli")
-    except BaseException:
-        if not committed:                   # база под прежним ключом: новый ключ ничего не открывает
-            with suppress(OSError):
-                env_file.unlink()
-        raise
+    cfg = _config(args)
+    busy = "служба работает: остановите её (systemctl stop cleaner.service) — она держит прежний ключ в памяти"
+    with _service_lock(cfg, busy):
+        env_file, key = Path(args.env_file), crypto.new_key()
+        _write_private(env_file, f"{crypto.key_line(key)}\n".encode("ascii"))
+        committed = False
+        try:
+            with _repository(cfg) as repo:
+                chats = repo.rotate_master(key)
+                committed = True
+                wal = repo.truncate_wal()
+                repo.audit("master_key_rotated", chats=chats, wal=wal, by="cli")
+        except BaseException:
+            if not committed:                   # база под прежним ключом: новый ключ ничего не открывает
+                with suppress(OSError):
+                    env_file.unlink()
+            raise
+    truncated = wal == "truncated"
     print(f"Главный ключ сменён: новый — в {env_file}, прежний базу больше не открывает. Ключей чатов: {chats}.")
     print("Подставьте его в окружение службы и выгрузите заново: python -m cleaner key export <файл>")
     if not truncated:
         print(
-            "ошибка: журнал WAL не усечён — базу держит другое соединение (служба, backup, eval), и прежние обёртки "
+            "ошибка: журнал WAL не усечён — базу держит другое соединение (backup, eval), и прежние обёртки "
             "ключей остаются в cleaner.db-wal до контрольной точки. Остановите его и выполните rotate ещё раз — уже "
             "с новым ключом в окружении.", file=sys.stderr,
         )
