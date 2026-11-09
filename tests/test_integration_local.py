@@ -6,6 +6,7 @@ import pytest
 
 from cleaner.core.types import EntityType, Policy
 from cleaner.engines import Engines, GATEWAY_KEY_ENV
+from cleaner.storage.repo import Item
 
 
 @pytest.fixture
@@ -47,6 +48,32 @@ def test_local_preview_shows_originals_and_needs_no_cloud_provider(local, repo):
     assert 'Local <EMAIL_1>' in events.text and repo.item(cid, item_id).source == "local"
     assert program.post(f"/api/v1/chats/{cid}/local-requests/send", json=receipt).status_code == 409
     assert program.post(f"/api/v1/chats/{cid}/answers/{item_id}/stop").status_code == 204
+
+
+def test_local_answer_events_carry_the_whole_prefix(api, app, repo):
+    """Контракт SSE — весь префикс, клиент заменяет показанное: ответ из двух частей не показывается последним куском,
+    и при обрыве без done на экране весь полученный текст."""
+    program = api()
+    cid = program.post("/api/v1/chats", json={}).json()["id"]
+    item = repo.add_item(cid, Item("local-answer", 0, "answer", "", None, source="local", status="running"))
+
+    class TwoParts:
+        """Ответ, у которого к каждому опросу страницы приходит следующая часть."""
+
+        def __init__(self):
+            self.parts = iter(["Local ", "Local answer"])
+            self.finished = False
+
+        def text(self):
+            text = next(self.parts)
+            self.finished = text == "Local answer"
+            return text
+
+    app.state.service.live.get = lambda item_id: TwoParts()
+    repo.finish_answer(cid, item.id, "Local answer", "done", {})
+    events = program.get(f"/api/v1/chats/{cid}/answers/{item.id}/events").text
+    shown = [json.loads(line[6:])["text"] for line in events.splitlines() if line.startswith("data: ")]
+    assert shown == ["Local ", "Local answer", "Local answer"]       # два события text и done
 
 
 def test_local_recipient_change_and_other_owner_invalidate_consent(local, repo, api):

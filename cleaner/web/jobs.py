@@ -24,8 +24,17 @@ INTERRUPTED = "Обработка прервана перезапуском сл
 # идёт до минуты: дольше ждать незачем, недождавшиеся помечаются прерванными.
 STOP_WAIT = 30.0
 MAX_WAIT = 300.0
-CANCELLED = "Отменено до начала обработки: исходный файл не хранится"
+CANCELLED = "Отменено до начала обработки: запустите её ещё раз"
+FILE_CANCELLED = "Отменено до начала обработки, а исходный файл не хранится: загрузите файл ещё раз"
 EXPIRED = "Время ожидания истекло: запустите обработку ещё раз"
+# Без срока ожидания: разбор файла. Его память уже учтена в бюджете (Budget), отменить его можно в очереди, а пакет
+# сканов на двух потоках идёт дольше любого срока (5 страниц по ≈72 с — 6 минут на файл): хвост пакета истекал бы
+# всегда, а повторить нечего — файл не хранится.
+_NO_DEADLINE = frozenset({"file"})
+
+
+def _cancelled(kind: str) -> str:
+    return FILE_CANCELLED if kind == "file" else CANCELLED
 
 
 class Task:
@@ -118,7 +127,7 @@ class Jobs:
 
         future.add_done_callback(finished)
         with task.lock:
-            if task.state == "queued" and not future.done():
+            if task.state == "queued" and not future.done() and kind not in _NO_DEADLINE:
                 task.timer = threading.Timer(self.max_wait, task.cancel, (EXPIRED,))
                 task.timer.daemon = True
                 task.timer.start()
@@ -132,13 +141,13 @@ class Jobs:
     def cancel(self, task_id: str, user: str) -> bool | None:
         with self._lock:
             task = self._tasks.get(task_id)
-        return task.cancel(CANCELLED) if task is not None and task.user == user else None
+        return task.cancel(_cancelled(task.kind)) if task is not None and task.user == user else None
 
     def cancel_chat(self, chat: str) -> None:
         with self._lock:
             tasks = [t for t in self._tasks.values() if t.chat == chat]
         for task in tasks:
-            task.cancel(CANCELLED)
+            task.cancel(_cancelled(task.kind))
 
     def shutdown(self) -> int:
         return shutdown(self)

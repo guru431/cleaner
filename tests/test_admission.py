@@ -1,17 +1,22 @@
 """Регрессии допуска очереди, очистки RAM multipart и отмены без хранения исходных файлов."""
 import asyncio
 import io
+import json
 from concurrent.futures import Executor, Future
 from types import SimpleNamespace
 
 import pytest
+from pdfgen import make_pdf
 from starlette.datastructures import Headers
 
 from cleaner.queueing import Budget, QueueFull
 from cleaner.service import ChatService
+from cleaner.storage.repo import Provider
 from cleaner.web import deps
 from cleaner.web.app import BodyLimit
-from cleaner.web.jobs import CANCELLED, EXPIRED, Jobs
+from cleaner.web.jobs import CANCELLED, EXPIRED, FILE_CANCELLED, Jobs
+
+TEXT_PAGE = "Contact petrov.test@kontora-test.ru for access"
 
 
 class Deferred(Executor):
@@ -62,6 +67,76 @@ def test_request_body_admission_refuses_before_receive(app):
     assert app.state.jobs.budget.usage() == (0, 0)
 
 
+async def _call(app, inner, method, path, body=b"", headers=()):
+    """Запрос через настоящий BodyLimit к заглушке приложения; возвращает (статус, тело ответа)."""
+    scope = {"type": "http", "method": method, "path": path, "app": app, "headers": list(headers)}
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await BodyLimit(inner)(scope, receive, send)
+    return sent[0]["status"], b"".join(m.get("body", b"") for m in sent[1:])
+
+
+def test_hanging_agent_streams_neither_hold_budget_nor_block_login_and_api(app):
+    """16 потоков ответа агентам по минуте: резерв тела отпущен по приёму, сверх AGENT_WORKERS — 429 в виде протокола
+    агента, а вход и /api/v1 принимаются (раньше — 503 «Служба занята»)."""
+    budget, slots = app.state.jobs.budget, app.state.agent_slots
+    answering = asyncio.Event()
+
+    async def inner(scope, receive, send):
+        while (await receive()).get("more_body"):
+            pass
+        if scope["path"].startswith("/agent/"):
+            await answering.wait()                  # поток ответа агенту
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def scenario():
+        held = [asyncio.create_task(_call(app, inner, "POST", "/agent/anthropic/v1/messages", b"{}"))
+                for _ in range(slots.limit)]
+        await asyncio.sleep(0)
+        refused = [await _call(app, inner, "POST", path, b"{}") for path in (
+            *["/agent/anthropic/v1/messages"] * 4, *["/agent/openai/v1/chat/completions"] * 4)]
+        assert budget.usage() == (0, 0) and slots.busy == slots.limit
+        login = await _call(app, inner, "POST", "/login", b"login=ivan")
+        api = await _call(app, inner, "POST", "/api/v1/chats", b"{}")
+        answering.set()
+        return refused, login, api, await asyncio.gather(*held)
+
+    refused, login, api, held = asyncio.run(scenario())
+    assert login == api == (200, b"ok") and all(reply == (200, b"ok") for reply in held)
+    anthropic, openai = json.loads(refused[0][1]), json.loads(refused[-1][1])
+    assert {status for status, _ in refused} == {429}
+    assert anthropic["type"] == "error" and anthropic["error"]["type"] == "rate_limit_error"
+    assert openai["error"]["type"] == "rate_limit_error" and openai["error"]["message"].startswith("Cleaner:")
+    assert slots.busy == 0 and slots.refused == 8 and budget.usage() == (0, 0)
+
+
+def test_body_reservation_is_the_declared_length_and_bounds_the_body(app):
+    budget = app.state.jobs.budget
+    seen = []
+
+    async def inner(scope, receive, send):
+        seen.append(budget.usage())
+        try:
+            await receive()
+        except Exception as exc:
+            seen.append(exc.status_code)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+
+    declared = [(b"content-length", b"2")]
+    asyncio.run(_call(app, inner, "POST", "/api/v1/chats", b"{}", declared))
+    asyncio.run(_call(app, inner, "POST", "/api/v1/chats", b"{}"))
+    asyncio.run(_call(app, inner, "POST", "/api/v1/chats", b"{} and more", declared))
+    assert seen == [(0, 2), (0, deps.MAX_BODY_BYTES), (0, 2), 413]
+    assert budget.usage() == (0, 0)
+
+
 def test_upload_admission_refuses_before_streaming_raw_bytes(app):
     app.state.jobs.budget.user_jobs = 0
 
@@ -92,7 +167,7 @@ def test_admission_precedes_database_write_and_cancel_frees_raw_arguments(repo, 
     assert task.args == () and task.fn is None
     assert budget.usage() == (0, 0)
     stored = repo.item(chat, item.id)
-    assert stored.status == "failed" and stored.meta["error"] == CANCELLED
+    assert stored.status == "failed" and stored.meta["error"] == FILE_CANCELLED
     executor.run()
     assert repo.item(chat, item.id).original == ""
 
@@ -115,16 +190,57 @@ def test_deadline_cancels_queued_and_failure_returns_its_budget(repo, engines, m
     chat = repo.create_chat(user, "Чат")
     executor = Deferred()
     jobs = Jobs(executor)
-    service = ChatService(repo, engines=engines, file_submit=jobs.submit, budget=jobs.budget)
-    first = service.add_file(chat, user, "report.txt", b"a")
+    service = ChatService(repo, engines=engines, submit=jobs.submit, file_submit=jobs.submit, budget=jobs.budget)
+    first = service.add_input(chat, user, "текст")
     timers[0]()
     assert repo.item(chat, first.id).meta["error"] == EXPIRED
     assert jobs.budget.usage() == (0, 0)
     second = service.add_file(chat, user, "report.bin", b"\x00\x01\xff")
+    assert len(timers) == 1                         # у разбора файла срока нет: хвост пакета сканов не истекает
     executor.run()  # cancelled first
     executor.run()  # unsupported second
     assert repo.item(chat, second.id).status == "failed"
     assert jobs.budget.usage() == (0, 0)
+
+
+def test_cancel_reason_depends_on_what_can_be_repeated(repo, engines):
+    """Отменённый файл — «загрузите файл ещё раз» (файл не хранится); отменённый текст можно запустить ещё раз."""
+    user = repo.create_user("owner", "hash", "user")
+    chat = repo.create_chat(user, "Чат")
+    jobs = Jobs(Deferred())
+    service = ChatService(repo, engines=engines, submit=jobs.submit, file_submit=jobs.submit, budget=jobs.budget)
+    text = service.add_input(chat, user, "текст")
+    file = service.add_file(chat, user, "report.txt", b"a")
+    for task in list(jobs._tasks.values()):
+        jobs.cancel(task.id, user)
+    assert repo.item(chat, text.id).meta["error"] == CANCELLED and "исходный файл" not in CANCELLED
+    assert repo.item(chat, file.id).meta["error"] == FILE_CANCELLED and "загрузите файл ещё раз" in FILE_CANCELLED
+
+
+def test_cloud_send_taken_off_the_queue_ends_the_wait_and_is_not_logged_as_sent(repo):
+    """Отправка снята с очереди: ответ закрыт для страницы (/stream выходит), события cloud_send нет — запрос не ушёл.
+    Ушедший запрос пишет его, когда задание начинается."""
+    user = repo.create_user("owner", "hash", "user")
+    chat = repo.create_chat(user, "Чат")
+    provider = repo.add_provider(Provider("", "Облако", "openai", "https://llm.example/v1", "bearer", "invented", ("m-1",), 512))
+    executor = Deferred()
+    sends = Jobs(executor)
+    service = ChatService(repo, send_submit=sends.submit, budget=sends.budget, cloud_send=lambda *a, **kw: iter(["Ответ"]))
+    service.add_input(chat, user, "Вопрос")
+    service.set_provider(chat, provider, "m-1")
+
+    def send():
+        item = service.send(chat, user, service.outgoing(chat).outgoing.context.digest())
+        return item, service.live.get(item.id), next(iter(sends._tasks.values()))
+
+    item, live, task = send()
+    assert sends.cancel(task.id, user)
+    assert live.finished and service.live.get(item.id) is None
+    assert repo.item(chat, item.id).status == "failed" and repo.audit_events("cloud_send") == []
+    executor.run()
+    item, live, task = send()
+    executor.run()
+    assert repo.item(chat, item.id).status == "done" and len(repo.audit_events("cloud_send")) == 1
 
 
 def test_chat_deletion_cancels_queued_work_and_releases_budget(repo, engines):
@@ -182,6 +298,26 @@ def test_personal_queue_hides_other_users_and_cancellation_needs_csrf(ivan, brow
     assert repo.items(chat)[0].status == "failed"
     assert ivan.get("/jobs/status").json() == {"jobs": []}
     assert pool.budget.usage() == (0, 0)
+
+
+def test_pdf_estimate_is_shown_in_the_queue_and_a_too_long_pdf_never_queues(ivan, api, app, repo):
+    """Идея аудита 09.11.2026: страниц, сканов и минут распознавания — до очереди; заведомо длинный PDF — отказ сразу."""
+    executor = Deferred()
+    pool = Jobs(executor, budget=app.state.jobs.budget)
+    app.state.service.file_submit = pool.submit
+    chat = ivan.chat()
+    data = make_pdf([TEXT_PAGE, None])
+    ivan.upload(f"/chats/{chat}/upload", "report.pdf", data)
+    [item] = repo.items(chat)
+    assert item.status == "queued" and item.meta["progress"] == "страниц 2, из них сканов 1, ≈2 мин распознавания"
+    assert "страниц 2, из них сканов 1, ≈2 мин распознавания" in ivan.get(f"/chats/{chat}").text
+    answer = api().post(f"/api/v1/chats/{chat}/files", files={"file": ("report.pdf", data)})
+    assert answer.json()["estimate"] == {"pages": 2, "ocr_pages": 1, "minutes": 2}
+    app.state.service.max_text_chars = 10
+    ivan.upload(f"/chats/{chat}/upload", "long.pdf", data)
+    refused = repo.items(chat)[-1]
+    assert refused.status == "failed" and "заведомо длиннее 10 знаков" in refused.meta["error"]
+    assert len(executor.tasks) == 2
 
 
 @pytest.mark.parametrize("csrf", ["correct", "bad"])

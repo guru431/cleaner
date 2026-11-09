@@ -7,7 +7,7 @@ from pdfgen import make_pdf
 
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.llm import CompletionError
-from cleaner.ingest.extract import ExtractError, Extractor, detect_kind
+from cleaner.ingest.extract import ExtractError, Extractor, detect_kind, estimate_pdf
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16
@@ -276,6 +276,33 @@ def test_scan_page_refused_by_recognition_is_left_out_and_the_rest_is_kept():
     result = Extractor(Documents(), Truncated()).extract("scan.pdf", make_pdf([None, TEXT_PAGE, None]))
     assert result.text == "страница 2: почта doc@x.example\n\nСкан: почта scan@x.example"
     assert (result.ocr_pages, result.unread_pages, result.failed_pages) == ((3,), (), (1,))
+
+
+def test_pdf_with_a_layer_longer_than_the_limit_is_refused_before_docling():
+    """Аудит 09.11.2026: PDF на 400 страниц разбирался Docling целиком (минуты под общим замком) и только потом
+    отклонялся по длине. Слой текста (_page_kinds) знает длину заранее."""
+    documents, ocr = Documents(), Ocr()
+    data = make_pdf([TEXT_PAGE, TEXT_PAGE, TEXT_PAGE, None])          # 43 непробельных знака на странице
+    with pytest.raises(ExtractError, match="заведомо длиннее 100 знаков"):
+        Extractor(documents, ocr, max_chars=100).extract("long.pdf", data)
+    assert documents.calls == [] and ocr.calls == []
+    assert Extractor(documents, ocr, max_chars=200).extract("long.pdf", data).pages == 4
+
+
+def test_recognition_stops_once_the_text_is_over_the_limit():
+    ocr = Ocr(text="x" * 50)
+    with pytest.raises(ExtractError, match="заведомо длиннее 80 знаков"):
+        Extractor(Documents(), ocr, max_chars=80).extract("scan.pdf", make_pdf([None, None, None]))
+    assert len(ocr.calls) == 2                       # третья страница (≈72 с) уже не распознаётся
+
+
+def test_pdf_estimate_counts_pages_to_recognise_and_minutes():
+    data = make_pdf([TEXT_PAGE, None, None])
+    estimate = estimate_pdf(data)
+    assert (estimate.pages, estimate.ocr_pages, estimate.minutes, estimate.layer_chars) == (3, 2, 3, 43)
+    assert estimate.summary() == "страниц 3, из них сканов 2, ≈3 мин распознавания"
+    assert estimate_pdf(data, ocr_all=True).ocr_pages == 3
+    assert estimate_pdf(make_pdf([TEXT_PAGE])).summary() == "страниц 1"
 
 
 @pytest.mark.parametrize("error", [
