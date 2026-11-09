@@ -2,6 +2,8 @@ import pytest
 
 from cleaner.core.detect import rules
 from cleaner.core.detect.base import DetectContext
+from cleaner.core.pipeline import sanitize
+from cleaner.core.restore import restore
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Settings
 
@@ -428,3 +430,123 @@ def test_placeholder_logins_in_a_url_are_not_masked():
     for text in ("https://имя:пароль@host.contoso.ru/", "https://login:password@host.contoso.ru/",
                  "https://username:secret@host.contoso.ru/"):
         assert T.ACCOUNT not in types(text), text
+
+
+@pytest.mark.parametrize("text, type_, value", [
+    ("Оплата картой 4111\xa01111\xa01111\xa01111", T.CARD, "4111\xa01111\xa01111\xa01111"),
+    ("карта 4111–1111–1111–1111", T.CARD, "4111–1111–1111–1111"),
+    ("паспорт 45\xa008\xa0123456", T.PASSPORT, "45\xa008\xa0123456"),
+    ("СНИЛС 112-233-445\xa095", T.SNILS, "112-233-445\xa095"),
+    ("СНИЛС 112‐233‐445 95", T.SNILS, "112‐233‐445 95"),
+    ("ИНН 77\u202f07\u202f08\u202f38\u202f93", T.INN, "77\u202f07\u202f08\u202f38\u202f93"),
+    ("IBAN GB82\u2007WEST\u20071234\u20075698\u20077654\u200732", T.BANK_ACCOUNT, "GB82\u2007WEST\u20071234\u20075698\u20077654\u200732"),
+    ("Дата рождения: 01–02–1980", T.BIRTHDATE, "01–02–1980"),
+], ids=["card-nbsp", "card-en-dash", "passport-nbsp", "snils-nbsp", "snils-hyphen", "inn-narrow-nbsp", "iban-figure-space",
+        "birthdate-en-dash"])
+def test_numbers_with_non_breaking_spaces_and_typographic_dashes(text, type_, value):
+    """FINDINGS «Слой 1: номера карт, паспортов, СНИЛС, ИНН и счетов с неразрывным пробелом не находятся»: Word и Outlook
+    ставят U+00A0 и U+202F между группами, автозамена — тире; найденное значение — как в оригинале."""
+    assert (type_, value) in found(text)
+
+
+@pytest.mark.parametrize("text, phone", [
+    ("тел. +7 916 123\u201145\u201167", "+7 916 123\u201145\u201167"),
+    ("тел. +7 (916) 123–45–67", "+7 (916) 123–45–67"),
+    ("тел. 8.916.123.45.67", "8.916.123.45.67"),
+    ("тел. +7.916.123.45.67", "+7.916.123.45.67"),
+    ("тел. 8\u2011916\u2011123\u201145\u201167", "8\u2011916\u2011123\u201145\u201167"),
+    ("ул. Ленина, д. 7, кв. 88. 8 812 682 53 49.", "8 812 682 53 49"),
+], ids=["nb-hyphen", "en-dash", "dots", "plus-dots", "nb-hyphen-eight", "flat-number-before"])
+def test_phone_with_typographic_dashes_or_dots(text, phone):
+    """FINDINGS «Слой 1: телефон с неразрывным дефисом, коротким тире или точками не находится»."""
+    assert (T.PHONE, phone) in found(text)
+
+
+@pytest.mark.parametrize("text", [
+    "версия 1.8.916.123.45.67", "сборка 8.916.123.45.67.2", "DNS 8.8.8.8 и 8.8.4.4", "релиз 8.10.2024.12.30",
+    "узел 10.8.123.45.67",
+], ids=["version-before", "version-after", "ip", "date", "ip-like"])
+def test_dotted_digits_that_are_not_a_phone(text):
+    """Точка — разделитель телефона только у отдельной записи: цепочка версии или адреса через точку — не номер."""
+    assert T.PHONE not in types(text)
+
+
+@pytest.mark.parametrize("text, value", [
+    ("Дата рождения: 12 марта 1985 г.", "12 марта 1985"),
+    ("родился 12 марта 1985 года", "12 марта 1985"),
+    ("д.р. 1 янв. 1990", "1 янв. 1990"),
+    ("DOB: March 12, 1985", "March 12, 1985"),
+    ("born 12 Mar 1985", "12 Mar 1985"),
+    ("Date of birth: Sept. 3rd, 1979", "Sept. 3rd, 1979"),
+], ids=["ru", "ru-genitive", "ru-short", "en", "en-day-first", "en-ordinal"])
+def test_birthdate_with_the_month_in_words(text, value):
+    """FINDINGS «Слой 1: дата рождения, записанная месяцем словом, не скрывается»."""
+    assert (T.BIRTHDATE, value) in found(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Встреча 12 марта 2026 г.", "родился 31 февраля 1985 года", "DOB: Feb 30, 1985", "родился 12 марс 1985",
+])
+def test_month_in_words_needs_context_and_a_real_date(text):
+    assert T.BIRTHDATE not in types(text)
+
+
+@pytest.mark.parametrize("text, email", [
+    ("GET /x?email=ivanov%40contoso.ru HTTP/1.1", "ivanov%40contoso.ru"),
+    ("return=/a?to=ivan%2Btest%40contoso.ru&x=1", "ivan%2Btest%40contoso.ru"),
+], ids=["at", "plus"])
+def test_url_encoded_email_is_found(text, email):
+    """FINDINGS «E-mail и `DOMAIN\\login` в URL-кодировке…»: «%40» — «@» в журналах веб-серверов и адресах возврата."""
+    assert found(text) == {(T.EMAIL, email)}
+
+
+def test_url_encoded_email_keeps_the_domain_and_the_login_hidden(state, settings):
+    """Та же находка: домен получал значение «40contoso.ru», а «ivanov» уходил открытым."""
+    text = "GET /x?email=ivanov%40contoso.ru HTTP/1.1, потом contoso.ru"
+    result = sanitize(state, text, settings)
+    assert "ivanov" not in result.sanitized and "contoso" not in result.sanitized
+    assert all(not entity.restore_value.startswith("40") for entity in state.entities.values())
+    assert restore(state, result.sanitized, settings).text == text
+
+
+def test_email_does_not_start_inside_a_percent_escape():
+    assert T.EMAIL not in types("path=%40ivanov.contoso.ru")
+    assert found("x=%2Fivanov@contoso.ru") == {(T.EMAIL, "ivanov@contoso.ru")}
+
+
+@pytest.mark.parametrize("text, email", [
+    ("пишите ivan.o'brien@contoso.ru", "ivan.o'brien@contoso.ru"),
+    ("пишите d’artagnan@contoso.ru", "d’artagnan@contoso.ru"),
+    ("адрес 'ivanov@contoso.ru'", "ivanov@contoso.ru"),
+], ids=["apostrophe", "typographic", "quoted"])
+def test_apostrophe_inside_the_mailbox_name(text, email):
+    """FINDINGS «Слой 1: апостроф в имени ящика оставляет часть адреса открытой»: «ivan.o» уходил открытым."""
+    assert found(text) == {(T.EMAIL, email)}
+
+
+@pytest.mark.parametrize("text, value", [
+    ("Загранпаспорт 75 1234567", "75 1234567"),
+    ("заграничный паспорт № 751234567", "751234567"),
+    ("водительское удостоверение 99 12 345678", "99 12 345678"),
+    ("ВУ 77 АА 123456", "77 АА 123456"),
+    ("СТС 77 УХ 123456", "77 УХ 123456"),
+    ("ПТС: 77 ОР 123456", "77 ОР 123456"),
+    ("ЭПТС 164301001234567", "164301001234567"),
+], ids=["foreign", "foreign-compact", "license", "license-old", "registration", "vehicle-passport", "electronic"])
+def test_other_identity_documents_are_passports(text, value):
+    """IDEAS «Номера документов слоем 1: загранпаспорт, водительское удостоверение, СТС/ПТС»: тип — PASSPORT, как
+    у документов в открытых наборах и у метки «document» слоя 4."""
+    assert (T.PASSPORT, value) in found(text)
+
+
+@pytest.mark.parametrize("text", [
+    "заказ 75 1234567", "вуз 99 12 345678", "паспорт 75 1234567", "склад 77 АА 123456", "ЭТС 164301001234567",
+])
+def test_document_numbers_need_their_words(text):
+    assert T.PASSPORT not in types(text)
+
+
+def test_inn_next_to_a_driving_licence_stays_an_inn():
+    result = found("Водительское удостоверение 5023 987654, ИНН 7707083893")
+    assert {(T.PASSPORT, "5023 987654"), (T.INN, "7707083893")} <= result
+    assert (T.PASSPORT, "7707083893") not in result

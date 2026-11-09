@@ -24,9 +24,13 @@ _AFTER = 15
 # буквы или цифры («CORP\ivanov@…»): иначе каждое «\.» и «\\.» цепочки «a\.a\.…» без «@» было бы началом попытки до
 # конца цепочки. В строке Perl и PHP в двойных кавычках и в выражении Perl «@» пишут через «\» («ivanov\@contoso.ru»):
 # одна обратная косая перед «@» — часть адреса; «\\@» — обратная косая и массив Perl, не адрес.
+# В адресе и журнале веб-сервера «@» пишут как «%40», «+» — как «%2B» («?email=ivanov%40contoso.ru»); имя не начинается
+# внутри «%XX»: «%2Fivanov@…» — косая и ivanov@…. Апостроф между буквами — часть имени: «ivan.o'brien@contoso.ru»; после
+# него и после «%2B» имя не начинается, иначе каждая буква цепочки «a'a'a'…» или «a%2Ba%2B…» без «@» была бы началом
+# попытки до её конца.
 _DOMAIN_PART = rf"(?:[\w-]+|{_LABEL.pattern})"
 _EMAIL = re.compile(
-    rf"(?<![\w.+-])(?:(?<!\\)|(?=[\w+-]))(?:[\w.+-]|\\{{1,2}}\.)+\\?@"
+    rf"(?:(?<![\w.+%-])(?<!\w['’])|(?<=%[0-9A-Fa-f]{{2}})(?<!%2[Bb]))(?:(?<!\\)|(?=[\w+-]))(?:[\w.+-]|\\{{1,2}}\.|%2[Bb]|['’](?<=\w.)(?=\w))+(?:\\?@|%40)"
     rf"(?:{_DOMAIN_PART}(?:\\{{0,2}}\.{_DOMAIN_PART})+|{_LABEL.pattern})"
 )
 # «схема://» прямо перед «…@хост»: то, что до «@», — пользователь адреса, а не e-mail. Знаки «?#=»
@@ -48,11 +52,20 @@ _URL_SERVICE_LOGINS = frozenset({
     "пользователь",
 })
 _IPV4_DOMAIN = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
-# +7 или 8 и ровно десять цифр с любыми разделителями в одной строке: «8 (4852) 12-34-56», «+7 916 1234567».
+# Неразрывные и узкие пробелы (Word, Outlook) и типографские дефисы и тире между группами цифр. Номера ищутся в копии текста
+# той же длины, где эти знаки заменены пробелом и «-»: позиции находок те же, значение берётся из оригинала.
+# translate на длинном тексте не из ASCII — около 0,1 с, поэтому только когда такие знаки в нём есть.
+_PLAIN = str.maketrans({
+    "\u00a0": " ", "\u202f": " ", "\u2007": " ", "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
+})
+_TYPOGRAPHIC = re.compile("[\u00a0\u202f\u2007\u2010-\u2013]")
+# +7 или 8 и ровно десять цифр с любыми разделителями в одной строке: «8 (4852) 12-34-56», «+7 916 1234567», «8.916.123.45.67».
 # Перевод строки телефон не переходит: «8» в конце строки и число на следующей — разные значения. «+» сам отделяет номер:
 # перед ним мешают только цифра и второй «+», буква — нет («тел+7…», конец пароля «Abc+7 916 …» — иначе десять цифр после
 # секрета оставались открытыми, аудит 21.10.2026); перед «8» буква мешает: «x8…» — часть обозначения.
-_PHONE_RU = re.compile(r"(?:(?<![\d+])\+7|(?<![\w+])8)(?:(?:[^\S\r\n]|[()-]){0,3}\d){10}(?!\d)")
+# Точка — одна между цифрами («кв. 88. 8 812 …» — номер квартиры и телефон) и только у отдельной записи:
+# «1.8.916.123.45.67» и «8.916.123.45.67.2» — версии (_decimal_part).
+_PHONE_RU = re.compile(r"(?:(?<![\d+])\+7|(?<![\w+])8)(?:(?:(?:[^\S\r\n]|[()-]){0,3}|\.)\d){10}(?!\d)")
 # «8 2024-10-14 12:00» — дата в журнале, а не телефон.
 _DATE_INSIDE = re.compile(r"(?:19|20)\d\d-[01]\d-[0-3]\d")
 _PHONE_INTL = re.compile(
@@ -65,7 +78,7 @@ _PHONE_LOCAL = re.compile(
 # Группы цифр через одиночный пробел, дефис, « - », точку или косую черту («6271 - 8855 - 1122 - 3344»,
 # «77/11/222/333/44»); номер карты ищется окнами внутри такой цепочки, потому что рядом бывают срок
 # действия, CVV или чужая группа («от 2024 4111 1111 1111 1111»).
-_DIGIT_RUN = re.compile(r"(?<![\w-])\d+(?:(?: - |[ ./\u2011-])\d+)*(?![\w-])")
+_DIGIT_RUN = re.compile(r"(?<![\w-])\d+(?:(?: - |[ ./-])\d+)*(?![\w-])")
 _DIGIT_GROUP = re.compile(r"\d+")
 # Точка между цифрами у слитной группы — десятичная: «3.14159265358984», «4111111111111111.5».
 _POINT_AFTER_DIGIT = re.compile(r"\d\.$")
@@ -93,10 +106,38 @@ _PASSPORT = re.compile(r"(?<![\w-])\d{2} ?\d{2} ?(?:№ ?)?\d{6}(?![\w-])")
 _PASSPORT_WORDS = re.compile(
     r"сери[яи]\s*(\d{2}\s?\d{2})\s*,?\s*(?:номер|№|n)\s*(\d{6})(?!\d)", re.IGNORECASE
 )
+# Другие документы — тоже PASSPORT, как документы в открытых наборах и метка «document» слоя 4. Загранпаспорт — две цифры
+# и семь; водительское удостоверение и СТС — как паспорт или с серией буквами («77 АА 123456»), ПТС — серия буквами,
+# ЭПТС — пятнадцать цифр. Каждый — только при слове о своём документе рядом.
+_FOREIGN_PASSPORT = re.compile(r"(?<![\w-])\d{2} ?(?:№ ?)?\d{7}(?![\w-])")
+_DOCUMENT = re.compile(r"(?<![\w-])(?:\d{2} ?[АВЕКМНОРСТУХABEKMHOPCTXY]{2} ?(?:№ ?)?\d{6}|\d{15})(?![\w-])")
+_DOCUMENT_WORDS = re.compile(
+    r"водительск|\bв/?у\b|\bвод\.\s*уд|\bстс\b|\bэ?птс\b|паспорт\w*\s+т/?с|регистрации\s+т/?с", re.IGNORECASE
+)
 # Год из двух цифр («д.р. 01.02.90») — только при двузначных дне и месяце: «1.2.10» — скорее версия.
 _DATE = re.compile(
     r"(?<![\w.])(?:(\d{1,2})[./-](\d{1,2})[./-](\d{4})|(\d{4})-(\d{2})-(\d{2})|(\d{2})[./-](\d{2})[./-](\d{2}))"
     r"(?!\w|\.\d)"
+)
+# Месяц словом: «12 марта 1985», «1 янв. 1990», «March 12, 1985», «Sept. 3rd, 1979»; номер месяца — по первым трём буквам.
+_MONTHS = {
+    stem: number
+    for number, stems in enumerate((
+        ("янв", "jan"), ("фев", "feb"), ("мар", "mar"), ("апр", "apr"), ("мая", "may"), ("июн", "jun"),
+        ("июл", "jul"), ("авг", "aug"), ("сен", "sep"), ("окт", "oct"), ("ноя", "nov"), ("дек", "dec"),
+    ), 1)
+    for stem in stems
+}
+_MONTH = (
+    r"(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря"
+    r"|january|february|march|april|may|june|july|august|september|october|november|december"
+    r"|янв|февр?|мар|апр|июн|июл|авг|сент?|окт|нояб?|дек|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)(?!\w)\.?"
+)
+_DATE_WORDS = re.compile(
+    rf"(?<![\w.])(?:(?P<day>\d{{1,2}})[^\S\r\n]+(?P<month>{_MONTH})"
+    rf"|(?P<month_first>{_MONTH})[^\S\r\n]+(?P<day_after>\d{{1,2}})(?:st|nd|rd|th)?,?)"
+    rf"[^\S\r\n]+(?P<year>(?:19|20)\d\d)(?!\d)",
+    re.IGNORECASE,
 )
 
 _PHONE_WORDS = ("тел", "моб", "phone", "tel.", "tel:", "звон", "номер")
@@ -111,6 +152,10 @@ Add = Callable[..., None]
 def _near(text: str, start: int, end: int, words: tuple[str, ...]) -> bool:
     around = (text[max(0, start - _BEFORE):start] + " " + text[end:end + _AFTER]).lower()
     return any(word in around for word in words)
+
+
+def _document_near(text: str, start: int, end: int) -> bool:
+    return bool(_DOCUMENT_WORDS.search(text[max(0, start - _BEFORE):start] + " " + text[end:end + _AFTER]))
 
 
 def _distance(pattern: re.Pattern[str], before: str, after: str) -> float:
@@ -141,6 +186,15 @@ def _valid_date(m: re.Match[str]) -> bool:
         day, month, year = m.group(7), m.group(8), "20" + m.group(9)
     try:
         date(int(year), int(month), int(day))
+    except ValueError:
+        return False
+    return True
+
+
+def _valid_date_words(m: re.Match[str]) -> bool:
+    day, month = (m.group("day"), m.group("month")) if m.group("day") else (m.group("day_after"), m.group("month_first"))
+    try:
+        date(int(m.group("year")), _MONTHS[month[:3].lower()], int(day))
     except ValueError:
         return False
     return True
@@ -287,7 +341,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
 
     skip = ctx.builtin.builtin_accounts | _URL_SERVICE_LOGINS
     for m in _EMAIL.finditer(text):
-        local, _, domain = m.group().rpartition("@")
+        local, at, domain = m.group().rpartition("@" if "@" in m.group() else "%40")
         if "." not in domain and domain.lower() not in ctx.issued_domains:
             continue        # «ivanov@<PERSON_1>»: метка не домена
         # Метка в конце имени с точкой — часть адреса, только если это метка доменного имени: «ivanov@contoso.ru.<TERM_1>» —
@@ -296,7 +350,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         while len(parts) > 2 and _LABEL.fullmatch(parts[-1]) and parts[-1].lower() not in ctx.issued_domains:
             parts.pop()
         domain = ".".join(parts).rstrip("\\")      # «\» перед отрезанной меткой — от «\.»
-        end = m.start() + len(local) + 1 + len(domain)
+        end = m.start() + len(local) + len(at) + len(domain)
         url = _USERINFO_BEFORE.search(text[max(0, m.start() - 300):m.start()])
         if url and not _NOT_USERINFO.search(url.group("user") + local):
             continue        # пользователь адреса, а не e-mail: вход — правило _URL_LOGIN ниже
@@ -305,7 +359,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             login = local.removesuffix("\\")
             if login.lower() not in skip:
                 add(m.start(), m.start() + len(login), EntityType.ACCOUNT)
-            add(m.start() + len(local) + 1, end, EntityType.HOST)
+            add(m.start() + len(local) + len(at), end, EntityType.HOST)
             continue
         if _IPV4_DOMAIN.fullmatch(hostmap.dotted(domain)):
             # Вход вида ivanov@10.1.2.5; служебный («user@», «root@») человека не выдаёт, как и в адресе. «\» перед «@» —
@@ -321,10 +375,14 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         login = m.group("login").rstrip("\\")
         if login and login.lower() not in skip:
             add(m.start("login"), m.start("login") + len(login), EntityType.ACCOUNT)
+    if _TYPOGRAPHIC.search(text):
+        text = text.translate(_PLAIN)       # дальше — номера: та же длина, позиции те же (_PLAIN)
     for pattern in (_PHONE_RU, _PHONE_INTL):
         for m in pattern.finditer(text):
             if pattern is _PHONE_RU and not _phone_groups(m.group()):
                 continue
+            if "." in m.group() and _decimal_part(text, m.start(), m.end()):
+                continue        # звено версии или адреса через точку
             if 8 <= len(_digits(m.group())) <= 15 and not _DATE_INSIDE.search(m.group()):
                 add(m.start(), m.end(), EntityType.PHONE)
     for m in _PHONE_LOCAL.finditer(text):
@@ -342,11 +400,23 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         if validators.iban(m.group()):
             add(m.start(), m.end(), EntityType.BANK_ACCOUNT, True)
     for m in _PASSPORT.finditer(text):
-        if _near(text, m.start(), m.end(), _PASSPORT_CONTEXT):
+        # Слитные десять цифр с верной суммой ИНН рядом с правами — ИНН из тех же реквизитов (_number).
+        document = _document_near(text, m.start(), m.end()) and not (m.group().isdigit() and validators.inn(m.group()))
+        if document or _near(text, m.start(), m.end(), _PASSPORT_CONTEXT):
             add(m.start(), m.end(), EntityType.PASSPORT)
     for m in _PASSPORT_WORDS.finditer(text):
         add(m.start(1), m.end(2), EntityType.PASSPORT)
+    for m in _FOREIGN_PASSPORT.finditer(text):
+        if _near(text, m.start(), m.end(), ("загран",)):
+            add(m.start(), m.end(), EntityType.PASSPORT)
+    for m in _DOCUMENT.finditer(text):
+        if _document_near(text, m.start(), m.end()):
+            add(m.start(), m.end(), EntityType.PASSPORT)
     for m in _DATE.finditer(text):
         if _valid_date(m) and _near(text, m.start(), m.end(), _BIRTH_WORDS):
+            add(m.start(), m.end(), EntityType.BIRTHDATE)
+    lower = text.lower()        # месяцы словом проверяются на каждой букве — только если есть слово о рождении
+    for m in _DATE_WORDS.finditer(text) if any(word in lower for word in _BIRTH_WORDS) else ():
+        if _valid_date_words(m) and _near(text, m.start(), m.end(), _BIRTH_WORDS):
             add(m.start(), m.end(), EntityType.BIRTHDATE)
     return spans

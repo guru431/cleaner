@@ -98,6 +98,8 @@ pytestmark = pytest.mark.integration
         "user=" * 20000, "a_user:" * 15000, "ab" * 50000 + "user=x", "логин " * 20000, "Account Name: a\n" * 8000,
         "Account Domain:" * 10000, "Failed password for " * 6000, "Invalid user a " * 8000, "доступ " * 20000,
         "доступ a:" * 15000, "доступ " + "a/" * 50000,
+        # Адрес в URL-кодировке («%40», «%2B»), точки телефона и месяц словом в дате рождения (аудит 09.11.2026).
+        "a%2B" * 20000, "%2Fa." * 15000, "a%40" * 20000, "8.916.123." * 10000, "родился 12 марта " * 5000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -125,6 +127,7 @@ pytestmark = pytest.mark.integration
         "schtasks_passwords", "net_users", "docker_logins", "docker_auths",
         "user_keys", "user_key_prefixes", "glued_user_key", "login_words", "event_names", "event_domains",
         "sshd_failed", "sshd_invalid", "access_words", "access_pairs", "access_slashes",
+        "encoded_plus_run", "encoded_slash_run", "encoded_at_run", "dotted_phone_run", "month_dates",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):
