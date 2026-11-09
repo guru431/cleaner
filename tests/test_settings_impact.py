@@ -101,6 +101,7 @@ def test_csv_import_of_one_new_row_is_logged_as_an_import(boss, repo):
     fields = {"csv": "Name\r\nsrv1.corp.example\r\n", "delimiter": "semicolon", "list": "never", "column": "Name"}
     shown = boss.post("/settings/dictionary/import", action="impact", **fields)
     assert shown.status_code == 200, shown.text
+    assert repo.audit_events("settings_previewed")[0].details["kind"] == "import"
     receipt = re.search(r'name="receipt" value="([^"]+)"', shown.text).group(1)
     assert boss.post("/settings/impact/apply", receipt=receipt).status_code == 303
     assert [e.details for e in repo.audit_events("dictionary_import")] == [{"list": "never", "count": 1}]

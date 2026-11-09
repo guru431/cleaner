@@ -150,7 +150,7 @@ def preview(repo, user_id, operation):
         binding = _binding(snap)
     # Оценка — в журнал (раздел 4 ТЗ, FR-11.2): вид правки и числа, без значений словаря.
     was, will = {r["id"] for r in before_config["dictionary"]}, {r["id"] for r in config["dictionary"]}
-    repo.audit("settings_previewed", user_id, kind=operation["kind"],
+    repo.audit("settings_previewed", user_id, kind="import" if operation.get("import") else operation["kind"],
                policies=sum(event == "policy_changed" for event, _ in _changes(before_config, config)),
                added=sum(1 for r in config["dictionary"] if r["id"] not in was),
                removed=sum(1 for r in before_config["dictionary"] if r["id"] not in will))
