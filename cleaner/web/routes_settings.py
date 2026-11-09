@@ -7,6 +7,7 @@ import json
 import threading
 from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import regex
@@ -19,7 +20,7 @@ from cleaner.core import cache
 from cleaner.core.detect.dictionary import PATTERN_TIMEOUT
 from cleaner.core.detect.llm import CompletionError
 from cleaner.core.entities import hostmap
-from cleaner.core.types import EntityType, Policy
+from cleaner.core.types import EntityType, Policy, default_policies
 from cleaner.egress import ProviderError, cloud
 from cleaner.engines import GATEWAY_KEY_ENV, LocalSettings, local_settings, save_local_settings
 from cleaner.eval import coverage, runner
@@ -27,6 +28,7 @@ from cleaner.eval.metrics import CLASSES
 from cleaner.storage.repo import CheckpointBusy, Provider, User
 from cleaner.web import auth, render
 from cleaner.web.deps import Viewer, get_admin, get_form, page, repo_of, service_of
+from cleaner.web.deps import _local as local_time
 from cleaner.web.routes_chats import LAYER_LABELS, LAYER_NAMES
 
 router = APIRouter(prefix="/settings")
@@ -93,9 +95,152 @@ def preview_undo(request: Request, form: dict[str, str] = Depends(get_form), vie
     return _impact(request, viewer, {"kind": "undo"})
 
 
+def _cards(request: Request) -> dict[str, tuple[str, str, str]]:
+    """Главная настроек (идея аудита 09.11.2026): по разделу — состояние good / warn / bad, одно число словами и строка
+    подробностей. Только из базы и памяти службы, без сетевых запросов."""
+    repo, engines = repo_of(request), request.app.state.engines
+    providers = repo.providers()
+    enabled = sum(provider.enabled for provider in providers)
+    policies = repo.policies()
+    defaults = default_policies()
+    off = sum(policy is Policy.OFF for policy in policies.values())
+    changed = sum(policy is not defaults[type_] for type_, policy in policies.items())
+    rows = repo.dictionary()
+    always = sum(row.list == "always" for row in rows)
+    patterns = repo.patterns()
+    users = repo.users()
+    disabled = sum(user.disabled for user in users)
+    since = (request.app.state.clock.now() - timedelta(days=1)).isoformat(timespec="seconds")
+    events = len(repo.audit_events(since=since, limit=None))
+    errors = len(repo.audit_events("error", since=since, limit=None))
+    gold = _gold_state(request)
+    if engines is None:
+        local = ("bad", "не подключена", "слои 4 и 5 и сканы недоступны")
+    elif not engines.status()["key"]:
+        local = ("bad", "ключ шлюза не задан", f"переменная {GATEWAY_KEY_ENV} в окружении службы")
+    else:
+        layer5 = "включена" if repo.layer_defaults()["llm"] else "выключена"
+        local = ("good", "ключ шлюза задан", f"допроверка в новых чатах {layer5}; доступность — кнопкой на странице")
+    return {
+        "/settings/providers": (
+            ("good", f"включено — {enabled}", f"всего — {len(providers)}") if enabled else
+            ("warn", "включённых нет", "отправки из чата нет — только перенос вручную")
+        ),
+        "/settings/local-llm": local,
+        "/settings/policies": (
+            ("warn", f"не ищется типов — {off}", f"изменено от умолчаний — {changed}") if off else
+            ("good", f"изменено от умолчаний — {changed}", f"типов — {len(policies)}")
+        ),
+        "/settings/dictionary": (
+            ("good" if rows else "warn", f"записей — {len(rows)}",
+             f"скрывать — {always}, не скрывать — {len(rows) - always}" if rows else "словарь организации пуст")
+        ),
+        "/settings/patterns": (
+            "good", f"включено — {sum(p.enabled for p in patterns)}", f"всего — {len(patterns)}",
+        ),
+        "/settings/builtin": (
+            "good", f"своих суффиксов — {len(stored_suffixes(repo))}",
+            f"своих «никогда не скрывать» — {len(rows) - always}",
+        ),
+        "/settings/gold": (gold["state"], f"эталон — {gold['count']} из {GOLD_TARGET}", gold["detail"]),
+        "/settings/users": (
+            "good", f"пользователей — {len(users) - disabled}",
+            f"администраторов — {sum(u.role == 'admin' and not u.disabled for u in users)}, отключено — {disabled}",
+        ),
+        "/settings/audit": (
+            ("warn" if errors else "good"), f"событий за сутки — {events}", f"ошибок за сутки — {errors}",
+        ),
+    }
+
+
+def _gold_state(request: Request) -> dict:
+    """Собственный эталон для главной настроек (идея «Сбор собственного эталона»): сколько примеров из GOLD_TARGET и
+    какие классы QA-3 пусты — напоминание администратору (warn), пока набор не полон. Без текстов примеров."""
+    repo = repo_of(request)
+    examples = repo.gold()
+    empty = [row["title"] for row in coverage.matrix(examples)["rows"] if not sum(row["cells"])]
+    stored = runner.passport(repo).get(runner.GOLD)
+    measured = (f"последний замер — {local_time(stored['measured_at'], request.app.state.tz)}" if stored
+                else "замера не было")
+    detail = f"пустых классов — {len(empty)}: {', '.join(empty)}" if empty else measured
+    state = "good" if len(examples) >= GOLD_TARGET and not empty else "warn"
+    return {"count": len(examples), "target": GOLD_TARGET, "state": state, "detail": detail, "measured": measured}
+
+
+# Пулы app.state.job_pools по порядку (app.create_app) — подписи для панели «Служба».
+POOL_NAMES = ("Очистка, слои 4–5, локальная модель", "Разбор файлов и сканов", "Отправки облаку", "Замер эталона")
+CHECKPOINT_DAYS = 30
+_MIB = 1024 * 1024
+NOT_CHECKED = "не проверялось"
+
+
+def _db_size(repo) -> tuple[int, int]:
+    """Размер файла базы по страницам SQLite и журнала WAL рядом с ним — в байтах."""
+    with repo.lock:
+        pages = repo.conn.execute("PRAGMA page_count").fetchone()[0]
+        size = repo.conn.execute("PRAGMA page_size").fetchone()[0]
+        file = repo.conn.execute("PRAGMA database_list").fetchone()[2]
+    wal = Path(f"{file}-wal") if file else None
+    return pages * size, wal.stat().st_size if wal is not None and wal.exists() else 0
+
+
+def _busy(share: float) -> str:
+    """Занятость предела: полный — bad (новое получает отказ), от 80 % — warn."""
+    return "bad" if share >= 1 else "warn" if share >= 0.8 else "good"
+
+
+def _service(request: Request) -> dict:
+    """Блок «Служба» на главной настроек (идея аудита 09.11.2026): занятость входного бюджета, пулов и шлюза агентов,
+    очередь со сроками, отказы контрольной точки, размер базы, модели и внешние службы. Внешние службы здесь не
+    опрашиваются (страница обновляется опросом): итога их проверки служба не хранит — «не проверялось».
+    Только счётчики и время: ни владельцев, ни чатов, ни текстов."""
+    app, repo, engines = request.app, repo_of(request), request.app.state.engines
+    budget = app.state.jobs.budget
+    jobs, used = budget.usage()
+    now = app.state.clock.now()
+    pools = []
+    for number, pool in enumerate(app.state.job_pools):
+        state = pool.overview()
+        left = (datetime.fromisoformat(state["expires"]) - now).total_seconds() if state["expires"] else None
+        pools.append(state | {
+            "name": POOL_NAMES[number] if number < len(POOL_NAMES) else "Другие задания",
+            "left": None if left is None else max(0, int(left)),
+            "state": "warn" if state["queued"] else "good",
+        })
+    slots = app.state.agent_slots
+    since = (now - timedelta(days=CHECKPOINT_DAYS)).isoformat(timespec="seconds")
+    checkpoint = [row for row in repo.audit_events("error", since=since, limit=None) if row.details.get("kind") == "CheckpointBusy"]
+    database, wal = _db_size(repo)
+    models = engines.status()["models"] if engines is not None else {}
+    local = local_settings(repo)
+    providers = repo.providers()
+    return {
+        "budget": {"jobs": jobs, "max_jobs": budget.max_jobs, "mib": round(used / _MIB), "max_mib": budget.max_bytes // _MIB,
+                   "state": _busy(max(jobs / budget.max_jobs, used / budget.max_bytes))},
+        "pools": pools,
+        "agents": {"busy": slots.busy, "limit": slots.limit, "refused": slots.refused, "state": _busy(slots.busy / slots.limit)},
+        "checkpoint": {"count": len(checkpoint), "last": checkpoint[0].ts if checkpoint else "", "days": CHECKPOINT_DAYS},
+        "database": {"mib": round(database / _MIB, 1), "wal_mib": round(wal / _MIB, 1)},
+        "models": {"present": sum(models.values()), "total": len(models)},
+        "local": {"connected": engines is not None, "key": bool(engines is not None and engines.status()["key"]),
+                  "model": local.model},
+        "ocr": local.ocr_model or "служба ocr-ru",
+        "providers": {"enabled": sum(p.enabled for p in providers), "total": len(providers)},
+        "gold": _gold_state(request),
+        "measure": app.state.measure["status"],
+        "not_checked": NOT_CHECKED,
+    }
+
+
 @router.get("")
 def index(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
-    return page(request, "settings.html", viewer)
+    return page(request, "settings.html", viewer, cards=_cards(request), service=_service(request))
+
+
+@router.get("/service")
+def service_state(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
+    """Блок «Служба» для опроса главной настроек (app.js, data-refresh): тот же кусок разметки, без страницы."""
+    return page(request, "_settings_service.html", viewer, service=_service(request))
 
 
 # --- политики (FR-4.2, FR-10.6) -----------------------------------------------

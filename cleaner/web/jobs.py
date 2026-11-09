@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Executor, Future, ThreadPoolExecutor, wait
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from cleaner.queueing import Budget, Reservation
 
@@ -137,6 +137,19 @@ class Jobs:
             return [{"id": t.id, "chat_id": t.chat, "item_id": t.item, "kind": t.kind,
                      "status": t.state, "created_at": t.created, "cancellable": t.state == "queued"}
                     for t in self._tasks.values() if t.user == user]
+
+    def overview(self) -> dict:
+        """Для панели состояния службы: потоки, сколько в работе и в очереди, самое давнее ожидающее и его срок — без
+        владельцев, чатов и элементов. expires — когда истечёт самое давнее ожидающее со сроком (у разбора файлов срока нет)."""
+        with self._lock:
+            tasks = [(t.state, t.created, t.kind) for t in self._tasks.values()]
+        queued = [(created, kind) for state, created, kind in tasks if state == "queued"]
+        timed = [created for created, kind in queued if kind not in _NO_DEADLINE]
+        expires = ((datetime.fromisoformat(min(timed)) + timedelta(seconds=self.max_wait)).isoformat() if timed else "")
+        return {
+            "workers": getattr(self._executor, "_max_workers", 0), "running": sum(state == "running" for state, _, _ in tasks),
+            "queued": len(queued), "oldest": min((created for created, _ in queued), default=""), "expires": expires,
+        }
 
     def cancel(self, task_id: str, user: str) -> bool | None:
         with self._lock:

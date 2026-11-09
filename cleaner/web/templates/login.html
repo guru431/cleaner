@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_ui.html" import theme_toggle %}
+{% from "_ui.html" import theme_set %}
 {% block title %}Вход — Cleaner{% endblock %}
 {% block main_class %}center{% endblock %}
 {% block main %}
@@ -15,6 +15,6 @@
     <label class="stack">Пароль <input name="password" type="password" autocomplete="current-password" required></label>
     <button class="primary wide">Войти</button>
   </form>
-  <div class="login-theme">{{ theme_toggle() }}</div>
+  <div class="login-theme">{{ theme_set() }}</div>
 </div>
 {% endblock %}

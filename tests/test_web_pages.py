@@ -49,18 +49,23 @@ def test_dark_palette_is_the_same_by_the_system_and_by_the_switch():
 
 
 def theme_modes(page: str) -> list[str]:
-    toggle = re.search(r"<button[^>]*data-theme-toggle[^>]*>(.*?)</button>", page, re.S).group(1)
-    return re.findall(r'<span class="mode m-([a-z]+)">.*?</svg>([^<]+)</span>', toggle)
+    group = re.search(r'<div class="segmented theme-set" role="group" aria-label="Тема">(.*?)</div>', page, re.S).group(1)
+    return re.findall(r'data-theme-set="([a-z]+)" aria-pressed="false"[^>]*>.*?</svg>([^<]+)</button>', group, re.S)
 
 
-def test_theme_toggle_names_three_modes_on_login_and_in_the_top_bar(browser, ivan):
+def test_theme_is_three_buttons_on_login_and_in_the_view_menu(browser, ivan):
     """Аудит 21.10.2026: после первого переключения вернуть «как в системе» было нельзя, а на входе темы не было вовсе.
-    Режим кнопки виден словом (какой — выбирает CSS по data-theme)."""
-    modes = [("system", "как в системе"), ("light", "светлая"), ("dark", "тёмная")]
+    Аудит 09.11.2026: кнопка по кругу при светлой системе первым нажатием видимо ничего не меняла, и в шапке стояли
+    три кнопки оформления подряд — теперь три сегмента в меню «Вид», выбранный виден сразу (aria-pressed)."""
+    modes = [("system", "Система"), ("light", "Светлая"), ("dark", "Тёмная")]
     assert theme_modes(browser().get("/login").text) == modes
-    assert theme_modes(ivan.get("/chats").text) == modes
+    page = ivan.get("/chats").text
+    assert theme_modes(re.search(r'<details class="menu view-menu">(.*?)</details>', page, re.S).group(1)) == modes
+    assert "data-theme-toggle" not in page
     css = (WEB / "static" / "app.css").read_text(encoding="utf-8")
-    assert ':root:not([data-theme]) .theme .m-system' in css
+    assert "html:not(.js) .theme-set" in css                # без JS выбирать нечем
+    assert 'button.setAttribute("aria-pressed", String(button.dataset.themeSet === current))' in (
+        WEB / "static" / "app.js").read_text(encoding="utf-8")
 
 
 def test_browser_storage_keeps_only_the_theme_and_the_tab():
@@ -135,7 +140,7 @@ def test_chat_pages_open_with_chats_current(ivan, repo):
     for path in paths:
         response = ivan.get(path)
         assert response.status_code == 200, path
-        assert re.findall(r'<a href="([^"]+)" class="on"', response.text) == ["/chats?kind=chat"], path
+        assert re.findall(r'<a href="([^"]+)" class="on"', response.text) == ["/chats"], path
 
 
 LONG_TITLE = "Согласование договора поставки серверного оборудования для филиала «Север» на четвёртый квартал"
@@ -265,15 +270,16 @@ def test_every_settings_page_opens_with_its_menu_item_current(boss):
 
 def test_settings_are_grouped_by_task_in_the_menu_and_on_the_cards(boss):
     """Идея аудита 21.10.2026: группы по задачам вместо общей «Качество и доступ»; меню и карточки — из одного списка,
-    у каждой карточки одна строка «что получите»."""
+    у каждой карточки одна строка «что получите». С 09.11.2026 она — в подсказке, на карточке — состояние раздела."""
     groups = ["Модели и подключения", "Правила очистки", "Качество", "Доступ и аудит"]
     index = boss.get("/settings").text
     menu = re.search(r'<aside class="side side-nav"[^>]*>(.*?)</aside>', index, re.S).group(1)
     assert re.findall(r"<h2>([^<]+)</h2>", menu) == groups
     cards = index[index.index("</aside>"):]
-    assert re.findall(r"<h2>([^<]+)</h2>", cards) == groups
-    lines = re.findall(r'<a class="card" href="([^"]+)"><strong>[^<]+</strong><span>([^<]+)</span></a>', cards)
+    assert re.findall(r"<h2>([^<]+)</h2>", cards) == groups + ["Служба"]
+    lines = re.findall(r'<a class="card" href="([^"]+)" title="([^"]+)"><strong>[^<]+</strong><span class="badge (?:good|warn|bad)">', cards)
     assert [href for href, _ in lines] == SETTINGS and all(line.strip() for _, line in lines)
+    assert "внутренними суффиксами доменов" in dict(lines)["/settings/builtin"]
 
 
 def test_layer_defaults_are_named_by_what_they_give(boss):

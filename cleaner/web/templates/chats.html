@@ -1,7 +1,22 @@
 {% extends "base.html" %}
-{% block title %}Чаты — Cleaner{% endblock %}
+{% block title %}Разговоры — Cleaner{% endblock %}
 {% block main_class %}split{% endblock %}
 {% block main %}
 {% include "_sidebar.html" %}
-<section class="work empty-state"><p>Выберите чат слева или создайте новый. Каждый чат — отдельное обращение со своей таблицей замен.</p></section>
+{% if request.query_params.get("kind", request.cookies.get("cleaner-chat-kind", "all")) == "agent" %}
+{# Чат агента создаёт шлюз — с первым запросом агента по ключу с доступом к модели; здесь создать его нечем. #}
+<section class="work empty-state">
+  <div class="agent-start">
+    <p>Чат агента появляется сам — с первым запросом агента через Cleaner по ключу с доступом к модели.</p>
+    <ol>
+      <li>На странице «Ключи» выпустите ключ в режиме «Агент через подключение» или «Агент по подписке».</li>
+      <li>Там же, у выпущенного ключа, — готовые настройки Claude Code, Codex и OpenCode и сертификат службы.</li>
+      <li>Первый запрос агента создаст здесь чат: в нём видно, что ушло модели и что вернулось агенту.</li>
+    </ol>
+    <p><a class="btn primary" href="/keys">Выпустить ключ для агента</a></p>
+  </div>
+</section>
+{% else %}
+<section class="work empty-state"><p>Выберите разговор слева или начните новую консультацию. Каждая консультация — отдельное обращение со своей таблицей замен.</p></section>
+{% endif %}
 {% endblock %}

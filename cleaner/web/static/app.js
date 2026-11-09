@@ -269,20 +269,44 @@ document.querySelectorAll("[data-poll]").forEach((element) => {
   setTimeout(check, 1000);
 });
 
-// Тема (раздел 14): кнопка в шапке и на входе — по кругу «как в системе → светлая → тёмная». «Как в системе» — без
-// data-theme и без записи в localStorage, тогда действует prefers-color-scheme. Режим на кнопке показывает CSS по data-theme.
+// Тема (раздел 14; 09.11.2026 — три кнопки вместо круга): «Система / Светлая / Тёмная» в меню «Вид» и на входе
+// ([data-theme-set]). «Система» — без data-theme и без записи в localStorage, тогда действует prefers-color-scheme.
+// Нажатая кнопка — aria-pressed, по data-theme: его до отрисовки ставит theme.js.
 const root = document.documentElement;
-const THEMES = ["", "light", "dark"];
-document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
+function syncTheme() {
+  const current = root.dataset.theme || "system";
+  document.querySelectorAll("[data-theme-set]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.themeSet === current));
+  });
+}
+document.querySelectorAll("[data-theme-set]").forEach((button) => {
   button.addEventListener("click", () => {
-    const next = THEMES[(THEMES.indexOf(root.dataset.theme || "") + 1) % THEMES.length];
+    const next = button.dataset.themeSet === "light" || button.dataset.themeSet === "dark" ? button.dataset.themeSet : "";
     if (next) root.dataset.theme = next;
     else delete root.dataset.theme;
+    syncTheme();
     try {
       if (next) localStorage.setItem("cleaner-theme", next);
       else localStorage.removeItem("cleaner-theme");
     } catch (error) { /* выбор — до перезагрузки */ }
   });
+});
+syncTheme();
+
+// Блок, обновляемый опросом ([data-refresh] — адрес куска разметки того же блока; главная настроек, «Служба»): раз в
+// 5 с, пока вкладка видна. Разметку собирает сервер с экранированием, как и всю страницу. Сеанс кончился или блока
+// больше нет (переход на вход, 4xx) — опрос прекращается; сеть и 5xx — временное, опрос идёт дальше.
+document.querySelectorAll("[data-refresh]").forEach((element) => {
+  const timer = setInterval(() => {
+    if (document.hidden) return;
+    fetch(element.dataset.refresh, { credentials: "same-origin", cache: "no-store" })
+      .then((response) => {
+        if (response.redirected || (response.status >= 400 && response.status < 500)) { clearInterval(timer); return null; }
+        return response.ok ? response.text() : null;
+      })
+      .then((html) => { if (html !== null) element.innerHTML = html; })
+      .catch(() => {});
+  }, 5000);
 });
 
 // Вид рабочего места (меню «Вид» в шапке, кнопки свёртки списка чатов и редактора): отметка — класс view-{имя} на

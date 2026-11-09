@@ -6,7 +6,7 @@
   <header class="panel-head"><h1 class="title">Ошибка {{ code }}</h1></header>
   <div class="panel-body">
     <p>{{ message }}</p>
-    <p><a href="/chats">К списку чатов</a></p>
+    <p>{% if back %}<a href="{{ back[0] }}">{{ back[1] }}</a> · {% endif %}<a href="/chats">К списку чатов</a></p>
   </div>
 </section>
 {% endblock %}

@@ -1,13 +1,20 @@
-{% from "_ui.html" import icon %}
+{% from "_ui.html" import icon, readiness %}
 {% set chat_kind = request.query_params.get("kind", request.cookies.get("cleaner-chat-kind", "all")) %}
+{% set need = request.query_params.get("need") == "1" %}
 <aside class="side">
+  {# Свёрнутый список — узкая полоса с кнопкой свёртки (меню «Вид»): развернуть можно на месте. #}
+  {% set fold %}<button type="button" class="side-fold" data-view-fold="side-folded" aria-expanded="true" title="Свернуть или развернуть список чатов">{{ icon("sidebar") }}<span class="sr-only">Список чатов</span></button>{% endset %}
+  {% if chat_kind == "agent" %}
+  {# Чат агента создаёт шлюз по ключу с доступом к модели, а не эта форма: она создала бы консультацию. #}
+  <div class="side-new">{{ fold }}</div>
+  {% else %}
   <form method="post" action="/chats" class="side-new">
     {% include "_csrf.html" %}
-    <input name="title" placeholder="Название (необязательно)" maxlength="200" aria-label="Название нового чата">
-    <button class="primary">{{ icon("plus") }}Новый</button>
-    {# Свёрнутый список — узкая полоса с этой кнопкой (меню «Вид»): развернуть можно на месте. #}
-    <button type="button" class="side-fold" data-view-fold="side-folded" aria-expanded="true" title="Свернуть или развернуть список чатов">{{ icon("sidebar") }}<span class="sr-only">Список чатов</span></button>
+    <input name="title" placeholder="Название (необязательно)" maxlength="200" aria-label="Название новой консультации">
+    <button class="primary">{{ icon("plus") }}Новая консультация</button>
+    {{ fold }}
   </form>
+  {% endif %}
   <nav class="chat-kinds" aria-label="Режим разговоров">
     {% for value, label in [("all", "Все"), ("chat", "Консультации"), ("agent", "Агенты")] %}
     <a href="/chats?kind={{ value }}{% if q %}&amp;q={{ q | urlencode }}{% endif %}"{% if chat_kind == value %} aria-current="page"{% endif %}>{{ label }}</a>
@@ -16,17 +23,23 @@
   <form method="get" action="/chats" class="search">
     {{ icon("search") }}
     <input type="hidden" name="kind" value="{{ chat_kind }}">
+    {% if need %}<input type="hidden" name="need" value="1">{% endif %}
     <input name="q" value="{{ q }}" placeholder="Название или имя ключа" aria-label="Поиск по названию или имени ключа">
   </form>
+  {% if chat_kind != "agent" %}
+  <a class="need-filter" href="/chats?kind={{ chat_kind }}{% if not need %}&amp;need=1{% endif %}{% if q %}&amp;q={{ q | urlencode }}{% endif %}"{% if need %} aria-current="page"{% endif %} title="Консультации с непроверенным текстом или с ошибкой обработки">{{ icon("warning") }}Требует действия</a>
+  {% endif %}
   <ul class="chat-list">
     {% for c in chats %}
+    {% if loop.changed(c.group) %}<li class="group">{{ c.group }}</li>{% endif %}
     <li{% if chat and chat.id == c.id %} class="current"{% endif %}>
       <a href="/chats/{{ c.id }}"><span class="name" title="{{ c.title }}">{{ c.title }}</span>
         <small class="chat-mode">{% if c.kind == "agent" %}{{ icon("code") }}Агент{% if c.agent_key %} · {{ c.agent_key }}{% endif %}{% else %}{{ icon("chat") }}Консультация{% endif %}</small>
+        {% if c.state == "answering" %}<small class="state">ответ модели…</small>{% elif c.state %}<small class="chat-state">{{ readiness(c.state, whole=true) }}</small>{% endif %}
         <small>{% if c.kind == "agent" and c.last_request %}Последний запрос: {{ c.last_request | local(tz) }}{% else %}{{ c.updated_at | local(tz) }}{% endif %}</small></a>
     </li>
     {% else %}
-    <li class="empty">Чатов нет</li>
+    <li class="empty">{{ "Ничего не требует действия" if need else "Чатов нет" }}</li>
     {% endfor %}
   </ul>
 </aside>
