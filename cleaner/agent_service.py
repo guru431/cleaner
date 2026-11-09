@@ -131,6 +131,11 @@ def _json(node: object) -> str:
     return json.dumps(node, ensure_ascii=False, separators=(",", ":"))
 
 
+def _digest(secret: bytes, proto: GatewayProtocol, role: str, kind: str, node: object) -> str:
+    """Отпечаток блока в журнале — по узлу, сведённому протоколом (ledger_node): так его ищут и так записывают."""
+    return ledger.block_digest(secret, proto.name, role, kind, proto.ledger_node(role, kind, node))
+
+
 def _ms(since: float) -> int:
     """Миллисекунды от since по time.perf_counter — длительность, а не время суток (AC-5.7)."""
     return int((time.perf_counter() - since) * 1000)
@@ -435,7 +440,12 @@ class AgentService:
         except ValueError:
             raise self._refuse(call, 400, "invalid_request_error", "Cleaner: неверный cache_control", "cache_control", chat_id=chat_id) from None
         units = proto.units(call.body)
-        digests = {unit.path: ledger.block_digest(secret, proto.name, unit.role, unit.kind, unit.node) for unit in units}
+        digests = {unit.path: _digest(secret, proto, unit.role, unit.kind, unit.node) for unit in units}
+        # Записи до сведения узлов (ledger_node) — под прежним отпечатком: разговор, начатый до него, повторяется дословно.
+        legacy = {
+            unit.path: digest for unit in units
+            if (digest := ledger.block_digest(secret, proto.name, unit.role, unit.kind, unit.node)) != digests[unit.path]
+        }
         groups: dict[str, list[walk.Unit]] = {"in": [], "out": []}
         for unit in units:
             try:
@@ -444,7 +454,9 @@ class AgentService:
                 raise self._refuse(call, 400, "invalid_request_error", "Cleaner: неверный непрозрачный блок", "opaque", chat_id=chat_id) from None
             groups["out" if proto.is_model_block(unit) or unit.kind == "opaque" and unit.role == "assistant" else "in"].append(unit)
         known = {
-            direction: self.repo.ledger_get(chat_id, conv_id, direction, [digests[u.path] for u in group])
+            direction: self.repo.ledger_get(
+                chat_id, conv_id, direction, [digests[u.path] for u in group] + [legacy[u.path] for u in group if u.path in legacy],
+            )
             for direction, group in groups.items()
         }
         repeated: dict[walk.Path, object] = {}
@@ -457,6 +469,9 @@ class AgentService:
             for unit in group:
                 digest = digests[unit.path]
                 entry = known[direction].get(digest)
+                if entry is None and unit.path in legacy:
+                    digest = legacy[unit.path]
+                    entry = known[direction].get(digest)
                 if entry is not None:
                     repeated[unit.path] = json.loads(entry.wire)
                     result.repeated[direction].append(digest)
@@ -532,15 +547,21 @@ class AgentService:
         layers: pipeline.Layers,
     ) -> tuple[object, str, dict[str, int]]:
         """Новый блок: очищенный узел, причина удержания ("" — нет) и замены по типам. Блок агента — слоями ключа; блок
-        модели, которого нет в журнале, — как ответ модели в чате: известные значения, словарь и правила (FR-8.11)."""
+        модели, которого нет в журнале, — слоями 1–3. Известных значений и словаря ему мало: агент держит его с
+        оригиналами, которые восстановление вывело само (FR-7.6: адрес в фиктивной подсети, имя в фиктивном домене), —
+        сущностями чата они не стали, а после истечения журнала или «Начать заново» и чат новый. Слои 4–5 не нужны:
+        это текст модели, а не пользователя, и ждать локальную модель на каждом сжатии истории агента незачем.
+        Неподписанные рассуждения агент получает как пришли, без восстановления (7.2.3): выведенных оригиналов в них
+        нет — по-прежнему известные значения и словарь."""
         if unit.kind == "media":
             return proto.placeholder(unit, ledger.REASONS["media"]), "media", {}
         blocked: list[str] = []
         counts: Counter = Counter()
+        detectors = (dictionary,) if unit.kind == "reasoning" else pipeline.DETECTORS
 
         def clean(text: str) -> str:
             if direction == "out":
-                found = pipeline.sanitize(state, text, settings, detectors=(dictionary,))
+                found = pipeline.sanitize(state, text, settings, detectors=detectors)
             else:
                 found = pipeline.sanitize(state, text, settings, layers)
                 # Замена сущности с «блокировать», вставленная агентом, держит блок, как оригинал (FR-4.2).
@@ -655,7 +676,7 @@ class AgentService:
         entries = [
             LedgerEntry(
                 conv_id, "out",
-                ledger.block_digest(prepared.secret, proto.name, "assistant", proto.model_kind(local), local),
+                _digest(prepared.secret, proto, "assistant", proto.model_kind(local), local),
                 _json(local), _json(wire),
             )
             for local, wire in stream.pairs

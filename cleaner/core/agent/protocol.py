@@ -51,6 +51,8 @@ class GatewayProtocol:
     end: Callable[[], bytes]                # после последнего события
     error_event: Callable[[str], dict]
     usage: Callable[[dict], dict[str, int]]
+    # Узел блока для отпечатка журнала (роль, вид, узел): одна и та же часть в разных записях агента — один отпечаток.
+    ledger_node: Callable[[str, str, object], object] = lambda role, kind, node: node
 
 
 # Заголовки агента к провайдеру (9.1); остальные отбрасываются — ключи агента и X-Cleaner-Key тоже.
@@ -107,7 +109,7 @@ RESPONSES = GatewayProtocol(
     sanitize_unit=responses.sanitize_unit, contains_media=responses.contains_media, is_model_block=walk.is_model_block,
     model_kind=responses.model_kind, rebuild=responses.rebuild, add_instruction=responses.add_instruction,
     placeholder=responses.placeholder, stream=responses.ResponsesStream, sse=stream.named_sse, end=lambda: b"",
-    error_event=responses.error_event, usage=responses.usage,
+    error_event=responses.error_event, usage=responses.usage, ledger_node=responses.ledger_node,
 )
 
 PROTOCOLS: dict[str, GatewayProtocol] = {"anthropic": ANTHROPIC, "chat": CHAT, "responses": RESPONSES}
