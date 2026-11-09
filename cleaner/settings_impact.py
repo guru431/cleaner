@@ -8,7 +8,8 @@ import json
 from dataclasses import asdict, replace
 
 from cleaner.core.pipeline import sanitize
-from cleaner.core.types import DictEntry, EntityType, Policy
+from cleaner.core.detect import dictionary
+from cleaner.core.types import EntityType, Policy
 from cleaner.eval import runner
 from cleaner.service import _cached_layers
 from cleaner.storage import crypto
@@ -26,7 +27,8 @@ def snapshot(repo):
 def settings_for(repo, config):
     rows = config["dictionary"]
     return replace(repo.settings(), policies={EntityType(t): Policy(p) for t, p in config["policies"].items()},
-                   always=tuple(DictEntry(EntityType(r["type"]), r["value"], tuple(r["aliases"])) for r in rows if r["list"] == "always"),
+                   always=tuple(dictionary.entry(EntityType(r["type"]), r["value"], tuple(r["aliases"]), r.get("inflect", False))
+                                for r in rows if r["list"] == "always"),
                    never=frozenset(v.strip().lower() for r in rows if r["list"] == "never" for v in (r["value"], *r["aliases"]) if v.strip()))
 
 
@@ -119,5 +121,5 @@ def apply(repo, user_id, receipt):
             if row["id"] in current_ids:
                 continue
             repo._insert_dictionary(row["list"], row["value"], EntityType(row["type"]) if row["type"] else None,
-                                    tuple(row["aliases"]), row["comment"])
+                                    tuple(row["aliases"]), row["comment"], row.get("inflect", False))
         repo.audit("settings_changed", user_id, section="shared", action="preview_applied")

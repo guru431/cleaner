@@ -1,12 +1,15 @@
 """Поиск известных написаний в тексте."""
 from __future__ import annotations
 
+import bisect
 import re
 import unicodedata
 from collections.abc import Callable, Iterable
 from typing import Any, Generic, TypeVar
 
 import regex
+
+from cleaner.core.types import EntityType
 
 T = TypeVar("T")
 _TOKEN = re.compile(r"[^\W\d_]+|\d+")
@@ -278,6 +281,119 @@ class Forms(Generic[T]):
     def find(self, text: str) -> list[tuple[int, int, T]]:
         """То же, что find_forms(text, forms)."""
         return _find(text, self.index, self.long, self.loose)
+
+
+# Цифровые значения в другой записи (FR-3.4, FR-5.3): «+7 (903) 111-22-33» — это и «9031112233», и «903 111-22-33»;
+# «4508 123456» — и «4508123456». Ключ значения — его цифры (resolve.canonical_key), у телефона — и последние десять:
+# код страны и «8» вместо «+7» пишут по-разному. Значения короче _DIGITS_MIN цифр по цифрам не ищутся: даты, суммы и
+# номера строк складывались бы в них из соседних чисел.
+_DIGIT_KEY_TYPES = frozenset({
+    EntityType.INN, EntityType.SNILS, EntityType.OGRN, EntityType.KPP, EntityType.OMS, EntityType.CARD,
+    EntityType.PASSPORT, EntityType.BANK_ACCOUNT,
+})
+DIGIT_TYPES = _DIGIT_KEY_TYPES | {EntityType.PHONE}     # типы, у которых бывают ключи digit_keys
+_DIGITS_MIN = 9             # КПП — девять цифр, короче цифровых значений нет
+_PHONE_TAIL = 10            # номер без кода страны
+_HEAD = 3                   # начало ключа, по которому отбрасываются чужие числа (Digits.find)
+_NOT_DIGIT = re.compile(r"[^0-9]")
+# Цепочка чисел с разделителями записи номера — пробелы, тире, точки, скобки, не больше трёх знаков между числами — и не
+# меньше _DIGITS_MIN цифр: каждый повтор берёт одну цифру, и короткие числа (их в журналах большинство) отсеивает
+# выражение, а не цикл. Перевод строки цепочку рвёт: числа соседних строк — разные значения.
+_DIGIT_SEPARATORS = r"[ \t\u00a0\u2009\u202f.()\-\u2010-\u2015]"
+_DIGIT_CHAIN = re.compile(rf"(?<![0-9])[0-9](?:{_DIGIT_SEPARATORS}{{0,3}}[0-9]){{{_DIGITS_MIN - 1},}}")
+_DIGIT_RUN = re.compile(r"[0-9]+")
+_LATIN = re.compile(r"[A-Za-z]")
+
+
+def digit_keys(type_: EntityType, form: str) -> tuple[str, ...]:
+    """Цифры, по которым написание form значения типа type_ ищется в любой записи (Digits); () — не ищется по цифрам."""
+    if type_ is EntityType.PHONE:
+        digits = _NOT_DIGIT.sub("", form)
+        if len(digits) < _PHONE_TAIL:
+            return ()
+        tail = digits[-_PHONE_TAIL:]
+        keys = {digits, tail}
+        if len(digits) == _PHONE_TAIL + 1 and digits[0] in "78":
+            keys |= {"7" + tail, "8" + tail}        # «+7 903…» и «8 903…» — один номер
+        return tuple(sorted(keys))
+    if type_ not in _DIGIT_KEY_TYPES or (type_ is EntityType.BANK_ACCOUNT and _LATIN.search(form)):
+        return ()           # IBAN с буквами ищется по написанию
+    digits = _NOT_DIGIT.sub("", form)
+    return (digits,) if len(digits) >= _DIGITS_MIN else ()
+
+
+class Digits(Generic[T]):
+    """Ключи цифровых значений (digit_keys) -> нагрузка; ищет их в цепочках чисел с разделителями. После сборки не
+    меняется — общая для потоков."""
+
+    __slots__ = ("keys", "heads", "longest")
+
+    def __init__(self, keys: dict[str, T]):
+        self.keys = keys
+        self.heads = frozenset(key[:_HEAD] for key in keys)
+        self.longest = max(map(len, keys), default=0)
+
+    def extended(self, keys: dict[str, T]) -> Digits[T]:
+        """Таблица с ключами keys поверх этих: нагрузка ключа из keys заменяет прежнюю."""
+        if not keys:
+            return self
+        out: Digits[T] = Digits({})
+        out.keys = self.keys | keys
+        out.heads = self.heads | {key[:_HEAD] for key in keys}
+        out.longest = max(self.longest, max(map(len, keys), default=0))
+        return out
+
+    def find(self, text: str, found: Iterable[tuple[int, int]] = ()) -> list[tuple[int, int, T]]:
+        """Вхождения ключей: несколько соседних чисел цепочки, цифры которых — ключ, самые длинные слева направо.
+        Найденное раньше (found — написания) второй раз не находится. Рядом с вхождением нет букв: «id9031112233» —
+        не номер. «+» перед номером и скобка вокруг кода входят во вхождение."""
+        if not self.keys:
+            return []
+        keys, heads, longest = self.keys, self.heads, self.longest
+        hits: list[tuple[int, int, T]] = []
+        for chain in _DIGIT_CHAIN.finditer(text):
+            base, written = chain.start(), chain.group()
+            groups = [m.span() for m in _DIGIT_RUN.finditer(written)]
+            digits = "".join(written[a:b] for a, b in groups)
+            offsets = [0]                   # начало цифр каждого числа цепочки в digits и их конец
+            for a, b in groups:
+                offsets.append(offsets[-1] + b - a)
+            i = 0
+            while i < len(groups):
+                first, best = offsets[i], -1
+                if digits[first:first + _HEAD] in heads:
+                    for j in range(i, len(groups)):
+                        if offsets[j + 1] - first > longest:
+                            break
+                        if digits[first:offsets[j + 1]] in keys:
+                            best = j
+                if best < 0:
+                    i += 1
+                    continue
+                payload = keys[digits[first:offsets[best + 1]]]
+                start, end = base + groups[i][0], base + groups[best][1]
+                if start and text[start - 1] == "(" and text.count(")", start, end) > text.count("(", start, end):
+                    start -= 1
+                if start and text[start - 1] == "+":
+                    start -= 1
+                before = text[start - 1] if start else ""
+                after = text[end] if end < len(text) else ""
+                if not (before.isalpha() or before == "_" or after.isalpha() or after == "_"):
+                    hits.append((start, end, payload))
+                i = best + 1
+        if not hits:
+            return hits
+        spans = sorted(found)
+        starts = [start for start, _ in spans]
+        reach: list[int] = []               # самый дальний конец найденного, начатого не позже каждого
+        for _, end in spans:
+            reach.append(max(end, reach[-1]) if reach else end)
+        outside = []
+        for start, end, payload in hits:
+            k = bisect.bisect_left(starts, end) - 1
+            if k < 0 or reach[k] <= start:
+                outside.append((start, end, payload))
+        return outside
 
 
 def find_forms(text: str, forms: Iterable[tuple[str, str, T]]) -> list[tuple[int, int, T]]:

@@ -161,3 +161,45 @@ def test_replacement_and_other_addresses_are_not_leaks(state, settings):
     padded = ".".join(octet.zfill(3) for octet in fake.split("."))
     text = f"{padded}, 2001:0db8:0001::0001, 010.001.002.006, ab:cd:2a00:1450:4010:0:0:0:0:65, 1.2.3.4.5"
     assert leaked(text, state, settings) == []
+
+
+@pytest.mark.parametrize("written, other, found", [
+    ("тел. +7 (903) 111-22-33", "Петров;9031112233;Москва", "9031112233"),
+    ("тел. +7 (903) 111-22-33", "звонить 903 111-22-33.", "903 111-22-33"),
+    ("тел. +7 (903) 111-22-33", "или 8 (903) 1112233", "8 (903) 1112233"),
+    ("тел. 8 903 111 22 33", "wa: +79031112233@c.us", "+79031112233"),
+    ("ИНН 7707083893", "ИНН 77 07 08 38 93", "77 07 08 38 93"),
+    ("паспорт 4508 123456", "паспорт 4508123456 выдан", "4508123456"),
+    ("паспорт 4508 123456", "строка: 12 4508 123456 7", "4508 123456"),
+], ids=["csv", "short_phone", "trunk_prefix", "plus_seven", "inn_spaced", "passport_joined", "inside_chain"])
+def test_known_number_is_found_in_another_notation(state, settings, written, other, found):
+    """FINDINGS «Известный чату номер в другой записи не скрывается и не ловится проверкой утечек»: ключ цифровой
+    сущности — её цифры, у телефона — и последние десять; проверка утечек сравнивает по ним, как адрес IP по адресу."""
+    sanitize(state, written, settings)
+    [entity] = state.entities.values()
+    assert leaked(other, state, settings) == [(found, entity.id)]
+    assert fresh(other, state, settings) == [(found, entity.id)]
+
+
+def test_numbers_that_only_resemble_a_known_one_are_not_leaks(state, settings):
+    """С другой стороны: число длиннее известного или с другими цифрами, номер внутри слова, части номера на разных
+    строках и короткие числа рядом (дата, сумма) — не утечки."""
+    sanitize(state, "тел. +7 (903) 111-22-33, паспорт 4508 123456", settings)
+    text = (
+        "счёт 12349031112233, id9031112233, 9031112234, 903 111\n22 33, 45081234567, "
+        "12.03.2026 903 руб., 4508 12345 6x"
+    )
+    assert leaked(text, state, settings) == []
+
+
+def test_dictionary_number_and_number_added_later_are_found_by_digits(state):
+    """Номер из словаря ищется по цифрам так же; номер сущности, добавленной после сборки таблиц, — тоже, и ключ
+    сущности — раньше ключа словаря, как при сборке с начала."""
+    always = Settings(always=(DictEntry(T.INN, "7707083893"),))
+    add(state, "a1", T.ACCOUNT, "ivanov")
+    assert leaked("ИНН 77-07-08-38-93", state, always) == [("77-07-08-38-93", None)]
+    add(state, "inn", T.INN, "7707083893")
+    text = "ИНН 77-07-08-38-93"
+    assert leaked(text, state, always) == [("77-07-08-38-93", "inn")] == fresh(text, state, always)
+    ops.unmask(state, "77-07-08-38-93")
+    assert leaked(text, state, always) == []

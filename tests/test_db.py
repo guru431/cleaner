@@ -35,7 +35,7 @@ def test_newer_schema_is_refused(tmp_path):
 
 
 def test_schema_version_is_the_last_migration():
-    assert db.SCHEMA_VERSION == max(number for number, _ in db.migrations()) == 10
+    assert db.SCHEMA_VERSION == max(number for number, _ in db.migrations()) == 11
 
 
 def test_version_2_chat_gets_no_provider(tmp_path):

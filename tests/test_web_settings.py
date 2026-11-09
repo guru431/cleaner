@@ -80,6 +80,53 @@ def test_csv_import_shows_a_preview_before_writing(boss, repo):
     assert boss.post("/settings/dictionary/import", column="Нет", action="save", **fields).status_code == 400
 
 
+def test_dictionary_is_paged_filtered_and_searched_without_values_in_the_address(boss, repo):
+    """FINDINGS «Интерфейс: словарь выводится целиком, без поиска и страниц»: страницы по 100 строк, отбор по списку и
+    типу — кодами в адресе, поиск по значению и вариантам — формой POST, без учёта регистра и «ё»."""
+    repo.add_dictionary_many("always", [f"srv{n:03d}.corp.example" for n in range(230)], T.HOST)
+    repo.add_dictionary("always", "Ромашка", T.ORG, ("Romashka", "Ёлка-М"))
+    repo.add_dictionary("never", "intranet.example")
+    rows = lambda response: re.findall(r'<td class="mono">([^<]+)</td><td class="nowrap">', response.text)
+    first = boss.get("/settings/dictionary")
+    assert len(rows(first)) == 100 and "Показаны 1–100 из 232" in first.text and "?page=2" in first.text
+    pages = [rows(boss.get("/settings/dictionary", page=str(number))) for number in (1, 2, 3)]
+    assert [len(shown) for shown in pages] == [100, 100, 32] and pages[2][-1] == "intranet.example"    # «никогда» — последним
+    assert len({value for shown in pages for value in shown}) == 232
+    assert rows(boss.get("/settings/dictionary", type="ORG")) == ["Ромашка"]
+    assert rows(boss.get("/settings/dictionary", list="never")) == ["intranet.example"]
+    assert boss.get("/settings/dictionary", page="99").status_code == 200
+    assert boss.get("/settings/dictionary", list="все").status_code == 400
+    assert boss.get("/settings/dictionary", type="НЕТ").status_code == 400
+    found = boss.post("/settings/dictionary/search", q="елка", list="", type="")
+    assert found.status_code == 200 and rows(found) == ["Ромашка"]
+    assert sorted(rows(boss.post("/settings/dictionary/search", q="SRV12", list="always", type="HOST"))) == [
+        f"srv{n:03d}.corp.example" for n in range(120, 130)
+    ]
+    assert len(rows(boss.post("/settings/dictionary/search", q="srv", list="always", type="HOST", page="3"))) == 30
+    plain = boss.post("/settings/dictionary/search", q=" ", list="always", type="ORG", page="2")
+    assert plain.status_code == 303 and plain.headers["location"] == "/settings/dictionary?list=always&type=ORG&page=2"
+
+
+def test_dictionary_entry_in_all_cases_shows_its_forms_and_is_kept_by_apply(boss, repo):
+    """IDEAS «Словарь: падежные формы для людей, организаций и терминов»: отметка «искать во всех падежах» хранится у
+    записи, «Оценить добавление» показывает формы, после применения они — варианты записи в настройках ядра. У типа без
+    падежей отметка не хранится."""
+    from cleaner import settings_impact
+
+    page = boss.get("/settings/dictionary").text
+    assert 'name="inflect"' in page and "падеж" in page
+    shown = boss.post("/settings/dictionary", list="always", value="Проект Полярис", type="TERM", inflect="1", action="impact")
+    assert shown.status_code == 200 and "Проекту Полярис" in shown.text and repo.dictionary() == []
+    receipt = re.search(r'name="receipt" value="([^"]+)"', shown.text).group(1)
+    settings_impact.apply(repo, repo.user_by_login("boss").id, receipt)
+    [row] = repo.dictionary()
+    assert row.inflect and row.aliases == ()
+    [entry] = repo.settings().always
+    assert "Проекту Полярис" in entry.aliases and "во всех падежах" in boss.get("/settings/dictionary").text
+    boss.post("/settings/dictionary", list="always", value="srv01.corp.example", type="HOST", inflect="1")
+    assert sorted((r.value, r.inflect) for r in repo.dictionary()) == [("srv01.corp.example", False), ("Проект Полярис", True)]
+
+
 def test_pattern_is_tried_on_a_sample_before_saving(boss, repo, monkeypatch):
     fields = {"name": "Инвентарный", "regex": r"INV-\d{6}", "type": "TERM"}
     tried = boss.post("/settings/patterns", sample="INV-123456 и INV-12", action="test", **fields)

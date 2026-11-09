@@ -3,6 +3,7 @@ import re
 import pytest
 
 from cleaner.core import leakcheck
+from cleaner.core.detect import dictionary as dictionary_layer
 from cleaner.core.detect import infra
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.entities import ops
@@ -1358,3 +1359,32 @@ def test_checked_strings_do_not_join_into_a_leak_across_their_boundary(state):
     always = Settings(always=(DictEntry(T.PERSON, "Анна Смирнова"),))
     assert checked_leaks(["отчёт подготовила Анна", "Смирнова — бухгалтер"], state, always) == []
     assert len(checked_leaks(["отчёт", "подготовила Анна\n\nСмирнова"], state, always)) == 1
+
+
+def test_known_number_in_another_notation_is_hidden(state, settings):
+    """FINDINGS «Известный чату номер в другой записи не скрывается и не ловится проверкой утечек»: слой известных
+    значений ищет номер чата по цифрам — в строке CSV, без кода страны, с другими разделителями, в ответе модели."""
+    sanitize(state, "тел. +7 (903) 111-22-33, ИНН 7707083893, паспорт 4508 123456", settings)
+    for text in ("Петров;9031112233;Москва", "903 111-22-33", "77 07 08 38 93", "серия и номер 4508123456"):
+        result = sanitize(state, text, settings)
+        assert not re.search(r"\d{2}", result.sanitized.replace("_1>", "").replace("_2>", "")), result.sanitized
+        assert result.leaks == []
+    answer = sanitize(state, "Перезвоните на 903-111-22-33", settings, detectors=(dictionary_layer,))
+    assert answer.sanitized.startswith("Перезвоните на <PHONE_")
+    unrelated = "счёт 12349031112233 от 12.03.2026 на 4508 руб."
+    assert sanitize(state, unrelated, Settings(), detectors=(dictionary_layer,)).sanitized == unrelated
+
+
+def test_dictionary_entry_in_all_cases_is_hidden_with_one_label_and_checked_for_leaks(state):
+    """IDEAS «Словарь: падежные формы для людей, организаций и терминов»: запись с отметкой «искать во всех падежах»
+    скрывает формы значения одной меткой при выключенном слое 4, и проверка утечек их видит."""
+    person = dictionary_layer.entry(T.PERSON, "Смирнова Анна Петровна", (), True)
+    always = Settings(always=(person, dictionary_layer.entry(T.TERM, "Проект Полярис", (), True)))
+    result = sanitize(state, "Передайте Смирновой Анне Петровне отчёт по Проекту Полярис.", always)
+    assert result.sanitized == "Передайте <PERSON_1> отчёт по <TERM_1>."
+    assert sanitize(state, "Смирнова Анна Петровна", always).sanitized == "<PERSON_1>"
+    [entity] = [e for e in state.entities.values() if e.type is T.PERSON]
+    assert entity.id in [leak.entity_id for leak in leakcheck.check("письмо Смирновой Анне Петровне", state, always)]
+    plain = Settings(always=(DictEntry(T.PERSON, "Смирнова Анна Петровна"),))
+    fresh_state = type(state)(chat_id="plain", net_key=state.net_key)
+    assert leakcheck.check("письмо Смирновой Анне Петровне", fresh_state, plain) == []
