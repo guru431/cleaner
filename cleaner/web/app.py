@@ -26,7 +26,7 @@ from cleaner.storage.repo import Repository
 from cleaner.web import (
     auth, routes_agent, routes_api, routes_auth, routes_chats, routes_keys, routes_review, routes_send, routes_settings,
 )
-from cleaner.web.deps import AGENT_BODY_BYTES, MAX_BODY_BYTES, LoginRequired, page
+from cleaner.web.deps import AGENT_BODY_BYTES, MAX_BODY_BYTES, LoginRequired, Viewer, get_viewer, page
 from cleaner.web.jobs import INTERRUPTED, Jobs, shutdown
 
 log = logging.getLogger("cleaner.web")
@@ -208,6 +208,56 @@ def _openai_error(code: int, message: str, headers: dict[str, str] | None = None
     return JSONResponse({"error": error}, status_code=code, headers=headers)
 
 
+def _signed_in(request: Request) -> Viewer | None:
+    """Вошедший — для шапки страницы ошибки (меню, тема, выход). Нет сессии или её не прочитать (ошибка могла случиться
+    в самой базе) — страница без шапки, как вход."""
+    try:
+        return get_viewer(request)
+    except Exception:
+        return None
+
+
+# Разделы настроек со своей страницей: ошибка формы раздела возвращает к нему.
+_SETTINGS_PAGES = frozenset({"providers", "local-llm", "policies", "dictionary", "patterns", "builtin", "gold", "users", "audit"})
+
+
+def _back(request: Request, viewer: Viewer | None) -> tuple[str, str] | None:
+    """Куда вернуться со страницы ошибки, кроме списка чатов. Адреса, откуда пришли, браузер не присылает
+    (Referrer-Policy: no-referrer), поэтому — по пути запроса: свой чат, раздел настроек, ключи, своя страница.
+    Та же страница, что открывалась (GET), — не ссылка: там та же ошибка."""
+    if viewer is None:
+        return None
+    path = request.url.path
+    parts = path.strip("/").split("/")
+    if parts[0] == "chats" and len(parts) > 1:
+        chat = request.app.state.repo.chat(parts[1])
+        if chat is None or chat.user_id != viewer.user.id:
+            return None
+        target, label = f"/chats/{parts[1]}", "Вернуться в чат"
+    elif parts[0] == "settings" and viewer.is_admin:
+        section = parts[1] if len(parts) > 1 and parts[1] in _SETTINGS_PAGES else ""
+        target, label = f"/settings/{section}".rstrip("/"), "Вернуться в настройки"
+    elif parts[0] == "keys":
+        target, label = "/keys", "Вернуться к ключам"
+    elif parts[0] == "account" and len(parts) > 1:
+        target, label = f"/account/{parts[1]}", "Вернуться"
+    else:
+        return None
+    return None if request.method == "GET" and path == target else (target, label)
+
+
+def _error_page(request: Request, status: int, message: str) -> Response:
+    """Страница ошибки с шапкой вошедшего. Не собралась шапка (внутренняя ошибка могла быть в ней) — без шапки."""
+    viewer = _signed_in(request)
+    if viewer is not None:
+        try:
+            return page(request, "error.html", viewer, status_code=status, code=status, message=message,
+                        back=_back(request, viewer))
+        except Exception:
+            pass
+    return page(request, "error.html", None, status_code=status, code=status, message=message, back=None)
+
+
 def _queue_error(request: Request, exc: QueueFull) -> Response:
     headers = {"Retry-After": str(exc.retry_after)}
     if _for_openai_agent(request):
@@ -216,7 +266,7 @@ def _queue_error(request: Request, exc: QueueFull) -> Response:
         return _agent_error(exc.status, str(exc), headers)
     if _for_program(request):
         return _json_error(exc.status, str(exc), headers)
-    response = page(request, "error.html", None, status_code=exc.status, code=exc.status, message=str(exc))
+    response = _error_page(request, exc.status, str(exc))
     response.headers.update(headers)
     return response
 
@@ -340,8 +390,7 @@ def create_app(
             standard = exc.detail == HTTPStatus(exc.status_code).phrase
             message = _STATUS_TEXT.get(exc.status_code, exc.detail) if standard else exc.detail
             return _json_error(exc.status_code, message, exc.headers)
-        message = _STATUS_TEXT.get(exc.status_code, exc.detail)
-        return page(request, "error.html", None, status_code=exc.status_code, code=exc.status_code, message=message)
+        return _error_page(request, exc.status_code, _STATUS_TEXT.get(exc.status_code, exc.detail))
 
     @app.exception_handler(RequestValidationError)
     async def bad_request(request: Request, exc: RequestValidationError) -> Response:
@@ -352,7 +401,7 @@ def create_app(
             return _agent_error(400, "Неверный запрос")
         if _for_program(request):
             return _json_error(422, "Неверный запрос")
-        return page(request, "error.html", None, status_code=400, code=400, message="Неверный запрос")
+        return _error_page(request, 400, "Неверный запрос")
 
     # Раньше guard: так предел оказывается внутри него, и отказ 413 доходит до обработчика ошибок.
     app.add_middleware(BodyLimit)
@@ -372,7 +421,7 @@ def create_app(
             elif _for_program(request):
                 response = _json_error(500, _INTERNAL)
             else:
-                response = page(request, "error.html", None, status_code=500, code=500, message=_INTERNAL)
+                response = _error_page(request, 500, _INTERNAL)
         response.headers.update(SECURITY_HEADERS)
         if secure_cookies:
             response.headers["Strict-Transport-Security"] = HSTS

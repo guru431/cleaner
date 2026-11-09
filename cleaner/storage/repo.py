@@ -410,6 +410,19 @@ class Repository:
         )
         return [self._chat(row) for row in rows]
 
+    def item_states(self, user_id: str) -> dict[str, list[tuple[str, str, bool]]]:
+        """Для списка чатов: вид, состояние и отметка «проверено» каждого элемента чатов владельца — без расшифровки
+        и без текстов. Чат -> [(kind, status, reviewed)] в порядке элементов."""
+        rows = self._all(
+            "SELECT i.chat_id, i.kind, i.status, i.reviewed_at IS NOT NULL AS reviewed FROM items i "
+            "JOIN chats c ON c.id = i.chat_id WHERE c.user_id = ? ORDER BY i.chat_id, i.seq",
+            user_id,
+        )
+        states: dict[str, list[tuple[str, str, bool]]] = {}
+        for row in rows:
+            states.setdefault(row["chat_id"], []).append((row["kind"], row["status"], bool(row["reviewed"])))
+        return states
+
     def rename_chat(self, chat_id: str, title: str) -> None:
         self._run(
             "UPDATE chats SET title_enc = ?, updated_at = ? WHERE id = ?",

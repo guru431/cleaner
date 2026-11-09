@@ -11,10 +11,10 @@ from cleaner.web.jobs import INTERRUPTED
 
 def test_new_chat_gets_a_dated_title_and_the_list_is_searchable(ivan):
     chat_id = ivan.chat(title="")
-    assert "Чат от 14.10.2026 09:00" in ivan.get(f"/chats/{chat_id}").text
+    assert "Консультация от 14.10.2026 09:00" in ivan.get(f"/chats/{chat_id}").text       # одно слово для обычного чата
     ivan.chat("Сервер почты")
     found = ivan.get("/chats", q="ПОЧТЫ").text
-    assert "Сервер почты" in found and "Чат от" not in found
+    assert "Сервер почты" in found and "Консультация от" not in found
 
 
 def test_input_is_shown_cleaned_and_downloadable(ivan):

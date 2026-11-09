@@ -1,0 +1,38 @@
+{# Блок «Служба» главной настроек: страница и опрос (/settings/service, app.js data-refresh) — одна разметка.
+   Только счётчики, сроки и настройки — ни владельцев, ни чатов. Внешние службы не опрашиваются: «не проверялось». #}
+{% from "_ui.html" import icon %}
+{% macro state(code, text) %}<span class="badge {{ code }}">{% if code != "good" %}{{ icon("warning") }}{% endif %}{{ text }}</span>{% endmacro %}
+<header class="panel-head"><h2 class="title">Занятость и модели</h2><span class="state">обновляется каждые 5 с</span></header>
+<table class="grid service-table">
+  <tbody>
+  <tr><th scope="row">Входной бюджет</th>
+    <td>{{ state(service.budget.state, "заданий — %d из %d" % (service.budget.jobs, service.budget.max_jobs)) }}
+      <div class="sub">память — {{ service.budget.mib }} из {{ service.budget.max_mib }} МиБ; сверх предела — отказ 503 «Служба занята»</div></td></tr>
+  {% for pool in service.pools %}
+  <tr><th scope="row">{{ pool.name }}</th>
+    <td>{{ state(pool.state, "в очереди — %d" % pool.queued) }}
+      <div class="sub">в работе — {{ pool.running }}{% if pool.workers %} из {{ pool.workers }} потоков{% endif %}{% if pool.oldest %}; ждёт с {{ pool.oldest | local(tz) }}{% endif %}{% if pool.left is not none %}; истечёт через {{ pool.left }} с{% elif pool.queued %}; без срока ожидания{% endif %}</div></td></tr>
+  {% endfor %}
+  <tr><th scope="row">Шлюз агентов</th>
+    <td>{{ state(service.agents.state, "запросов — %d из %d" % (service.agents.busy, service.agents.limit)) }}
+      <div class="sub">отказов 429 с запуска службы — {{ service.agents.refused }}</div></td></tr>
+  <tr><th scope="row">Контрольная точка базы</th>
+    <td>{{ state("warn" if service.checkpoint.count else "good", "не прошла за %d дней — %d" % (service.checkpoint.days, service.checkpoint.count)) }}
+      <div class="sub">{% if service.checkpoint.last %}последний раз — {{ service.checkpoint.last | local(tz) }}; копии удалённого в журнале WAL сотрёт следующая{% else %}удалённое стирается и из журнала WAL{% endif %}</div></td></tr>
+  <tr><th scope="row">База</th>
+    <td>{{ service.database.mib }} МиБ<div class="sub">журнал WAL — {{ service.database.wal_mib }} МиБ</div></td></tr>
+  <tr><th scope="row">Модели на диске</th>
+    <td>{% if service.models.total %}{{ state("good" if service.models.present == service.models.total else "bad", "%d из %d" % (service.models.present, service.models.total)) }}{% else %}<span class="muted">нет сведений</span>{% endif %}
+      <div class="sub">слой 4 — имена и организации, разбор документов</div></td></tr>
+  <tr><th scope="row">Локальная модель</th>
+    <td>{% if not service.local.connected %}{{ state("bad", "не подключена") }}{% elif not service.local.key %}{{ state("bad", "ключ шлюза не задан") }}{% else %}<span class="mono">{{ service.local.model }}</span>{% endif %}
+      <div class="sub">доступность — {{ service.not_checked }}; проверка — кнопкой «Проверить соединение» в разделе</div></td></tr>
+  <tr><th scope="row">Распознавание сканов</th>
+    <td><span class="mono">{{ service.ocr }}</span><div class="sub">доступность — {{ service.not_checked }}</div></td></tr>
+  <tr><th scope="row">Облачные подключения</th>
+    <td>включено — {{ service.providers.enabled }} из {{ service.providers.total }}<div class="sub">доступность — {{ service.not_checked }}; проверка — у подключения в разделе</div></td></tr>
+  <tr><th scope="row">Эталонный набор</th>
+    <td>{{ state(service.gold.state, "эталон — %d из %d" % (service.gold.count, service.gold.target)) }}
+      <div class="sub">{% if service.measure in ("queued", "running") %}идёт замер{% else %}{{ service.gold.measured }}{% endif %}</div></td></tr>
+  </tbody>
+</table>

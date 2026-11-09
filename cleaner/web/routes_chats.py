@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -19,7 +20,7 @@ from cleaner.service import LOCAL_PENDING, AnswerView, ChatView, EditRefused, In
 from cleaner.storage.repo import Chat, Item
 from cleaner.web import render
 from cleaner.web.deps import (
-    Upload, Viewer, get_form, get_upload, get_viewer, own_chat, page, repo_of, service_of, writable_chat,
+    Upload, Viewer, get_form, get_upload, get_viewer, own_chat, page, repo_of, service_of, templates, writable_chat,
 )
 
 router = APIRouter()
@@ -49,6 +50,8 @@ def partial_extraction(meta: dict[str, object]) -> str:
 class ListedChat(Chat):
     agent_key: str = ""
     last_request: str = ""
+    state: str = ""             # list_state: processing | answering | review | failed | "" — значок в списке
+    group: str = ""             # «Сегодня» / «Вчера» / «Раньше» — по времени изменения в поясе интерфейса
 
 
 def chat_filter(request: Request) -> str:
@@ -56,11 +59,41 @@ def chat_filter(request: Request) -> str:
     return selected if selected in ("all", "chat", "agent") else "all"
 
 
+# Состояния, которые требуют действия пользователя: отбор «требует действия» в списке чатов.
+NEEDS_ACTION = ("review", "failed")
+
+
+def list_state(items: list[tuple[str, str, bool]]) -> str:
+    """Значок консультации в списке чатов (идея аудита 09.11.2026) — по состоянию элементов, без расшифровки и без
+    проверки утечек: в том же порядке, что маршрут чата (route). Неотмеченный текст — «требуется проверка», и
+    заблокированный тоже: блокировку и «проверено» решают проверка утечек и нынешние политики, их знает только страница
+    чата, поэтому в списке ни «проверено», ни «блокировка» не утверждаются."""
+    inputs = [(status, reviewed) for kind, status, reviewed in items if kind == "input"]
+    if any(status in ("queued", "running") for status, _ in inputs):
+        return "processing"
+    if any(kind == "answer" and status in ("queued", "running") for kind, status, _ in items):
+        return "answering"
+    if any(status == "done" and not reviewed for status, reviewed in inputs):
+        return "review"
+    if inputs and not any(reviewed for _, reviewed in inputs):
+        return "failed"
+    return ""
+
+
+def _day_group(request: Request, iso: str) -> str:
+    tz = request.app.state.tz
+    today = request.app.state.clock.now().astimezone(tz).date()
+    days = (today - datetime.fromisoformat(iso).astimezone(tz).date()).days
+    return "Сегодня" if days <= 0 else "Вчера" if days == 1 else "Раньше"
+
+
 def chat_list(request: Request, viewer: Viewer, query: str = "") -> list[ListedChat]:
-    """Поиск по расшифрованным названиям и именам ключей — только среди чатов владельца."""
+    """Поиск по расшифрованным названиям и именам ключей — только среди чатов владельца. need=1 — только консультации,
+    которые требуют действия (NEEDS_ACTION)."""
     repo = repo_of(request)
     selected = chat_filter(request)
     keys = {key.id: key.name for key in repo.api_keys(viewer.user.id)}
+    states = repo.item_states(viewer.user.id)
     chats = []
     for chat in repo.chats(viewer.user.id):
         if selected != "all" and chat.kind != selected:
@@ -68,9 +101,22 @@ def chat_list(request: Request, viewer: Viewer, query: str = "") -> list[ListedC
         conversations = repo.chat_conversations(chat.id) if chat.kind == "agent" else []
         names = ", ".join(dict.fromkeys(keys[c.key_id] for c in conversations if c.key_id in keys))
         last = max((c.last_seen for c in conversations), default="")
-        chats.append(ListedChat(**vars(chat), agent_key=names, last_request=last))
+        state = list_state(states.get(chat.id, [])) if chat.kind != "agent" else ""
+        chats.append(ListedChat(**vars(chat), agent_key=names, last_request=last, state=state,
+                                group=_day_group(request, chat.updated_at)))
+    if request.query_params.get("need") == "1":
+        chats = [chat for chat in chats if chat.state in NEEDS_ACTION]
     needle = query.strip().lower()
     return [chat for chat in chats if needle in f"{chat.title} {chat.agent_key}".lower()] if needle else chats
+
+
+def queued_jobs(request: Request, viewer: Viewer) -> int:
+    """Значок «Задания» в шапке: сколько заданий вошедшего в очереди и в работе — по памяти пулов, без базы. Те же
+    задания, что на /jobs (у замера эталона чата нет — его там нет и здесь)."""
+    return sum(1 for pool in request.app.state.job_pools for job in pool.owned(viewer.user.id) if job["chat_id"])
+
+
+templates.env.globals["queued_jobs"] = queued_jobs          # шапка base.html — на каждой странице вошедшего
 
 
 def input_view(view: ChatView, item_id: str) -> InputView:
@@ -221,7 +267,7 @@ def chats(request: Request, q: str = "", viewer: Viewer = Depends(get_viewer)) -
 @router.post("/chats")
 def create_chat(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
     now = request.app.state.clock.now().astimezone(request.app.state.tz)
-    title = form.get("title", "").strip()[:_TITLE] or f"Чат от {now:%d.%m.%Y %H:%M}"       # FR-1.1
+    title = form.get("title", "").strip()[:_TITLE] or f"Консультация от {now:%d.%m.%Y %H:%M}"       # FR-1.1
     chat_id = repo_of(request).create_chat(viewer.user.id, title)
     repo_of(request).audit("chat_created", viewer.user.id, chat_id)
     return RedirectResponse(f"/chats/{chat_id}", status_code=303)

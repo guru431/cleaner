@@ -1,19 +1,29 @@
 {# Общие куски разметки. Иконка — символ из static/icons.svg, цвет — currentColor. #}
 {% macro icon(name) %}<svg class="icon" aria-hidden="true"><use href="/static/icons.svg#{{ name }}"></use></svg>{% endmacro %}
-{# Тема: по кругу «как в системе → светлая → тёмная» (app.js). Видна подпись действующего режима (app.css по data-theme),
-   она же — имя кнопки для читалок: скрытые подписи в имя не входят. #}
-{% macro theme_toggle() %}<button type="button" class="theme" data-theme-toggle title="Тема по кругу: как в системе, светлая, тёмная">
-  <span class="sr-only">Тема:</span>
-  <span class="mode m-system">{{ icon("auto") }}как в системе</span>
-  <span class="mode m-light">{{ icon("sun") }}светлая</span>
-  <span class="mode m-dark">{{ icon("moon") }}тёмная</span>
-</button>{% endmacro %}
+{# Тема (09.11.2026): три кнопки-сегмента — выбранный режим виден сразу, без круга, где первое нажатие при светлой системе
+   ничего не меняло. Нажатая — aria-pressed (app.js по data-theme). Без JS выбирать нечем — ряд не показывается. #}
+{% macro theme_set() %}<div class="segmented theme-set" role="group" aria-label="Тема">
+  <button type="button" data-theme-set="system" aria-pressed="false" title="Как в системе">{{ icon("auto") }}Система</button>
+  <button type="button" data-theme-set="light" aria-pressed="false">{{ icon("sun") }}Светлая</button>
+  <button type="button" data-theme-set="dark" aria-pressed="false">{{ icon("moon") }}Тёмная</button>
+</div>{% endmacro %}
+{# Меню пользователя в шапке (09.11.2026): логин — заголовок, в нём свои страницы и выход. Работает и без JS (details). #}
+{% macro user_menu(viewer) %}<details class="menu user-menu">
+  <summary class="btn" title="Учётная запись {{ viewer.user.login }}"><span class="user-login">{{ viewer.user.login }}</span></summary>
+  <div class="pop" role="group" aria-label="Учётная запись">
+    <a href="/keys">Мои ключи</a>
+    <a href="/account/password">Сменить пароль</a>
+    <a href="/account/sessions">Мои сессии</a>
+    <form method="post" action="/logout">{% include "_csrf.html" %}<button>Выйти</button></form>
+  </div>
+</details>{% endmacro %}
 {# Вид рабочего места: отметки — классы view-… на <html> (theme.js до отрисовки, app.js по нажатию), в localStorage
    только их имена. Без JS меню не показывается: переключать нечем. Без отметок — исходный компактный вид. #}
 {% macro view_toggle(name, label, hint) %}<button type="button" class="toggle" data-view-toggle="{{ name }}" aria-pressed="false" title="{{ hint }}"><span class="switch"></span>{{ label }}</button>{% endmacro %}
 {% macro view_menu() %}<details class="menu view-menu">
-  <summary class="btn" title="Вид рабочего места: размер текста, плотность строк, свёрнутые панели">{{ icon("layout") }}Вид</summary>
+  <summary class="btn" title="Вид рабочего места: тема, размер текста, плотность строк, свёрнутые панели">{{ icon("layout") }}Вид</summary>
   <div class="pop" role="group" aria-label="Вид рабочего места">
+    {{ theme_set() }}
     {{ view_toggle("text-large", "Текст элементов крупнее", "Тексты в ленте, на проверке и в таблицах — 14,5 px вместо 12,5") }}
     {{ view_toggle("ui-large", "Весь интерфейс крупнее", "Увеличить элементы управления и подписи независимо от текста документов") }}
     {{ view_toggle("contrast", "Контрастные замены", "Подчёркивание и рамка дополняют цвет; выбранный тип назван над панелями") }}

@@ -1,15 +1,23 @@
 {% extends "_settings.html" %}
 {% from "_settings_nav.html" import sections %}
+{% from "_ui.html" import icon %}
 {% block title %}Настройки — Cleaner{% endblock %}
 {% block content %}
 <h1>Настройки</h1>
-<p class="lead">Общие для всех чатов: подключения к моделям, правила очистки, замер качества, доступ и журнал.</p>
+<p class="lead">Состояние разделов и службы. Что делает раздел — в подсказке карточки и в меню слева.</p>
+{# Панель (идея аудита 09.11.2026): у карточки — состояние словом и одним числом, подробность — строкой под ним;
+   описание раздела — в title, а не повтором меню. #}
 {% for group, links in sections %}
 <h2>{{ group }}</h2>
 <div class="cards">
   {% for href, label, description in links %}
-  <a class="card" href="{{ href }}"><strong>{{ label }}</strong><span>{{ description }}</span></a>
+  {% set state, value, detail = cards[href] %}
+  <a class="card" href="{{ href }}" title="{{ description }}"><strong>{{ label }}</strong><span class="badge {{ state }}">{% if state != "good" %}{{ icon("warning") }}{% endif %}{{ value }}</span><span class="sub">{{ detail }}</span></a>
   {% endfor %}
 </div>
 {% endfor %}
+<h2>Служба</h2>
+<section class="panel service" data-refresh="/settings/service">
+  {% include "_settings_service.html" %}
+</section>
 {% endblock %}
