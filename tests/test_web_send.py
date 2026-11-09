@@ -237,7 +237,12 @@ def test_manual_transfer_shows_the_whole_cleaned_dialogue_with_roles(ivan, provi
     assert text.startswith("=== Инструкция ===\nВ тексте встречаются обозначения") and "Отвечай кратко" in text
     assert "=== Вопрос ===\nВопрос: почта &lt;EMAIL_1&gt;" in text and "=== Ответ модели ===\nОтвет про &lt;EMAIL_1&gt;" in text
     assert "a@x.example" not in page and 'data-copy="manual-text"' in page
-    assert f'href="/chats/{chat_id}/manual"' in ivan.get(f"/chats/{chat_id}").text
+    # Ручной перенос и вкладка «Ответ вручную» — в ручном режиме; при выбранной модели их нет (идея аудита 09.11.2026).
+    chat = ivan.get(f"/chats/{chat_id}").text
+    assert f'href="/chats/{chat_id}/manual"' not in chat and 'data-tab="answer"' not in chat
+    ivan.post(f"/chats/{chat_id}/provider", choice="")
+    chat = ivan.get(f"/chats/{chat_id}").text
+    assert f'href="/chats/{chat_id}/manual"' in chat and 'data-tab="answer"' in chat
 
 
 def test_manual_transfer_offers_no_copy_when_a_fragment_is_blocked(ivan, repo, provider):
@@ -282,3 +287,41 @@ def test_route_leads_from_review_to_transfer_and_the_mark_is_cleared_by_an_edit(
     assert "анонимн" not in page.lower() and "безопасн" not in page.lower()
     ivan.post(f"/chats/{chat_id}/mask", item_id=item_id, value="Заря", type="TERM")
     assert "требуется проверка" in ivan.get(f"/chats/{chat_id}").text
+
+
+def stages(page: str) -> list[tuple[str, str]]:
+    route = re.search(r'<nav class="route"[^>]*>\s*<ol>(.*?)</ol>', page, re.S).group(1)
+    return [(cls, re.sub(r"<[^>]+>", "", label)) for cls, label in re.findall(r'<li(?: class="([a-z ]+)")?[^>]*>(.*?)</li>', route)]
+
+
+def test_route_does_not_tick_a_review_that_was_skipped(ivan, repo):
+    """Находка «маршрут чата отмечает «Проверка ✓ → Передача ✓», хотя ни один текст не проверен»: после ответа этап
+    проверки пройден только при всех отмеченных текстах, иначе он помечен пропущенным."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="Проект Заря, почта a@x.example")
+    ivan.post(f"/chats/{chat_id}/answer", answer="Ответ про <EMAIL_1>")
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert stages(page) == [("done", "Исходник"), ("skipped", "Проверка"), ("done", "Передача"),
+                            ("on", "Восстановленный ответ")]
+    assert 'title="Пропущена: не все тексты отмечены проверенными"' in page
+    item_id = repo.items(chat_id)[0].id
+    review = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    shown = re.search(r'/reviewed"[^>]*>.*?name="digest" value="([0-9a-f]{64})"', review, re.S).group(1)
+    ivan.post(f"/chats/{chat_id}/items/{item_id}/reviewed", digest=shown)
+    assert [cls for cls, _ in stages(ivan.get(f"/chats/{chat_id}").text)] == ["done", "done", "done", "on"]
+
+
+def test_manual_transfer_after_an_answer_says_what_to_do_instead_of_an_error(ivan, repo):
+    """Находка «Перенос вручную…» после ответа модели ведёт на «Ошибка 409»: кнопка недоступна с подсказкой, а сама
+    страница — с шапкой и сообщением, как при составе без вопроса."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert f'href="/chats/{chat_id}/manual"' in page
+    ivan.post(f"/chats/{chat_id}/answer", answer="ответ")
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert f'href="/chats/{chat_id}/manual"' not in page
+    assert '<button type="button" disabled title="Последним в чате стоит ответ: сначала добавьте текст или вопрос">Перенос вручную…</button>' in page
+    response = ivan.get(f"/chats/{chat_id}/manual")
+    assert response.status_code == 200 and 'class="flash bad">Последним в чате должен быть вопрос' in response.text
+    assert "Выйти" in response.text and 'id="manual-text"' not in response.text

@@ -175,6 +175,58 @@ def test_reviewed_text_is_saved_as_a_gold_example(ivan, repo):
     assert [e.details for e in repo.audit_events("gold_added")] == [{"spans": 3}]
 
 
+def test_marking_a_text_reviewed_offers_to_save_it_as_gold(ivan, repo):
+    """Идея «Сбор собственного эталона из проверенных текстов»: после «Отметить проверенным» — необязательное
+    предложение с выбором сценария и назначения; без отметки и по прямому адресу его нет."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    item_id = first_item(repo, chat_id)
+    path = f"/chats/{chat_id}/items/{item_id}"
+    assert "Сохранить его как эталон?" not in ivan.get(path, offer="gold").text            # ещё не проверен
+    shown = re.search(r'name="digest" value="([0-9a-f]{64})"', ivan.get(path).text).group(1)
+    response = ivan.post(f"{path}/reviewed", digest=shown)
+    assert response.headers["location"] == f"{path}?offer=gold"
+    offer = ivan.get(response.headers["location"]).text
+    panel = re.search(r'<section class="panel gold-offer".*?</section>', offer, re.S).group(0)
+    assert "Сохранить его как эталон?" in panel and f'action="{path}/gold"' in panel and 'name="scenario"' in panel
+    assert f'href="{path}">Не сейчас</a>' in panel and repo.gold() == []
+    assert "Сохранить его как эталон?" not in ivan.get(path).text
+
+
+def test_review_shows_each_count_once_with_types_as_legend_and_short_sources(ivan, repo):
+    """Идея «экран проверки без тройного дублирования»: число оригиналов — один раз, без «Блокировки: 0» и «Проверено:
+    нет»; значки типов с числами — сами кнопки легенды; источники — короткими метками с расшифровкой в подсказке;
+    снятие замены в строке — одной иконкой; переходы поиска и замен — стрелками с разными подписями."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="клиент Ромашка, почта a@x.example")
+    item_id = first_item(repo, chat_id)
+    page = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    assert "Блокировки:" not in page and "Проверено:" not in page
+    assert re.search(r'data-legend="t-EMAIL"[^>]*><span class="swatch t-EMAIL"></span>Почта — 1</button>', page)
+    assert page.count("Почта — 1") == 1
+    assert '<abbr title="слой 1 — правила">С1</abbr>' in page and "<td class=\"sub\">слой" not in page
+    assert 'class="danger icon-only" title="Снять замену во всём чате…"' in page
+    assert re.findall(r'title="(Предыдущ[^"(]+|Следующ[^"(]+) \(', page) == [
+        "Предыдущее совпадение поиска", "Следующее совпадение поиска", "Предыдущая замена", "Следующая замена",
+    ]
+    repo.add_dictionary("always", "Ромашка", T.ORG)
+    page = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    assert page.count("найдено оригиналов — 1") == 1 and "известных скрываемых оригиналов не найдено" not in page
+
+
+def test_entity_table_searches_on_the_page_and_puts_the_danger_last(ivan, repo):
+    """Идея «таблица замен — поиск и порядок действий»: поле поиска без имени и вне форм — значение не уходит в адрес;
+    «Изменить…» первым, «Снять замену…» — последним."""
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="a@x.example")
+    table = ivan.get(f"/chats/{chat_id}/entities").text
+    field = re.search(r'<input type="search" id="entities-find"[^>]*>', table).group(0)
+    assert "name=" not in field
+    assert not any(field in form for form in re.findall(r"<form.*?</form>", table, re.S))
+    actions = re.search(r'<td class="actions">(.*?)</td>', table, re.S).group(1)
+    assert actions.index("Изменить…") < actions.index("Снять замену…")
+
+
 def test_residual_risk_guesses_are_shown_and_stored_encrypted(ivan, repo, engines, tmp_path):
     """FR-9.3: догадки — подсказка на экране проверки; верная догадка — оригинал, поэтому зашифрована."""
     engines.completer.answers = [json.dumps({"guesses": [{"kind": "org", "guess": "Ромашка Rk17", "clue": ""}]}, ensure_ascii=False)]

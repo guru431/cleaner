@@ -30,12 +30,21 @@
   {% endif %}
 </section>
 {% else %}
+{# Одна строка сводки: готовность (в ней и «проверено»), слои, итог проверки утечек, открытые — только при ненулевых;
+   числа найденных оригиналов и блокировок — один раз, в сообщениях ниже. Действия — справа. #}
 <section class="review-brief" aria-label="Сводка проверки текста">
   <strong>Текст {{ item.seq }}</strong>
   {{ readiness_badge(readiness) }}
-  <span{% if leaks or blocked %} class="bad-text"{% endif %}>{{ icon("warning") }}Блокировки: {{ leaks + blocked }}</span>
-  <span>Открыто: {{ opened }}</span>
-  <span title="Отметка пользователя, не гарантия отсутствия неизвестных утечек">Проверено: {{ "да" if readiness == "reviewed" else "нет" }}</span>
+  <span class="badge" title="Слои распознавания, выполненные для этого текста">слои {{ layers_ran }}</span>
+  {% if not leaks %}
+  {# Проверка знает только найденные слоями, скрытые вручную и словарь «всегда скрывать», а снятые замены пропускает:
+     итог — не «оригиналов нет» (аудит 21.10.2026). #}
+  <span class="badge good" title="Проверка ищет значения, которые нашли слои или скрыли вручную, и словарь «всегда скрывать»; значение, которого не нашёл ни один слой, ей неизвестно">{{ icon("check") }}известных скрываемых оригиналов не найдено</span>
+  {% endif %}
+  {% if opened %}
+  <span class="badge warn" title="Значения, с которых в этом чате снята замена: в очищенном тексте они открыты и уходят как есть">{{ icon("warning") }}открыто по решению пользователя — {{ opened }}</span>
+  {% endif %}
+  {# Отметка «проверено» — подсказка маршрута чата, не разрешение; форма несёт отпечаток показанного текста. #}
   <span class="spacer"></span>
   {% if readiness == "review" %}
   <form method="post" action="/chats/{{ chat.id }}/items/{{ item.id }}/reviewed" class="mark-reviewed">
@@ -46,22 +55,19 @@
   {% if next_review %}<a class="btn" href="/chats/{{ chat.id }}/items/{{ next_review }}">Следующий текст</a>{% endif %}
   <a class="btn" href="/chats/{{ chat.id }}/{{ transfer }}">Передача…</a>
 </section>
-<section class="summary">
-  <div class="badges">
-    {% for name, count in summary %}<span class="badge">{{ name }} — {{ count }}</span>{% else %}<span class="muted">Замен нет</span>{% endfor %}
-    {% if leaks %}
-    <span class="badge bad">{{ icon("warning") }}найдено оригиналов — {{ leaks }}</span>
-    {% else %}
-    {# Проверка знает только найденные слоями, скрытые вручную и словарь «всегда скрывать», а снятые замены пропускает:
-       итог — не «оригиналов нет» (аудит 21.10.2026). #}
-    <span class="badge good" title="Проверка ищет значения, которые нашли слои или скрыли вручную, и словарь «всегда скрывать»; значение, которого не нашёл ни один слой, ей неизвестно">{{ icon("check") }}известных скрываемых оригиналов не найдено</span>
-    {% endif %}
-    {% if opened %}
-    <span class="badge warn" title="Значения, с которых в этом чате снята замена: в очищенном тексте они открыты и уходят как есть">{{ icon("warning") }}открыто по решению пользователя — {{ opened }}</span>
-    {% endif %}
-    <span class="badge" title="Слои распознавания, выполненные для этого текста">слои {{ layers_ran }}</span>
-    {# Отметка «проверено» — подсказка маршрута чата, не разрешение; форма несёт отпечаток показанного текста. #}
+{% if offer_gold %}
+<section class="panel gold-offer" aria-label="Сохранить как эталон">
+  <header class="panel-head">
+    <h2 class="title">Текст отмечен проверенным. Сохранить его как эталон?</h2>
+    <span class="actions"><a class="btn" href="/chats/{{ chat.id }}/items/{{ item.id }}">Не сейчас</a></span>
+  </header>
+  <div class="panel-body">
+    <p class="muted">Необязательно. Эталон нужен для измерения качества очистки (QA-1): выберите сценарий и назначение. Копия текста с разметкой хранится под общим ключом и по умолчанию удаляется вместе с чатом.</p>
+    {% include "_gold_save.html" %}
   </div>
+</section>
+{% endif %}
+<section class="summary">
   {% if extraction %}<p class="muted">{{ extraction }}</p>{% endif %}
   {% if warnings or notices %}
   <details class="review-explanation"><summary>Слои и особенности текста: пояснения ({{ warnings | length + notices | length }})</summary>
@@ -80,25 +86,26 @@
   {% endif %}
 </section>
 
-{# Рабочее место проверки (app.js): поиск, переходы и легенда работают на странице, без запросов; без JS строки скрыты. #}
+{# Типы этого текста с числом замен — они же кнопки легенды (app.js): нажатые оставляют выделенными только свои
+   метки, N / P ходят по ним. Без JS — просто значки с числами. #}
+<div class="badges review-legend" role="group" aria-label="Замены по типам — показать только выбранные" data-review-tools>
+  {% for class_, name, count in legend %}<button type="button" class="chip" data-legend="{{ class_ }}" aria-pressed="false" title="Показать только: {{ name }}"><span class="swatch {{ class_ }}"></span>{{ name }}{% if count %} — {{ count }}{% endif %}</button>{% endfor %}
+  {% if not fragments %}<span class="muted">Замен нет</span>{% endif %}
+</div>
+{# Рабочее место проверки (app.js): поиск и переходы работают на странице, без запросов; без JS строка скрыта. #}
 <div class="review-tools" data-review-tools>
   <span class="search">{{ icon("search") }}<input type="search" id="review-find" autocomplete="off" placeholder="Найти в обеих панелях" aria-label="Найти в оригинале и в очищенном тексте"></span>
-  <button type="button" data-find="-1" title="Shift+Enter в поле поиска">Предыдущее</button>
-  <button type="button" data-find="1" title="Enter в поле поиска">Следующее</button>
+  <button type="button" class="arrow" data-find="-1" title="Предыдущее совпадение поиска (Shift+Enter в поле поиска)" aria-label="Предыдущее совпадение поиска">↑</button>
+  <button type="button" class="arrow" data-find="1" title="Следующее совпадение поиска (Enter в поле поиска)" aria-label="Следующее совпадение поиска">↓</button>
   <span class="muted" id="review-found" aria-live="polite"></span>
   <span class="spacer"></span>
-  <button type="button" class="toggle" data-sync-scroll aria-pressed="false" title="Панели прокручиваются вместе — по доле высоты"><span class="switch"></span>Синхронная прокрутка</button>
-</div>
-<div class="review-tools" data-review-tools>
   <span class="muted">Замены:</span>
   <span class="badge selected-type" data-selected-type hidden aria-live="polite"></span>
-  <button type="button" data-step="-1" title="Клавиша P в панели текста">Предыдущая</button>
-  <button type="button" data-step="1" title="Клавиша N в панели текста">Следующая</button>
-  <span class="legend" role="group" aria-label="Показать только">
-    {% for class_, name in legend %}<button type="button" class="chip" data-legend="{{ class_ }}" aria-pressed="false"><span class="swatch {{ class_ }}"></span>{{ name }}</button>{% endfor %}
-  </span>
-  <span class="hint" id="review-keys">В панели текста: N / P — следующая / предыдущая замена, Enter — её пара в соседней панели, Esc — снять выбор.</span>
+  <button type="button" class="arrow" data-step="-1" title="Предыдущая замена (клавиша P в панели текста)" aria-label="Предыдущая замена">←</button>
+  <button type="button" class="arrow" data-step="1" title="Следующая замена (клавиша N в панели текста)" aria-label="Следующая замена">→</button>
+  <button type="button" class="toggle" data-sync-scroll aria-pressed="false" title="Панели прокручиваются вместе — по доле высоты"><span class="switch"></span>Синхронная прокрутка</button>
 </div>
+<p class="hint review-keys" id="review-keys">В панели текста: N / P — следующая / предыдущая замена, Enter — её пара в соседней панели, Esc — снять выбор. Типы над строкой поиска — фильтры замен.</p>
 
 <div class="compare">
   <section class="panel">
@@ -175,7 +182,7 @@
   <div class="tab-panel on" role="tabpanel" data-tab-panel="fragments">
     {# Фильтры — на странице (app.js), по кодам в data-атрибутах строк; без JS строка скрыта, таблица видна вся. #}
     <div class="table-filter" data-filter-table="fragments-table">
-      <select data-filter="type" aria-label="Тип"><option value="">Все типы</option>{% for class_, name in legend if class_.startswith("t-") %}<option value="{{ class_[2:] }}">{{ name }}</option>{% endfor %}</select>
+      <select data-filter="type" aria-label="Тип"><option value="">Все типы</option>{% for class_, name, _ in legend if class_.startswith("t-") %}<option value="{{ class_[2:] }}">{{ name }}</option>{% endfor %}</select>
       <select data-filter="source" aria-label="Кто нашёл"><option value="">Все источники</option>{% for code, name in sources %}<option value="{{ code }}">{{ name }}</option>{% endfor %}</select>
       <span class="muted" data-filter-count aria-live="polite"></span>
     </div>
@@ -185,13 +192,13 @@
       {% for f in fragments %}
       <tr data-type="{{ f.why.code }}" data-sources="{{ f.why.sources | join(' ') }}">
         <td class="mono">{{ f.value }}</td><td class="mono nowrap">{{ f.surrogate }}</td><td class="nowrap">{{ f.type }}</td>
-        <td class="sub">{{ f.why.names | join("; ") }}{% if f.why.validated %}; формат подтверждён{% endif %}</td>
+        <td class="sub nowrap">{% for label, full in f.why.short %}<abbr title="{{ full }}">{{ label }}</abbr>{% if not loop.last %}, {% endif %}{% endfor %}{% if f.why.validated %}, <abbr title="формат подтверждён контрольной суммой или строгим форматом">формат ✓</abbr>{% endif %}</td>
         <td class="actions">
           <form method="post" action="/chats/{{ chat.id }}/unmask/preview">
             {% include "_csrf.html" %}
             <input type="hidden" name="item_id" value="{{ item.id }}">
             <input type="hidden" name="value" value="{{ f.value }}">
-            <button class="danger">Снять замену во всём чате…</button>
+            <button class="danger icon-only" title="Снять замену во всём чате…" aria-label="Снять замену {{ f.surrogate }} во всём чате…">{{ icon("x") }}</button>
           </form>
         </td>
       </tr>
@@ -236,7 +243,7 @@
   </div>
   {% endif %}
   <div class="tab-panel" role="tabpanel" data-tab-panel="gold">
-    <p class="muted">Сначала проверьте замены. Копия текста с текущей разметкой попадёт в набор для измерения качества и останется в нём после удаления чата.</p>
+    <p class="muted">Сначала проверьте замены. Копия текста с текущей разметкой попадёт в набор для измерения качества под общим ключом. При удалении чата она удаляется вместе с ним, если не снять эту отметку в форме удаления; оставленную удаляет администратор.</p>
     {% include "_gold_save.html" %}
   </div>
 </div>

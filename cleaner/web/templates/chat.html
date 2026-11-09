@@ -37,6 +37,11 @@
         <form method="post" action="/chats/{{ chat.id }}/delete">
           {% include "_csrf.html" %}
           <label class="check"><input type="checkbox" name="confirm" value="yes" required> Удалить чат безвозвратно, вместе с таблицей замен и ключом</label>
+          {% if gold_count %}
+          <input type="hidden" name="gold_shown" value="yes">
+          <label class="check"><input type="checkbox" name="gold" value="yes" checked> Удалить и примеры эталона из этого чата — {{ gold_count }}</label>
+          <small class="hint">Без этой отметки примеры с исходным текстом останутся в эталонном наборе под общим ключом; удалить их сможет только администратор на странице «Эталонный набор».</small>
+          {% endif %}
           <button class="danger">Удалить</button>
         </form>
       </div>
@@ -46,7 +51,8 @@
   {# Маршрут чата (routes_chats.route): этапы, готовность текстов и основное действие следующего шага — подсказка. #}
   <nav class="route" aria-label="Этапы чата">
     <ol>
-      {% for name in stages %}<li{% if loop.index0 == route.stage %} class="on" aria-current="step"{% elif loop.index0 < route.stage %} class="done"{% endif %}>{% if loop.index0 < route.stage %}{{ icon("check") }}{% endif %}{{ name }}</li>{% endfor %}
+      {% set skipped = route.skipped or () %}
+      {% for name in stages %}<li{% if loop.index0 == route.stage %} class="on" aria-current="step"{% elif loop.index0 in skipped %} class="skipped" title="Пропущена: не все тексты отмечены проверенными"{% elif loop.index0 < route.stage %} class="done"{% endif %}>{% if loop.index0 in skipped and loop.index0 != route.stage %}{{ icon("warning") }}{% elif loop.index0 < route.stage %}{{ icon("check") }}{% endif %}{{ name }}</li>{% endfor %}
     </ol>
     {{ readiness(route.state, whole=true) }}
     {% if route.action %}<a class="btn primary" href="{{ route.action[1] }}">{{ route.action[0] }}</a>{% endif %}
@@ -144,10 +150,16 @@
     {% endfor %}
   </div>
 
+  {# Основное действие следующего шага — только в маршруте: здесь та же ссылка не повторяется. Без вопроса последним
+     передавать нечего — кнопка недоступна, причина в подсказке. Ручной перенос — в ручном режиме: при выбранной модели
+     нет ни его, ни вкладки «Ответ вручную». #}
+  {% set next_step = route.action[1] if route.action else "" %}
+  {# Выбранная модель, которой больше нет среди включённых, — ручной режим, как его и показывает список. #}
+  {% set connected = chosen and chosen in choices | map("first") | list %}
   <footer class="composer">
     <div class="send-row">
       {% if choices %}
-      <form method="post" action="/chats/{{ chat.id }}/provider">
+      <form method="post" action="/chats/{{ chat.id }}/provider" class="auto-submit" data-auto-submit>
         {% include "_csrf.html" %}
         <label for="choice">Облачная модель</label>
         <select id="choice" name="choice">
@@ -156,11 +168,17 @@
         </select>
         <button>Выбрать</button>
       </form>
-      {% if chosen %}<a class="btn primary" href="/chats/{{ chat.id }}/send" title="Сначала экран подтверждения с тем, что уйдёт">Отправить очищенный чат…</a>{% endif %}
+      {% if connected and next_step != "/chats/" ~ chat.id ~ "/send" %}
+      {% if no_question %}<button type="button" disabled title="{{ no_question }}">Отправить очищенный чат…</button>
+      {% else %}<a class="btn" href="/chats/{{ chat.id }}/send" title="Сначала экран подтверждения с тем, что уйдёт">Отправить очищенный чат…</a>{% endif %}
+      {% endif %}
       {% else %}
       <span class="muted">Подключений к облачным моделям нет: очищенный текст копируется вручную, ответ вставляется ниже.</span>
       {% endif %}
-      <a class="btn" href="/chats/{{ chat.id }}/manual" title="Весь очищенный диалог одним текстом с ролями и инструкцией о метках — для интерфейса облачной модели">Перенос вручную…</a>
+      {% if not connected and next_step != "/chats/" ~ chat.id ~ "/manual" %}
+      {% if no_question %}<button type="button" disabled title="{{ no_question }}">Перенос вручную…</button>
+      {% else %}<a class="btn" href="/chats/{{ chat.id }}/manual" title="Весь очищенный диалог одним текстом с ролями и инструкцией о метках — для интерфейса облачной модели">Перенос вручную…</a>{% endif %}
+      {% endif %}
       {% if local %}
       <form method="post" action="/chats/{{ chat.id }}/ask-local" class="ask-local">
         {% include "_csrf.html" %}
@@ -177,7 +195,7 @@
         <button type="button" role="tab" data-tab="text" aria-selected="true">Текст</button>
         <button type="button" role="tab" data-tab="file" aria-selected="false">Файлы</button>
         <button type="button" role="tab" data-tab="instruction" aria-selected="false">Инструкция</button>
-        <button type="button" role="tab" data-tab="answer" aria-selected="false">Ответ вручную</button>
+        {% if not connected %}<button type="button" role="tab" data-tab="answer" aria-selected="false">Ответ вручную</button>{% endif %}
       </div>
       {# Свёрнутый редактор — одна строка вкладок (меню «Вид»); вкладка или эта кнопка разворачивают его. Кнопка — вне
          tablist (там только вкладки), на строку вкладок её ставит app.css. #}
@@ -196,7 +214,15 @@
           <button class="primary">Загрузить и очистить</button>
           <div class="upload-preview" data-upload-preview hidden aria-live="polite"></div>
           <label class="check"><input type="checkbox" name="ocr" value="all"> {{ ocr_all }}</label>
-          <small class="hint">До 10 файлов, весь пакет до {{ max_file_mb }} МБ: DOCX, XLSX, PPTX, PDF (и скан), EML, MSG, HTML, CSV, текст, PNG, JPEG. Результат каждого файла — отдельно в ленте; повторяется только ошибочный. Перед передачей выберите состав запроса. Скачивается очищенный текст без исходного оформления. Отметка — для PDF с текстом на картинках или неполным слоем текста: каждая страница идёт в распознавание, это дольше</small>
+          <details class="upload-help"><summary>Форматы и ограничения</summary>
+            <ul class="hint">
+              <li>До 10 файлов, весь пакет до {{ max_file_mb }} МБ: DOCX, XLSX, PPTX, PDF (и скан), EML, MSG, HTML, CSV, текст, PNG, JPEG.</li>
+              <li>Снимок экрана можно вставить из буфера (Ctrl+V) — он добавится к выбранным файлам как PNG.</li>
+              <li>Результат каждого файла — отдельно в ленте; повторяется только ошибочный.</li>
+              <li>Скачивается очищенный текст без исходного оформления.</li>
+              <li>Отметка распознавания — для PDF с текстом на картинках или неполным слоем текста: каждая страница идёт в распознавание, это дольше.</li>
+            </ul>
+          </details>
         </form>
       </div>
       <div class="tab-panel" role="tabpanel" data-tab-panel="instruction">
@@ -208,6 +234,7 @@
           <small class="hint">Очищается так же и уходит в системную часть запроса</small>
         </form>
       </div>
+      {% if not connected %}
       <div class="tab-panel" role="tabpanel" data-tab-panel="answer">
         <form method="post" action="/chats/{{ chat.id }}/answer" class="compose">
           {% include "_csrf.html" %}
@@ -215,6 +242,7 @@
           <button class="primary">Восстановить</button>
         </form>
       </div>
+      {% endif %}
     </div>
   </footer>
 </section>

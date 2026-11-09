@@ -1018,21 +1018,28 @@ class ChatService:
             if live is not None:
                 live.stop("Чат удалён")
 
-    def delete_chat(self, chat_id: str, user_id: str, via: str | None = None) -> None:
+    def delete_chat(self, chat_id: str, user_id: str, via: str | None = None, gold: bool = True) -> None:
         """FR-1.4: идущие ответы облака прерываются, чтобы поток провайдера не читался впустую, затем чат удаляется.
-        via — откуда удалён (api), для журнала."""
+        via — откуда удалён (api), для журнала. gold — удалить и примеры эталона из этого чата (по умолчанию): без него
+        они остаются в наборе под общим ключом, и удаляет их администратор. Примеры удаляются до чата, чтобы
+        контрольная точка удаления чата усекла журнал WAL и с ними."""
         self.stop_chat(chat_id)
         for submit in (self.submit, self.file_submit, self.send_submit):
             pool = getattr(submit, "__self__", None)
             if hasattr(pool, "cancel_chat"):
                 pool.cancel_chat(chat_id)
+        examples = self.repo.chat_gold(chat_id)
+        if gold:
+            for gold_id in examples:
+                self.repo.delete_gold(gold_id)
         try:
             self.repo.delete_chat(chat_id)
         except CheckpointBusy as exc:
             # Удаление состоялось; копии страниц в журнале WAL сотрёт следующая контрольная точка — администратору в журнал.
             log.error("удаление чата: %s", type(exc).__name__)
             self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="delete")
-        self.repo.audit("chat_deleted", user_id, chat_id, **({"via": via} if via else {}))
+        details = ({"via": via} if via else {}) | ({"gold" if gold else "gold_kept": len(examples)} if examples else {})
+        self.repo.audit("chat_deleted", user_id, chat_id, **details)
 
     def check_provider(self, provider: Provider, model: str) -> str:
         """FR-8.2: проверочный запрос без данных пользователя. ProviderError — отказ провайдера."""
@@ -1315,6 +1322,7 @@ class ChatService:
             reviewed = metadata(scenario, checks, purpose, source or f"chat:{chat_id}")
         except ValueError as exc:
             raise EditRefused(str(exc)) from None
+        reviewed["chat"] = chat_id          # и при своём источнике документа: удаление чата находит примеры (FR-1.4)
         state, _ = self.repo.load_state(chat_id)
         item = self.repo.item(chat_id, item_id)
         if item is None or item.kind != "input":

@@ -29,6 +29,8 @@ _NOTICES = {
 # Строк таблицы замен на странице. Без страниц таблица чата с тысячами сущностей — мегабайты HTML и DOM на каждое
 # открытие, а прежние списки кандидатов на объединение в каждой строке росли квадратично (аудит 21.10.2026).
 ENTITIES_PAGE = 100
+# Короткие метки источников для таблицы фрагментов; расшифровка — render.SOURCE_NAMES в подсказке.
+SOURCE_SHORT = {"manual": "вручную", "rules": "С1", "secrets": "С2", "infra": "С3", "dict": "С3", "ner": "С4", "llm": "С5"}
 _SENIORITY = (
     "Фрагмент нашли несколько слоёв. Где находки пересекаются, тип берётся по старшинству (FR-3.3): решение "
     "пользователя, секрет, подтверждённый формат, остальные правила и словари, модели распознавания имён, локальная модель."
@@ -113,9 +115,13 @@ def _why(item: Item, state: ChatState, policies: Mapping[EntityType, Policy]) ->
                 f"Внутри фрагмента найдено значение типа «{'», «'.join(held)}», который администратор велел блокировать: "
                 "текст не выдаётся, пока фрагмент в нём; политику меняет администратор."
             )
+        short: dict[str, list[str]] = {}            # слой 3 — два источника под одной меткой: подсказка называет оба
+        for code in codes:
+            short.setdefault(SOURCE_SHORT.get(code, render.SOURCE_NAMES[code]), []).append(render.SOURCE_NAMES[code])
         why[entity_id] = {
             "surrogate": entry["surrogate"], "type": name, "code": entry["type"].value, "sources": codes,
             "names": [render.SOURCE_NAMES[code] for code in codes], "validated": entry["validated"],
+            "short": [(label, "; ".join(names)) for label, names in short.items()],
             "policy": POLICY_NAMES[policy], "advice": advice, "seniority": _SENIORITY if len(codes) > 1 else "",
         }
     return why
@@ -276,14 +282,17 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
     original_marks = render.original_marks(item, state)
     sanitized_marks = render.sanitized_marks(item, state, entry.leaks, blocked)
     opened_marks = render.opened_marks(item.original, state, original_marks), render.opened_marks(sanitized, state, sanitized_marks)
-    # Легенда над панелями — типы этого текста словами (кнопки-фильтры), затем состояния, которые тоже выделены цветом.
-    legend = list(dict.fromkeys((f"t-{w['code']}", w["type"]) for w in sorted(why.values(), key=lambda w: w["code"])))
+    # Легенда в сводке — типы этого текста с числом замен (они же кнопки-фильтры: отдельного ряда значков типов нет),
+    # затем состояния, которые тоже выделены цветом.
+    counts = dict(render.summary(item, state))
+    legend = list(dict.fromkeys((f"t-{w['code']}", w["type"], counts.get(w["type"], 0))
+                                for w in sorted(why.values(), key=lambda w: w["code"])))
     if blocked:
-        legend.append(("blocked", "блокировка по политике"))
+        legend.append(("blocked", "блокировка по политике", 0))
     if entry.leaks:
-        legend.append(("leak", "оригинал в очищенном"))
+        legend.append(("leak", "оригинал в очищенном", 0))
     if any(opened_marks):
-        legend.append(("opened", render.OPENED.lower()))
+        legend.append(("opened", render.OPENED.lower(), 0))
     sources = [(code, label) for code, label in render.SOURCE_NAMES.items() if any(code in w["sources"] for w in why.values())]
     next_review = next((other.id for other in repo_of(request).items(chat_id)
                         if other.kind == "input" and other.seq > item.seq and other.status == "done"), "")
@@ -294,7 +303,9 @@ def review(request: Request, chat_id: str, item_id: str, viewer: Viewer = Depend
         layers_ran=layers_ran(item), readiness=entry.readiness, shown=shown_digest(item),
         original=render.highlight(item.original, original_marks + opened_marks[0]),
         sanitized=render.highlight(sanitized, sanitized_marks + opened_marks[1]),
-        summary=render.summary(item, state), fragments=fragments, why=why, legend=legend, sources=sources,
+        fragments=fragments, why=why, legend=legend, sources=sources,
+        # Предложение «Сохранить как эталон?» — сразу после «Отметить проверенным» (идея «Сбор собственного эталона…»).
+        offer_gold=request.query_params.get("offer") == "gold" and entry.readiness == "reviewed",
         notices=[(_NOTICES.get(code, code), count) for code, count in notices.items()],
         exposed=[", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],
         types=render.TYPE_NAMES, pending=False, retry=can_retry(item), warnings=_warnings(item), extraction=_extraction(item),

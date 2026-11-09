@@ -110,7 +110,8 @@ def manual(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer))
     try:
         preview = service_of(request).manual(chat_id, _exclude(request))
     except EditRefused as exc:
-        raise HTTPException(409, str(exc)) from None
+        # Собрать нечего (последним стоит ответ, текст ещё очищается): страница с причиной, а не «Ошибка 409».
+        preview = Preview(None, None, [], refused=str(exc).rstrip("."))
     shown = _request(preview)
     outgoing = preview.outgoing
     text = None

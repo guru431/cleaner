@@ -82,6 +82,32 @@ def test_rename_and_delete_with_confirmation(ivan):
     assert ivan.get(f"/chats/{chat_id}").status_code == 404
 
 
+def gold_chat(ivan, repo, source: str = "") -> str:
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    ivan.post(f"/chats/{chat_id}/items/{repo.items(chat_id)[0].id}/gold", purpose="tuning", source=source)
+    return chat_id
+
+
+def test_chat_is_deleted_with_its_gold_examples_unless_the_owner_keeps_them(ivan, repo):
+    """Находка «Удаление чата «безвозвратно», а пример эталона из него остаётся»: форма называет число примеров эталона
+    из чата и по умолчанию удаляет их той же операцией — и тех, что сохранены под другим источником документа; снятая
+    отметка оставляет их под общим ключом, и форма говорит это заранее. В журнал — только числа."""
+    other = gold_chat(ivan, repo, source="Договор 7")
+    chat_id = gold_chat(ivan, repo, source="Договор 9")
+    ivan.post(f"/chats/{chat_id}/items/{repo.items(chat_id)[0].id}/gold", purpose="tuning", source="Договор 9")
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert re.search(r'<input type="checkbox" name="gold" value="yes" checked> Удалить и примеры эталона из этого чата — 2', page)
+    assert "останутся в эталонном наборе под общим ключом" in page
+    assert ivan.post(f"/chats/{chat_id}/delete", confirm="yes", gold_shown="yes", gold="yes").status_code == 303
+    assert [row.metadata["source"] for row in repo.gold()] == ["Договор 7"]
+    assert [e.details for e in repo.audit_events("chat_deleted")] == [{"gold": 2}]
+    assert "примеры эталона" not in ivan.get(f"/chats/{ivan.chat()}").text           # без примеров — без отметки
+    ivan.post(f"/chats/{other}/delete", confirm="yes", gold_shown="yes")              # отметка снята
+    assert [row.metadata["source"] for row in repo.gold()] == ["Договор 7"]
+    assert repo.audit_events("chat_deleted")[0].details == {"gold_kept": 1}
+
+
 def test_copy_and_download_are_blocked_while_a_leak_is_found(ivan, repo):
     chat_id = ivan.chat()
     ivan.post(f"/chats/{chat_id}/input", text="клиент Ромашка")

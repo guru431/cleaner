@@ -51,7 +51,10 @@ document.addEventListener("selectionchange", () => {
   if (!panel.contains(selection.anchorNode) || !panel.contains(selection.focusNode)) return;
   // Значение, а не позиции: браузер отдаёт переводы строк как LF, сервер ищет значение в оригинале сам.
   field.value = selection.toString().trim();
+  // Выделение (например, чтобы скопировать) — не начатый ввод: editing() его не считает, пока поле не правили руками.
+  field.dataset.fromSelection = "";
 });
+document.getElementById("mask-value")?.addEventListener("input", (event) => { delete event.target.dataset.fromSelection; });
 
 // Перезагрузка по опросу или по концу потока. Ленту прокручивает она сама, а страницу проверки — main, а не окно,
 // и их место браузер не восстанавливает. Оно кладётся в состояние этой записи истории (history.state — не хранилище:
@@ -78,10 +81,11 @@ function refresh() {
 
 // Начатый, но не отправленный ввод: перезагрузка его сбросила бы (поля браузер восстанавливает не всегда, выбор файла —
 // никогда). Скрытые поля пишет сервер — не в счёт; список без selected в разметке исходно стоит на первом варианте.
+// Поле, заполненное выделением в «Оригинале» (data-from-selection), — тоже не в счёт.
 function editing(exceptForm = null) {
   return [...document.querySelectorAll("input, textarea, select")].some((field) => {
     if (!field.form || field.form.method.toLowerCase() !== "post" || field.form === exceptForm ||
-        field.type === "hidden" || field.disabled) return false;
+        field.type === "hidden" || field.disabled || "fromSelection" in field.dataset) return false;
     if (field.type === "file") return field.files.length > 0;
     if (field.type === "checkbox" || field.type === "radio") return field.checked !== field.defaultChecked;
     if (field.tagName === "SELECT") {
@@ -206,6 +210,42 @@ document.querySelectorAll("[data-upload-batch]").forEach((field) => {
     });
     preview.append(list);
   });
+});
+
+// Снимок экрана из буфера (Ctrl+V на странице чата без текста в буфере) — в поле «Файлы» к уже выбранным: тот же путь
+// загрузки, тот же предел пакета (проверка выше по change) и то же распознавание PNG и JPEG; ничего не отправляется и не
+// хранится, пока не нажата кнопка формы. Вставка текста не перехватывается.
+document.querySelectorAll("[data-upload-batch]").forEach((field) => {
+  const types = { "image/png": "png", "image/jpeg": "jpg" };
+  document.addEventListener("paste", (event) => {
+    const data = event.clipboardData;
+    if (!data || data.types.includes("text/plain") || typeof DataTransfer !== "function") return;
+    const images = [...data.files].filter((file) => file.type in types);
+    if (!images.length) return;
+    event.preventDefault();
+    const files = new DataTransfer();
+    [...field.files].forEach((file) => files.items.add(file));
+    images.forEach((file) => {
+      files.items.add(new File([file], `screenshot-${files.items.length + 1}.${types[file.type]}`, { type: file.type }));
+    });
+    field.files = files.files;
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+    document.querySelector('.composer [data-tab="file"]')?.click();
+  });
+});
+
+// Выбор облачной модели — одним действием: список отправляет свою форму (кнопка «Выбрать» видна только без JS).
+document.querySelectorAll("[data-auto-submit]").forEach((form) => {
+  form.addEventListener("change", () => form.requestSubmit());
+});
+
+// Ctrl+Enter (⌘+Enter) в поле редактора чата отправляет его форму — с проверкой обязательных полей, как кнопка.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey) || event.isComposing) return;
+  const form = event.target.closest?.(".composer form.compose");
+  if (!form) return;
+  event.preventDefault();
+  form.requestSubmit();
 });
 
 // По концу задания, проверки риска или потока страница перезагружается, если ввод не начат. Иначе — строка над
@@ -632,4 +672,22 @@ document.querySelectorAll("[data-filter-table]").forEach((bar) => {
   };
   bar.addEventListener("change", apply);
   apply();
+});
+
+// Поиск в таблице замен (entities.html) — по замене и оригиналу строк этой страницы, без запросов: значение не уходит
+// в адрес. Строки только скрываются; без учёта регистра.
+document.querySelectorAll("#entities-find").forEach((field) => {
+  const rows = [...document.querySelectorAll("#entities-table tbody tr")].filter((row) => row.cells.length > 1);
+  const texts = rows.map((row) => `${row.cells[0].textContent} ${row.cells[2].textContent}`.toLowerCase());
+  const found = document.querySelector("[data-entities-found]");
+  field.addEventListener("input", () => {
+    const needle = field.value.trim().toLowerCase();
+    let shown = 0;
+    rows.forEach((row, index) => {
+      row.hidden = Boolean(needle) && !texts[index].includes(needle);
+      if (!row.hidden) shown += 1;
+    });
+    const pages = found.dataset.pages ? `; другие страницы (всего ${found.dataset.pages}) — отбором по типу или листанием` : "";
+    found.textContent = needle ? `Найдено на этой странице: ${shown} из ${rows.length}${pages}` : "";
+  });
 });
