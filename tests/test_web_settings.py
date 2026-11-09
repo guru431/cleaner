@@ -128,6 +128,30 @@ def test_users_are_created_given_new_passwords_and_disabled(boss, browser, repo)
     assert {"user_created", "password_changed", "user_disabled"} <= {e.event for e in repo.audit_events()}
 
 
+def test_disabled_account_is_deleted_with_all_its_chats(boss, browser, repo, app):
+    """Идея «Удаление учётной записи вместе с её чатами»: только отключённая запись, с подтверждением логином; чаты —
+    через ChatService.delete_chat (ключи чатов стёрты, журнал WAL усечён), в журнал — событие без данных."""
+    other = browser()
+    petr = other.user("petr")
+    other.login("petr")
+    chats = [other.chat("Первый"), other.chat("Второй")]
+    assert boss.post(f"/settings/users/{petr}/delete", confirm="petr").status_code == 400      # ещё включён
+    boss.post(f"/settings/users/{petr}/disable", disabled="yes")
+    assert boss.post(f"/settings/users/{petr}/delete", confirm="ivan").status_code == 400      # не тот логин
+    assert repo.user(petr) is not None and all(repo.chat(chat) for chat in chats)
+    assert "Удалить вместе с чатами" in boss.get("/settings/users").text
+    deleted = []
+    app.state.service.stop_chat = deleted.append              # путь ChatService.delete_chat, а не каскад схемы
+    assert boss.post(f"/settings/users/{petr}/delete", confirm="petr").status_code == 303
+    assert sorted(deleted) == sorted(chats)
+    assert repo.user(petr) is None and repo.chat_ids(petr) == [] and not any(repo.chat(chat) for chat in chats)
+    assert repo.conn.execute("SELECT COUNT(*) FROM chats WHERE user_id = ?", (petr,)).fetchone()[0] == 0
+    [event] = repo.audit_events("user_deleted")
+    assert (event.user_id, event.details) == (repo.user_by_login("boss").id, {"target": petr, "chats": 2})
+    assert len(repo.audit_events("chat_deleted")) == 2
+    assert boss.post(f"/settings/users/{petr}/delete", confirm="petr").status_code == 404
+
+
 def test_every_password_form_names_whose_password_it_is(boss):
     """Форма нового пароля без поля логина: менеджер паролей браузера записал бы новый пароль пользователя к учётной
     записи вошедшего администратора. Логин строки — скрытым полем без name: на сервер он не уходит."""

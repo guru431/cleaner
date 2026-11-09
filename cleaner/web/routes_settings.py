@@ -22,7 +22,7 @@ from cleaner.egress import ProviderError, cloud
 from cleaner.engines import GATEWAY_KEY_ENV, LocalSettings, local_settings, save_local_settings
 from cleaner.eval import coverage, runner
 from cleaner.eval.metrics import CLASSES
-from cleaner.storage.repo import Provider, User
+from cleaner.storage.repo import CheckpointBusy, Provider, User
 from cleaner.web import auth, render
 from cleaner.web.deps import Viewer, get_admin, get_form, page, repo_of, service_of
 from cleaner.web.routes_chats import LAYER_LABELS, LAYER_NAMES
@@ -45,6 +45,7 @@ EVENTS = (
     "provider_changed", "cloud_send", "local_answer", "eval_run", "reviewed", "api_auth_failed",
     "key_created", "key_disabled", "agent_send", "agent_refused", "agent_withheld", "agent_chat_created", "agent_pruned",
     "key_restarted", "request_prepared",
+    "user_deleted", "master_key_rotated", "logout_all", "audit_export", "egress_refused", "service_started",
 )
 PROTOCOL_NAMES = {"openai": "OpenAI-совместимый", "anthropic": "Anthropic-совместимый", "responses": "OpenAI Responses"}
 AUTH_NAMES = {"bearer": "Authorization: Bearer", "x-api-key": "x-api-key"}
@@ -479,6 +480,30 @@ def disable_user(request: Request, user_id: str, form: dict[str, str] = Depends(
     repo = repo_of(request)
     repo.set_disabled(user_id, disabled)
     repo.audit("user_disabled" if disabled else "user_enabled", viewer.user.id, target=user_id)
+    return _redirect("/settings/users")
+
+
+@router.post("/users/{user_id}/delete")
+def delete_user(request: Request, user_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    """Учётная запись и все её чаты — только у отключённой записи (она не входит, ключи её не принимаются) и после
+    ввода её логина. Чаты — через ChatService.delete_chat, как кнопкой пользователя (FR-1.4)."""
+    user = _target(request, user_id)
+    if not user.disabled:
+        raise HTTPException(400, "Удалить можно только отключённую учётную запись")
+    if form.get("confirm", "").strip() != user.login:
+        raise HTTPException(400, "Для подтверждения введите логин удаляемой учётной записи")
+    repo, service = repo_of(request), service_of(request)
+    chat_ids = repo.chat_ids(user_id)
+    for chat_id in chat_ids:
+        service.delete_chat(chat_id, viewer.user.id, via="user_deleted")
+    try:
+        deleted = repo.delete_user(user_id)
+    except CheckpointBusy as exc:
+        deleted = True              # запись удалена; копии страниц в журнале WAL сотрёт следующая контрольная точка
+        repo.audit("error", viewer.user.id, kind=type(exc).__name__, stage="delete_user")
+    if not deleted:
+        raise HTTPException(409, "Пока удалялись чаты, у учётной записи появились новые — повторите удаление")
+    repo.audit("user_deleted", viewer.user.id, target=user_id, chats=len(chat_ids))
     return _redirect("/settings/users")
 
 

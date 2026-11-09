@@ -310,6 +310,24 @@ class Repository:
             if disabled:
                 self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
 
+    def chat_ids(self, user_id: str) -> list[str]:
+        """Чаты пользователя без расшифровки названий."""
+        return [row["id"] for row in self._all("SELECT id FROM chats WHERE user_id = ? ORDER BY id", user_id)]
+
+    def delete_user(self, user_id: str) -> bool:
+        """Удаление отключённой учётной записи, у которой уже нет чатов: их удаляет вызывающий через
+        ChatService.delete_chat (задания, кэши, журнал), а каскадом схемы уходят только сессии и ключи доступа.
+        Затем контрольная точка с усечением журнала WAL; не вышла — CheckpointBusy, а запись уже удалена.
+        False — записи нет, она включена или у неё появились чаты."""
+        with self.lock:
+            deleted = self._run(
+                "DELETE FROM users WHERE id = ? AND disabled = 1 AND NOT EXISTS (SELECT 1 FROM chats WHERE user_id = ?)",
+                user_id, user_id,
+            ) == 1
+        if deleted and not self.truncate_wal():
+            raise CheckpointBusy(user_id)
+        return deleted
+
     def create_session(self, token_hash: str, user_id: str, csrf: str, password_hash: str) -> bool:
         """Сессия — одной записью и только для того хэша пароля, что проверен при входе, у включённой учётной
         записи. Пока Argon2 проверял пароль, его могли сменить, а запись — отключить: сессии они уже закрыли,
