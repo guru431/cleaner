@@ -158,6 +158,50 @@ def test_quoted_colon_and_listed_computer_names(text, hosts):
     assert {value for type_, value in found(text) if type_ is T.HOST} == hosts
 
 
+@pytest.mark.parametrize(
+    "text, hosts",
+    [
+        (r"psexec -accepteula \\srv01 cmd /c ipconfig", {"srv01"}), (r"psexec \\buh-pc07,buh-pc08 -s cmd", {"buh-pc07", "buh-pc08"}),
+        (r"net view \\FS01", {"FS01"}), (r"sc.exe \\srv-app01 query Spooler", {"srv-app01"}),
+        (r"shutdown /r /m \\ws-0142 /t 0", {"ws-0142"}), ("mstsc /v:srv-term01:3389", {"srv-term01"}),
+        ("Nov  9 10:01:02 srv01 sshd[812]: Accepted publickey", {"srv01"}),
+        ("2026-11-09T10:01:02.123+03:00 gw-msk kernel: eth0 up", {"gw-msk"}),
+        ("Nov 9 10:01:02 localhost CRON[44]: session opened", set()),
+    ],
+)
+def test_dotless_host_in_a_command_or_syslog_field(text, hosts):
+    """IDEAS P3 «узлы без точек по структуре»: команда или поле требуют узел, и слово без точек — имя узла."""
+    assert {value for type_, value in found(text) if type_ is T.HOST} == hosts
+
+
+@pytest.mark.parametrize(
+    "text",
+    [r'"(\\w+) (\\d+)"', r"a \\ b \\hline", r"\\srv01 недоступен", "Встреча Nov 9 10:01 у Иванова", r"see \\srv01 now"],
+)
+def test_dotless_name_outside_those_commands_is_not_a_host(text):
+    assert {value for type_, value in found(text) if type_ is T.HOST} == set()
+
+
+def test_loc_is_an_internal_suffix_but_a_pandas_indexer_is_code():
+    """IDEAS P3 «суффикс loc»: «.loc» — частый суффикс доменов AD; «df.loc[…]» — индексатор pandas (2287 строк из 2461 с
+    «.loc» в выборке кода site-packages)."""
+    assert found("контроллер dc01.romashka.loc, домен romashka.loc") == {
+        (T.HOST, "dc01.romashka.loc"), (T.DOMAIN, "romashka.loc"),
+    }
+    assert found('df.loc[mask, "total"] = 0') == set()
+    assert (T.HOST, "mail.romashka.loc") in found("connect from mail.romashka.loc[10.1.2.3]")
+
+
+def test_added_internal_suffix_marks_a_name():
+    assert values("узел srv01.romashka.lcl") == set()
+    try:
+        hostmap.set_extra_suffixes(("lcl",))
+        assert found("узел srv01.romashka.lcl") == {(T.HOST, "srv01.romashka.lcl")}
+    finally:
+        hostmap.set_extra_suffixes(())
+    assert values("узел srv01.romashka.lcl") == set()
+
+
 def test_zero_padded_address_is_found():
     result = found("узлы 010.001.002.005 и 192.168.001.010")
     assert {(T.IP, "010.001.002.005"), (T.IP, "192.168.001.010")} <= result

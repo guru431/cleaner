@@ -15,8 +15,10 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from cleaner.core.detect.base import DetectorError, load_builtin
 from cleaner import settings_impact
+from cleaner.core import cache
 from cleaner.core.detect.dictionary import PATTERN_TIMEOUT
 from cleaner.core.detect.llm import CompletionError
+from cleaner.core.entities import hostmap
 from cleaner.core.types import EntityType, Policy
 from cleaner.egress import ProviderError, cloud
 from cleaner.engines import GATEWAY_KEY_ENV, LocalSettings, local_settings, save_local_settings
@@ -264,6 +266,22 @@ def delete_pattern(request: Request, pattern_id: str, form: dict[str, str] = Dep
 
 # --- встроенные списки (FR-10.5) -------------------------------------------------
 
+SUFFIXES_KEY = "internal_suffixes.extra"
+_SUFFIX = regex.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
+
+
+def stored_suffixes(repo) -> tuple[str, ...]:
+    """Внутренние суффиксы, которые добавил администратор."""
+    raw = repo.setting(SUFFIXES_KEY)
+    return tuple(json.loads(raw)) if raw else ()
+
+
+def apply_suffixes(repo) -> None:
+    """Дополнения внутренних суффиксов действуют на всю службу: при старте и после изменения на странице."""
+    hostmap.set_extra_suffixes(stored_suffixes(repo))
+    cache.clear_strings()           # ответы о доменных именах меток (labels) зависят от суффиксов
+
+
 @router.get("/builtin")
 def builtin(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
     lists = load_builtin()
@@ -273,9 +291,40 @@ def builtin(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
             ("Общеизвестные домены", sorted(lists.well_known_domains)),
             ("Служебные имена узлов", sorted(lists.generic_labels)),
             ("Стандартные учётные записи", sorted(lists.builtin_accounts)),
+            ("Внутренние суффиксы", sorted(hostmap.INTERNAL_SUFFIXES)),
         ],
         never=[row for row in repo_of(request).dictionary() if row.list == "never"],
+        suffixes=stored_suffixes(repo_of(request)),
     )
+
+
+@router.post("/builtin/suffixes")
+def add_suffix(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    value = form.get("value", "").strip().lower().lstrip("*.")
+    if not _SUFFIX.fullmatch(value):
+        raise HTTPException(400, "Суффикс — части из латинских букв, цифр и дефиса через точку: «loc», «corp.example»")
+    repo = repo_of(request)
+    current = stored_suffixes(repo)
+    if value in current or value in hostmap.INTERNAL_SUFFIXES or hostmap.has_known_suffix(f"name.{value}"):
+        raise HTTPException(400, "Этот суффикс уже известен")
+    repo.set_setting(SUFFIXES_KEY, json.dumps([*current, value]))
+    apply_suffixes(repo)
+    repo.audit("settings_changed", viewer.user.id, section="internal_suffixes", action="add")
+    return _redirect("/settings/builtin")
+
+
+@router.post("/builtin/suffixes/{value}/delete")
+def delete_suffix(
+    request: Request, value: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin),
+) -> Response:
+    repo = repo_of(request)
+    current = stored_suffixes(repo)
+    if value not in current:
+        raise HTTPException(404, "Суффикс не найден")
+    repo.set_setting(SUFFIXES_KEY, json.dumps([suffix for suffix in current if suffix != value]))
+    apply_suffixes(repo)
+    repo.audit("settings_changed", viewer.user.id, section="internal_suffixes", action="delete")
+    return _redirect("/settings/builtin")
 
 
 # --- локальная модель (FR-9.1, SEC-12) -------------------------------------------------

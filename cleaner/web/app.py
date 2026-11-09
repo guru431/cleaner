@@ -229,6 +229,7 @@ def create_app(
     app.state.tz = tz
     app.state.cert_file = cert_file                  # сертификат TLS службы; пусто — без TLS
     _interrupt(repo)            # служба одна, очередь в памяти: всё «в работе» прервано (остановка без lifespan, сбой)
+    routes_settings.apply_suffixes(repo)        # внутренние суффиксы, добавленные на странице встроенных списков
     app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static")), name="static")
     app.include_router(routes_auth.router)
     app.include_router(routes_chats.router)

@@ -60,6 +60,24 @@ _REMOTE_SWITCH = re.compile(
     rf"|waitfor|setx|takeown)(?:\.exe)?(?:[ \t]+[^\s|&;]+){{0,30}}?[ \t]+/S[ \t]+{_HOST_LIST}",
     re.IGNORECASE,
 )
+# Узел без ресурса и без точек — только там, где команда или поле требуют узел: «psexec \\srv01 cmd» (и список
+# «\\srv01,srv02»), «net view \\srv01», «sc \\srv01 query», «shutdown /r /m \\srv01», «mstsc /v:srv01:3389». Вне этих команд
+# «\\слово» — экранирование в строке (регулярное выражение, LaTeX), а не узел. Аргументов до узла не больше тридцати, как у
+# _REMOTE_SWITCH.
+_COMMAND_UNC = re.compile(
+    r"(?<![\w-])(?:psexec(?:64)?(?:\.exe)?|sc(?:\.exe)?|shutdown(?:\.exe)?|net(?:\.exe)?[ \t]+view)"
+    r"(?:[ \t]+[^\s|&;]+){0,30}?[ \t]+\\\\(?P<hosts>\w[\w.-]*(?:,\w[\w.-]*)*)(?![\w\\])",
+    re.IGNORECASE,
+)
+_RDP_HOST = re.compile(
+    r"(?<![\w-])mstsc(?:\.exe)?(?:[ \t]+[^\s|&;]+){0,30}?[ \t]+/v:[\"']?(?P<host>\w[\w.-]*)", re.IGNORECASE
+)
+# Поле узла строки syslog (RFC 3164 и метка времени ISO 8601 rsyslog): «Nov  9 10:01:02 srv01 sshd[812]:».
+_SYSLOG_HOST = re.compile(
+    r"(?<![\w:])(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d\d:\d\d:\d\d"
+    r"|\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?)"
+    r" (?P<host>[\w.-]+) [\w./-]+(?:\[\d+\])?:"
+)
 _MACHINE = re.compile(r"(?<![\w.$-])(?P<host>(?=[A-Za-z-]*\d)[A-Za-z0-9][A-Za-z0-9-]{1,14})\$(?![\w$])")
 # Начало имени. Имя начинается и после точки за знаком, который не часть имени («*.contoso.ru» сертификата и DNS,
 # «domain=.contoso.ru» cookie, «no_proxy=.contoso.ru,.corp.local», «${env}.contoso.ru»), но не после «/» и «\» с точкой —
@@ -240,6 +258,8 @@ def _plausible(value: str, text: str, end: int, ctx: DetectContext) -> bool:
     """Имя с точками вне сетевого контекста: похоже ли оно на узел, а не на код или файл."""
     if hostmap.code_like(value, ctx.builtin.ambiguous_suffixes) or text[end:end + 1] == "(":
         return False        # System.Net, 1.2.3.dev, README.md, вызов метода
+    if text[end:end + 1] == "[" and value.count(".") == 1 and value.lower().endswith(".loc"):
+        return False        # «df.loc[…]» pandas — не домен «.loc»; «mail.romashka.loc[10.1.2.3]» Postfix — узел
     return hostmap.has_known_suffix(value)
 
 
@@ -277,7 +297,7 @@ def _named(m: re.Match) -> Iterator[tuple[int, str]]:
 
 
 def _hosts(text: str, ctx: DetectContext) -> Iterator[Span]:
-    for pattern in (_URL_HOST, _UNC_HOST, _PARAM_HOST, _REMOTE_SWITCH):
+    for pattern in (_URL_HOST, _UNC_HOST, _PARAM_HOST, _REMOTE_SWITCH, _COMMAND_UNC, _RDP_HOST, _SYSLOG_HOST):
         for m in pattern.finditer(text):
             for start, host in _named(m):
                 value = _HOST_PREFIX.match(host).group().rstrip(".")     # «…contoso.ru», «…ru,»

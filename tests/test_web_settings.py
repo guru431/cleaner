@@ -112,6 +112,30 @@ def test_builtin_lists_are_shown_and_extended_through_the_never_list(boss, repo)
     assert repo.settings().never == frozenset({"intranet.example"})
 
 
+def test_internal_suffixes_are_shown_extended_and_reduced(boss, repo):
+    """IDEAS P3 «список суффиксов на странице встроенных списков»: встроенные видны, свои добавляются и удаляются и действуют
+    на распознавание сразу."""
+    from cleaner.core.entities import hostmap
+    from cleaner.web.routes_settings import apply_suffixes
+
+    page = boss.get("/settings/builtin").text
+    assert "localdomain" in page and "loc" in page
+    try:
+        assert boss.post("/settings/builtin/suffixes", value=".LCL").headers["location"] == "/settings/builtin"
+        assert hostmap.has_known_suffix("srv01.romashka.lcl")
+        assert "lcl" in boss.get("/settings/builtin").text
+        for value in ("lcl", "loc", "ru", "a b", ""):
+            assert boss.post("/settings/builtin/suffixes", value=value).status_code == 400, value
+        apply_suffixes(repo)            # перезапуск службы: дополнение берётся из базы
+        assert hostmap.extra_suffixes == ("lcl",)
+        assert [e.details for e in repo.audit_events("settings_changed")][-1] == {"section": "internal_suffixes", "action": "add"}
+        boss.post("/settings/builtin/suffixes/lcl/delete")
+        assert not hostmap.has_known_suffix("srv01.romashka.lcl")
+        assert boss.post("/settings/builtin/suffixes/lcl/delete").status_code == 404
+    finally:
+        hostmap.set_extra_suffixes(())
+
+
 def test_users_are_created_given_new_passwords_and_disabled(boss, browser, repo):
     boss.post("/settings/users", login="petr", password="длинный-пароль-1", role="user")
     petr = repo.user_by_login("petr")

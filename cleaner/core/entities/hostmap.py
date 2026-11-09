@@ -3,10 +3,16 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
+from pathlib import Path
 
 import tldextract
 
-INTERNAL_SUFFIXES = ("local", "lan", "corp", "internal", "intra", "home", "localdomain", "ad")
+_SUFFIXES = Path(__file__).resolve().parents[2] / "data" / "internal_suffixes.txt"
+# Встроенный список внутренних суффиксов (FR-10.5); дополнения администратора — set_extra_suffixes.
+INTERNAL_SUFFIXES = tuple(dict.fromkeys(
+    line.strip().lower() for line in _SUFFIXES.read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+))
 # Предел имени DNS. Имя длиннее целиком не записывается (resolve) и в деревья поиска не берётся (surrogates, restore).
 MAX_NAME = 253
 # Точка в регулярном выражении: «\.» («^srv01\.contoso\.ru$») и «\\.» — то же выражение внутри строки JSON, Java, C#
@@ -25,6 +31,21 @@ def separator(value: str) -> str:
 
 # Только встроенная копия списка публичных суффиксов: в сеть библиотека не ходит.
 _extract = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, extra_suffixes=INTERNAL_SUFFIXES)
+extra_suffixes: tuple[str, ...] = ()
+
+
+def set_extra_suffixes(values: tuple[str, ...]) -> None:
+    """Дополнения администратора к внутренним суффиксам (страница встроенных списков). Список один на службу, как и
+    встроенный; ответы has_known_suffix сбрасываются, остальные строковые кэши — cache.clear_strings."""
+    global _extract, extra_suffixes
+    values = tuple(dict.fromkeys(value for value in values if value not in INTERNAL_SUFFIXES))
+    if values == extra_suffixes:
+        return
+    _extract = tldextract.TLDExtract(
+        suffix_list_urls=(), cache_dir=None, extra_suffixes=INTERNAL_SUFFIXES + values
+    )
+    extra_suffixes = values
+    has_known_suffix.cache_clear()
 
 
 def split_name(name: str) -> tuple[list[str], str]:

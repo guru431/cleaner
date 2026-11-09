@@ -87,6 +87,8 @@ pytestmark = pytest.mark.integration
         # Экранированный знак LDAP-имени (RFC 4514), список узлов после ключа, адрес IPv4 в конце IPv6.
         "CN=a\\," * 5000, "CN=a" + "\\" * 50000, "-ComputerName a" + ",a" * 10000, "-ComputerName " + "'a', " * 5000,
         "1:1:1.1.1." * 5000,
+        # Узлы без точек в командах и поле syslog: команды без узла, список узлов, метки времени подряд.
+        "sc psexec mstsc " * 5000, "psexec \\\\a" + ",a" * 10000, "Nov 9 10:01:02 " * 5000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -109,6 +111,7 @@ pytestmark = pytest.mark.integration
         "mixed_case_parts", "leading_dots", "wildcards", "after_label_signs", "json_mixed", "json_addresses",
         "escaped_at_chain", "escaped_at_run", "escaped_at_logins", "escaped_backslash_at",
         "dn_escaped_commas", "dn_backslashes", "computer_list", "computer_quoted_list", "ipv6_v4_tails",
+        "remote_tools", "psexec_list", "syslog_stamps",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):

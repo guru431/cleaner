@@ -2,7 +2,7 @@
 {% block title %}Встроенные списки — Cleaner{% endblock %}
 {% block content %}
 <h1>Встроенные списки</h1>
-<p class="lead">Значения этих списков не скрываются. Свои значения добавляются в список «никогда не скрывать» словаря организации.</p>
+<p class="lead">Общеизвестные домены, служебные имена узлов и стандартные учётные записи не скрываются. Свои значения добавляются в список «никогда не скрывать» словаря организации. Внутренние суффиксы, наоборот, отмечают имена организации.</p>
 <section class="panel">
   <header class="panel-head"><h2 class="title">Добавить</h2></header>
   <div class="panel-body">
@@ -16,6 +16,31 @@
     </form>
     <p class="muted">Добавлено вами: {% for r in never %}<span class="mono">{{ r.value }}</span>{% if not loop.last %}, {% endif %}{% else %}ничего{% endfor %}</p>
   </div>
+</section>
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Внутренние суффиксы</h2></header>
+  <div class="panel-body">
+    <p class="muted">Имя с таким окончанием скрывается как узел или домен организации, как имя с настоящим доменом верхнего уровня. Встроенный список — ниже.</p>
+    <form method="post" action="/settings/builtin/suffixes" class="inline-form">
+      {% include "_csrf.html" %}
+      <input name="value" placeholder="Суффикс, например loc" required aria-label="Суффикс">
+      <button class="primary">Добавить</button>
+    </form>
+    {% if not suffixes %}<p class="muted">Добавлено вами: ничего</p>{% endif %}
+  </div>
+  {% if suffixes %}
+  <table class="grid">
+    <thead><tr><th>Добавлено вами</th><th></th></tr></thead>
+    <tbody>
+    {% for value in suffixes %}
+    <tr>
+      <td class="mono">{{ value }}</td>
+      <td class="actions"><form method="post" action="/settings/builtin/suffixes/{{ value }}/delete">{% include "_csrf.html" %}<button class="danger">Удалить</button></form></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
 </section>
 {% for title, values in lists %}
 <details class="panel">
