@@ -112,11 +112,12 @@ def no_question(view: ChatView) -> str:
     return ""
 
 
-def route(view: ChatView, chat_id: str, chosen: bool) -> dict[str, object]:
+def route(view: ChatView, chat_id: str, chosen: bool, off: str = "") -> dict[str, object]:
     """Маршрут чата (аудит интерфейса 21.10.2026): этап по последним элементам, готовность текстов и основное действие
     следующего шага. Готовность — по всем входным текстам чата: запрос собирается из всей истории (раздел 10.1), и
     текст, изменённый правкой после прошлого ответа, уйдёт в новом виде. Подсказка, а не запрет: копирование и
-    отправку решают проверка утечек и политики, как прежде."""
+    отправку решают проверка утечек и политики, как прежде. chosen — выбранная модель доступна для отправки;
+    off — почему выбранная недоступна (подключение выключено): тогда ручной перенос с этой подсказкой."""
     entries = view.items
     if not entries:
         return {"stage": 0, "state": "", "action": None, "hint": "Вставьте текст или загрузите файл ниже"}
@@ -145,7 +146,21 @@ def route(view: ChatView, chat_id: str, chosen: bool) -> dict[str, object]:
     if chosen:
         return {"stage": 2, "state": "reviewed", "action": ("Подтвердить отправку…", f"/chats/{chat_id}/send"), "hint": ""}
     return {"stage": 2, "state": "reviewed", "action": ("Копировать очищенное…", f"/chats/{chat_id}/manual"),
-            "hint": "ответ модели — затем во вкладку «Ответ вручную»"}
+            "hint": off or "ответ модели — затем во вкладку «Ответ вручную»"}
+
+
+def _unavailable(request: Request, provider_id: str | None, model: str) -> str:
+    """Почему выбранную в чате модель нельзя использовать (те же условия, что у отправки, ChatService._connection);
+    пусто — можно или модель не выбрана. Список моделей тогда показывает ручной режим, маршрут — эту подсказку."""
+    if not provider_id:
+        return ""
+    provider = repo_of(request).provider(provider_id)
+    if provider is None or model not in provider.models:
+        return "Выбранной модели больше нет в подключениях: выберите модель ниже или скопируйте очищенное вручную"
+    if not provider.enabled:
+        return (f"Подключение «{provider.name}» выключено администратором: выберите другую модель ниже или скопируйте "
+                "очищенное вручную, ответ — во вкладку «Ответ вручную»")
+    return ""
 
 
 def _entries(view: ChatView) -> list[dict[str, object]]:
@@ -313,12 +328,13 @@ def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depe
         return _agent_chat(request, chat, viewer, q)
     view = service_of(request).view(chat_id)
     provider_id, model = repo_of(request).chat_provider(chat_id)
+    off = _unavailable(request, provider_id, model)
     return page(
         request, "chat.html", viewer, chat=chat, chats=chat_list(request, viewer, q), q=q, entries=_entries(view),
         max_file_mb=request.app.state.max_file_bytes // (1024 * 1024), ocr_all=OCR_ALL,
         layers=service_of(request).layers(chat_id), layer_names=LAYER_NAMES, layer_labels=LAYER_LABELS,
         choices=_choices(request), chosen=f"{provider_id}|{model}" if provider_id else "",
-        route=route(view, chat_id, bool(provider_id)), stages=STAGES,
+        route=route(view, chat_id, bool(provider_id) and not off, off), stages=STAGES,
         local=request.app.state.engines is not None,
         local_hint=_local_hint(request) if request.app.state.engines is not None else "",
         local_pending=LOCAL_PENDING if local_pending(entry.item for entry in view.items) else "",

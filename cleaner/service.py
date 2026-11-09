@@ -946,11 +946,11 @@ class ChatService:
     ) -> None:
         """Задание: поток ответа — в память для страницы, по окончании — в элемент чата. Обрыв сохраняет полученное.
         in_request — «замен в запросе» (FR-7.5) на момент отправки: для журнала, вместе со счётчиками восстановления.
-        sent — поля события cloud_send: оно пишется здесь, когда запрос уходит, а не при постановке в очередь —
-        снятая с очереди отправка облака не достигла."""
+        sent — поля события cloud_send (local_answer — у локальной модели): оно пишется здесь, когда запрос уходит, а не
+        при постановке в очередь — снятая с очереди отправка модели не достигла."""
         live = self.live.start(item_id)
         if sent is not None:
-            self.repo.audit("cloud_send", user_id, chat_id, **sent)
+            self.repo.audit("cloud_send" if local_client is None else "local_answer", user_id, chat_id, **sent)
         outcome: dict = {}
         error, aborted = "", False
         state, settings = None, None
@@ -1091,14 +1091,15 @@ class ChatService:
             return [Item(uuid.uuid4().hex, 0, "answer", "", None, source="local", status="queued")], []
 
         [item] = self._apply(chat_id, work)
-        messages = built["messages"]
-        self.repo.audit("local_answer", user_id, chat_id, messages=len(messages))
-        self._submit(self.submit, self.run_local, chat_id, item.id, user_id, messages)
+        self._submit(self.submit, self.run_local, chat_id, item.id, user_id, built["messages"])
         return item
 
     def run_local(self, chat_id: str, item_id: str, user_id: str, messages: list[dict[str, str]]) -> None:
+        """Задание: событие local_answer — здесь, когда вопрос уходит модели, а не при постановке в очередь, как
+        cloud_send в run_send: снятый с очереди вопрос модели не достиг."""
         try:
             self.repo.set_item_status(chat_id, item_id, "running")
+            self.repo.audit("local_answer", user_id, chat_id, messages=len(messages))
             text, truncated = self.engines.client().answer(messages, max_tokens=LOCAL_ANSWER_TOKENS)
             if truncated:
                 self.repo.finish_answer(chat_id, item_id, text, "partial", {"error": "Ответ обрезан пределом длины"})

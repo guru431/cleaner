@@ -123,12 +123,14 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def _egress_targets(repo: Repository) -> list[str]:
-    """Узлы, к которым службе можно: локальный шлюз (и распознавание на нём), включённые подключения, подписки
-    действующих ключей шлюза. Читается из базы при каждой проверке сторожа: правка настроек действует сразу."""
+    """Узлы, к которым службе можно: локальный шлюз (и распознавание на нём), все настроенные подключения, подписки
+    действующих ключей шлюза. Читается из базы при каждой проверке сторожа: правка настроек действует сразу.
+    Выключенное подключение — тоже: «Проверить» на странице подключений администратор запускает и для него, а адрес
+    задал он сам; отправку по выключенному подключению закрывает служба (_connection), а не сторож."""
     from cleaner.agent_service import SUBSCRIPTIONS
     from cleaner.engines import local_settings
 
-    urls = [local_settings(repo).url, *(provider.base_url for provider in repo.providers() if provider.enabled)]
+    urls = [local_settings(repo).url, *(provider.base_url for provider in repo.providers())]
     used = {key.upstream for key in repo.api_keys() if not key.disabled}
     urls += [url for access, (_, url) in SUBSCRIPTIONS.items() if access in used]
     return [urlsplit(url).hostname or "" for url in urls]

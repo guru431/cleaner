@@ -11,7 +11,7 @@ from starlette.datastructures import Headers
 
 from cleaner.queueing import Budget, QueueFull
 from cleaner.service import ChatService
-from cleaner.storage.repo import Provider
+from cleaner.storage.repo import Item, Provider
 from cleaner.web import deps
 from cleaner.web.app import BodyLimit
 from cleaner.web.jobs import CANCELLED, EXPIRED, FILE_CANCELLED, Jobs
@@ -241,6 +241,26 @@ def test_cloud_send_taken_off_the_queue_ends_the_wait_and_is_not_logged_as_sent(
     item, live, task = send()
     executor.run()
     assert repo.item(chat, item.id).status == "done" and len(repo.audit_events("cloud_send")) == 1
+
+
+def test_local_answer_taken_off_the_queue_is_not_logged_as_answered(repo, engines):
+    """Как у cloud_send: событие local_answer пишется, когда задание началось; снятый с очереди вопрос локальной
+    модели не дошёл до неё."""
+    user = repo.create_user("owner", "hash", "user")
+    chat = repo.create_chat(user, "Чат")
+    executor = Deferred()
+    jobs = Jobs(executor)
+    service = ChatService(repo, engines=engines, submit=jobs.submit, budget=jobs.budget)
+    repo.add_item(chat, Item("q" * 32, 0, "input", "Вопрос", "Вопрос"))
+    item = service.ask_local(chat, user)
+    assert jobs.cancel(next(iter(jobs._tasks.values())).id, user)
+    assert repo.item(chat, item.id).status == "failed" and repo.audit_events("local_answer") == []
+    executor.run()
+    item = service.ask_local(chat, user)
+    assert repo.audit_events("local_answer") == []                 # в очереди: модель ещё не спрошена
+    executor.run()
+    assert repo.item(chat, item.id).status == "done"
+    assert [e.details for e in repo.audit_events("local_answer")] == [{"messages": 1}]
 
 
 def test_chat_deletion_cancels_queued_work_and_releases_budget(repo, engines):

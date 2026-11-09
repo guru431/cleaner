@@ -1,5 +1,6 @@
 """Explicit original-text consent uses only the configured local transport."""
 import json
+from concurrent.futures import Executor, Future
 
 import httpx
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from cleaner.core.types import EntityType, Policy
 from cleaner.engines import Engines, GATEWAY_KEY_ENV
 from cleaner.storage.repo import Item
+from cleaner.web.jobs import Jobs
 
 
 @pytest.fixture
@@ -48,6 +50,49 @@ def test_local_preview_shows_originals_and_needs_no_cloud_provider(local, repo):
     assert 'Local <EMAIL_1>' in events.text and repo.item(cid, item_id).source == "local"
     assert program.post(f"/api/v1/chats/{cid}/local-requests/send", json=receipt).status_code == 409
     assert program.post(f"/api/v1/chats/{cid}/answers/{item_id}/stop").status_code == 204
+
+
+class Deferred(Executor):
+    """Очередь, которую тест запускает сам: задание можно снять до начала."""
+
+    def __init__(self):
+        self.tasks = []
+
+    def submit(self, fn, /, *args, **kwargs):
+        future = Future()
+        self.tasks.append((future, fn, args))
+        return future
+
+    def run(self):
+        future, fn, args = self.tasks.pop(0)
+        if future.set_running_or_notify_cancel():
+            future.set_result(fn(*args))
+
+
+def test_local_send_taken_off_the_queue_ends_the_wait_and_is_not_logged(local, app, repo):
+    """Как у cloud_send: local_answer — когда задание началось; снятый с очереди ответ закрыт для /events."""
+    program, cid, sent = local
+    executor = Deferred()
+    sends = Jobs(executor)
+    service = app.state.service
+    service.send_submit = sends.submit
+
+    def send():
+        result = program.post(f"/api/v1/chats/{cid}/local-requests/send", json={"receipt": prepare(local).json()["receipt"]})
+        assert result.status_code == 202, result.text
+        item_id = result.json()["item_id"]
+        return item_id, service.live.get(item_id), next(iter(sends._tasks.values()))
+
+    item_id, live, task = send()
+    assert sends.cancel(task.id, task.user)
+    assert live.finished and service.live.get(item_id) is None
+    assert repo.item(cid, item_id).status == "failed" and repo.audit_events("local_answer") == [] and sent == []
+    executor.run()
+    item_id, live, task = send()
+    assert repo.audit_events("local_answer") == []
+    executor.run()
+    assert repo.item(cid, item_id).status == "done" and len(sent) == 1
+    assert [e.details for e in repo.audit_events("local_answer")] == [{"messages": 1, "via": "api"}]
 
 
 def test_local_answer_events_carry_the_whole_prefix(api, app, repo):

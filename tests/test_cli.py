@@ -222,7 +222,7 @@ def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monk
 
 def test_serve_records_the_code_fingerprint_and_guards_the_settings_hosts(home, monkeypatch, guards, offline_env, capsys, clock):
     """Идеи «Видимый отпечаток установленного кода» и «Сторож выхода в сеть»: запуск — событие журнала и строка
-    журнала службы с отпечатком; сторож разрешает шлюз, включённые подключения и подписки действующих ключей."""
+    журнала службы с отпечатком; сторож разрешает шлюз, все настроенные подключения и подписки действующих ключей."""
     from cleaner import version
 
     key = init(home)
@@ -241,7 +241,8 @@ def test_serve_records_the_code_fingerprint_and_guards_the_settings_hosts(home, 
         owner = repo.users()[0].id
         repo.add_api_key(owner, "агент", auth.token_hash("ck_a"), "ck_a", "claude-subscription")
         repo.disable_api_key(repo.add_api_key(owner, "старый", auth.token_hash("ck_b"), "ck_b", "chatgpt-subscription"))
-        assert on and sorted(cli._egress_targets(repo)) == ["127.0.0.1", "api.anthropic.com", "llm.example"]
+        # Выключенное подключение — тоже: его «Проверить» администратор запускает явно, адрес задал он же.
+        assert on and sorted(cli._egress_targets(repo)) == ["127.0.0.1", "api.anthropic.com", "llm.example", "off.example"]
     finally:
         repo.conn.close()
 

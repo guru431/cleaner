@@ -1,6 +1,7 @@
 """Отправка в интерфейсе (FR-8.3…8.6, FR-9.4): выбор подключения, подтверждение, поток ответа, остановка."""
 import asyncio
 import re
+from dataclasses import replace
 
 import pytest
 from fastapi import Request
@@ -287,6 +288,21 @@ def test_route_leads_from_review_to_transfer_and_the_mark_is_cleared_by_an_edit(
     assert "анонимн" not in page.lower() and "безопасн" not in page.lower()
     ivan.post(f"/chats/{chat_id}/mask", item_id=item_id, value="Заря", type="TERM")
     assert "требуется проверка" in ivan.get(f"/chats/{chat_id}").text
+
+
+def test_route_of_a_chat_with_a_disabled_connection_says_so_instead_of_offering_to_send(ivan, repo, provider):
+    """Подключение чата выключили: маршрут не ведёт на «Подтвердить отправку…» (там 409), а говорит, что оно
+    выключено и что делать, — и ведёт на ручной перенос, как и список модели, показывающий ручной режим."""
+    chat_id = chat_with_question(ivan, provider)
+    item_id = repo.items(chat_id)[0].id
+    review = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    ivan.post(f"/chats/{chat_id}/items/{item_id}/reviewed", digest=digest(review))
+    assert "Подтвердить отправку…" in ivan.get(f"/chats/{chat_id}").text
+    repo.update_provider(replace(repo.provider(provider), enabled=False), None)
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert "Подтвердить отправку…" not in page and f'href="/chats/{chat_id}/send"' not in page
+    assert "Подключение «Облако» выключено администратором" in page and "выберите другую модель" in page
+    assert f'<a class="btn primary" href="/chats/{chat_id}/manual">Копировать очищенное…</a>' in page
 
 
 def stages(page: str) -> list[tuple[str, str]]:
