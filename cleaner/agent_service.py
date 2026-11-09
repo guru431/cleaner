@@ -558,6 +558,12 @@ class AgentService:
         нет — по-прежнему известные значения и словарь."""
         if unit.kind == "media":
             return proto.placeholder(unit, ledger.REASONS["media"]), "media", {}
+        nested = False
+        if unit.kind not in ("opaque", "reasoning"):
+            # Изображение или файл глубже известных мест (блок незнакомого вида, computer_call_output) — тоже пометкой.
+            node, nested = walk.hold_media(unit.node, "input_text" if proto.name == "responses" else "text")
+            if nested:
+                unit = replace(unit, node=node)
         blocked: list[str] = []
         counts: Counter = Counter()
         detectors = (dictionary,) if unit.kind == "reasoning" else pipeline.DETECTORS
@@ -584,7 +590,7 @@ class AgentService:
             return proto.placeholder(unit, ledger.REASONS["failed"]), "failed", {}
         if blocked:
             return proto.placeholder(unit, ledger.REASONS["blocked"].format(type=blocked[0])), "blocked", {}
-        if proto.contains_media(unit):
+        if nested or proto.contains_media(unit):
             return node, "media", dict(counts)
         return node, "", dict(counts)
 

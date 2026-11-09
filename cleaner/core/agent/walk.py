@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
@@ -45,6 +46,37 @@ def is_media(block: object) -> bool:
         return False
     source = block.get("source")
     return block.get("type") in MEDIA or (isinstance(source, dict) and source.get("type") in ("base64", "url"))
+
+
+# Изображение и файл на любой глубине (8.3, FR-8.8): части медиа всех трёх протоколов, строка data: с base64 и длинная
+# строка целиком из знаков base64. Подписи и шифротекст рассуждений — тоже base64, но их трогать нельзя.
+_MEDIA_PARTS = MEDIA | frozenset({"input_image", "input_file", "input_audio", "image_url", "computer_screenshot"})
+_DATA_URL = re.compile(r"\s*data:[\w.+-]+/[\w.+-]+(?:;[\w.+-]+=[^;,]*)*;base64,", re.IGNORECASE)
+_BASE64 = re.compile(r"[A-Za-z0-9+/_=-]{4096,}")
+_SIGNED = ("signature", "encrypted")
+
+
+def hold_media(node: object, text_type: str = "text") -> tuple[object, bool]:
+    """Узел, в котором изображения и файлы на любой глубине заменены пометкой удержания (7.4): часть медиа — частью
+    text_type с пометкой, строка data: или base64 — самой пометкой. Второе — было ли что заменить; без замен узел тот же."""
+    text = ledger.placeholder(ledger.REASONS["media"])
+    if isinstance(node, str):
+        return (text, True) if _DATA_URL.match(node) or _BASE64.fullmatch(node) else (node, False)
+    if isinstance(node, dict):
+        if node.get("type") in _MEDIA_PARTS or is_media(node):
+            return {"type": text_type, "text": text}, True
+        out, held = {}, False
+        for key, value in node.items():
+            if any(word in key.lower() for word in _SIGNED):
+                out[key] = value
+                continue
+            out[key], found = hold_media(value, text_type)
+            held = held or found
+        return (out, True) if held else (node, False)
+    if isinstance(node, list):
+        items = [hold_media(item, text_type) for item in node]
+        return ([item for item, _ in items], True) if any(found for _, found in items) else (node, False)
+    return node, False
 
 
 def _kind(block: object) -> str:
