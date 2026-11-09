@@ -51,6 +51,37 @@ def test_agent_chat_shows_the_ledger_side_by_side(ivan, gateway, stub):
     assert "в 0 блоках" in page
 
 
+def test_agent_chat_warns_about_new_request_shapes(ivan, repo, stub):
+    """Риск 7: незнакомые поля и блоки (пути и type, без данных) и блоки модели вне журнала — в квитанции и на странице."""
+    provider_id = repo.add_provider(Provider("", "Заглушка", "anthropic", stub.url, "x-api-key", "sk-1", ("m-1",)))
+    key = auth.new_api_key()
+    key_id = repo.add_api_key(repo.user_by_login("ivan").id, "агент", auth.token_hash(key), key[-4:],
+                              upstream=f"provider:{provider_id}")
+
+    def send(request: dict) -> str:
+        stub.script.append(model_turn("Готово"))
+        response = ivan.client.post("/agent/anthropic/v1/messages", content=json.dumps(request).encode(),
+                                    headers={"x-api-key": key, "content-type": "application/json"})
+        assert response.status_code == 200, response.text
+        return repo.api_key(key_id).chat_id
+
+    chat = send(body(TASK))
+    page = ivan.get(f"/chats/{chat}").text
+    assert "data-agent-shapes" not in page and "data-agent-fresh" not in page
+    odd = body("Второй разговор")
+    odd["messages"][0]["content"].append({"type": "custom_note", "note": "секретная заметка"})
+    history = [{"role": "assistant", "content": [{"type": "text", "text": f"Ответ {n}, которого модель не давала"}]}
+               for n in range(3)]
+    send(body("Третий разговор", *[part for turn in history for part in (turn, {"role": "user", "content": "дальше"})]))
+    send(odd)
+    receipts = repo.agent_receipts(chat)
+    assert receipts[0]["unfamiliar"] == ["messages[].content[] type=custom_note"]
+    assert (receipts[1]["model_blocks"], receipts[1]["model_fresh"]) == (3, 3)
+    page = ivan.get(f"/chats/{chat}").text
+    assert "data-agent-shapes" in page and "messages[].content[] type=custom_note" in page
+    assert "data-agent-fresh" in page and "секретная заметка" not in page.split("Журнал отправленного")[0]
+
+
 def test_agent_chat_counts_values_left_open_in_frozen_blocks(ivan, gateway, repo):
     chat = gateway()
     state, version = repo.load_state(chat)

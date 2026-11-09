@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections import Counter, OrderedDict
@@ -113,6 +114,24 @@ class _Prepared:
     replaced: Counter = field(default_factory=Counter)
     blocks: list[dict] = field(default_factory=list)
     guard: SecretGuard | None = None    # секреты в адресах чужих узлов в аргументах ответа (настройка ключа)
+    unfamiliar: list[str] = field(default_factory=list)     # формы незнакомых полей и блоков: пути и type, без данных
+    model_blocks: int = 0               # блоков модели в истории запроса
+    model_fresh: int = 0                # из них не найдено в журнале out
+
+
+# Имя поля или значение type, которое можно показать в квитанции: имя протокола, а не данные пользователя.
+_SHAPE_NAME = re.compile(r"[A-Za-z_$][\w.$-]{0,63}")
+
+
+def _shape(unit: walk.Unit) -> str:
+    """Форма незнакомого поля или блока (8.3) для квитанции: путь в теле с [] вместо номеров и значение type. Имя, не
+    похожее на имя поля протокола (ключ — значение пользователя), — «?»."""
+    path = "".join(
+        "[]" if isinstance(step, int) else ("." if i else "") + (step if _SHAPE_NAME.fullmatch(step) else "?")
+        for i, step in enumerate(unit.path)
+    )
+    type_ = unit.node.get("type") if isinstance(unit.node, dict) else None
+    return f"{path} type={type_}" if isinstance(type_, str) and _SHAPE_NAME.fullmatch(type_) else path
 
 
 def _snapshot(state: ChatState) -> ChatState:
@@ -392,6 +411,10 @@ class AgentService:
             "withheld": dict(prepared.withheld) if prepared else {}, "blocks": prepared.blocks if prepared else [],
             # Секреты и учётные записи, оставленные заменой в адресах чужих узлов в аргументах инструментов.
             "held_secrets": prepared.guard.held if prepared and prepared.guard else 0,
+            # Новые формы запросов агента (риск 7): незнакомые поля и блоки, блоки модели вне журнала out.
+            "unfamiliar": prepared.unfamiliar if prepared else [],
+            "model_blocks": prepared.model_blocks if prepared else 0,
+            "model_fresh": prepared.model_fresh if prepared else 0,
             "channels": ["JSON: новые значения и ключи объектов", "JSON: служебные параметры", "URL: разобранные параметры", "HTTP: разрешённые заголовки"],
             "headers": sorted(name for name, _ in out.headers) if out else [],
             "parameters": ["beta"] if out and out.query else [],
@@ -537,6 +560,9 @@ class AgentService:
             refused.reason = "leak_structural" if in_service else "leak"
             raise refused
         result.out, result.state = out, _snapshot(state)
+        result.unfamiliar = sorted({_shape(unit) for unit in units if unit.kind == "other"})
+        result.model_blocks = len(groups["out"])
+        result.model_fresh = sum(1 for direction, _ in fresh if direction == "out")
         held = {entry.digest for entry in entries if entry.withheld}
         result.blocks = [
             {"direction": direction, "digest": digests[unit.path], "kind": unit.kind,

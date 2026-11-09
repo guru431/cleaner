@@ -1,0 +1,17 @@
+{# Новые формы запросов агента (спецификация 2026-10-28, риск 7) по квитанциям страницы, новые первыми: незнакомые поля
+   и блоки и рост доли блоков модели, не найденных в журнале out. Только пути, значения type и числа. #}
+{% set ns = namespace(shapes=[], recent=0, recent_fresh=0, older=0, older_fresh=0) %}
+{% for receipt in receipts %}
+  {% for shape in receipt.unfamiliar | default([]) %}{% if shape not in ns.shapes %}{% set ns.shapes = ns.shapes + [shape] %}{% endif %}{% endfor %}
+  {% if loop.index <= 10 %}
+    {% set ns.recent = ns.recent + (receipt.model_blocks | default(0)) %}{% set ns.recent_fresh = ns.recent_fresh + (receipt.model_fresh | default(0)) %}
+  {% else %}
+    {% set ns.older = ns.older + (receipt.model_blocks | default(0)) %}{% set ns.older_fresh = ns.older_fresh + (receipt.model_fresh | default(0)) %}
+  {% endif %}
+{% endfor %}
+{% if ns.shapes %}
+<p class="flash warn" data-agent-shapes>Агент прислал поля или блоки, которых шлюз не знает: <code>{{ ns.shapes | join(", ") }}</code>. Они очищены как текст. Если агент обновился, проверьте, что запросы к модели по-прежнему работают, и сообщите о новой форме.</p>
+{% endif %}
+{% if ns.recent_fresh >= 3 and ns.recent_fresh * 5 > ns.recent and (not ns.older or ns.recent_fresh * ns.older > ns.older_fresh * ns.recent) %}
+<p class="flash warn" data-agent-fresh>В последних запросах {{ ns.recent_fresh }} из {{ ns.recent }} блоков модели не нашлись в журнале отправленного: агент изменил или сжал историю. Такие блоки очищаются заново, и кэш промптов провайдера на них не срабатывает.</p>
+{% endif %}

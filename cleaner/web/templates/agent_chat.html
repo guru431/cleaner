@@ -25,6 +25,7 @@
   <section class="panel">
     <header class="panel-head"><h2 class="title">Квитанции запросов</h2></header>
     <div class="panel-body">
+      {% include "_agent_shapes.html" %}
       <p class="sub">Один запрос объединяет новые и повторённые блоки. Содержимое доступно владельцу чата; значения ключей доступа и токенов в квитанцию не записываются.</p>
       {% for receipt in receipts %}
       <details{% if selected_request and selected_request.id == receipt.id %} open{% endif %}>
