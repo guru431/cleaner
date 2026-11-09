@@ -209,7 +209,43 @@ def cmd_apikey(args: argparse.Namespace) -> int:
     return 0
 
 
+def _rotate_key(args: argparse.Namespace) -> int:
+    """Новый главный ключ: сначала в новый файл окружения (базу, перешифрованную ключом, которого нигде нет, не открыть),
+    затем перешифровка обёрток одной транзакцией. Не удалась — база под прежним ключом, новый файл удаляется.
+    Службу на время смены останавливают: она держит прежний ключ в памяти (docs/deployment.md)."""
+    if not args.env_file:
+        raise ValueError("для rotate укажите --env-file: новый файл для нового ключа")
+    env_file, key = Path(args.env_file), crypto.new_key()
+    _write_private(env_file, f"{crypto.key_line(key)}\n".encode("ascii"))
+    committed = False
+    try:
+        with _repository(_config(args)) as repo:
+            chats = repo.rotate_master(key)
+            committed = True
+            truncated = repo.truncate_wal()
+            repo.audit("master_key_rotated", chats=chats, wal="truncated" if truncated else "busy", by="cli")
+    except BaseException:
+        if not committed:                   # база под прежним ключом: новый ключ ничего не открывает
+            with suppress(OSError):
+                env_file.unlink()
+        raise
+    print(f"Главный ключ сменён: новый — в {env_file}, прежний базу больше не открывает. Ключей чатов: {chats}.")
+    print("Подставьте его в окружение службы и выгрузите заново: python -m cleaner key export <файл>")
+    if not truncated:
+        print(
+            "ошибка: журнал WAL не усечён — базу держит другое соединение (служба, backup, eval), и прежние обёртки "
+            "ключей остаются в cleaner.db-wal до контрольной точки. Остановите его и выполните rotate ещё раз — уже "
+            "с новым ключом в окружении.", file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def cmd_key(args: argparse.Namespace) -> int:
+    if args.action == "rotate":
+        return _rotate_key(args)
+    if not args.file:
+        raise ValueError(f"для {args.action} укажите файл ключа")
     passphrase = _secret(args.passphrase_file, "Пароль файла ключа: ")
     if args.action == "export":
         if len(passphrase) < auth.MIN_PASSWORD:
@@ -333,11 +369,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     apikey.add_argument("--model", action="append", default=[], help="add: разрешённая модель подключения или подписки (можно несколько; нет — все)")
 
-    key = commands.add_parser("key", help="выгрузка и загрузка главного ключа")
-    key.add_argument("action", choices=("export", "import"))
-    key.add_argument("file", help="файл ключа, защищённый паролем")
+    key = commands.add_parser("key", help="выгрузка, загрузка и смена главного ключа")
+    key.add_argument("action", choices=("export", "import", "rotate"))
+    key.add_argument("file", nargs="?", default="", help="export, import: файл ключа, защищённый паролем")
     key.add_argument("--passphrase-file", help="пароль файла ключа — первой строкой файла")
-    key.add_argument("--env-file", help="для import: новый файл окружения для ключа")
+    key.add_argument("--env-file", help="для import и rotate: новый файл окружения для ключа")
 
     backup = commands.add_parser("backup", help="копия базы без остановки службы")
     backup.add_argument("target", help="новый файл копии")

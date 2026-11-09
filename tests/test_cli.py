@@ -91,6 +91,39 @@ def test_users_key_export_import_and_backup(home, monkeypatch, clock):
     assert main(["backup", str(home / "copy.db")]) == 1                           # существующий файл не трогается
 
 
+def test_key_rotate_rewraps_the_keys_and_the_old_key_no_longer_opens_the_base(home, monkeypatch, clock):
+    """Идея «Смена главного ключа»: обёртки ключей чатов и общего ключа — новым ключом одной транзакцией, затем
+    контрольная точка WAL; содержимое читается новым ключом, прежний не открывает ни базу, ни её файлы."""
+    key = init(home)
+    database = home / "data" / "cleaner.db"
+    repo = open_repo(database, key, clock)
+    chat = repo.create_chat(repo.users()[0].id, "Вымышленный чат")
+    repo.add_dictionary("never", "вымышленное-значение")
+    old_wrap = repo.conn.execute("SELECT dek_wrapped FROM chats").fetchone()[0]
+    old_global = repo.setting("global_dek")
+    repo.conn.close()
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, crypto.encode_key(crypto.new_key()))       # не тот ключ: ничего не меняется
+    assert main(["key", "rotate", "--env-file", str(home / "new.env")]) == 1
+    assert not (home / "new.env").exists()
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    assert main(["key", "rotate", "--env-file", str(home / "new.env")]) == 0
+    name, new_key = (home / "new.env").read_text(encoding="ascii").strip().split("=", 1)
+    assert name == crypto.MASTER_KEY_ENV and new_key != key
+    fresh = open_repo(database, new_key, clock)
+    assert fresh.chat(chat).title == "Вымышленный чат"
+    assert [row.value for row in fresh.dictionary()] == ["вымышленное-значение"]
+    assert fresh.audit_events(limit=1)[0].details == {"chats": 1, "wal": "truncated", "by": "cli"}
+    fresh.conn.close()
+    stale = db.connect(database)
+    try:
+        with pytest.raises(crypto.CryptoError):
+            Repository(stale, crypto.master_key_from_env({crypto.MASTER_KEY_ENV: key}), clock)
+    finally:
+        stale.close()
+    raw = b"".join(path.read_bytes() for path in (home / "data").glob("cleaner.db*"))
+    assert old_wrap not in raw and old_global.encode("ascii") not in raw
+
+
 def test_apikey_add_list_disable(home, monkeypatch, capsys, clock):
     """FR-13.1: ключ выпускается командой для проектов, которые заводятся сценарием; печатается один раз."""
     key = init(home)

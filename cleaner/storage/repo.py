@@ -246,6 +246,32 @@ class Repository:
         self._run("INSERT INTO settings(key, value) VALUES ('global_dek', ?)", sealed)
         return key
 
+    def truncate_wal(self) -> bool:
+        """Контрольная точка с усечением журнала WAL, как у delete_chat: False — её не пустило другое соединение."""
+        for _ in range(_CHECKPOINT_ATTEMPTS):
+            with self.lock:
+                if not self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
+                    return True
+        return False
+
+    def rotate_master(self, new_master: bytes) -> int:
+        """Смена главного ключа (cleaner key rotate): обёртки ключей чатов и общего ключа перешифровываются новым
+        ключом одной транзакцией — не открылась прежним хоть одна, не меняется ничего; исключение отсюда — база под
+        прежним ключом. Содержимое под ключами чатов и общим ключом не трогается. После неё вызывающий выполняет
+        truncate_wal(): до контрольной точки прежние обёртки лежат в WAL и открываются прежним ключом.
+        Возвращает число чатов."""
+        with self.lock:
+            with transaction(self.conn):
+                rows = self.conn.execute("SELECT id, dek_wrapped FROM chats").fetchall()
+                for row in rows:
+                    aad = f"chat-dek:{row['id']}"
+                    wrapped = crypto.seal(new_master, crypto.unseal(self.master, row["dek_wrapped"], aad), aad)
+                    self.conn.execute("UPDATE chats SET dek_wrapped = ? WHERE id = ?", (wrapped, row["id"]))
+                sealed = base64.b64encode(crypto.seal(new_master, self.global_key, "global-dek")).decode("ascii")
+                self.conn.execute("UPDATE settings SET value = ? WHERE key = 'global_dek'", (sealed,))
+            self.master = new_master
+        return len(rows)
+
     # --- пользователи и сессии ---------------------------------------------
 
     @staticmethod

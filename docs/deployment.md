@@ -39,6 +39,28 @@
 (`shred -u`) вместе с копиями прежних прогонов; после отката копия остаётся до следующей удачной установки.
 Копии для хранения снимайте сами командой `backup` и помните, что удалённые позже чаты в них сохранятся.
 
+## Смена главного ключа
+
+Если `cleaner.env` или выгруженный файл ключа могли попасть в чужие руки, смените ключ. Команда перешифровывает
+обёртки ключей чатов и общий ключ одной транзакцией и усекает журнал WAL; содержимое чатов не трогается.
+Служба держит прежний ключ в памяти, поэтому на время смены её останавливают:
+
+```bash
+sudo systemctl stop cleaner.service
+sudo bash -c 'set -a; . /etc/cleaner/cleaner.env; set +a; cd /opt/cleaner &&
+  CLEANER_CONFIG=/etc/cleaner/cleaner.toml .venv/bin/python -m cleaner key rotate --env-file /etc/cleaner/cleaner.env.new'
+sudo chown cleaner:cleaner /var/lib/cleaner/cleaner.db*
+sudo bash -c 'grep -v "^CLEANER_MASTER_KEY=" /etc/cleaner/cleaner.env >> /etc/cleaner/cleaner.env.new &&
+  mv /etc/cleaner/cleaner.env.new /etc/cleaner/cleaner.env'
+sudo systemctl start cleaner.service
+```
+
+Новый файл создаётся с правами 0600 до изменения базы; если перешифровка не удалась, база остаётся под прежним
+ключом, а новый файл удаляется. Вторая команда `bash` переносит остальные строки окружения, например
+`CLEANER_GATEWAY_KEY`, не выводя значений. Затем выполните `sudo bash /usr/local/sbin/check-cleaner.sh`,
+выгрузите новый ключ командой `key export` и уничтожьте прежние выгрузки. Копии, снятые командой `backup`
+до смены, открываются только прежним ключом.
+
 ## Проверки локального периметра
 
 `tests/test_deploy.py` проверяет все локальные профили, их полноту и включение `CLIENTS` в `INTERNAL`.
