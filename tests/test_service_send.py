@@ -241,6 +241,7 @@ def test_restore_audit_has_the_replacements_of_the_request(repo, chat, provider)
     fn(*args)
     assert repo.audit_events("restore")[0].details == {
         "restored": 1, "altered": 0, "derived": 0, "unknown": 0, "kept": 0, "foreign_links": 0, "in_request": 2,
+        "provider": provider.id, "model": "m-1", "label_style": "angle",      # отчёт «Сохранность меток»
     }
     assert [e.result.counters["in_request"] for e in service.view(chat_id).items if isinstance(e, AnswerView)] == [2]
 

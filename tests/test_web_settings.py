@@ -298,6 +298,54 @@ def test_audit_is_exported_as_csv_with_the_current_filter(browser, repo, clock):
     assert browser().get("/settings/audit/export").status_code == 303                 # без входа — на страницу входа
 
 
+def test_label_report_sums_restore_counters_by_model_and_label_style_and_flags_distortion(browser, repo, clock):
+    """Идея «Отчёт об искажении меток облачными моделями»: сводка событий restore за период по подключению, модели и
+    виду метки; пометка «искажает метки» — доля искажённых больше 5 % при не меньше 50 замен; только администратору."""
+    from cleaner.storage.repo import Provider
+    from cleaner.web.routes_settings import _label_report
+
+    ivan = repo.create_user("ivan", "hash", "user")
+    cloud = repo.add_provider(Provider("", "Облако", "openai", "https://llm.example/v1", "bearer", "k", ("m-good", "m-bad"), 512))
+    zero = dict.fromkeys(("restored", "altered", "derived", "unknown", "kept", "foreign_links"), 0)
+
+    def restored(model: str | None, style: str = "angle", **counters: int) -> None:
+        fields = {"provider": cloud, "model": model, "label_style": style} if model else {}
+        repo.audit("restore", ivan, "c" * 32, **(zero | counters), in_request=1, **fields)
+
+    restored(None, restored=10, altered=1)                                    # 14.10: событие до 09.11.2026
+    restored("m-good", restored=100, altered=2)                               # 2 % — не помечается
+    for _ in range(3):
+        restored("m-bad", "square", restored=20, altered=3, unknown=1, kept=4)  # 12 из 72 — помечается
+    restored("m-bad", restored=2, unknown=1)                                  # 33 %, но 3 замены — мало
+    clock.advance(days=6)
+    restored("m-bad", "square", restored=5)                                   # 20.10
+    report = _label_report(repo, None, "2026-10-15")
+    assert [(r["connection"], r["model"], r["style"], r["answers"], r["labels"], r["flagged"]) for r in report] == [
+        ("Облако", "m-bad", "[[ТИП_N]]", 3, 72, True),
+        ("Облако", "m-good", "<ТИП_N>", 1, 102, False),
+        ("", "", "", 1, 11, False),
+        ("Облако", "m-bad", "<ТИП_N>", 1, 3, False),
+    ]
+    assert (report[0]["altered"], report[0]["unknown"], report[0]["kept"], round(report[0]["share"], 3)) == (9, 3, 12, 0.167)
+    assert [r["answers"] for r in _label_report(repo, "2026-10-15", None)] == [1]
+
+    admin = browser()
+    admin.user("boss", "admin")
+    admin.login("boss")                                                       # 20.10
+    page = admin.get("/settings/labels").text                                 # по умолчанию — 30 дней
+    assert page.count("искажает метки</span>") == 1 and "модель не указана" in page
+    assert "15,6 %" in page                                                   # m-bad [[…]] с ответом 20.10: 12 из 77
+    assert "искажает метки</span>" not in admin.get("/settings/labels", since="2026-10-20").text
+    home = admin.get("/settings").text
+    assert re.search(r'href="/settings/labels"[^>]*><strong>[^<]+</strong><span class="badge warn">.*?искажают метки — 1</span>'
+                     r'<span class="sub">m-bad</span>', home, re.S)
+    assert admin.get("/settings/labels", since="вчера").status_code == 400
+    user = browser()
+    user.user("petr")
+    user.login("petr")
+    assert user.get("/settings/labels").status_code == 403
+
+
 def test_audit_filter_lists_every_event_the_service_writes():
     """Ревью 2026-10-21: событие «reviewed» в фильтр журнала не попало. Сверка с исходниками: каждое имя события в
     repo.audit("…") есть в списке фильтра."""

@@ -271,7 +271,7 @@ def test_review_of_a_blocked_text_offers_no_copy(ivan, repo):
 
 SETTINGS = [
     "/settings/providers", "/settings/local-llm", "/settings/policies", "/settings/dictionary", "/settings/patterns",
-    "/settings/builtin", "/settings/gold", "/settings/users", "/settings/audit",
+    "/settings/builtin", "/settings/gold", "/settings/labels", "/settings/users", "/settings/audit",
 ]
 
 

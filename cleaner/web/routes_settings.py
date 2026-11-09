@@ -144,6 +144,7 @@ def _cards(request: Request) -> dict[str, tuple[str, str, str]]:
             f"своих «никогда не скрывать» — {len(rows) - always}",
         ),
         "/settings/gold": (gold["state"], f"эталон — {gold['count']} из {GOLD_TARGET}", gold["detail"]),
+        "/settings/labels": _labels_card(request),
         "/settings/users": (
             "good", f"пользователей — {len(users) - disabled}",
             f"администраторов — {sum(u.role == 'admin' and not u.disabled for u in users)}, отключено — {disabled}",
@@ -840,6 +841,73 @@ def export_audit(
     return Response(
         "﻿" + out.getvalue(), media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="cleaner-audit.csv"'},
+    )
+
+
+# --- сохранность меток (FR-7.3, FR-7.5, FR-5.10; открытый вопрос ТЗ, раздел 14) ---------------------------------
+
+# Модель «искажает метки», когда за период доля искажённых замен в её ответах больше LABEL_DISTORTION_SHARE при не
+# меньше LABEL_MIN_LABELS замен (решение владельца, 09.11.2026). Искажённые — восстановленные из искажённой записи
+# (altered: FR-7.3 их вернул, но модель записала метку не так, как выдана) и неизвестные (unknown: такой метки чат не
+# выдавал — данные не вернутся). 5 % — каждая двадцатая замена: ответы этой модели уже приходится перечитывать.
+# 50 замен — меньше одна-две метки решали бы долю случайно (один ответ с тремя метками давал бы 33 %).
+LABEL_DISTORTION_SHARE = 0.05
+LABEL_MIN_LABELS = 50
+LABEL_DAYS = 30            # период отчёта и карточки на главной настроек по умолчанию
+LABEL_STYLES = {"angle": "<ТИП_N>", "square": "[[ТИП_N]]"}
+_LABEL_COUNTERS = ("restored", "altered", "derived", "unknown", "kept")
+
+
+def _label_report(repo, since: str | None, before: str | None) -> list[dict]:
+    """Сводка событий restore за период по подключению, модели и виду метки (FR-5.10) — только числа журнала.
+    Событие без подключения и модели (вставленный ответ или записанное до 09.11.2026) — в строке «модель не указана».
+    Замены в ответе — восстановленные, из искажённой записи, выведенные и неизвестные; оставленные по политике (kept)
+    в долю не входят: это решение политики, а не модели. Сначала помеченные, затем по числу замен."""
+    names = {provider.id: provider.name for provider in repo.providers()}
+    groups: dict[tuple, dict] = {}
+    for row in repo.audit_events("restore", since=since, before=before, limit=None):
+        details = row.details
+        provider, model = details.get("provider") or "", details.get("model") or ""
+        style = details.get("label_style") or ""
+        group = groups.setdefault((provider, model, style), {
+            "connection": names.get(provider, provider) if provider else "",
+            "model": model, "style": LABEL_STYLES.get(style, style), "answers": 0,
+        } | dict.fromkeys(_LABEL_COUNTERS, 0))
+        group["answers"] += 1
+        for counter in _LABEL_COUNTERS:
+            group[counter] += int(details.get(counter) or 0)
+    for group in groups.values():
+        group["labels"] = group["restored"] + group["altered"] + group["derived"] + group["unknown"]
+        group["share"] = (group["altered"] + group["unknown"]) / group["labels"] if group["labels"] else 0.0
+        group["flagged"] = group["labels"] >= LABEL_MIN_LABELS and group["share"] > LABEL_DISTORTION_SHARE
+    return sorted(groups.values(), key=lambda group: (not group["flagged"], -group["labels"]))
+
+
+def _labels_card(request: Request) -> tuple[str, str, str]:
+    """Карточка «Сохранность меток» на главной настроек: за LABEL_DAYS дней — модели, искажающие метки (warn)."""
+    since = (request.app.state.clock.now() - timedelta(days=LABEL_DAYS)).isoformat(timespec="seconds")
+    rows = _label_report(repo_of(request), since, None)
+    flagged = [row for row in rows if row["flagged"]]
+    if flagged:
+        return ("warn", f"искажают метки — {len(flagged)}",
+                ", ".join(row["model"] or "модель не указана" for row in flagged))
+    return ("good", f"ответов за {LABEL_DAYS} дней — {sum(row['answers'] for row in rows)}",
+            f"замен в них — {sum(row['labels'] for row in rows)}")
+
+
+@router.get("/labels")
+def labels(
+    request: Request, since: str | None = None, until: str = "", viewer: Viewer = Depends(get_admin),
+) -> Response:
+    """Отчёт «Сохранность меток»: как облачные модели возвращают метки, по счётчикам событий restore за период.
+    Без отбора — последние LABEL_DAYS дней; пустое поле «с» — весь журнал."""
+    if since is None:
+        today = request.app.state.clock.now().astimezone(request.app.state.tz).date()
+        since = (today - timedelta(days=LABEL_DAYS - 1)).isoformat()
+    rows = _label_report(repo_of(request), _day_start(request, since), _day_start(request, until, 1))
+    return page(
+        request, "labels.html", viewer, rows=rows, since=since, until=until,
+        share=LABEL_DISTORTION_SHARE, minimum=LABEL_MIN_LABELS,
     )
 
 

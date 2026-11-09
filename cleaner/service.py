@@ -733,10 +733,13 @@ class ChatService:
     @admitted("restore")
     def add_answer(self, chat_id: str, user_id: str, text: str) -> Item:
         self._check_length(text)
-        counters: dict[str, int] = {}
+        counters: dict[str, int | str] = {}
 
         def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
-            counters.update(restore(state, text, settings).counters, in_request=_in_request(items)[-1])
+            # Модель вставленного ответа неизвестна: в отчёте «Сохранность меток» — строка «модель не указана».
+            counters.update(
+                restore(state, text, settings).counters, in_request=_in_request(items)[-1], label_style=state.label_style,
+            )
             return [Item(uuid.uuid4().hex, 0, "answer", text, None, source="pasted_answer")], []
 
         [item] = self._apply(chat_id, work)
@@ -1001,7 +1004,12 @@ class ChatService:
         finally:
             self.live.finish(item_id)
         if text and state is not None and local_client is None:
-            self.repo.audit("restore", user_id, chat_id, **restore(state, text, settings).counters, in_request=in_request)
+            # Подключение, модель и вид метки — для отчёта «Сохранность меток» (/settings/labels): только
+            # идентификатор подключения и имя модели из настроек, данных пользователя в них нет (FR-11.2).
+            self.repo.audit(
+                "restore", user_id, chat_id, **restore(state, text, settings).counters, in_request=in_request,
+                provider=(sent or {}).get("provider"), model=(sent or {}).get("model"), label_style=state.label_style,
+            )
 
     def stop(self, chat_id: str, item_id: str) -> None:
         """FR-8.6: генерацию можно остановить; полученная часть сохраняется неполной."""

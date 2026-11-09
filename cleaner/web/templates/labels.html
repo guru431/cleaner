@@ -1,0 +1,37 @@
+{% extends "_settings.html" %}
+{% from "_ui.html" import icon %}
+{% block title %}Сохранность меток — Cleaner{% endblock %}
+{% block content %}
+<h1>Сохранность меток</h1>
+<p class="lead">Как облачные модели возвращают метки, по счётчикам восстановления в журнале: по подключению, модели и виду метки за период. Только числа — без текстов и значений.</p>
+<form method="get" action="/settings/labels" class="inline-form">
+  <label>с <input type="date" name="since" value="{{ since }}"></label>
+  <label>по <input type="date" name="until" value="{{ until }}"></label>
+  <button>Показать</button>
+</form>
+<p class="sub">Искажено — восстановлено из искажённой записи и неизвестные метки, доля — от замен в ответах; оставленные по политике в долю не входят. Модель искажает метки, если доля больше {{ "%g"|format(share * 100) }} % при не меньше {{ minimum }} замен за период. Модель вставленных вручную ответов и событий до 09.11.2026 не указана.</p>
+<section class="panel">
+  <table class="grid">
+    <thead><tr><th>Подключение</th><th>Модель</th><th>Вид метки</th><th>Ответов</th><th>Замен</th><th>Восстановлено</th><th>Из искажённой записи</th><th>Выведено</th><th>Неизвестных</th><th>По политике</th><th>Доля искажённых</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.connection or "—" }}</td>
+      <td class="mono">{{ r.model or "модель не указана" }}</td>
+      <td class="mono nowrap">{{ r.style or "не указан" }}</td>
+      <td>{{ r.answers }}</td>
+      <td>{{ r.labels }}</td>
+      <td>{{ r.restored }}</td>
+      <td>{{ r.altered }}</td>
+      <td>{{ r.derived }}</td>
+      <td>{{ r.unknown }}</td>
+      <td>{{ r.kept }}</td>
+      <td class="nowrap">{{ ("%.1f"|format(r.share * 100)).replace(".", ",") }} %{% if r.flagged %} <span class="badge warn">{{ icon("warning") }}искажает метки</span>{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="11" class="empty">Восстановленных ответов за период нет</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
