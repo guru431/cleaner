@@ -25,7 +25,7 @@ from cleaner.egress import ProviderError, cloud
 from cleaner.engines import GATEWAY_KEY_ENV, LocalSettings, local_settings, save_local_settings
 from cleaner.eval import coverage, runner
 from cleaner.eval.metrics import CLASSES
-from cleaner.storage.repo import CheckpointBusy, Provider, User
+from cleaner.storage.repo import SUFFIXES_KEY, CheckpointBusy, Provider, User
 from cleaner.web import auth, render
 from cleaner.web.deps import Viewer, get_admin, get_form, page, repo_of, service_of
 from cleaner.web.deps import _local as local_time
@@ -491,8 +491,7 @@ def delete_pattern(request: Request, pattern_id: str, form: dict[str, str] = Dep
 
 # --- встроенные списки (FR-10.5) -------------------------------------------------
 
-SUFFIXES_KEY = "internal_suffixes.extra"
-_SUFFIX = regex.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
+_SUFFIX =regex.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
 
 
 def stored_suffixes(repo) -> tuple[str, ...]:

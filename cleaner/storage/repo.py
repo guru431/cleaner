@@ -1220,7 +1220,8 @@ class Repository:
         return Settings(always=always, never=never, patterns=patterns, policies=self.policies())
 
     def _apply_suffixes(self) -> None:
-        """Внутренние суффиксы из базы (ключ — routes_settings.SUFFIXES_KEY) — для всей службы, как встроенный список.
+        """Внутренние суффиксы из базы (ключ SUFFIXES_KEY, его же пишет страница встроенных списков) — для всей службы,
+        как встроенный список.
         Строковые кэши сбрасываются, только если список изменился: ответы о доменных именах меток зависят от него."""
         raw = self.setting(SUFFIXES_KEY)
         if hostmap.set_extra_suffixes(tuple(json.loads(raw)) if raw else ()):
