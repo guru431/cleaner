@@ -1187,16 +1187,19 @@ class Repository:
 
     def audit_events(
         self, event: str | None = None, user_id: str | None = None,
-        since: str | None = None, before: str | None = None, limit: int = 200,
+        since: str | None = None, before: str | None = None, limit: int | None = 200,
     ) -> list[AuditRow]:
-        """Свежие первыми. since и before — начало строки ISO: «2026-10-14» отбирает с начала суток (UTC)."""
+        """Свежие первыми. since и before — начало строки ISO: «2026-10-14» отбирает с начала суток (UTC).
+        limit None — без предела (выгрузка CSV)."""
         sql, args = "SELECT * FROM audit WHERE 1 = 1", []
         for condition, value in (("event = ?", event), ("user_id = ?", user_id), ("ts >= ?", since), ("ts < ?", before)):
             if value:
                 sql += f" AND {condition}"
                 args.append(value)
-        sql += " ORDER BY id DESC LIMIT ?"
-        args.append(limit)
+        sql += " ORDER BY id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
         return [
             AuditRow(row["id"], row["ts"], row["user_id"], row["chat_id"], row["event"], json.loads(row["details"]))
             for row in self._all(sql, *args)

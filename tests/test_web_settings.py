@@ -181,6 +181,33 @@ def test_audit_is_filtered_by_event_user_and_day(browser, repo, clock):
     assert admin.get("/settings/audit", since="вчера").status_code == 400
 
 
+def test_audit_is_exported_as_csv_with_the_current_filter(browser, repo, clock):
+    """Идея «Выгрузка журнала в CSV за период»: тот же отбор, что на странице, без предела в 500 строк; ячейки,
+    которые таблица сочла бы формулой, обезврежены; сама выгрузка — событие журнала."""
+    import csv
+    import io
+
+    ivan = repo.create_user("=HYPERLINK(\"x\")", "hash", "user")
+    for _ in range(501):
+        repo.audit("restore", ivan, restored=2)                               # 14.10
+    repo.audit("leak", ivan, note="@SUM(1)")
+    clock.advance(days=1)
+    admin = browser()
+    admin.user("boss", "admin")
+    admin.login("boss")                                                       # 15.10
+    response = admin.get("/settings/audit/export", user=ivan, until="2026-10-14")
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/csv")
+    assert "attachment" in response.headers["content-disposition"]
+    rows = list(csv.reader(io.StringIO(response.content.decode("utf-8-sig"))))
+    assert rows[0] == ["time_utc", "login", "user_id", "chat_id", "event", "details"]
+    assert len(rows) == 1 + 502 and {row[4] for row in rows[1:]} == {"restore", "leak"}
+    assert rows[1][1] == "'=HYPERLINK(\"x\")" and rows[1][5] == '{"note": "@SUM(1)"}'
+    assert all(not cell.startswith(("=", "+", "-", "@", "\t", "\r")) for row in rows for cell in row)
+    [event] = repo.audit_events("audit_export")
+    assert event.details == {"rows": 502, "filter": {"event": "", "user": ivan, "since": "", "until": "2026-10-14"}}
+    assert browser().get("/settings/audit/export").status_code == 303                 # без входа — на страницу входа
+
+
 def test_audit_filter_lists_every_event_the_service_writes():
     """Ревью 2026-10-21: событие «reviewed» в фильтр журнала не попало. Сверка с исходниками: каждое имя события в
     repo.audit("…") есть в списке фильтра."""

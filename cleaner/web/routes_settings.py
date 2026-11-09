@@ -535,6 +535,42 @@ def audit(
     )
 
 
+_FORMULA = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _cell(value: object) -> str:
+    """Ячейка CSV, которую Excel и LibreOffice не примут за формулу (CSV-инъекция: логин «=HYPERLINK(…)»)."""
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(_FORMULA) else text
+
+
+@router.get("/audit/export")
+def export_audit(
+    request: Request, event: str = "", user: str = "", since: str = "", until: str = "",
+    viewer: Viewer = Depends(get_admin),
+) -> Response:
+    """Журнал с отбором страницы, без её предела в 500 строк, — файлом CSV (UTF-8 с BOM: его открывает Excel).
+    Время — UTC, как хранится. Сама выгрузка — событие журнала с отбором и числом строк."""
+    repo = repo_of(request)
+    rows = repo.audit_events(event or None, user or None, _day_start(request, since), _day_start(request, until, 1), limit=None)
+    logins = {u.id: u.login for u in repo.users()}
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\r\n")
+    writer.writerow(["time_utc", "login", "user_id", "chat_id", "event", "details"])
+    for row in rows:
+        writer.writerow([_cell(value) for value in (
+            row.ts, logins.get(row.user_id, ""), row.user_id, row.chat_id, row.event,
+            json.dumps(row.details, ensure_ascii=False),
+        )])
+    repo.audit(
+        "audit_export", viewer.user.id, rows=len(rows), filter={"event": event, "user": user, "since": since, "until": until},
+    )
+    return Response(
+        "﻿" + out.getvalue(), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="cleaner-audit.csv"'},
+    )
+
+
 # --- эталонный набор (FR-6.10, QA-1) ----------------------------------------------------
 
 GOLD_TARGET = 200          # QA-1: не меньше 200 примеров к концу этапа 2
