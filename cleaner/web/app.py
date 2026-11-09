@@ -58,9 +58,50 @@ _UPLOAD_PATH = re.compile(r"(?:/chats/[^/]+/upload|/api/v1/chats/[^/]+/files)")
 _CERT_BLOCK = re.compile(rb"-----BEGIN CERTIFICATE-----\r?\n.*?-----END CERTIFICATE-----", re.DOTALL)
 
 
+class AgentSlots:
+    """Одновременные запросы агентов (POST /agent/…) — от приёма тела до конца потока ответа. Поток ответа держится
+    минуты; без своего предела 16 таких запросов занимали общий входной бюджет, и вход и /api/v1 отвечали 503.
+    Сверх предела — сразу 429 в виде протокола агента: агент повторит по Retry-After. Счётчики читает панель
+    состояния: busy — занято сейчас, refused — отказов с запуска службы. Только цикл событий — замок не нужен."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.busy = 0
+        self.refused = 0
+
+    def acquire(self) -> bool:
+        if self.busy >= self.limit:
+            self.refused += 1
+            return False
+        self.busy += 1
+        return True
+
+    def release(self) -> None:
+        self.busy -= 1
+
+
+def _agent_busy(scope: Scope, limit: int) -> Response:
+    message = f"шлюз агентов занят: одновременно идут {limit} запросов, повторите позже"
+    headers = {"Retry-After": "5"}
+    if scope["path"].startswith("/agent/openai/"):
+        return _openai_error(429, message, headers)
+    return _agent_error(429, message, headers)
+
+
+def _declared_length(scope: Scope) -> int | None:
+    """Заголовок Content-Length, если он есть и это число; у тела частями (chunked) его нет."""
+    for name, value in scope.get("headers", ()):
+        if name == b"content-length":
+            return int(value) if value.isdigit() else None
+    return None
+
+
 class BodyLimit:
     """Предел тела запроса для всех маршрутов, вход тоже. Считаются принятые байты, а не заголовок
-    Content-Length: у тела, присланного частями (chunked), этого заголовка нет."""
+    Content-Length: у тела, присланного частями (chunked), этого заголовка нет.
+
+    Резерв общего бюджета — объём из Content-Length (без него — предел маршрута) и только на время приёма тела:
+    принятое тело дальше ограничивают очередь заданий и предел запросов агентов (AgentSlots), а не бюджет."""
 
     def __init__(self, app: ASGIApp, limit: int = MAX_BODY_BYTES):
         self.app = app
@@ -81,6 +122,7 @@ class BodyLimit:
             return
         received = 0
         limit = self._limit(scope)
+        reservation = None
 
         async def limited() -> Message:
             nonlocal received
@@ -88,22 +130,35 @@ class BodyLimit:
             received += len(message.get("body", b""))
             if received > limit:
                 raise StarletteHTTPException(413, "Слишком большой запрос")
+            if reservation and (message["type"] == "http.disconnect" or not message.get("more_body", False)):
+                reservation.release()           # тело принято целиком: поток ответа резерв не держит
             return message
 
-        reservation = None
-        if scope.get("method") in ("POST", "PUT", "PATCH") and not _UPLOAD_PATH.fullmatch(scope["path"]):
-            # FastAPI читает JSON до проверки dependency ключа. Общий входной бюджет нужен уже здесь:
-            # число и объём синхронных API-запросов ограничены и до их разбора, не только у service.add_*.
-            try:
-                reservation = scope["app"].state.jobs.budget.reserve(None, limit, count=0)
-            except QueueFull as exc:
-                await _queue_error(Request(scope), exc)(scope, receive, send)
-                return
+        writing = scope.get("method") in ("POST", "PUT", "PATCH")
+        slots = scope["app"].state.agent_slots if writing and scope["path"].startswith("/agent/") else None
+        if slots is not None and not slots.acquire():
+            await _agent_busy(scope, slots.limit)(scope, receive, send)
+            return
         try:
-            await self.app(scope, limited, send)
+            if writing and not _UPLOAD_PATH.fullmatch(scope["path"]):
+                # FastAPI читает JSON до проверки dependency ключа. Общий входной бюджет нужен уже здесь:
+                # число и объём синхронных API-запросов ограничены и до их разбора, не только у service.add_*.
+                # Тело сверх заявленного (заголовок вместе с chunked) — тоже отказ 413: резерв меньше принятого не бывает.
+                declared = _declared_length(scope)
+                limit = limit if declared is None else min(declared, limit)
+                try:
+                    reservation = scope["app"].state.jobs.budget.reserve(None, limit, count=0)
+                except QueueFull as exc:
+                    await _queue_error(Request(scope), exc)(scope, receive, send)
+                    return
+            try:
+                await self.app(scope, limited, send)
+            finally:
+                if reservation:
+                    reservation.release()
         finally:
-            if reservation:
-                reservation.release()
+            if slots is not None:
+                slots.release()
 
 
 def _for_program(request: Request) -> bool:
@@ -223,6 +278,7 @@ def create_app(
     app.state.service = service
     app.state.agent = AgentService(repo, engines, clock)
     app.state.agent_pool = agent_pool
+    app.state.agent_slots = AgentSlots(AGENT_WORKERS)
     app.state.throttle = auth.Throttle(clock)
     app.state.key_throttle = auth.Throttle(clock)            # неверные ключи доступа — по адресу клиента
     app.state.secure_cookies = secure_cookies

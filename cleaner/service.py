@@ -452,6 +452,7 @@ class ChatService:
         item_id = args[1]
 
         def cancelled(reason):
+            self.live.finish(item_id)           # ответ облака снят с очереди: страница и SSE не ждут его бесконечно
             if kind == "risk":
                 self.repo.set_item_risk_status(chat_id, item_id, args[3], "interrupted", ("queued",))
             elif self.repo.item(chat_id, item_id) is not None:
@@ -530,9 +531,28 @@ class ChatService:
     @admitted("file")
     def add_file(self, chat_id: str, user_id: str, filename: str, data: bytes, ocr_all: bool = False) -> Item:
         """Файл — в очередь. Его байты живут только в памяти задания; имя нужно лишь для расширения (FR-2.7).
-        ocr_all — распознать каждую страницу PDF: выбор пользователя, когда слой текста неполон или нечитаем."""
-        item = self.repo.add_item(chat_id, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="queued"))
-        self._submit(self.file_submit, self.process, chat_id, item.id, user_id, data, filename, ocr_all)
+        ocr_all — распознать каждую страницу PDF: выбор пользователя, когда слой текста неполон или нечитаем.
+        У PDF до очереди — оценка (страниц, сканов, минут распознавания) в ходе обработки, а текст заведомо длиннее
+        предела отклоняется сразу, а не после минут разбора."""
+        from cleaner.ingest.extract import ExtractError, detect_kind, estimate_pdf
+
+        meta: dict[str, object] = {}
+        refused: ExtractError | None = None
+        try:
+            if self.engines is not None and detect_kind(filename, data) == "pdf":
+                estimate = estimate_pdf(data, ocr_all)
+                meta = {"progress": estimate.summary(),
+                        "estimate": {"pages": estimate.pages, "ocr_pages": estimate.ocr_pages, "minutes": estimate.minutes}}
+                estimate.check(self.max_text_chars)
+        except ExtractError as exc:
+            refused = exc if meta else None     # PDF не открылся — причину скажет само задание, как раньше
+        item = self.repo.add_item(
+            chat_id, Item(uuid.uuid4().hex, 0, "input", "", None, source="file", status="queued", meta=meta),
+        )
+        if refused is not None:
+            self._failed(chat_id, item.id, user_id, refused)
+        else:
+            self._submit(self.file_submit, self.process, chat_id, item.id, user_id, data, filename, ocr_all)
         return self.repo.item(chat_id, item.id) or item
 
     def process(
@@ -575,6 +595,8 @@ class ChatService:
         # До записи: текст, который всё равно не очистить, не хранится, и повторить нечего (файл не хранится).
         self._check_length(extracted.text)
         meta: dict[str, object] = {"kind": extracted.kind}
+        if "estimate" in item.meta:
+            meta["estimate"] = item.meta["estimate"]        # оценка при загрузке (add_file): её видит и программа
         if extracted.pages:
             meta["pages"] = extracted.pages
         if extracted.ocr_pages:
@@ -909,22 +931,26 @@ class ChatService:
 
         [item] = self._apply(chat_id, work)
         context = built["context"]
-        self.repo.audit(
-            "cloud_send", user_id, chat_id, provider=provider.id, model=model, messages=len(context.messages),
-            chars=sum(len(text) for text in context.texts()), excluded=excluded,
-        )
+        sent = {
+            "provider": provider.id, "model": model, "messages": len(context.messages),
+            "chars": sum(len(text) for text in context.texts()), "excluded": excluded,
+        }
         self.live.start(item.id)
-        self._submit(self.send_submit, self.run_send, chat_id, item.id, user_id, context, link(provider), in_request)
+        self._submit(self.send_submit, self.run_send, chat_id, item.id, user_id, context, link(provider), in_request, None, sent)
         return item
 
     def run_send(
         self, chat_id: str, item_id: str, user_id: str, context: OutgoingContext | LocalContext, connection: cloud.Connection | None,
         in_request: int,
-        local_client=None,
+        local_client=None, sent: dict | None = None,
     ) -> None:
         """Задание: поток ответа — в память для страницы, по окончании — в элемент чата. Обрыв сохраняет полученное.
-        in_request — «замен в запросе» (FR-7.5) на момент отправки: для журнала, вместе со счётчиками восстановления."""
+        in_request — «замен в запросе» (FR-7.5) на момент отправки: для журнала, вместе со счётчиками восстановления.
+        sent — поля события cloud_send: оно пишется здесь, когда запрос уходит, а не при постановке в очередь —
+        снятая с очереди отправка облака не достигла."""
         live = self.live.start(item_id)
+        if sent is not None:
+            self.repo.audit("cloud_send", user_id, chat_id, **sent)
         outcome: dict = {}
         error, aborted = "", False
         state, settings = None, None

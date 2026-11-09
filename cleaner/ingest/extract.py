@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ctypes
 import io
+import math
 import re
 import zipfile
 import zlib
@@ -32,6 +33,11 @@ _IMAGE_SHARE = 0.3
 # Цифровой заголовок вне изображения не засчитывается, а штамп или номер поверх скана (десятки знаков) много ниже
 # порога. Редкий скан почти без текста распознаётся заново — дольше, но без потери текста.
 _LAYER_AREA = 1500
+# Распознавание одной страницы в ocr-ru (замер аудита 09.11.2026 — около 72 с) — только для оценки при загрузке.
+OCR_PAGE_SECONDS = 72
+# Непробельные знаки слоя — оценка текста снизу: Markdown Docling добавляет пробелы и разметку, а колонтитулы
+# (их Docling не выводит) занимают меньше, чем пробелы основного текста.
+_PDF_TOO_LONG = "Документ слишком большой: его текст заведомо длиннее {} знаков. Разделите его на части"
 _WORDS = re.compile(r"\w+")
 _OCR_DOWN = frozenset({"unavailable", "auth"})   # распознавание недоступно целиком, а не отказало на одной странице
 _OCR_LIMIT = 20 * 1024 * 1024       # предел ocr-ru на одно изображение
@@ -436,10 +442,10 @@ def _layer_inside(textpage, boxes: list[_Box]) -> int:
     return inside
 
 
-def _page_kinds(data: bytes) -> list[tuple[str, bool]]:
-    """Вид страницы и есть ли на ней изображения. scan — в слое текста почти нет знаков, а изображение есть: только
-    распознавание; mixed — слой текста есть, но изображения покрывают заметную долю страницы, а слой их не покрывает
-    (_LAYER_AREA): и слой, и распознавание; text — только слой текста."""
+def _page_kinds(data: bytes) -> list[tuple[str, bool, int]]:
+    """Вид страницы, есть ли на ней изображения и непробельных знаков в её слое текста. scan — в слое текста почти нет
+    знаков, а изображение есть: только распознавание; mixed — слой текста есть, но изображения покрывают заметную долю
+    страницы, а слой их не покрывает (_LAYER_AREA): и слой, и распознавание; text — только слой текста."""
     pdf = _open_pdf(data)
     try:
         result = []
@@ -459,10 +465,42 @@ def _page_kinds(data: bytes) -> list[tuple[str, bool]]:
                 kind = "text"
             else:
                 kind = "text" if _layer_inside(textpage, boxes) * _LAYER_AREA >= covered else "mixed"
-            result.append((kind, bool(found)))
+            result.append((kind, bool(found), chars))
         return result
     finally:
         pdf.close()
+
+
+@dataclass(frozen=True)
+class PdfEstimate:
+    """Оценка PDF до разбора (_page_kinds — доли секунды, без Docling и распознавания)."""
+    pages: int
+    ocr_pages: int              # страницы, которые пойдут на распознавание: сканы, смешанные, при ocr_all — все
+    layer_chars: int            # непробельные знаки слоя страниц, которые разберёт Docling: оценка текста снизу
+
+    @property
+    def minutes(self) -> int:
+        return math.ceil(self.ocr_pages * OCR_PAGE_SECONDS / 60)
+
+    def summary(self) -> str:
+        if not self.ocr_pages:
+            return f"страниц {self.pages}"
+        return f"страниц {self.pages}, из них сканов {self.ocr_pages}, ≈{self.minutes} мин распознавания"
+
+    def check(self, max_chars: int) -> None:
+        """Отказ до Docling: текст заведомо длиннее предела, и элемент всё равно отклонили бы — после минут разбора."""
+        if self.layer_chars > max_chars:
+            raise ExtractError(_PDF_TOO_LONG.format(max_chars))
+
+
+def _estimate(found: list[tuple[str, bool, int]], ocr_all: bool) -> PdfEstimate:
+    ocr = sum(1 for kind, _, _ in found if ocr_all or kind != "text")
+    return PdfEstimate(len(found), ocr, sum(chars for kind, _, chars in found if kind != "scan"))
+
+
+def estimate_pdf(data: bytes, ocr_all: bool = False) -> PdfEstimate:
+    """Оценка при загрузке (страниц, на распознавание, минут) — до постановки в очередь. ExtractError — PDF не открыть."""
+    return _estimate(_page_kinds(data), ocr_all)
 
 
 def _key(text: str) -> str:
@@ -555,14 +593,21 @@ class Extractor:
         except DetectorError:           # ключ шлюза не задан или адрес отклонён (engines.client)
             return None, True
 
+    def _too_long(self, texts: dict[int, str]) -> None:
+        """Уже полученный текст страниц длиннее предела: дальше не распознавать — итог всё равно отклонили бы."""
+        if sum(len(text.strip()) for text in texts.values()) > self.max_chars:
+            raise ExtractError(_PDF_TOO_LONG.format(self.max_chars))
+
     def _pdf(self, data: bytes, progress: Progress, ocr_all: bool = False) -> Extracted:
         found = _page_kinds(data)
-        kinds = [kind for kind, _ in found]
+        _estimate(found, ocr_all).check(self.max_chars)
+        kinds = [kind for kind, _, _ in found]
         if ocr_all:
             kinds = ["scan" if kind == "scan" else "mixed" for kind in kinds]
         text_pages = [number for number, kind in enumerate(kinds, 1) if kind != "scan"]
         ocr_pages = [number for number, kind in enumerate(kinds, 1) if kind != "text"]
         texts = self.documents.pdf_pages(data, text_pages) if text_pages else {}
+        self._too_long(texts)
         unread: list[int] = []
         doubtful: list[int] = []
         failed: list[int] = []
@@ -583,6 +628,7 @@ class Extractor:
                     refused = refused or exc
                     continue
                 unread += missed
+                self._too_long(texts)
                 continue
             recognised, down = (None, True) if down else self._over_layer(data, number)
             if recognised is None or not recognised.strip():
@@ -593,6 +639,7 @@ class Extractor:
                     doubtful.append(number)
             else:
                 texts[number] = _merge(recognised, texts.get(number, ""))
+                self._too_long(texts)
         if ocr_pages:
             progress(len(ocr_pages), len(ocr_pages))
         pages = [texts.get(number, "").strip() for number in range(1, len(kinds) + 1)]

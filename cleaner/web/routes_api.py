@@ -164,7 +164,8 @@ def answer_events(request: Request, chat_id: str, item_id: str,
             if live is not None:
                 text = live.text()
                 if len(text) > seen:
-                    shown = text[seen:] if item.source == "local" else await run_in_threadpool(restorer.feed, text[seen:])
+                    # Весь префикс, а не прирост (контракт docs/studio-api.md): клиент заменяет показанный текст.
+                    shown = text if item.source == "local" else await run_in_threadpool(restorer.feed, text[seen:])
                     seen = len(text)
                     yield event("text", {"text": shown})
             if live is None or live.finished:
@@ -309,14 +310,16 @@ async def add_text(request: Request, chat_id: str, body: TextIn, caller: ApiCall
 def add_file(
     request: Request, chat_id: str, upload: Upload = Depends(get_api_upload), caller: ApiCaller = Depends(get_api_caller),
 ) -> Response:
-    """Файл — в очередь разбора (FR-2.2…2.9); результат — опросом GET …/items/{item_id}."""
+    """Файл — в очередь разбора (FR-2.2…2.9); результат — опросом GET …/items/{item_id}. У PDF — estimate: страниц,
+    на распознавание и минут распознавания; PDF с текстом заведомо длиннее предела — сразу status failed."""
     api_writable_chat(request, chat_id, caller)
     try:
         item = service_of(request).add_file(chat_id, caller.user.id, upload.filename, upload.data, upload.ocr_all,
                                             reservation=upload.reservation)
     except KeyError:
         raise HTTPException(404, "Чат не найден") from None
-    return JSONResponse({"item_id": item.id, "status": item.status}, status_code=202)
+    estimate = {"estimate": item.meta["estimate"]} if "estimate" in item.meta else {}
+    return JSONResponse({"item_id": item.id, "status": item.status} | estimate, status_code=202)
 
 
 @router.get("/chats/{chat_id}/items/{item_id}")

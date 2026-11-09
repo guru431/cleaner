@@ -202,8 +202,7 @@ class IntegrationService(ChatService):
 
         [item] = self._apply(chat_id, work, expected=payload["version"])
         self.live.start(item.id)
+        sent = {"provider": provider.id, "model": payload["model"], "messages": len(built["context"].messages)}
         self._submit(self.send_submit, self.run_send, chat_id, item.id, user_id,
-                     built["context"], link(provider), built["count"])
-        self.repo.audit("cloud_send", user_id, chat_id, provider=provider.id, model=payload["model"],
-                        messages=len(built["context"].messages))
+                     built["context"], link(provider), built["count"], None, sent)
         return item
