@@ -760,6 +760,7 @@ class AgentService:
                 raise AgentRefused(502, "api_error", "Cleaner: провайдер прислал не JSON") from None
             self._record(proto, chat_id, conv_id, prepared, stream)
             self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=upstream.status, usage=proto.usage(reply))
+            self._restored(call, chat_id, audit["model"], access, prepared, stream)
             return AgentReply(upstream.status, {"content-type": "application/json"}, body=_json(message).encode("utf-8"))
         headers = {"content-type": "text/event-stream", "cache-control": "no-cache"}
         headers.update((name, value) for name, value in upstream.headers.items() if name not in ("content-type", "retry-after"))
@@ -775,6 +776,7 @@ class AgentService:
                 self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished, usage=usage)
                 self._receipt(call, proto, chat_id, conv_id, access, prepared, started, 200 if finished else 502,
                               "" if finished else getattr(stream, "failure_reason", "stream_interrupted"))
+                self._restored(call, chat_id, audit["model"], access, prepared, stream)
             finally:
                 # close живёт до уничтожения HTTP-ответа: после записи он не должен держать тело запроса и снимок
                 # из 20 000 сущностей (и заставлять GC обходить их на следующих запросах).
@@ -789,6 +791,22 @@ class AgentService:
             end(False, {})
 
         return AgentReply(200, headers, events=events, stop=upstream.abort, close=close)
+
+    def _restored(
+        self, call: AgentCall, chat_id: str, model: str, access: _Access, prepared: _Prepared, stream: ProtocolStream,
+    ) -> None:
+        """Событие restore ответа шлюза — одно на ответ, для отчёта «Сохранность меток» (/settings/labels, FR-11.4):
+        счётчики восстановления текста модели (RestorationBudget.counters), подключение или вид подписки, модель из
+        запроса, вид метки чата, source="agent". Оборванный поток и отказ провайдера посреди потока — по уже
+        восстановленному тексту: метки в нём модель уже записала, как в неполном ответе чата. Ответ без текста (только
+        вызовы инструментов) и отказ провайдера до ответа события не дают."""
+        counters = stream.budget.counters()
+        if counters is None:
+            return
+        self.repo.audit(
+            "restore", call.user.id, chat_id, **counters, provider=access.id, model=model,
+            label_style=prepared.state.label_style, source="agent",
+        )
 
     def _record(
         self, proto: GatewayProtocol, chat_id: str, conv_id: str, prepared: _Prepared, stream: ProtocolStream,

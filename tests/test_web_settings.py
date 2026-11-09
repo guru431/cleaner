@@ -346,6 +346,35 @@ def test_label_report_sums_restore_counters_by_model_and_label_style_and_flags_d
     assert user.get("/settings/labels").status_code == 403
 
 
+def test_label_report_merges_agent_replies_into_the_model_row_and_filters_by_source(browser, repo):
+    """Ответы шлюза агентов (source="agent") — в строке той же модели, что и чаты; отбор «агенты» / «чаты»; подписка —
+    своим именем."""
+    from cleaner.storage.repo import Provider
+
+    ivan = repo.create_user("ivan", "hash", "user")
+    cloud = repo.add_provider(Provider("", "Облако", "openai", "https://llm.example/v1", "bearer", "k", ("m-1",), 512))
+    zero = dict.fromkeys(("restored", "altered", "derived", "unknown", "kept", "foreign_links"), 0)
+    repo.audit("restore", ivan, "c" * 32, **(zero | {"restored": 30}), in_request=1, provider=cloud, model="m-1",
+               label_style="angle")
+    for _ in range(2):
+        repo.audit("restore", ivan, "d" * 32, **(zero | {"restored": 10, "unknown": 2}), provider=cloud, model="m-1",
+                   label_style="angle", source="agent")
+    repo.audit("restore", ivan, "d" * 32, **(zero | {"restored": 4}), provider="claude-subscription", model="m-sub",
+               label_style="angle", source="agent")
+    admin = browser()
+    admin.user("boss", "admin")
+    admin.login("boss")
+    page = admin.get("/settings/labels", since="").text
+    assert re.search(r"<td>Облако</td>\s*<td[^>]*>m-1</td>\s*<td[^>]*>[^<]*</td>\s*<td[^>]*>чаты, агенты</td>\s*<td>3</td>"
+                     r"\s*<td>54</td>", page)
+    assert "Подписка Claude" in page
+    agents = admin.get("/settings/labels", since="", source="agent").text
+    assert re.search(r"<td[^>]*>агенты</td>\s*<td>2</td>\s*<td>24</td>", agents) and "чаты, агенты" not in agents
+    chats = admin.get("/settings/labels", since="", source="chat").text
+    assert "Подписка Claude" not in chats and re.search(r"<td[^>]*>чаты</td>\s*<td>1</td>\s*<td>30</td>", chats)
+    assert admin.get("/settings/labels", source="api").status_code == 400
+
+
 def test_audit_filter_lists_every_event_the_service_writes():
     """Ревью 2026-10-21: событие «reviewed» в фильтр журнала не попало. Сверка с исходниками: каждое имя события в
     repo.audit("…") есть в списке фильтра."""

@@ -30,6 +30,7 @@ from cleaner.web import auth, render
 from cleaner.web.deps import Viewer, get_admin, get_form, page, repo_of, service_of
 from cleaner.web.deps import _local as local_time
 from cleaner.web.routes_chats import LAYER_LABELS, LAYER_NAMES
+from cleaner.web.routes_keys import SUBSCRIPTION_NAMES
 
 router = APIRouter(prefix="/settings")
 
@@ -855,28 +856,36 @@ LABEL_DISTORTION_SHARE = 0.05
 LABEL_MIN_LABELS = 50
 LABEL_DAYS = 30            # период отчёта и карточки на главной настроек по умолчанию
 LABEL_STYLES = {"angle": "<ТИП_N>", "square": "[[ТИП_N]]"}
+LABEL_SOURCES = {"chat": "чаты", "agent": "агенты"}    # источник события restore; у событий чатов поля source нет
 _LABEL_COUNTERS = ("restored", "altered", "derived", "unknown", "kept")
 
 
-def _label_report(repo, since: str | None, before: str | None) -> list[dict]:
+def _label_report(repo, since: str | None, before: str | None, source: str = "") -> list[dict]:
     """Сводка событий restore за период по подключению, модели и виду метки (FR-5.10) — только числа журнала.
     Событие без подключения и модели (вставленный ответ или записанное до 09.11.2026) — в строке «модель не указана».
     Замены в ответе — восстановленные, из искажённой записи, выведенные и неизвестные; оставленные по политике (kept)
-    в долю не входят: это решение политики, а не модели. Сначала помеченные, затем по числу замен."""
-    names = {provider.id: provider.name for provider in repo.providers()}
+    в долю не входят: это решение политики, а не модели. Сначала помеченные, затем по числу замен.
+    Ответы чатов и шлюза агентов (source="agent") одной модели — в одной строке: порог пометки — о модели; sources —
+    откуда ответы строки, source — отбор одного источника ("chat" | "agent", "" — все)."""
+    names = {provider.id: provider.name for provider in repo.providers()} | SUBSCRIPTION_NAMES
     groups: dict[tuple, dict] = {}
     for row in repo.audit_events("restore", since=since, before=before, limit=None):
         details = row.details
+        origin = details.get("source") or "chat"
+        if source and origin != source:
+            continue
         provider, model = details.get("provider") or "", details.get("model") or ""
         style = details.get("label_style") or ""
         group = groups.setdefault((provider, model, style), {
             "connection": names.get(provider, provider) if provider else "",
-            "model": model, "style": LABEL_STYLES.get(style, style), "answers": 0,
+            "model": model, "style": LABEL_STYLES.get(style, style), "answers": 0, "sources": set(),
         } | dict.fromkeys(_LABEL_COUNTERS, 0))
         group["answers"] += 1
+        group["sources"].add(origin)
         for counter in _LABEL_COUNTERS:
             group[counter] += int(details.get(counter) or 0)
     for group in groups.values():
+        group["sources"] = ", ".join(LABEL_SOURCES[name] for name in LABEL_SOURCES if name in group["sources"])
         group["labels"] = group["restored"] + group["altered"] + group["derived"] + group["unknown"]
         group["share"] = (group["altered"] + group["unknown"]) / group["labels"] if group["labels"] else 0.0
         group["flagged"] = group["labels"] >= LABEL_MIN_LABELS and group["share"] > LABEL_DISTORTION_SHARE
@@ -897,16 +906,18 @@ def _labels_card(request: Request) -> tuple[str, str, str]:
 
 @router.get("/labels")
 def labels(
-    request: Request, since: str | None = None, until: str = "", viewer: Viewer = Depends(get_admin),
+    request: Request, since: str | None = None, until: str = "", source: str = "", viewer: Viewer = Depends(get_admin),
 ) -> Response:
     """Отчёт «Сохранность меток»: как облачные модели возвращают метки, по счётчикам событий restore за период.
-    Без отбора — последние LABEL_DAYS дней; пустое поле «с» — весь журнал."""
+    Без отбора — последние LABEL_DAYS дней; пустое поле «с» — весь журнал; source — чаты или агенты."""
     if since is None:
         today = request.app.state.clock.now().astimezone(request.app.state.tz).date()
         since = (today - timedelta(days=LABEL_DAYS - 1)).isoformat()
-    rows = _label_report(repo_of(request), _day_start(request, since), _day_start(request, until, 1))
+    if source and source not in LABEL_SOURCES:
+        raise HTTPException(400, "Неизвестный источник ответов")
+    rows = _label_report(repo_of(request), _day_start(request, since), _day_start(request, until, 1), source)
     return page(
-        request, "labels.html", viewer, rows=rows, since=since, until=until,
+        request, "labels.html", viewer, rows=rows, since=since, until=until, source=source, sources=LABEL_SOURCES,
         share=LABEL_DISTORTION_SHARE, minimum=LABEL_MIN_LABELS,
     )
 

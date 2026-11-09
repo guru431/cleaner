@@ -1206,6 +1206,8 @@ def originals(
                     raise RestoreLimit("response_expansion_limit")
         return "".join(piece for piece, _, _ in pieces)
 
+    # Счётчики восстановления всех значений (FR-11.4: событие restore ответа шлюза) или None — значений не было.
+    original.counters = lambda: None if restorer is None else dict(restorer.counters)    # type: ignore[attr-defined]
     return original
 
 

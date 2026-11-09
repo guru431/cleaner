@@ -33,10 +33,13 @@ class RestorationBudget:
         self.remaining = RESTORED_BYTES
         self.arguments = ARGUMENT_BYTES
         self.guard: SecretGuard | None = None       # настройка ключа: секреты в адресах чужих узлов не восстанавливаются
+        self._text: Callable[[str], str] | None = None
 
     def original(self, state: ChatState, settings: Settings, *, exact: bool = False) -> Callable[[str], str]:
         restore = originals(state, settings, exact=exact, max_bytes=ARGUMENT_BYTES if exact else RESTORED_BYTES,
                             guard=self.guard if exact else None)
+        if not exact:
+            self._text = restore
 
         def checked(value: str) -> str:
             result = restore(value)
@@ -49,6 +52,13 @@ class RestorationBudget:
             return result
 
         return checked
+
+    def counters(self) -> dict[str, int] | None:
+        """Счётчики восстановления текста модели за весь ответ (все блоки и варианты) — для события restore и отчёта
+        «Сохранность меток»; None — текста в ответе не было. Аргументы инструментов не в счёт: они восстанавливаются
+        только по точным записям замен (10.3), искажённую или неизвестную метку там не видно, и их точные метки
+        занижали бы долю искажённых."""
+        return self._text.counters() if self._text is not None else None    # type: ignore[attr-defined]
 
 
 class DeltaRestorer:

@@ -431,6 +431,41 @@ def test_agent_send_carries_gateway_and_upstream_times(gw, repo):
         assert all(type(ms) is int and ms >= 0 for ms in times), event.details
 
 
+def test_reply_restore_counters_reach_the_label_report(gw, repo):
+    """Отчёт «Сохранность меток» и ответы шлюза: одно событие restore на ответ — счётчики текста модели (аргументы
+    вызова не в счёт), подключение, модель запроса, вид метки, source="agent"; оборванный поток — по восстановленному;
+    ответ провайдера с ошибкой события не даёт."""
+    from cleaner.web.routes_settings import _label_report
+
+    def distorted(request: dict) -> list[dict]:
+        first = request["messages"][0]["content"][-1]["text"]
+        host, mail = HOST.search(first).group(), re.search(r"<EMAIL_\d+>", first).group()
+        return model_turn(f"Проверяю {host}, пишу {mail} и <PERSON_99>", ("toolu_1", "Bash", {"command": f"ping {host}"}))
+
+    def cut(request: dict) -> list[dict]:
+        host = HOST.search(request["messages"][0]["content"][-1]["text"]).group()
+        return model_turn(f"Начинаю с {host} ", ("toolu_2", "Edit", {"file_path": "a.txt"}), cut=True)
+
+    error = {"type": "error", "error": {"type": "overloaded_error", "message": "busy"}}
+    gw.stub.script += [distorted, cut, {"status": 529, "body": error}]
+    blocks = agent_blocks(gw.send(body(TASK)))
+    assert blocks[-1]["input"] == {"command": "ping srv-dc01.corp.contoso.ru"} and "<PERSON_99>" in blocks[0]["text"]
+    gw.send(body(TASK + " ещё раз"))
+    assert gw.call(body("Третья задача")).status == 529
+    events = repo.audit_events("restore")
+    assert [{key: event.details[key] for key in ("restored", "altered", "unknown", "provider", "model", "label_style", "source")}
+            for event in reversed(events)] == [
+        {"restored": 2, "altered": 0, "unknown": 1, "provider": gw.provider_id, "model": "m-1", "label_style": "angle",
+         "source": "agent"},
+        {"restored": 1, "altered": 0, "unknown": 0, "provider": gw.provider_id, "model": "m-1", "label_style": "angle",
+         "source": "agent"},
+    ]
+    [row] = _label_report(repo, None, None, "agent")
+    assert (row["connection"], row["model"], row["sources"], row["answers"], row["labels"], row["unknown"]) == (
+        "Заглушка", "m-1", "агенты", 2, 4, 1)
+    assert _label_report(repo, None, None, "chat") == []
+
+
 def test_parallel_request_waits_only_for_cleaning(gw):
     """Запрос, чья модель ещё думает, не держит чат (раздел 13): замок снимается до отправки, и второй запрос того же
     ключа и чата проходит, пока первый ждёт провайдера."""
