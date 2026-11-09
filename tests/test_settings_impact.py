@@ -73,6 +73,33 @@ def test_preview_does_not_hold_the_service_lock_while_recounting(repo, monkeypat
     assert repo.setting("probe") == "1"
 
 
+def test_chat_deleted_during_a_preview_does_not_wait_and_the_wal_is_truncated_after(tmp_path, repo, monkeypatch):
+    """Ревью: снимок оценки — другое соединение; удаление чата ждало его три раза по 5 с под общим замком (служба
+    стояла) и кончалось CheckpointBusy, а страницы удалённого чата с обёрткой его ключа оставались в cleaner.db-wal
+    (FR-1.4). Удаление не ждёт снимок своего процесса: усечение откладывается до его закрытия."""
+    repo.conn.execute("PRAGMA busy_timeout = 0")            # прежнее ожидание — сразу CheckpointBusy, без 15 с
+    admin = repo.create_user("admin", "hash", "admin")
+    service = ChatService(repo)
+    chat = repo.create_chat(admin, "Own")
+    service.add_input(chat, admin, "mail owner@contoso.ru")
+    doomed = repo.create_chat(admin, "Вымышленный")
+    [wrapped] = repo.conn.execute("SELECT dek_wrapped FROM chats WHERE id = ?", (doomed,)).fetchone()
+    deferred = []
+    original = settings_impact.sanitize
+
+    def probe(*args, **kwargs):
+        if not deferred:
+            service.delete_chat(doomed, admin)
+            deferred.append(bytes(wrapped) in (tmp_path / "cleaner.db-wal").read_bytes())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(settings_impact, "sanitize", probe)
+    settings_impact.preview(repo, admin, {"kind": "policies", "policies": {"EMAIL": "block"}})
+    assert deferred == [True] and repo.chat(doomed) is None
+    assert repo.audit_events("error") == [] and repo.audit_events("chat_deleted")[0].details == {"wal": "deferred"}
+    assert bytes(wrapped) not in b"".join(path.read_bytes() for path in tmp_path.glob("cleaner.db*"))
+
+
 def _row(list_, value, type_=None):
     return {"id": "", "list": list_, "value": value, "type": type_, "aliases": [], "comment": ""}
 

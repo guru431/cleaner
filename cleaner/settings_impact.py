@@ -52,21 +52,23 @@ def _binding(repo):
 def _reading(repo):
     """Согласованный снимок базы отдельным соединением (BEGIN DEFERRED, журнал WAL): пересчёт идёт без общего замка
     и без транзакции записи — сессии, шлюз агентов и задания его не ждут. У базы в памяти второго соединения нет:
-    тогда, как прежде, под замком."""
+    тогда, как прежде, под замком. Пока снимок открыт, удаление чата не ждёт его, а усечение журнала WAL выполняется
+    при его закрытии (Repository.reading)."""
     path = repo._one("PRAGMA database_list")["file"]
     if not path:
         with repo.lock, transaction(repo.conn):
             yield repo
         return
-    conn = db.connect(path)
-    try:
-        conn.execute("BEGIN DEFERRED")
-        conn.execute("SELECT COUNT(*) FROM settings").fetchone()       # снимок фиксируется первым чтением
-        yield Repository(conn, repo.master, repo.clock)
-    finally:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
-        conn.close()
+    with repo.reading():
+        conn = db.connect(path)
+        try:
+            conn.execute("BEGIN DEFERRED")
+            conn.execute("SELECT COUNT(*) FROM settings").fetchone()       # снимок фиксируется первым чтением
+            yield Repository(conn, repo.master, repo.clock)
+        finally:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            conn.close()
 
 
 def changed(repo, operation):

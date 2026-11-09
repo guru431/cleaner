@@ -88,6 +88,30 @@ def test_address_is_not_written_to_the_journal(guard):
     assert "client-secret" not in repr(guard.reports) and "client-secret" not in str(refused.value)
 
 
+def test_address_from_the_callers_own_lookup_passes_when_dns_rotates():
+    """Ревью: балансировка DNS отдаёт при каждом запросе другой набор адресов пула. Сторож узнаёт адреса своим
+    запросом, а соединение идёт по адресу из ответа вызывающему: обёртка getaddrinfo запоминает и его. Адрес, которого
+    не было ни в одном ответе для разрешённого имени, — по-прежнему отказ."""
+    pool, answers, reports = [f"192.0.2.{n}" for n in range(1, 41)], [], []
+
+    def resolve(name, port, *args, **kwargs):
+        watch.hook("socket.getaddrinfo", (name, port, 0, 0, 0))            # событие аудита настоящего getaddrinfo
+        first = len(answers) * 4
+        answers.append(name)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (pool[first + n], port)) for n in range(4)]
+
+    watch = Watch(lambda: [PROVIDER], lambda *event: reports.append(event), resolve)
+    infos = watch.wrap(resolve)(PROVIDER, 443)
+    assert answers == [PROVIDER, PROVIDER]                                # запрос сторожа и запрос вызывающего
+    for info in infos:
+        watch.hook("socket.connect", (None, info[4]))
+    with pytest.raises(EgressRefused):
+        watch.hook("socket.connect", (None, (pool[-1], 443)))
+    with pytest.raises(EgressRefused):                                    # неразрешённое имя ответа не получает
+        watch.wrap(resolve)("cdn.example", 443)
+    assert len(reports) == 2 and answers == [PROVIDER, PROVIDER]
+
+
 _PROCESS = """
 import asyncio, socket
 from cleaner.egress import watch

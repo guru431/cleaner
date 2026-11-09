@@ -10,7 +10,8 @@
 - socket.getaddrinfo: имя, которого нет в списке, — отказ до запроса DNS: само имя тоже уходит наружу, серверу DNS.
   Числовой адрес разрешается без сети (так uvicorn разбирает адрес, который слушает) — его проверит connect.
   Для разрешённого имени сторож сам узнаёт его адреса: событие аудита не видит ответа getaddrinfo, а соединение идёт
-  уже по адресу (у httpx с asyncio — и из другого потока).
+  уже по адресу (у httpx с asyncio — и из другого потока). Ответ самому вызывающему запоминает обёртка
+  socket.getaddrinfo (Watch.wrap): при балансировке DNS он отличается от ответа сторожу.
 - socket.connect и socket.sendto: петля (и IPv4 в IPv6), адрес из списка или адрес разрешённого имени; иначе отказ.
 
 Отказ — исключение EgressRefused (OSError: клиенты считают его ошибкой соединения) и событие журнала egress_refused,
@@ -102,11 +103,28 @@ class Watch:
             return              # имя не разрешилось — не разрешится и у вызывающего, он получит свою ошибку
         finally:
             self._inside.active = False
+        self._remember(name, found)
+
+    def _remember(self, name: str, found: set[str]) -> None:
         with self._lock:
             known = self._resolved.setdefault(name, set())
             if len(known | found) > _KEEP_ADDRESSES:
                 known.clear()
             known |= found
+
+    def wrap(self, getaddrinfo: Callable[..., list]) -> Callable[..., list]:
+        """socket.getaddrinfo, который запоминает и ответ вызывающему. Балансировка DNS отдаёт на каждый запрос свой
+        набор адресов пула, и ответ на запрос сторожа (_learn) может не содержать адреса, к которому пойдёт соединение.
+        Обхода это не открывает: getaddrinfo сам вызывает событие аудита, и неразрешённое имя получает отказ до
+        запроса — запоминаются только адреса из ответа для имени из настроек, как и у _learn, в любом потоке."""
+        def guarded(host, port, *args, **kwargs):
+            infos = getaddrinfo(host, port, *args, **kwargs)
+            name = _name(host)
+            if name and name != "localhost" and _ip(name) is None:
+                self._remember(name, {str(_ip(str(info[4][0]))) for info in infos})
+            return infos
+
+        return guarded
 
     def decide(self, event: str, args: tuple) -> str | None:
         """None — можно; иначе вид назначения для журнала: name, private или public."""
@@ -156,5 +174,7 @@ class Watch:
 
 
 def install(watch: Watch) -> None:
-    """Только в процессе службы: снять перехватчик аудита нельзя."""
+    """Только в процессе службы: снять перехватчик аудита нельзя. socket.create_connection (httpx, httpcore) и
+    asyncio берут socket.getaddrinfo при вызове — подмена видна им; кто её обходит, получает прежнюю проверку."""
     sys.addaudithook(watch.hook)
+    socket.getaddrinfo = watch.wrap(socket.getaddrinfo)

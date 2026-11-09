@@ -132,6 +132,31 @@ def test_key_rotate_rewraps_the_keys_and_the_old_key_no_longer_opens_the_base(ho
     assert old_wrap not in raw and old_global.encode("ascii") not in raw
 
 
+def test_key_rotate_refuses_while_the_service_runs(home, monkeypatch, offline_env, capsys, clock):
+    """Ревью: простаивающее соединение службы не мешает ни транзакции, ни усечению WAL, а служба держит прежний ключ в
+    памяти и обёртывает им ключи новых чатов — после перезапуска с новым ключом они не открываются. Служба держит замок
+    рядом с базой: rotate при нём отказывает, ничего не меняя, а служба не стартует, пока идёт смена."""
+    key = init(home)
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    rotated = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: rotated.append(main(["key", "rotate", "--env-file", str(home / "new.env")])))
+    capsys.readouterr()
+    assert main(["serve"]) == 0
+    assert rotated == [1] and not (home / "new.env").exists()
+    assert "служба работает" in capsys.readouterr().err
+    open_repo(home / "data" / "cleaner.db", key, clock).conn.close()          # база под прежним ключом
+    started, rotate = [], Repository.rotate_master
+
+    def rotating(self, new_master):
+        started.append(main(["serve"]))
+        return rotate(self, new_master)
+
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: None)
+    monkeypatch.setattr(Repository, "rotate_master", rotating)
+    assert main(["key", "rotate", "--env-file", str(home / "new.env")]) == 0
+    assert started == [1]
+
+
 def test_apikey_add_list_disable(home, monkeypatch, capsys, clock):
     """FR-13.1: ключ выпускается командой для проектов, которые заводятся сценарием; печатается один раз."""
     key = init(home)
