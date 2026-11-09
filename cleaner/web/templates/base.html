@@ -32,5 +32,12 @@
 </header>
 {% endif %}
 <main class="{% block main_class %}page{% endblock %}">{% block main %}{% endblock %}</main>
+{% if viewer %}
+{% set installed = build() %}
+<footer class="page muted"><small>
+  <span title="sha256 исходников {{ installed.digest }}">Код {{ installed.short }} от {{ installed.date }}</span> ·
+  <a href="/account/password">Сменить пароль</a> · <a href="/account/sessions">Мои сессии</a>
+</small></footer>
+{% endif %}
 </body>
 </html>

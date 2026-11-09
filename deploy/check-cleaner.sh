@@ -250,11 +250,25 @@ else
     miss "нет /usr/local/sbin/check-egress.sh"
 fi
 
-echo "6. Самопроверка (AC-1.9)"
+echo "6. Самопроверка (AC-1.9) и установленный код"
 if (cd "$APP" && runuser -u cleaner -- "$APP/.venv/bin/python" -m cleaner verify) >"$WORK/verify.txt" 2>&1; then
     ok "$(tail -n 1 "$WORK/verify.txt")"
 else
     bad "самопроверка: $(tail -n 1 "$WORK/verify.txt")"
+fi
+# Отпечаток кода на диске (первая строка verify) и тот, с которым служба запущена (её строка в журнале при старте):
+# разные — файлы заменили, а службу не перезапустили.
+installed=$(sed -n 's/^Код: \([0-9a-f]\{12\}\) от \([0-9-]*\) .*/\1 от \2/p' "$WORK/verify.txt")
+running=$(journalctl -u "$UNIT" -o cat --no-pager 2>/dev/null \
+    | sed -n 's/^Cleaner: служба запущена\. Код: \([0-9a-f]\{12\}\) от \([0-9-]*\) .*/\1 от \2/p' | tail -n 1)
+if [[ -z "$installed" ]]; then
+    bad "cleaner verify не напечатал отпечаток кода"
+elif [[ -z "$running" ]]; then
+    skip "в журнале службы нет строки запуска с отпечатком (журнал повёрнут или служба старше 09.11.2026)"
+elif [[ "$running" == "$installed" ]]; then
+    ok "служба работает с установленным кодом: $installed"
+else
+    bad "служба запущена с кодом $running, а на диске $installed — перезапустите службу"
 fi
 
 echo "7. Канарейка в базе и журнале (AC-1.8)"
@@ -293,6 +307,7 @@ fi
 
 echo
 echo "Отпечаток сертификата (SHA-256): ${fingerprint:-не прочитан}"
+echo "Код (sha256 исходников, начало): ${installed:-не прочитан}"
 if [[ $fails -gt 0 ]]; then
     printf '%sПровалов: %d%s\n' "$RED" "$fails" "$NC"
     exit 1

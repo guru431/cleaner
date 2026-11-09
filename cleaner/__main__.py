@@ -12,8 +12,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from cleaner import config
+from cleaner import config, version
 from cleaner.agent_service import gateway_access
 from cleaner.clock import SystemClock
 from cleaner.config import Config
@@ -121,6 +122,28 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _egress_targets(repo: Repository) -> list[str]:
+    """Узлы, к которым службе можно: локальный шлюз (и распознавание на нём), включённые подключения, подписки
+    действующих ключей шлюза. Читается из базы при каждой проверке сторожа: правка настроек действует сразу."""
+    from cleaner.agent_service import SUBSCRIPTIONS
+    from cleaner.engines import local_settings
+
+    urls = [local_settings(repo).url, *(provider.base_url for provider in repo.providers() if provider.enabled)]
+    used = {key.upstream for key in repo.api_keys() if not key.disabled}
+    urls += [url for access, (_, url) in SUBSCRIPTIONS.items() if access in used]
+    return [urlsplit(url).hostname or "" for url in urls]
+
+
+def _guard_network(repo: Repository) -> None:
+    """Сторож выхода в сеть (egress.watch) — только в процессе службы: снять его нельзя, тесты подменяют эту функцию."""
+    from cleaner.egress import watch
+
+    def report(kind: str, port: object, origin: str) -> None:
+        repo.audit("egress_refused", kind=kind, port=port, origin=origin)
+
+    watch.install(watch.Watch(lambda: _egress_targets(repo), report))
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     _offline()
     _quiet_libraries()
@@ -132,6 +155,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     cfg = _config(args)
     config.check_transport(cfg)
     with _repository(cfg) as repo:
+        # Отпечаток считается до работы: замена файлов под службой его не меняет. Строку журнала службы сверяет с
+        # кодом на диске check-cleaner.sh.
+        build = version.current()
+        repo.audit("service_started", code=build.digest, date=build.date)
+        print(f"Cleaner: служба запущена. {build.line()}", file=sys.stderr, flush=True)
+        _guard_network(repo)
         app = create_app(
             repo, SystemClock(), secure_cookies=bool(cfg.tls_cert), max_text_chars=cfg.max_text_chars,
             tz=timezone(timedelta(hours=cfg.utc_offset_hours)),
@@ -401,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify":
         from cleaner import selfcheck
 
+        print(version.current().line())          # первой строкой: последнюю check-cleaner.sh берёт как итог
         return selfcheck.run(print)
     handlers = {
         "init": cmd_init, "serve": cmd_serve, "user": cmd_user, "key": cmd_key, "backup": cmd_backup, "models": cmd_models,

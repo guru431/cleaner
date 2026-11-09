@@ -19,6 +19,14 @@ from cleaner.storage.repo import Provider, Repository
 from cleaner.web import auth
 
 
+@pytest.fixture(autouse=True)
+def guards(monkeypatch):
+    """Сторож выхода в сеть ставит перехватчик аудита, которого не снять: в процессе тестов — только запись вызова."""
+    calls = []
+    monkeypatch.setattr(cli, "_guard_network", calls.append)
+    return calls
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     """Каталог установки: cleaner.toml и файл с паролем; быстрый Argon2; ключа в окружении нет."""
@@ -193,7 +201,7 @@ def test_apikey_add_gateway_key(home, monkeypatch, capsys, clock):
     repo.conn.close()
 
 
-def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monkeypatch):
+def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monkeypatch, guards):
     for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY", "DO_NOT_TRACK", "TOKENIZERS_PARALLELISM"):
         monkeypatch.setenv(name, "")
     monkeypatch.setenv(crypto.MASTER_KEY_ENV, init(home))
@@ -206,9 +214,44 @@ def test_serve_needs_tls_off_loopback_and_runs_without_the_access_log(home, monk
     assert main(["serve"]) == 0
     [kwargs] = calls
     assert (kwargs["host"], kwargs["ssl_certfile"], kwargs["access_log"]) == ("10.20.0.10", "c.pem", False)
+    assert len(guards) == 1                                  # сторож выхода в сеть — до запуска службы
     assert os.environ["HF_HUB_OFFLINE"] == "1" and os.environ["TRANSFORMERS_OFFLINE"] == "1"
     # Обзор плана 2+4, m-7: предупреждения Docling бывают с текстом ячеек документа — в журнал службы они не идут.
     assert all(logging.getLogger(name).level == logging.CRITICAL for name in ("docling", "transformers", "gliner"))
+
+
+def test_serve_records_the_code_fingerprint_and_guards_the_settings_hosts(home, monkeypatch, guards, offline_env, capsys, clock):
+    """Идеи «Видимый отпечаток установленного кода» и «Сторож выхода в сеть»: запуск — событие журнала и строка
+    журнала службы с отпечатком; сторож разрешает шлюз, включённые подключения и подписки действующих ключей."""
+    from cleaner import version
+
+    key = init(home)
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: None)
+    capsys.readouterr()
+    assert main(["serve"]) == 0
+    build = version.current()
+    assert f"Код: {build.short} от {build.date}" in capsys.readouterr().err
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    try:
+        [started] = repo.audit_events("service_started")
+        assert started.details == {"code": build.digest, "date": build.date}
+        on = repo.add_provider(Provider("", "Вкл", "openai", "https://llm.example/v1", "bearer", "sk-1", ("m",)))
+        repo.add_provider(Provider("", "Выкл", "openai", "https://off.example/v1", "bearer", "sk-2", ("m",), enabled=False))
+        owner = repo.users()[0].id
+        repo.add_api_key(owner, "агент", auth.token_hash("ck_a"), "ck_a", "claude-subscription")
+        repo.disable_api_key(repo.add_api_key(owner, "старый", auth.token_hash("ck_b"), "ck_b", "chatgpt-subscription"))
+        assert on and sorted(cli._egress_targets(repo)) == ["127.0.0.1", "api.anthropic.com", "llm.example"]
+    finally:
+        repo.conn.close()
+
+
+def test_verify_prints_the_code_fingerprint_first(capsys):
+    from cleaner import version
+
+    assert main(["verify"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == version.current().line() and lines[-1].startswith("OK:")
 
 
 @pytest.fixture

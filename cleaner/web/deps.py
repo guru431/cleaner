@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
+from cleaner import version
 from cleaner.queueing import Reservation
 from cleaner.service import ChatService
 from cleaner.storage.repo import ApiKey, Chat, Repository, Session, User
@@ -40,6 +41,7 @@ def _local(iso: str, tz: tzinfo) -> str:
 
 
 templates.env.filters["local"] = _local
+templates.env.globals["build"] = version.current          # подвал страниц: отпечаток кода службы
 
 
 class LoginRequired(Exception):

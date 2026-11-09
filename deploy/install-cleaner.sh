@@ -213,7 +213,8 @@ fi
 
 # --- код: каталог заменяется целиком, прежний уезжает в копию --------------------
 rm -rf "$APP/cleaner.new"
-cp -r "$SRC/cleaner" "$APP/cleaner.new"
+# Время файлов сохраняется: git archive ставит им время коммита, и дата отпечатка кода (cleaner verify, подвал) — его.
+cp -r --preserve=timestamps "$SRC/cleaner" "$APP/cleaner.new"
 find "$APP/cleaner.new" -name __pycache__ -prune -exec rm -rf {} +
 chown -R root:cleaner "$APP/cleaner.new"
 find "$APP/cleaner.new" -type d -exec chmod 0750 {} +
