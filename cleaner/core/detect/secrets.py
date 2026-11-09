@@ -88,10 +88,11 @@ _VALUE = rf"""(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)'|{_BARE})"""
 # предел длины имени пропускал длинные ключи (spring….client-secret), а без предела выражение
 # со словом внутри перебирало «tokentoken…» квадратичное время. Значение разбирается отдельно и
 # только у ключа со словом секрета: пара без него не съедает соседнюю («id:token=…»).
-_KEY_NAME = re.compile(r"""(?<![\w.-])(?P<key>[\w.-]++)["']?\s*[:=](?P<gap>\s*)""")
+_KEY_NAME = re.compile(r"""(?<![\w.-])(?P<key>[\w.-]++)["']?\s*(?P<sep>[:=])(?P<gap>\s*)""")
 # Значение со следующей строки («Пароль:\nQwerty123») — значение, а следующее поле («DB_PASSWORD=\nDB_USER=app», YAML
-# «password:\n  user: app») — нет: поле пусто. Иначе следующее поле становилось искомым секретом чата.
-_FIELD = re.compile(r"""["']?[\w.-]++["']?[ \t]*+(?:=|:(?=[\s"']|$))""")
+# «password:\n  user: app») — нет: поле пусто. Иначе следующее поле становилось искомым секретом чата. Поле — имя-ключ
+# с тем же разделителем, что у ключа (_next_field): «Пароль:\nQwerty=2024x», «token:\n  dGhp…==» — значения.
+_FIELD = re.compile(r"""(?P<q>["']?)(?P<name>[^\W\d][\w.-]*+)(?P=q)[ \t]*+(?P<sep>=|:(?=[\s"']|$))""")
 _KEY_WORD = re.compile(
     r"password|passwd|passphrase|pass|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key"
     r"|credential|пароль",
@@ -675,6 +676,22 @@ def _net_user_password(m: re.Match[str]) -> tuple[int, int] | None:
     return bounds if bounds and not (_RUSSIAN_WORD.fullmatch(word) or word in _PROSE_WORDS) else None
 
 
+def _next_field(text: str, pos: int, sep: str) -> bool:
+    """С pos начинается следующее поле, а не значение пустого ключа с разделителем sep: имя-ключ (в кавычках — всегда)
+    и тот же разделитель. Имя без кавычек в обоих регистрах с цифрой («Zx9=…», «dGhpc2…==») или перед «=» в конце строки
+    и «==» после имени — хвост base64, а не ключ."""
+    m = _FIELD.match(text, pos)
+    if m is None or m.group("sep") != sep:
+        return False
+    if m.group("q"):
+        return True
+    name, after = m.group("name"), text[m.end():m.end() + 1]
+    if sep == "=" and after == "=":
+        return False
+    mixed = any(c.isupper() for c in name) and any(c.islower() for c in name)
+    return not (mixed and (any(c.isdigit() for c in name) or (sep == "=" and after in ("", "\r", "\n"))))
+
+
 def _docker_auth(value: str) -> bool:
     """Значение поля «auth» — base64 от «имя:пароль» с непустым паролем."""
     try:
@@ -714,7 +731,7 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         # Цена — пара внутри отвергнутого значения («PWD=/x?token=…») не ищется.
         if m.start() < parsed_until or not _secret_key(key):
             continue
-        if ("\n" in m.group("gap") or "\r" in m.group("gap")) and _FIELD.match(text, m.end()):
+        if ("\n" in m.group("gap") or "\r" in m.group("gap")) and _next_field(text, m.end(), m.group("sep")):
             continue                           # поле пусто, на следующей строке — другое поле
         value = _VALUE_AT.match(text, m.end())
         if not value:

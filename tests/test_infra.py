@@ -182,6 +182,20 @@ def test_dotless_name_outside_those_commands_is_not_a_host(text):
     assert {value for type_, value in found(text) if type_ is T.HOST} == set()
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "2026-11-09T10:01:02Z INFO main.py: started", "2026-11-09T10:01:02.123+03:00 ERROR app.service: failed",
+        "2026-11-09T10:01:02Z warning kernel: low memory", "Nov  9 10:01:02 Debug app[7]: x",
+        "2026-11-09T10:01:02Z CRIT sshd[1]: y", "2026-11-09T10:01:02Z Fatal worker: z",
+    ],
+)
+def test_log_level_after_a_timestamp_is_not_a_host(text):
+    """Ревью: в строке журнала с меткой времени ISO уровень («INFO», «ERROR») занимал место поля узла и становился
+    DOMAIN/HOST во всём чате."""
+    assert found(text) == set()
+
+
 def test_loc_is_an_internal_suffix_but_a_pandas_indexer_is_code():
     """IDEAS P3 «суффикс loc»: «.loc» — частый суффикс доменов AD; «df.loc[…]» — индексатор pandas (2287 строк из 2461 с
     «.loc» в выборке кода site-packages)."""
@@ -374,6 +388,19 @@ def test_ipv6_with_an_embedded_ipv4_is_one_address():
     assert mapped == plain
     sanitized = sanitize(state, "NAT64 64:ff9b::10.1.2.3 отвечает", Settings()).sanitized
     assert "ff9b" not in sanitized and "10.1.2.3" not in sanitized
+
+
+def test_ipv4_mapped_ipv6_in_hex_is_an_address():
+    """Ревью: пропуск «::ffff:» ради точечной записи пропускал и шестнадцатеричную «::ffff:a14:1e28» (10.20.30.40), которую
+    правило IPv4 не находит, — адрес уходил открытым. Петля и документационные адреса в такой записи открыты, как у IPv4."""
+    assert found("connect from ::ffff:a14:1e28 port 22") == {(T.IP, "::ffff:a14:1e28")}
+    assert found("client [::ffff:0a14:1e28]:5432 refused") == {(T.IP, "::ffff:0a14:1e28")}
+    assert found("from ::ffff:7f00:1 and ::ffff:c000:201") == set()
+    state = ChatState(chat_id="mapped-hex", net_key=bytes(32))
+    text = "connect from ::ffff:a14:1e28 port 22"
+    result = sanitize(state, text, Settings())
+    assert "a14:1e28" not in result.sanitized
+    assert restore(state, result.sanitized, Settings()).text == text
 
 
 def test_ipv6_after_a_label_is_masked_and_restored():

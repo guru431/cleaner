@@ -61,6 +61,9 @@ _CODE_OBJECTS = frozenset({
     "options", "opts", "args", "params", "session", "auth", "g", "current", "user", "data", "form", "props",
 })
 _CAMEL = re.compile(r"[a-z][A-Z]")
+# Имя переменной кода без кавычек: «user = user_id», «login = login_name» — идентификатор, а не логин; в кавычках
+# («user = "ivanov"») — значение.
+_CODE_IDENTIFIER = re.compile(r"\w+_(?:ids?|names?|obj|var|input)", re.IGNORECASE)
 _CONSTANT = re.compile(r"[A-Z0-9]+(?:_[A-Z0-9]+)+")
 # Искомым написанием чата становится имя с цифрой, знаком или от пяти знаков: «user: app» иначе скрывал бы слово app во
 # всех текстах чата.
@@ -165,8 +168,8 @@ def _keyed(text: str, ctx: DetectContext) -> list[Span]:
         if not bounds:
             continue
         start, end, bare = bounds
-        if bare and m.group("quote"):
-            continue                       # ключ в кавычках и имя без них — переменная кода: «{"user": user_id}»
+        if bare and (m.group("quote") or _CODE_IDENTIFIER.fullmatch(text, start, end)):
+            continue                       # переменная кода: «{"user": user_id}», «user = user_id»
         login, english = text[start:end], key.isascii()
         if not prefix and english and not _LINE_END.match(text, end):
             continue                       # реплика «User: Can you help me?», комментарий «the login: keep polling»

@@ -72,11 +72,15 @@ _COMMAND_UNC = re.compile(
 _RDP_HOST = re.compile(
     r"(?<![\w-])mstsc(?:\.exe)?(?:[ \t]+[^\s|&;]+){0,30}?[ \t]+/v:[\"']?(?P<host>\w[\w.-]*)", re.IGNORECASE
 )
-# Поле узла строки syslog (RFC 3164 и метка времени ISO 8601 rsyslog): «Nov  9 10:01:02 srv01 sshd[812]:».
+# Поле узла строки syslog (RFC 3164 и метка времени ISO 8601 rsyslog): «Nov  9 10:01:02 srv01 sshd[812]:». Журналы
+# приложений на том же месте пишут уровень («2026-11-09T10:01:02Z INFO main.py: started») — это не узел.
+_LOG_LEVEL = (
+    r"(?:info|warn|warning|error|err|debug|trace|fatal|notice|critical|crit|alert|emerg|severe|fine)(?![\w.-])"
+)
 _SYSLOG_HOST = re.compile(
     r"(?<![\w:])(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d\d:\d\d:\d\d"
     r"|\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?)"
-    r" (?P<host>[\w.-]+) [\w./-]+(?:\[\d+\])?:"
+    rf" (?!(?i:{_LOG_LEVEL}))(?P<host>[\w.-]+) [\w./-]+(?:\[\d+\])?:"
 )
 _MACHINE = re.compile(r"(?<![\w.$-])(?P<host>(?=[A-Za-z-]*\d)[A-Za-z0-9][A-Za-z0-9-]{1,14})\$(?![\w$])")
 # Начало имени. Имя начинается и после точки за знаком, который не часть имени («*.contoso.ru» сертификата и DNS,
@@ -182,8 +186,10 @@ def _ipv6(text: str) -> Iterator[Span]:
             ip = ipaddress.IPv6Address(candidate)
         except ValueError:
             continue
-        if ip.ipv4_mapped is not None:
-            continue        # «::ffff:» и адрес IPv4: адрес находит _ipv4 — та же сущность, что без «::ffff:», петля открыта
+        if ip.ipv4_mapped is not None and ("." in candidate or not netmap.is_maskable(ip.ipv4_mapped)):
+            # «::ffff:» и адрес IPv4 через точки находит _ipv4 — та же сущность, что без «::ffff:». Шестнадцатеричная
+            # запись («::ffff:a14:1e28») — адрес IPv6, но петля и документационные адреса в ней открыты, как у IPv4.
+            continue
         if netmap.is_maskable(ip):
             start = m.start("addr")
             yield Span(start, start + len(candidate), EntityType.IP, name, validated=True)
