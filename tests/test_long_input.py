@@ -100,6 +100,9 @@ pytestmark = pytest.mark.integration
         "доступ a:" * 15000, "доступ " + "a/" * 50000,
         # Адрес в URL-кодировке («%40», «%2B»), точки телефона и месяц словом в дате рождения (аудит 09.11.2026).
         "a%2B" * 20000, "%2Fa." * 15000, "a%40" * 20000, "8.916.123." * 10000, "родился 12 марта " * 5000,
+        # Поле на следующей строке с «=», уровень журнала после метки времени ISO, переменная кода после ключа входа
+        # (ревью 09.11.2026).
+        "token:\nAb1=" * 15000, "2026-11-09T10:01:02Z INFO " * 5000, "user = a_id\n" * 10000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -128,6 +131,7 @@ pytestmark = pytest.mark.integration
         "user_keys", "user_key_prefixes", "glued_user_key", "login_words", "event_names", "event_domains",
         "sshd_failed", "sshd_invalid", "access_words", "access_pairs", "access_slashes",
         "encoded_plus_run", "encoded_slash_run", "encoded_at_run", "dotted_phone_run", "month_dates",
+        "next_line_equals", "iso_log_levels", "code_identifier_logins",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):

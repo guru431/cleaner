@@ -1150,6 +1150,23 @@ def test_value_on_the_line_after_the_key_is_still_found(text, value):
     assert found(text) == {value}
 
 
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("token:\n  " + "dGhpc2lzYXNl" + "Y3JldA==", "dGhpc2lzYXNl" + "Y3JldA=="),
+        ("Пароль:\nQwerty=2024x", "Qwerty=2024x"),
+        ("client_secret:\n  Zx9=kq7Lm2", "Zx9=kq7Lm2"),
+        ("api_key=\n" + "sk9aZt7" + "Qp2Lm==", "sk9aZt7" + "Qp2Lm=="),
+        ("password=\nQx7Lm2kZ=", "Qx7Lm2kZ="),
+    ],
+    ids=["base64_after_colon", "ru_colon_then_equals", "colon_then_equals", "env_padding", "env_mixed_digit"],
+)
+def test_value_with_an_equals_sign_on_the_next_line_is_not_a_field(text, value):
+    """Ревью: значение со знаком «=» на строке после ключа принималось за следующее поле, и пароль уходил открытым.
+    Поле — только имя-ключ с тем же разделителем, что у ключа, и без продолжения base64 после него."""
+    assert found(text) == {value}
+
+
 def _docker_auth(credentials: str) -> str:
     import base64
 

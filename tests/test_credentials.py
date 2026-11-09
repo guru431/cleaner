@@ -84,6 +84,24 @@ def test_words_types_code_and_service_names_after_a_login_key_are_left_alone(tex
     assert not {value for type_, value in found(text) if type_ == "ACCOUNT"}, text
 
 
+@pytest.mark.parametrize(
+    "text", ["user = user_id", "login = login_name\n", "db_user = owner_ids;", "username: display_name"]
+)
+def test_code_identifier_after_a_login_key_is_not_an_account(text):
+    """Ревью: «user = user_id» в коде давало <ACCOUNT_1>, и каждое «user_id» чата заменялось. Имя переменной с «_id»,
+    «_name» — идентификатор кода, а не логин."""
+    assert not {value for type_, value in found(text) if type_ == "ACCOUNT"}, text
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [('user = "user_id"', "user_id"), ('user = "ivanov"', "ivanov"), ("user=ivanov", "ivanov"),
+     ("Server=sql01;User Id=svc_crm;Password=x;", "svc_crm")],
+)
+def test_quoted_and_config_logins_stay_accounts(text, value):
+    assert ("ACCOUNT", value) in found(text)
+
+
 def test_short_common_login_is_hidden_only_in_its_place():
     """«user: app» — учётная запись, но слово app искомым написанием чата не становится: иначе оно скрывалось бы везде."""
     spans = credentials.detect("db:\n  user: app\n", CTX)
