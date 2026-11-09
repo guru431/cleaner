@@ -155,12 +155,21 @@ def _page(request: Request, viewer: Viewer, issued: str = "", issued_key: ApiKey
             "OpenAI Responses" if key.upstream == "chatgpt-subscription" else "")
         enabled = key.layers or {}
         layer_text = "1–3" + (", 4" if enabled.get("ner") else "") + (", 5" if enabled.get("llm") else "")
-        details[key.id] = f"{protocol} · слои {layer_text} · автоматическая отправка" if key.upstream else "Слои по настройкам чата"
+        guard = "" if key.hold_secrets else " · секреты в адресах чужих узлов восстанавливаются"
+        details[key.id] = f"{protocol} · слои {layer_text}{guard} · автоматическая отправка" if key.upstream else "Слои по настройкам чата"
     settings = _agent_settings(request, issued, issued_key, providers) if issued and issued_key and issued_key.upstream else []
+    check = ""
+    if settings:
+        # Самопроверка агента (…/v1/cleaner/check): маршрут того протокола, на котором агент говорит со шлюзом.
+        provider = provider_by_upstream.get(issued_key.upstream)
+        anthropic = issued_key.upstream == "claude-subscription" or (provider is not None and provider.protocol == "anthropic")
+        cacert = f'--cacert "{CERT}" ' if request.app.state.cert_file else ""
+        check = (f'curl {cacert}-H "X-Cleaner-Key: {issued}" '
+                 f'{request.base_url}agent/{"anthropic" if anthropic else "openai"}/v1/cleaner/check')
     return page(
         request, "keys.html", viewer, keys=keys, logins=logins, issued=issued, endpoint=f"{request.base_url}api/v1/chats",
         access=access, gateway=gateway, protocols=PROTOCOL_LABELS, agent_settings=settings, cert=bool(request.app.state.cert_file),
-        subscriptions=SUBSCRIPTION_OPTIONS if viewer.is_admin else {}, key_details=details,
+        subscriptions=SUBSCRIPTION_OPTIONS if viewer.is_admin else {}, key_details=details, check_command=check,
     )
 
 
@@ -189,6 +198,8 @@ def create_key(request: Request, form: dict[str, str] = Depends(get_form), viewe
                  (mode == "subscription" and provider_id not in SUBSCRIPTION_NAMES)):
         raise HTTPException(400, "Режим ключа не соответствует выбранному доступу к модели")
     upstream, models, layers = None, (), None
+    # Отметка снимает защиту (17, риск 1): без неё — и у формы без поля — секреты в адресах чужих узлов не восстанавливаются.
+    hold_secrets = form.get("restore_foreign") != "1"
     if provider_id:
         # Отметки моделей — поля «m:<подключение>:<модель>»: у формы несколько подключений, у каждого свои модели. У
         # подписки списка нет — модели через запятую (пусто — все).
@@ -203,7 +214,7 @@ def create_key(request: Request, form: dict[str, str] = Depends(get_form), viewe
         layers = {"ner": form.get("ner") == "1", "llm": form.get("llm") == "1"}
     key = auth.new_api_key()
     with repo.lock, transaction(repo.conn):
-        key_id = repo.add_api_key(viewer.user.id, name, auth.token_hash(key), key[-4:], upstream, models, layers)
+        key_id = repo.add_api_key(viewer.user.id, name, auth.token_hash(key), key[-4:], upstream, models, layers, hold_secrets)
         repo.audit("key_created", viewer.user.id, id=key_id)
         ticket = request.app.state.issued_keys.put(viewer.session.token_hash, key_id, key)
     return RedirectResponse(f"/keys?issued={ticket}", status_code=303, headers={"cache-control": "no-store"})

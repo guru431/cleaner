@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections import Counter, OrderedDict
@@ -21,7 +22,7 @@ from cleaner.core.agent import ledger, walk
 from cleaner.core.agent.protocol import PROTOCOLS, GatewayProtocol, ProtocolStream
 from cleaner.core.detect import dictionary
 from cleaner.core.detect.base import DetectorError
-from cleaner.core.restore import RestoreLimit
+from cleaner.core.restore import RestoreLimit, SecretGuard
 from cleaner.core.types import ChatState, Entity, Policy, Settings
 from cleaner.egress import ProviderError, cloud, forward as egress
 from cleaner.storage.repo import ApiKey, CheckpointBusy, LedgerEntry, Repository, StaleState, User
@@ -112,6 +113,25 @@ class _Prepared:
     withheld: Counter = field(default_factory=Counter)
     replaced: Counter = field(default_factory=Counter)
     blocks: list[dict] = field(default_factory=list)
+    guard: SecretGuard | None = None    # секреты в адресах чужих узлов в аргументах ответа (настройка ключа)
+    unfamiliar: list[str] = field(default_factory=list)     # формы незнакомых полей и блоков: пути и type, без данных
+    model_blocks: int = 0               # блоков модели в истории запроса
+    model_fresh: int = 0                # из них не найдено в журнале out
+
+
+# Имя поля или значение type, которое можно показать в квитанции: имя протокола, а не данные пользователя.
+_SHAPE_NAME = re.compile(r"[A-Za-z_$][\w.$-]{0,63}")
+
+
+def _shape(unit: walk.Unit) -> str:
+    """Форма незнакомого поля или блока (8.3) для квитанции: путь в теле с [] вместо номеров и значение type. Имя, не
+    похожее на имя поля протокола (ключ — значение пользователя), — «?»."""
+    path = "".join(
+        "[]" if isinstance(step, int) else ("." if i else "") + (step if _SHAPE_NAME.fullmatch(step) else "?")
+        for i, step in enumerate(unit.path)
+    )
+    type_ = unit.node.get("type") if isinstance(unit.node, dict) else None
+    return f"{path} type={type_}" if isinstance(type_, str) and _SHAPE_NAME.fullmatch(type_) else path
 
 
 def _snapshot(state: ChatState) -> ChatState:
@@ -129,6 +149,11 @@ def _snapshot(state: ChatState) -> ChatState:
 
 def _json(node: object) -> str:
     return json.dumps(node, ensure_ascii=False, separators=(",", ":"))
+
+
+def _digest(secret: bytes, proto: GatewayProtocol, role: str, kind: str, node: object) -> str:
+    """Отпечаток блока в журнале — по узлу, сведённому протоколом (ledger_node): так его ищут и так записывают."""
+    return ledger.block_digest(secret, proto.name, role, kind, proto.ledger_node(role, kind, node))
 
 
 def _ms(since: float) -> int:
@@ -162,12 +187,13 @@ def gateway_access(
 class AgentService:
     def __init__(
         self, repo: Repository, engines: Any, clock: Clock, forward: Callable[..., egress.Upstream] = egress.forward,
-        subscription_urls: Mapping[str, str] | None = None,
+        subscription_urls: Mapping[str, str] | None = None, reach: Callable[[str], int] = egress.reach,
     ):
         self.repo = repo
         self.engines = engines          # cleaner.engines.Engines или заглушка тестов; None — без слоёв 4–5
         self.clock = clock
         self.forward = forward
+        self.reach = reach              # самопроверка: доступен ли провайдер (GET без данных)
         # Только для тестов: заглушка вместо закреплённых адресов подписок.
         self.subscription_urls = {access: url for access, (_, url) in SUBSCRIPTIONS.items()} | dict(subscription_urls or {})
         self._guard = threading.Lock()
@@ -231,6 +257,67 @@ class AgentService:
         refused = AgentRefused(status, kind, message, headers)
         refused.reason = reason
         return refused
+
+    # --- самопроверка агента ------------------------------------------------------------
+
+    def check(self, key: ApiKey, user: User, family: str, *, model: str = "", tls: bool, login: bool) -> dict:
+        """Самопроверка (маршрут …/v1/cleaner/check, раздел 14): ключ, доступ, протокол, модель, слои, TLS и доступность
+        провайдера. Текста пользователя нет ни в запросе, ни в ответе: провайдеру уходит только GET по адресу подключения,
+        без ключа. family — anthropic | openai (путь маршрута); ok у проверки: True, False или None — не проверить отсюда."""
+        checks: list[dict] = []
+
+        def add(name: str, ok: bool | None, detail: str) -> None:
+            checks.append({"name": name, "ok": ok, "detail": detail})
+
+        add("key", True, "ключ действует")
+        url, protocol, allowed = "", "", ()
+        if not key.upstream:
+            add("access", False, "у ключа нет доступа к модели — он только для /api/v1")
+        elif key.upstream in SUBSCRIPTIONS:
+            protocol, url = SUBSCRIPTIONS[key.upstream][0], self.subscription_urls[key.upstream]
+            add("access", user.role == "admin", "подписка" if user.role == "admin" else "доступ по подписке — только у администратора")
+            allowed = key.models
+            add("login", True if login else None,
+                "агент прислал вход подписки" if login else "вход подписки агента проверяется на первом запросе")
+        else:
+            kind, _, provider_id = key.upstream.partition(":")
+            provider = self.repo.provider(provider_id) if kind == "provider" else None
+            if provider is None or not provider.enabled:
+                add("access", False, "подключение ключа удалено или выключено")
+            else:
+                add("access", True, "подключение Cleaner")
+                protocol, url, allowed = provider.protocol, provider.base_url, provider.allowed_models(key.models)
+        if protocol:
+            wanted = ("anthropic",) if family == "anthropic" else ("openai", "responses")
+            endpoint = {"anthropic": "/agent/anthropic", "openai": "/agent/openai/v1/chat/completions",
+                        "responses": "/agent/openai/v1/responses"}[protocol]
+            add("protocol", protocol in wanted, f"агенту — {endpoint}")
+            if model:
+                add("model", not allowed or model in allowed, "модель разрешена ключу" if not allowed or model in allowed
+                    else "модель не разрешена ключу")
+            else:
+                add("model", True, f"разрешены: {', '.join(allowed)}" if allowed else "разрешены все модели")
+        layers = [name for name in ("ner", "llm") if key.layers.get(name)]
+        if layers:
+            try:
+                if self.engines is None:
+                    raise DetectorError("слоёв 4–5 в службе нет")
+                for name in layers:
+                    getattr(self.engines, name)()
+                add("layers", True, "слои 4–5 ключа доступны")
+            except DetectorError:
+                add("layers", False, "включённый для ключа слой очистки недоступен — запросы получат 503")
+        add("tls", True if tls else None, "соединение по TLS: сертификат службы принят" if tls else "служба работает без TLS")
+        if url:
+            try:
+                status = self.reach(url)
+            except egress.ProviderTimeout:
+                add("provider", False, "провайдер не ответил вовремя")
+            except (ProviderError, ValueError):
+                add("provider", False, "провайдер недоступен")
+            else:
+                add("provider", status < 500, f"провайдер ответил HTTP {status}")
+        return {"ok": all(item["ok"] is not False for item in checks), "checks": checks}
 
     # --- запрос ------------------------------------------------------------------------
 
@@ -384,6 +471,12 @@ class AgentService:
             "new": prepared.new if prepared else 0,
             "repeated": sum(map(len, prepared.repeated.values())) if prepared else 0,
             "withheld": dict(prepared.withheld) if prepared else {}, "blocks": prepared.blocks if prepared else [],
+            # Секреты и учётные записи, оставленные заменой в адресах чужих узлов в аргументах инструментов.
+            "held_secrets": prepared.guard.held if prepared and prepared.guard else 0,
+            # Новые формы запросов агента (риск 7): незнакомые поля и блоки, блоки модели вне журнала out.
+            "unfamiliar": prepared.unfamiliar if prepared else [],
+            "model_blocks": prepared.model_blocks if prepared else 0,
+            "model_fresh": prepared.model_fresh if prepared else 0,
             "channels": ["JSON: новые значения и ключи объектов", "JSON: служебные параметры", "URL: разобранные параметры", "HTTP: разрешённые заголовки"],
             "headers": sorted(name for name, _ in out.headers) if out else [],
             "parameters": ["beta"] if out and out.query else [],
@@ -435,7 +528,14 @@ class AgentService:
         except ValueError:
             raise self._refuse(call, 400, "invalid_request_error", "Cleaner: неверный cache_control", "cache_control", chat_id=chat_id) from None
         units = proto.units(call.body)
-        digests = {unit.path: ledger.block_digest(secret, proto.name, unit.role, unit.kind, unit.node) for unit in units}
+        digests: dict[walk.Path, str] = {}
+        # Записи до сведения узлов (ledger_node) — под прежним отпечатком: разговор, начатый до него, повторяется дословно.
+        legacy: dict[walk.Path, str] = {}
+        for unit in units:
+            node = proto.ledger_node(unit.role, unit.kind, unit.node)
+            digests[unit.path] = ledger.block_digest(secret, proto.name, unit.role, unit.kind, node)
+            if node is not unit.node:
+                legacy[unit.path] = ledger.block_digest(secret, proto.name, unit.role, unit.kind, unit.node)
         groups: dict[str, list[walk.Unit]] = {"in": [], "out": []}
         for unit in units:
             try:
@@ -444,7 +544,9 @@ class AgentService:
                 raise self._refuse(call, 400, "invalid_request_error", "Cleaner: неверный непрозрачный блок", "opaque", chat_id=chat_id) from None
             groups["out" if proto.is_model_block(unit) or unit.kind == "opaque" and unit.role == "assistant" else "in"].append(unit)
         known = {
-            direction: self.repo.ledger_get(chat_id, conv_id, direction, [digests[u.path] for u in group])
+            direction: self.repo.ledger_get(
+                chat_id, conv_id, direction, [digests[u.path] for u in group] + [legacy[u.path] for u in group if u.path in legacy],
+            )
             for direction, group in groups.items()
         }
         repeated: dict[walk.Path, object] = {}
@@ -457,6 +559,9 @@ class AgentService:
             for unit in group:
                 digest = digests[unit.path]
                 entry = known[direction].get(digest)
+                if entry is None and unit.path in legacy:
+                    digest = legacy[unit.path]
+                    entry = known[direction].get(digest)
                 if entry is not None:
                     repeated[unit.path] = json.loads(entry.wire)
                     result.repeated[direction].append(digest)
@@ -519,6 +624,9 @@ class AgentService:
             refused.reason = "leak_structural" if in_service else "leak"
             raise refused
         result.out, result.state = out, _snapshot(state)
+        result.unfamiliar = sorted({_shape(unit) for unit in units if unit.kind == "other"})
+        result.model_blocks = len(groups["out"])
+        result.model_fresh = sum(1 for direction, _ in fresh if direction == "out")
         held = {entry.digest for entry in entries if entry.withheld}
         result.blocks = [
             {"direction": direction, "digest": digests[unit.path], "kind": unit.kind,
@@ -532,15 +640,27 @@ class AgentService:
         layers: pipeline.Layers,
     ) -> tuple[object, str, dict[str, int]]:
         """Новый блок: очищенный узел, причина удержания ("" — нет) и замены по типам. Блок агента — слоями ключа; блок
-        модели, которого нет в журнале, — как ответ модели в чате: известные значения, словарь и правила (FR-8.11)."""
+        модели, которого нет в журнале, — слоями 1–3. Известных значений и словаря ему мало: агент держит его с
+        оригиналами, которые восстановление вывело само (FR-7.6: адрес в фиктивной подсети, имя в фиктивном домене), —
+        сущностями чата они не стали, а после истечения журнала или «Начать заново» и чат новый. Слои 4–5 не нужны:
+        это текст модели, а не пользователя, и ждать локальную модель на каждом сжатии истории агента незачем.
+        Неподписанные рассуждения агент получает как пришли, без восстановления (7.2.3): выведенных оригиналов в них
+        нет — по-прежнему известные значения и словарь."""
         if unit.kind == "media":
             return proto.placeholder(unit, ledger.REASONS["media"]), "media", {}
+        nested = False
+        if unit.kind not in ("opaque", "reasoning"):
+            # Изображение или файл глубже известных мест (блок незнакомого вида, computer_call_output) — тоже пометкой.
+            node, nested = walk.hold_media(unit.node, "input_text" if proto.name == "responses" else "text")
+            if nested:
+                unit = replace(unit, node=node)
         blocked: list[str] = []
         counts: Counter = Counter()
+        detectors = (dictionary,) if unit.kind == "reasoning" else pipeline.DETECTORS
 
         def clean(text: str) -> str:
             if direction == "out":
-                found = pipeline.sanitize(state, text, settings, detectors=(dictionary,))
+                found = pipeline.sanitize(state, text, settings, detectors=detectors)
             else:
                 found = pipeline.sanitize(state, text, settings, layers)
                 # Замена сущности с «блокировать», вставленная агентом, держит блок, как оригинал (FR-4.2).
@@ -560,7 +680,7 @@ class AgentService:
             return proto.placeholder(unit, ledger.REASONS["failed"]), "failed", {}
         if blocked:
             return proto.placeholder(unit, ledger.REASONS["blocked"].format(type=blocked[0])), "blocked", {}
-        if proto.contains_media(unit):
+        if nested or proto.contains_media(unit):
             return node, "media", dict(counts)
         return node, "", dict(counts)
 
@@ -602,6 +722,8 @@ class AgentService:
             self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=upstream.status)
             return AgentReply(upstream.status, dict(upstream.headers), body=raw)
         stream = proto.stream(prepared.state, prepared.settings)
+        if call.key.hold_secrets:
+            stream.budget.guard = prepared.guard = SecretGuard(prepared.out.body)
         if not call.body.get("stream"):
             try:
                 raw = upstream.read(_BODY_BYTES)
@@ -655,7 +777,7 @@ class AgentService:
         entries = [
             LedgerEntry(
                 conv_id, "out",
-                ledger.block_digest(prepared.secret, proto.name, "assistant", proto.model_kind(local), local),
+                _digest(prepared.secret, proto, "assistant", proto.model_kind(local), local),
                 _json(local), _json(wire),
             )
             for local, wire in stream.pairs

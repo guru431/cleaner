@@ -149,6 +149,12 @@ def test_gateway_key_needs_an_enabled_connection_and_its_models(ivan, repo):
     assert response.status_code == 200
     [key] = repo.api_keys()
     assert (key.upstream, key.models, key.layers) == (f"provider:{ids['anthropic']}", ("m-2",), {"ner": True, "llm": False})
+    assert key.hold_secrets is True         # секреты в адресах чужих узлов не восстанавливаются, пока не отмечено иное
+    issue_page(ivan, name="агент 2", provider=ids["anthropic"], restore_foreign="1")
+    second = next(stored for stored in repo.api_keys() if stored.name == "агент 2")
+    assert second.hold_secrets is False
+    assert ivan.get("/keys").text.count("секреты в адресах чужих узлов восстанавливаются") == 1
+    repo.disable_api_key(second.id)
     page = ivan.get("/keys").text
     assert "DeepSeek: m-2" in page and page.count("только API") == 1         # только пункт формы
     issue(ivan, "скрипт")
@@ -192,7 +198,7 @@ def test_each_access_shows_its_agent_settings_once(boss, repo):
     responses = repo.add_provider(Provider("", "OpenAI", "responses", "https://api.example/v1", "bearer", "sk-3", ("gpt-5.5",)))
     cases = {
         anthropic: ['"ANTHROPIC_AUTH_TOKEN": "{key}"', '"ANTHROPIC_BASE_URL": "http://testserver/agent/anthropic"'],
-        "claude-subscription": ['"ANTHROPIC_CUSTOM_HEADERS": "X-Cleaner-Key: {key}"', "claude-switch.ps1 cleaner-sub",
+        "claude-subscription": ['"ANTHROPIC_CUSTOM_HEADERS": "X-Cleaner-Key: {key}"',
                                 '"ANTHROPIC_BASE_URL": "http://testserver/agent/anthropic"'],
         responses: ['base_url = "http://testserver/agent/openai/v1"', 'wire_api = "responses"', 'env_key = "CLEANER_KEY"',
                     '$env:CLEANER_KEY = "{key}"', "CODEX_CA_CERTIFICATE", 'model = "gpt-5.5"'],
@@ -208,9 +214,18 @@ def test_each_access_shows_its_agent_settings_once(boss, repo):
         shown = html.unescape(response.text)
         for line in lines:
             assert line.replace("{key}", key) in shown, (access, line)
-        snippets = "".join(re.findall(r'<pre class="text mono">(.*?)</pre>', shown, re.S))
+        snippets = "".join(re.findall(r'<pre class="text mono"[^>]*>(.*?)</pre>', shown, re.S))
         assert ("ANTHROPIC_AUTH_TOKEN" in snippets) is (access == anthropic)
         assert ("requires_openai_auth" in snippets) is (access == "chatgpt-subscription")
+        assert "claude-switch" not in shown                     # скрипта владельца в поставке нет
+        # Порядок подключения: ключ, сертификат, настройки, самопроверка; у ключа и у каждого блока — копирование.
+        steps = shown.index('id="issued-key"'), shown.index("/cert.pem") if "/cert.pem" in shown else shown.index("Сертификат."), \
+            shown.index('id="agent-settings-1"'), shown.index('id="agent-check"')
+        assert list(steps) == sorted(steps)
+        for target in re.findall(r'<pre class="text mono" id="([^"]+)"', shown):
+            assert f'data-copy="{target}"' in shown, (access, target)
+        family = "anthropic" if access in (anthropic, "claude-subscription") else "openai"
+        assert f'curl -H "X-Cleaner-Key: {key}" http://testserver/agent/{family}/v1/cleaner/check' in shown
         assert key not in boss.get("/keys").text
     names = {key.name: key.upstream for key in repo.api_keys()}
     assert names["агент claude-subscription"] == "claude-subscription"
@@ -225,7 +240,9 @@ def test_subscription_models_are_free_text(boss, repo):
 
 
 def snippets(response) -> list[str]:
-    return re.findall(r'<pre class="text mono">(.*?)</pre>', html.unescape(response.text), re.S)
+    """Ключ и блоки настроек агента — без команды самопроверки."""
+    pattern = r'<pre class="text mono" id="(?:issued-key|agent-settings-\d+)">(.*?)</pre>'
+    return re.findall(pattern, html.unescape(response.text), re.S)
 
 
 def test_opencode_settings_carry_the_key_as_api_key(ivan, repo):

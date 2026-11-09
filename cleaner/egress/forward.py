@@ -153,6 +153,25 @@ class Upstream:
             self._client.close()
 
 
+_REACH_TIMEOUT = httpx.Timeout(10.0)
+
+
+def reach(base_url: str, *, transport: httpx.BaseTransport | None = None) -> int:
+    """Самопроверка агента (маршрут …/v1/cleaner/check): доступен ли провайдер. GET по адресу подключения без тела, без
+    ключа и без заголовков агента — провайдеру не уходит ничего, кроме самого обращения. Код ответа — любой HTTP-ответ
+    значит, что узел доступен; нет ответа — ProviderError или ProviderTimeout."""
+    check_url(base_url)
+    client = httpx.Client(transport=transport, trust_env=False, follow_redirects=False, timeout=_REACH_TIMEOUT,
+                          verify=urlsplit(base_url).scheme != "http")
+    try:
+        with client:
+            return client.get(base_url).status_code
+    except httpx.TimeoutException:
+        raise ProviderTimeout() from None
+    except httpx.HTTPError:
+        raise ProviderError("соединение с провайдером не удалось") from None
+
+
 def forward(
     out: AgentOutgoing, connection: Connection, state: ChatState, settings: Settings, *,
     passed: tuple[str, ...] = _PASSED, transport: httpx.BaseTransport | None = None,

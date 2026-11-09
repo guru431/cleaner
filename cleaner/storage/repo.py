@@ -201,6 +201,7 @@ class ApiKey:
     layers: dict[str, bool] = field(default_factory=lambda: dict(KEY_LAYERS), hash=False)     # слои 4 и 5 шлюза
     chat_id: str | None = None                 # текущий чат шлюза
     agent_epoch: int = 0                       # namespace после явного сброса клиента без id разговора
+    hold_secrets: bool = True                  # шлюз: секреты и учётные записи в адресах чужих узлов не восстанавливаются
 
 
 class Repository:
@@ -841,20 +842,22 @@ class Repository:
             row["id"], row["user_id"], self._dec(self.global_key, row["name_enc"], f"api_keys.name:{row['id']}"),
             row["tail"], bool(row["disabled"]), row["created_at"], row["last_used_at"] or "",
             row["upstream"], tuple(json.loads(row["models"])), KEY_LAYERS | json.loads(row["layers"]), row["chat_id"], row["agent_epoch"],
+            bool(row["hold_secrets"]),
         )
 
     def add_api_key(
         self, user_id: str, name: str, token_hash: str, tail: str,
         upstream: str | None = None, models: tuple[str, ...] = (), layers: dict[str, bool] | None = None,
+        hold_secrets: bool = True,
     ) -> str:
         """Доступ к модели (upstream, models) задаётся при создании и не меняется: другой доступ — новый ключ."""
         key_id = uuid.uuid4().hex
         self._run(
-            "INSERT INTO api_keys(id, user_id, name_enc, token_hash, tail, disabled, created_at, upstream, models, layers) "
-            "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            "INSERT INTO api_keys(id, user_id, name_enc, token_hash, tail, disabled, created_at, upstream, models, layers, "
+            "hold_secrets) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
             key_id, user_id, self._enc(self.global_key, name, f"api_keys.name:{key_id}"), token_hash, tail, self._now(),
             upstream, json.dumps(list(models), ensure_ascii=False),
-            json.dumps({name_: bool((layers or KEY_LAYERS).get(name_, False)) for name_ in KEY_LAYERS}),
+            json.dumps({name_: bool((layers or KEY_LAYERS).get(name_, False)) for name_ in KEY_LAYERS}), int(hold_secrets),
         )
         return key_id
 

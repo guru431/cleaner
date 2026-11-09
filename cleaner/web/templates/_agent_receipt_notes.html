@@ -1,0 +1,3 @@
+{# Отметки квитанции запроса шлюза (agent_chat.html, внутри цикла по receipts): значений здесь нет — только числа. #}
+{% if receipt.unfamiliar or receipt.model_blocks %}<p>{% if receipt.unfamiliar %}Незнакомые поля и блоки (очищены как текст): <code>{{ receipt.unfamiliar | join(", ") }}</code>. {% endif %}{% if receipt.model_blocks %}Блоков модели в истории: {{ receipt.model_blocks }}, не найдено в журнале: {{ receipt.model_fresh }}.{% endif %}</p>{% endif %}
+{% if receipt.held_secrets %}<p class="flash warn">В аргументах инструментов секрет или учётная запись в адресе чужого узла остались заменой: {{ receipt.held_secrets }}. Так бывает, когда модель следует инструкции из прочитанного файла или страницы.</p>{% endif %}

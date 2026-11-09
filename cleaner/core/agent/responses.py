@@ -239,6 +239,16 @@ def model_kind(node: dict) -> str:
     return "text" if node.get("type") == "output_text" else "tool_use"
 
 
+def ledger_node(role: str, kind: str, node: object) -> object:
+    """Текст ассистента для отпечатка журнала: строка content и часть output_text — один узел. Клиент присылает ответ
+    модели то строкой, то частью; пустые annotations и logprobs части ничего не добавляют."""
+    if role != "assistant" or kind != "text" or not isinstance(node, dict) or node.get("type") not in ("text", "output_text"):
+        return node
+    return {"type": "output_text", **{
+        key: value for key, value in node.items() if key != "type" and value not in ([], None)
+    }}
+
+
 def rebuild(body: dict, replaced: dict) -> dict:
     replaced = dict(replaced)
     for path, node in replaced.items():
@@ -246,6 +256,9 @@ def rebuild(body: dict, replaced: dict) -> dict:
             old = body["input"][path[1]]
             if "content" in old and old["content"] is None:
                 replaced[path] = dict(node, content=None)
+        elif path[-1] == "content" and isinstance(node, dict) and node.get("type") == "output_text":
+            # Часть из журнала на месте ответа строкой (ledger_node): строкой и уходит.
+            replaced[path] = text_block(node["text"])
     return walk.rebuild(body, replaced, KEEP)
 
 
