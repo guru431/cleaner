@@ -56,6 +56,7 @@ class Session:
     user_id: str
     csrf: str
     last_seen_at: str
+    created_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -339,9 +340,24 @@ class Repository:
             token_hash, user_id, csrf, now, now, user_id, password_hash,
         ) == 1
 
+    @staticmethod
+    def _session(row: sqlite3.Row) -> Session:
+        return Session(row["token_hash"], row["user_id"], row["csrf"], row["last_seen_at"], row["created_at"])
+
     def session(self, token_hash: str) -> Session | None:
         row = self._one("SELECT * FROM sessions WHERE token_hash = ?", token_hash)
-        return None if row is None else Session(row["token_hash"], row["user_id"], row["csrf"], row["last_seen_at"])
+        return None if row is None else self._session(row)
+
+    def sessions(self, user_id: str) -> list[Session]:
+        """Сессии пользователя, свежие первыми."""
+        return [
+            self._session(row)
+            for row in self._all("SELECT * FROM sessions WHERE user_id = ? ORDER BY last_seen_at DESC, created_at DESC", user_id)
+        ]
+
+    def delete_sessions(self, user_id: str) -> int:
+        """«Выйти на всех устройствах»: все сессии пользователя; число закрытых."""
+        return self._run("DELETE FROM sessions WHERE user_id = ?", user_id)
 
     def touch_session(self, token_hash: str) -> None:
         self._run("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", self._now(), token_hash)

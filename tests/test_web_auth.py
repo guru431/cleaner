@@ -83,6 +83,55 @@ def test_session_expires_after_eight_idle_hours(browser, clock):
     assert b.get("/").headers["location"] == "/login"
 
 
+def test_active_session_ends_after_its_absolute_lifetime(browser, clock):
+    """Идея «Сессии…»: опрос страницы продлевал сессию простоя бесконечно — теперь не дольше MAX_AGE от входа."""
+    from cleaner.web.deps import MAX_AGE
+
+    b = browser()
+    b.user("ivan")
+    b.login("ivan")
+    for _ in range(int(MAX_AGE.total_seconds() // 3600)):
+        assert b.get("/").headers["location"] == "/chats"
+        clock.advance(hours=1)
+    clock.advance(seconds=1)
+    assert b.get("/").headers["location"] == "/login"
+
+
+def test_user_lists_sessions_and_logs_out_everywhere(browser, repo, clock):
+    first, second, third = browser(), browser(), browser()
+    first.user("ivan")
+    third.user("petr")
+    for b, login in ((first, "ivan"), (second, "ivan"), (third, "petr")):
+        b.login(login)
+    page = first.get("/account/sessions").text
+    assert page.count("<tr class=\"session") == 2 and "эта" in page
+    assert first.post("/account/sessions/logout-all").headers["location"] == "/login"
+    assert first.get("/").headers["location"] == second.get("/").headers["location"] == "/login"
+    assert third.get("/").headers["location"] == "/chats"                    # чужие сессии не тронуты
+    [event] = repo.audit_events("logout_all")
+    assert event.details == {"sessions": 2}
+
+
+def test_user_changes_own_password_with_the_current_one(browser, repo):
+    b, other = browser(), browser()
+    user = b.user("ivan")
+    b.login("ivan")
+    other.login("ivan")
+    assert "Текущий пароль" in b.get("/account/password").text
+    wrong = b.post("/account/password", current="не тот пароль", password="новый-пароль-123", repeat="новый-пароль-123")
+    assert wrong.status_code == 400 and "Текущий пароль неверен" in wrong.text
+    mismatch = b.post("/account/password", current="пароль-для-тестов", password="новый-пароль-123", repeat="другой-пароль-123")
+    assert mismatch.status_code == 400
+    assert b.post("/account/password", current="пароль-для-тестов", password="коротко", repeat="коротко").status_code == 400
+    done = b.post("/account/password", current="пароль-для-тестов", password="новый-пароль-123", repeat="новый-пароль-123")
+    assert done.headers["location"] == "/login"
+    assert b.get("/").headers["location"] == other.get("/").headers["location"] == "/login"
+    assert b.login("ivan").status_code == 401 and b.login("ivan", "новый-пароль-123").status_code == 303
+    [changed] = repo.audit_events("password_changed")
+    assert (changed.user_id, changed.details) == (user, {"target": user, "by": "self"})
+    assert [e.details for e in repo.audit_events("login_failed")] == [{}, {"stage": "password_change"}]
+
+
 def test_disabled_user_loses_the_session(browser, repo):
     b = browser()
     user = b.user("ivan")

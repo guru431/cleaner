@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hmac
 import math
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse, Response
@@ -10,7 +11,7 @@ from starlette.concurrency import run_in_threadpool
 
 from cleaner.storage.repo import User
 from cleaner.web import auth
-from cleaner.web.deps import SESSION_COOKIE, Viewer, get_form, get_viewer, page, repo_of
+from cleaner.web.deps import IDLE, MAX_AGE, SESSION_COOKIE, Viewer, get_form, get_viewer, page, repo_of
 
 router = APIRouter()
 LOGIN_COOKIE = "cleaner_login"      # токен формы входа: сессии ещё нет, проверяем двойной отправкой
@@ -97,3 +98,79 @@ def logout(request: Request, form: dict[str, str] = Depends(get_form), viewer: V
 @router.get("/")
 def home(viewer: Viewer = Depends(get_viewer)) -> Response:
     return RedirectResponse("/chats", status_code=303)
+
+
+def _signed_out(path: str = "/login") -> Response:
+    response = RedirectResponse(path, status_code=303)
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+
+# --- своя учётная запись: сессии и пароль ------------------------------------------------
+
+@router.get("/account/sessions")
+def sessions(request: Request, viewer: Viewer = Depends(get_viewer)) -> Response:
+    """Свои сессии: начало, последнее действие и когда истечёт. Адресов и браузеров сессия не хранит."""
+    rows = [
+        {
+            "current": session.token_hash == viewer.session.token_hash, "created_at": session.created_at,
+            "last_seen_at": session.last_seen_at,
+            "expires_at": min(
+                datetime.fromisoformat(session.created_at) + MAX_AGE, datetime.fromisoformat(session.last_seen_at) + IDLE,
+            ).isoformat(timespec="seconds"),
+        }
+        for session in repo_of(request).sessions(viewer.user.id)
+    ]
+    return page(request, "account_sessions.html", viewer, rows=rows, idle_hours=IDLE // timedelta(hours=1),
+                max_age_hours=MAX_AGE // timedelta(hours=1))
+
+
+@router.post("/account/sessions/logout-all")
+def logout_all(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
+    """Выйти на всех устройствах — и на этом тоже."""
+    repo = repo_of(request)
+    repo.audit("logout_all", viewer.user.id, sessions=repo.delete_sessions(viewer.user.id))
+    return _signed_out()
+
+
+def _password_page(request: Request, viewer: Viewer, status_code: int = 200, error: str = "") -> Response:
+    return page(request, "account_password.html", viewer, status_code=status_code, error=error, min_password=auth.MIN_PASSWORD)
+
+
+@router.get("/account/password")
+def password_form(request: Request, viewer: Viewer = Depends(get_viewer)) -> Response:
+    return _password_page(request, viewer)
+
+
+# async, как вход: текущий пароль проверяется в пуле Argon2, место ждётся в цикле событий (auth.check_password).
+# Неверный текущий пароль — неудача входа этого логина: перебор пароля из чужой открытой сессии упирается в ту же паузу.
+@router.post("/account/password")
+async def change_own_password(
+    request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer),
+) -> Response:
+    login = viewer.user.login
+    wait = request.app.state.throttle.wait(login)
+    if wait:
+        return _password_page(request, viewer, 429, f"Слишком много попыток. Повторите через {math.ceil(wait)} с")
+    new = str(form.get("password", ""))
+    if new != str(form.get("repeat", "")):
+        return _password_page(request, viewer, 400, "Новый пароль и повтор не совпадают")
+    if len(new) < auth.MIN_PASSWORD:
+        return _password_page(request, viewer, 400, f"Новый пароль короче {auth.MIN_PASSWORD} знаков")
+    try:
+        password_ok = await auth.check_password(viewer.user.password_hash, str(form.get("current", "")))
+    except auth.Busy:
+        return _password_page(request, viewer, 503, "Сервер занят проверкой паролей — попробуйте позже")
+    return await run_in_threadpool(_change_own_password, request, viewer, password_ok, new)
+
+
+def _change_own_password(request: Request, viewer: Viewer, password_ok: bool, new: str) -> Response:
+    repo, throttle = repo_of(request), request.app.state.throttle
+    if not password_ok:
+        throttle.failed(viewer.user.login)
+        repo.audit("login_failed", viewer.user.id, stage="password_change")
+        return _password_page(request, viewer, 400, "Текущий пароль неверен")
+    throttle.succeeded(viewer.user.login)
+    repo.set_password(viewer.user.id, auth.hash_password(new))           # закрывает все сессии, и эту тоже
+    repo.audit("password_changed", viewer.user.id, target=viewer.user.id, by="self")
+    return _signed_out()
