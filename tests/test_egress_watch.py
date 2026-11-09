@@ -72,7 +72,7 @@ def test_address_outside_the_settings_is_refused_and_logged_once(guard, event, a
 
 def test_allowed_list_follows_the_settings(guard):
     guard.lookup(PROVIDER)
-    guard.targets.remove(PROVIDER)                                          # подключение выключили
+    guard.targets.remove(PROVIDER)                                          # подключение удалили
     with pytest.raises(EgressRefused):
         guard.connect("192.0.2.44")
     with pytest.raises(EgressRefused):

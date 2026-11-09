@@ -221,6 +221,18 @@ def test_interrupted_processing_fails_at_start(repo):
     assert not repo.set_item_risk_status(chat, "c" * 32, job, "running", ("interrupted",))     # задание прервано
 
 
+def test_interrupted_file_without_extracted_text_asks_for_the_file_again(repo):
+    """Файл не хранится: прерванный до извлечения текста разбор повторить нельзя — своя причина. Извлечённый текст
+    (в meta есть kind) очищается заново, как вставленный."""
+    user, chat = new_chat(repo)
+    repo.add_item(chat, Item("a" * 32, 0, "input", "", None, source="file", status="running", meta={"progress": "1/5"}))
+    repo.add_item(chat, Item("b" * 32, 0, "input", "", None, source="file", status="queued"))
+    repo.add_item(chat, Item("c" * 32, 0, "input", "текст", None, source="file", status="running", meta={"kind": "pdf"}))
+    repo.add_item(chat, Item("d" * 32, 0, "input", "текст", None, status="running"))
+    assert repo.fail_interrupted("прервано", file_reason="загрузите файл") == 4
+    assert [i.meta.get("error") for i in repo.items(chat)] == ["загрузите файл", "загрузите файл", "прервано", "прервано"]
+
+
 def test_risk_transitions_belong_to_their_job(repo):
     """Аудит 21.10.2026: прежняя проверка, сброшенная сменой текста, не завершает новую — ни догадками, ни отказом;
     догадки о другом очищенном тексте не записываются и у своего задания."""

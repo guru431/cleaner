@@ -87,10 +87,10 @@ def changed(repo, operation):
     return config
 
 
-def _changes(before, config):
+def _changes(before, config, imported=False):
     """События журнала по каждому изменению — с теми же полями, что пишут прямые правки (FR-11.1), без значений.
-    Одна добавленная запись — как добавление, несколько — как импорт; несколько удалённых (возврат после импорта) —
-    одним событием с числом."""
+    imported — правка из импорта CSV (признак import операции): добавленные — как импорт, при любом их числе;
+    иначе — как добавление. Несколько добавленных или удалённых (возврат) — одним событием с числом."""
     events = [("policy_changed", {"type": type_, "policy": policy}) for type_, policy in sorted(config["policies"].items())
               if before["policies"].get(type_) != policy]
     kept, known = {r["id"] for r in config["dictionary"]}, {r["id"] for r in before["dictionary"]}
@@ -99,10 +99,10 @@ def _changes(before, config):
         added = sum(1 for r in config["dictionary"] if r["list"] == list_ and r["id"] not in known)
         if removed:
             events.append(("dictionary_changed", {"action": "delete", "list": list_} | ({"count": removed} if removed > 1 else {})))
-        if added == 1:
-            events.append(("dictionary_changed", {"action": "add", "list": list_}))
-        elif added:
+        if added and imported:
             events.append(("dictionary_import", {"list": list_, "count": added}))
+        elif added:
+            events.append(("dictionary_changed", {"action": "add", "list": list_} | ({"count": added} if added > 1 else {})))
     return events
 
 
@@ -154,7 +154,8 @@ def preview(repo, user_id, operation):
                policies=sum(event == "policy_changed" for event, _ in _changes(before_config, config)),
                added=sum(1 for r in config["dictionary"] if r["id"] not in was),
                removed=sum(1 for r in before_config["dictionary"] if r["id"] not in will))
-    payload = {"user": user_id, "expires": repo.clock.now().timestamp() + 600, "binding": binding, "config": config}
+    payload = {"user": user_id, "expires": repo.clock.now().timestamp() + 600, "binding": binding, "config": config,
+               "import": bool(operation.get("import"))}
     receipt = base64.urlsafe_b64encode(crypto.seal(repo.global_key, json.dumps(payload).encode(), _AAD)).decode()
     shown = len(owners) >= MIN_OWNERS
     return {"mine": mine, "others": others if shown else None, "owners": len(owners) if shown else None,
@@ -187,6 +188,6 @@ def apply(repo, user_id, receipt):
                 continue
             repo._insert_dictionary(row["list"], row["value"], EntityType(row["type"]) if row["type"] else None,
                                     tuple(row["aliases"]), row["comment"], row.get("inflect", False))
-        for event, details in _changes(current, payload["config"]):
+        for event, details in _changes(current, payload["config"], payload.get("import", False)):
             repo.audit(event, user_id, **details)
         repo.audit("settings_changed", user_id, section="shared", action="preview_applied")

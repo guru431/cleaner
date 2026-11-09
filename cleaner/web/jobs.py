@@ -20,6 +20,8 @@ log = logging.getLogger("cleaner.jobs")
 
 WORKERS = 2
 INTERRUPTED = "Обработка прервана перезапуском службы: запустите её ещё раз"
+# Разбор файла до извлечения текста повторить нельзя: файл не хранится (как FILE_CANCELLED).
+FILE_INTERRUPTED = "Обработка прервана перезапуском службы, а исходный файл не хранится: загрузите файл ещё раз"
 # Сколько остановка службы ждёт идущие задания. systemd ждёт остановки 90 с, а страница распознавания
 # идёт до минуты: дольше ждать незачем, недождавшиеся помечаются прерванными.
 STOP_WAIT = 30.0
@@ -118,7 +120,7 @@ class Jobs:
         def finished(future):
             self._pending.discard(future)
             if future.cancelled():
-                task.cancel(INTERRUPTED)
+                task.cancel(FILE_INTERRUPTED if kind == "file" else INTERRUPTED)
             if task.timer:
                 task.timer.cancel()
             reservation.release()

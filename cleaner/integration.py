@@ -94,8 +94,8 @@ class IntegrationService(ChatService):
 
         [item] = self._apply(chat_id, work, expected=payload["version"])
         self.live.start(item.id)
-        self._submit(self.send_submit, self.run_send, chat_id, item.id, user_id, context, None, 0, client)
-        self.repo.audit("local_answer", user_id, chat_id, messages=len(messages), via="api")
+        self._submit(self.send_submit, self.run_send, chat_id, item.id, user_id, context, None, 0, client,
+                     {"messages": len(messages), "via": "api"})        # local_answer — когда задание началось
         return item
 
     def _build_request(self, state, settings, messages, provider, model, layers, cached=None):

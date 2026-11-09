@@ -677,14 +677,17 @@ class Repository:
         if changed != 1:
             raise KeyError(item_id)
 
-    def fail_interrupted(self, reason: str) -> int:
-        """При старте службы: обработка, прерванная остановкой, — отказ с причиной (NFR-6). Число таких элементов."""
+    def fail_interrupted(self, reason: str, file_reason: str | None = None) -> int:
+        """При старте службы: обработка, прерванная остановкой, — отказ с причиной (NFR-6). Число таких элементов.
+        file_reason — у файла, текст которого ещё не извлечён (в meta нет kind, его пишет set_item_original): файл
+        не хранится, и запустить обработку ещё раз нельзя."""
         with self.lock, transaction(self.conn):
-            rows = self.conn.execute("SELECT id, meta FROM items WHERE status IN ('queued', 'running')").fetchall()
+            rows = self.conn.execute("SELECT id, source, meta FROM items WHERE status IN ('queued', 'running')").fetchall()
             for row in rows:
                 meta = json.loads(row["meta"])
                 meta.pop("progress", None)
-                meta["error"] = reason
+                unread = file_reason is not None and row["source"] == "file" and "kind" not in meta
+                meta["error"] = file_reason if unread else reason
                 self.conn.execute(
                     "UPDATE items SET status = 'failed', meta = ? WHERE id = ?",
                     (json.dumps(meta, ensure_ascii=False), row["id"]),

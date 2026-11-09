@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from cleaner.ingest.extract import ExtractError
 from cleaner.storage.repo import Item
 from cleaner.web.app import FILE_WORKERS, create_app
-from cleaner.web.jobs import INTERRUPTED, WORKERS, Jobs, shutdown
+from cleaner.web.jobs import FILE_INTERRUPTED, INTERRUPTED, WORKERS, Jobs, shutdown
 
 # Предел ожидания заданий в настоящих пулах — страховка от зависания, а не замер: под нагрузкой машины очистка в потоке
 # шла дольше секунды, и тест падал по TimeoutError без ошибки в коде (аудит 21.10.2026).
@@ -186,6 +186,34 @@ def test_service_stop_marks_unfinished_texts_interrupted_while_the_database_is_o
     assert app.state.unfinished_jobs == 1            # по нему serve выходит, не дожидаясь потока задания (__main__)
     release.set()
     executor.shutdown(wait=True)
+
+
+def test_service_stop_asks_for_the_file_again_when_its_text_was_not_extracted(repo, clock, engines):
+    """Файл не хранится: разбор, прерванный остановкой (идущий и снятый с очереди), — «загрузите файл ещё раз», а не
+    «запустите её ещё раз», которого нельзя сделать."""
+    files = Jobs(ThreadPoolExecutor(max_workers=1), stop_wait=0)
+    user = repo.create_user("ivan", "hash", "user")
+    chat_id = repo.create_chat(user, "Чат")
+    reading, release = threading.Event(), threading.Event()
+
+    class StuckScan:
+        def extract(self, filename, data, progress, ocr_all=False):
+            reading.set()
+            release.wait(5)
+            raise ExtractError("распознавание остановлено тестом")
+
+    engines.extractor = StuckScan
+    app = create_app(repo, clock, secure_cookies=False, engines=engines, files=files)
+    try:
+        with TestClient(app):
+            running = app.state.service.add_file(chat_id, user, "скан-1.pdf", b"%PDF-1.7")
+            queued = app.state.service.add_file(chat_id, user, "скан-2.pdf", b"%PDF-1.7")
+            assert reading.wait(GUARD)
+        assert [repo.item(chat_id, i.id).meta["error"] for i in (running, queued)] == [FILE_INTERRUPTED] * 2
+        assert "загрузите файл ещё раз" in FILE_INTERRUPTED
+    finally:
+        release.set()
+        files._executor.shutdown(wait=True)
 
 
 def test_jobs_run_in_a_background_pool():

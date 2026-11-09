@@ -27,7 +27,7 @@ from cleaner.web import (
     auth, routes_agent, routes_api, routes_auth, routes_chats, routes_keys, routes_review, routes_send, routes_settings,
 )
 from cleaner.web.deps import AGENT_BODY_BYTES, MAX_BODY_BYTES, LoginRequired, Viewer, get_viewer, page
-from cleaner.web.jobs import INTERRUPTED, Jobs, shutdown
+from cleaner.web.jobs import FILE_INTERRUPTED, INTERRUPTED, Jobs, shutdown
 
 log = logging.getLogger("cleaner.web")
 
@@ -273,7 +273,7 @@ def _queue_error(request: Request, exc: QueueFull) -> Response:
 
 def _interrupt(repo: Repository) -> None:
     """Всё, что осталось в очереди или в работе, — отказ «прервано» с кнопкой повтора (NFR-6)."""
-    interrupted = repo.fail_interrupted(INTERRUPTED)
+    interrupted = repo.fail_interrupted(INTERRUPTED, FILE_INTERRUPTED)
     if interrupted:
         repo.audit("jobs_interrupted", count=interrupted)
 

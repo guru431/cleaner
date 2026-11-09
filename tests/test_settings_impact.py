@@ -1,4 +1,5 @@
 """Shared previews never disclose another owner's text or mutate a chat."""
+import re
 import threading
 
 import pytest
@@ -86,12 +87,24 @@ def test_apply_writes_the_same_audit_events_as_direct_edits(repo):
     assert [e.details for e in repo.audit_events("policy_changed")] == [{"type": "EMAIL", "policy": "block"}]
     run({"kind": "add", "rows": [_row("always", "Ромашка-Плюс", "ORG")]})
     assert [e.details for e in repo.audit_events("dictionary_changed")] == [{"action": "add", "list": "always"}]
-    run({"kind": "add", "rows": [_row("never", "альфа"), _row("never", "бета")]})
+    run({"kind": "add", "rows": [_row("never", "альфа"), _row("never", "бета")], "import": True})
     assert [e.details for e in repo.audit_events("dictionary_import")] == [{"list": "never", "count": 2}]
     entry = next(r.id for r in repo.dictionary() if r.list == "always")
     run({"kind": "delete", "id": entry})
     assert repo.audit_events("dictionary_changed")[0].details == {"action": "delete", "list": "always"}
     assert "Ромашка" not in str([e.details for e in repo.audit_events()])
+
+
+def test_csv_import_of_one_new_row_is_logged_as_an_import(boss, repo):
+    """Импорт отличается по признаку из маршрута импорта, а не по числу записей: CSV с одной новой строкой —
+    dictionary_import, как при прямом сохранении импорта."""
+    fields = {"csv": "Name\r\nsrv1.corp.example\r\n", "delimiter": "semicolon", "list": "never", "column": "Name"}
+    shown = boss.post("/settings/dictionary/import", action="impact", **fields)
+    assert shown.status_code == 200, shown.text
+    receipt = re.search(r'name="receipt" value="([^"]+)"', shown.text).group(1)
+    assert boss.post("/settings/impact/apply", receipt=receipt).status_code == 303
+    assert [e.details for e in repo.audit_events("dictionary_import")] == [{"list": "never", "count": 1}]
+    assert repo.audit_events("dictionary_changed") == []
 
 
 def test_other_owners_counts_hidden_below_threshold_and_preview_is_audited(repo):

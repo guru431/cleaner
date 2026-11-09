@@ -432,7 +432,7 @@ def import_csv(request: Request, form: dict[str, str] = Depends(get_form), viewe
         if column not in headers:
             raise HTTPException(400, "Выберите колонку из первой строки файла")
         if form.get("action") == "impact":
-            return _impact(request, viewer, {"kind": "add", "rows": [
+            return _impact(request, viewer, {"kind": "add", "import": True, "rows": [
                 {"id": "", "list": list_, "value": value, "type": type_.value if type_ else None, "aliases": [], "comment": ""}
                 for value in new]})
         repo.add_dictionary_many(list_, new, type_)
@@ -846,7 +846,7 @@ def export_audit(
 
 # --- эталонный набор (FR-6.10, QA-1) ----------------------------------------------------
 
-GOLD_TARGET = 200          # QA-1: не меньше 200 примеров к концу этапа 2
+GOLD_TARGET = 200          # QA-1: не меньше 200 примеров
 _MEASURING = threading.Lock()     # проверка «замер уже идёт» и постановка нового — одним шагом
 
 

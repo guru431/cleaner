@@ -386,7 +386,7 @@ def test_second_local_question_waits_for_the_first_answer(repo, chat, engines, m
         service.ask_local(chat_id, user)
     assert len(jobs) == 2
     assert [i.status for i in repo.items(chat_id) if i.source == "local"] == ["done", "queued"]
-    assert len(repo.audit_events("local_answer")) == 2
+    assert len(repo.audit_events("local_answer")) == 1           # второй вопрос в очереди: модель ещё не спрошена
 
 
 def test_local_answer_failure_has_a_reason(repo, chat, engines):
