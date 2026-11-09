@@ -502,3 +502,8 @@ html:not(.js) .key-mode, html:not(.js) .key-summary { display: none; }
   .top .brand { margin-right: 4px; }
   .top .who { max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
 }
+
+/* Страница политик: пояснение политик над группами типов. */
+.policy-help { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 0 0 16px; max-width: 800px; }
+.policy-help dt { font-weight: 600; }
+.policy-help dd { margin: 0; color: var(--muted); }
