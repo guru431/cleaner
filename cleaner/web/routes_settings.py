@@ -17,7 +17,7 @@ from cleaner.core.detect.base import DetectorError, load_builtin
 from cleaner import settings_impact
 from cleaner.core.detect.dictionary import PATTERN_TIMEOUT
 from cleaner.core.detect.llm import CompletionError
-from cleaner.core.types import EntityType, Policy
+from cleaner.core.types import EntityType, Policy, default_policies
 from cleaner.egress import ProviderError, cloud
 from cleaner.engines import GATEWAY_KEY_ENV, LocalSettings, local_settings, save_local_settings
 from cleaner.eval import coverage, runner
@@ -45,6 +45,7 @@ EVENTS = (
     "provider_changed", "cloud_send", "local_answer", "eval_run", "reviewed", "api_auth_failed",
     "key_created", "key_disabled", "agent_send", "agent_refused", "agent_withheld", "agent_chat_created", "agent_pruned",
     "key_restarted", "request_prepared",
+    "settings_previewed",
 )
 PROTOCOL_NAMES = {"openai": "OpenAI-совместимый", "anthropic": "Anthropic-совместимый", "responses": "OpenAI Responses"}
 AUTH_NAMES = {"bearer": "Authorization: Bearer", "x-api-key": "x-api-key"}
@@ -97,10 +98,28 @@ def index(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
 
 # --- политики (FR-4.2, FR-10.6) -----------------------------------------------
 
+# Группы типов на странице политик. Каждый тип — ровно в одной группе (тест): новый тип не пропадёт со страницы молча.
+POLICY_GROUPS = (
+    ("Люди и организации", (EntityType.PERSON, EntityType.ORG, EntityType.ADDRESS, EntityType.EMAIL, EntityType.PHONE,
+                            EntityType.BIRTHDATE, EntityType.TERM)),
+    ("Документы и реквизиты", (EntityType.PASSPORT, EntityType.INN, EntityType.SNILS, EntityType.OGRN, EntityType.KPP,
+                               EntityType.OMS)),
+    ("Финансы", (EntityType.CARD, EntityType.BANK_ACCOUNT)),
+    ("Инфраструктура", (EntityType.IP, EntityType.MAC, EntityType.HOST, EntityType.DOMAIN, EntityType.SID, EntityType.DN,
+                        EntityType.ACCOUNT)),
+    ("Секреты", (EntityType.SECRET,)),
+)
+# Уточнение подписи только здесь: паспортом находятся и ВУ, СТС, ПТС, загранпаспорт; общая подпись типа не меняется.
+_POLICY_LABELS = {EntityType.PASSPORT: "Паспорт и документы (ВУ, СТС, ПТС, загранпаспорт)"}
+
+
 @router.get("/policies")
 def policies(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
+    groups = [(title, [(type_, _POLICY_LABELS.get(type_, render.TYPE_NAMES[type_])) for type_ in types])
+              for title, types in POLICY_GROUPS]
     return page(
-        request, "policies.html", viewer, current=repo_of(request).policies(), types=render.TYPE_NAMES, names=POLICY_NAMES
+        request, "policies.html", viewer, current=repo_of(request).policies(), groups=groups, names=POLICY_NAMES,
+        defaults=default_policies(),
     )
 
 
@@ -117,7 +136,10 @@ def save_policies(request: Request, form: dict[str, str] = Depends(get_form), vi
         except ValueError:
             raise HTTPException(400, "Неизвестная политика") from None
     current = repo.policies()
-    if form.get("action") == "impact":
+    if form.get("reset"):                         # «Вернуть умолчание» у строки — тоже через оценку влияния
+        type_ = _type(form["reset"])
+        wanted[type_] = default_policies()[type_]
+    if form.get("action") == "impact" or form.get("reset"):
         return _impact(request, viewer, {"kind": "policies", "policies": {t.value: p.value for t, p in wanted.items()}})
     for type_, policy in wanted.items():
         if policy is not current[type_]:

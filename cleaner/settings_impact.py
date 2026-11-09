@@ -5,17 +5,24 @@ import base64
 import copy
 import hashlib
 import json
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 
 from cleaner.core.pipeline import sanitize
 from cleaner.core.types import DictEntry, EntityType, Policy
 from cleaner.eval import runner
 from cleaner.service import _cached_layers
-from cleaner.storage import crypto
+from cleaner.storage import crypto, db
 from cleaner.storage.db import transaction
+from cleaner.storage.repo import Repository
 
 _AAD = "settings-impact"
 _UNDO = "settings.impact.undo"
+# Счётчики по чужим чатам показываются, только если затронуты чаты не меньше чем трёх других владельцев. Иначе
+# оценка одной записи словаря отвечала бы, есть ли строка в текстах конкретного человека (раздел 4 ТЗ): при одном
+# или двух владельцах администратор, знающий круг подозреваемых, узнаёт чей текст. Ноль тоже скрыт — иначе
+# «скрыто» само означало бы «встречается».
+MIN_OWNERS = 3
 
 
 def snapshot(repo):
@@ -31,10 +38,33 @@ def settings_for(repo, config):
 
 
 def _binding(repo):
-    chats = [tuple(row) for row in repo._all("SELECT id, version FROM chats ORDER BY id")]
-    raw = [snapshot(repo), chats, runner.settings_fingerprint(repo.settings(), repo.global_key),
+    """Подтверждение связано с настройками и эталоном, но не с версиями чатов: каждый ход агента и каждый новый
+    текст поднимают версию, и пока кто-то работает, применить было бы нельзя. Тексты, изменённые после оценки,
+    в её числах не учтены и очищаются уже по новым настройкам при обычных действиях Cleaner."""
+    raw = [snapshot(repo), runner.settings_fingerprint(repo.settings(), repo.global_key),
            runner.fingerprint(runner.gold_examples(repo), repo.global_key), repo.setting("settings.impact.version")]
     return hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
+
+
+@contextmanager
+def _reading(repo):
+    """Согласованный снимок базы отдельным соединением (BEGIN DEFERRED, журнал WAL): пересчёт идёт без общего замка
+    и без транзакции записи — сессии, шлюз агентов и задания его не ждут. У базы в памяти второго соединения нет:
+    тогда, как прежде, под замком."""
+    path = repo._one("PRAGMA database_list")["file"]
+    if not path:
+        with repo.lock, transaction(repo.conn):
+            yield repo
+        return
+    conn = db.connect(path)
+    try:
+        conn.execute("BEGIN DEFERRED")
+        conn.execute("SELECT COUNT(*) FROM settings").fetchone()       # снимок фиксируется первым чтением
+        yield Repository(conn, repo.master, repo.clock)
+    finally:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        conn.close()
 
 
 def changed(repo, operation):
@@ -55,26 +85,48 @@ def changed(repo, operation):
     return config
 
 
+def _changes(before, config):
+    """События журнала по каждому изменению — с теми же полями, что пишут прямые правки (FR-11.1), без значений.
+    Одна добавленная запись — как добавление, несколько — как импорт; несколько удалённых (возврат после импорта) —
+    одним событием с числом."""
+    events = [("policy_changed", {"type": type_, "policy": policy}) for type_, policy in sorted(config["policies"].items())
+              if before["policies"].get(type_) != policy]
+    kept, known = {r["id"] for r in config["dictionary"]}, {r["id"] for r in before["dictionary"]}
+    for list_ in ("always", "never"):
+        removed = sum(1 for r in before["dictionary"] if r["list"] == list_ and r["id"] not in kept)
+        added = sum(1 for r in config["dictionary"] if r["list"] == list_ and r["id"] not in known)
+        if removed:
+            events.append(("dictionary_changed", {"action": "delete", "list": list_} | ({"count": removed} if removed > 1 else {})))
+        if added == 1:
+            events.append(("dictionary_changed", {"action": "add", "list": list_}))
+        elif added:
+            events.append(("dictionary_import", {"list": list_, "count": added}))
+    return events
+
+
 def preview(repo, user_id, operation):
-    with repo.lock, transaction(repo.conn):
-        config = changed(repo, operation)
-        before, after = repo.settings(), settings_for(repo, config)
-        counts = dict(chats=0, items=0, blocked=0, replacements=0, pending=0, frozen=0)
+    with _reading(repo) as snap:
+        before_config = snapshot(snap)
+        config = changed(snap, operation)
+        before, after = snap.settings(), settings_for(snap, config)
+        mine, others = (dict(chats=0, items=0, blocked=0, replacements=0) for _ in range(2))
+        owners, pending, frozen = set(), 0, 0
         own = []
-        for user in repo.users():
-            for chat in repo.chats(user.id):
+        for user in snap.users():
+            counts = mine if user.id == user_id else others
+            for chat in snap.chats(user.id):
                 if chat.kind == "agent":
-                    counts["frozen"] += 1
+                    frozen += 1
                     continue
-                old, _ = repo.load_state(chat.id)
+                old, _ = snap.load_state(chat.id)
                 new = copy.deepcopy(old)
                 touched = False
-                on = repo.layer_defaults() | repo.chat_layers(chat.id)
-                for item in repo.items(chat.id):
+                on = snap.layer_defaults() | snap.chat_layers(chat.id)
+                for item in snap.items(chat.id):
                     if item.kind != "input":
                         continue
                     if item.status != "done":
-                        counts["pending"] += 1
+                        pending += 1
                         continue
                     layers, _ = _cached_layers(item, on)
                     a, b = sanitize(old, item.original, before, layers), sanitize(new, item.original, after, layers)
@@ -86,14 +138,26 @@ def preview(repo, user_id, operation):
                         if user.id == user_id and len(own) < 10:
                             own.append({"before": a.sanitized, "after": b.sanitized})
                 counts["chats"] += touched
-        examples = runner.gold_examples(repo)
+                if touched and user.id != user_id:
+                    owners.add(user.id)
+        examples = runner.gold_examples(snap)
         old = runner.run(examples, before, ["1-3"], None)["1-3"]
         new = runner.run(examples, after, ["1-3"], None)["1-3"]
         quality = [{"title": title, "before": runner.share(*old.classes.get(title, (0, 0))),
                     "after": runner.share(*new.classes.get(title, (0, 0)))} for title in set(old.classes) | set(new.classes)]
-        payload = {"user": user_id, "expires": repo.clock.now().timestamp() + 600, "binding": _binding(repo), "config": config}
-        receipt = base64.urlsafe_b64encode(crypto.seal(repo.global_key, json.dumps(payload).encode(), _AAD)).decode()
-        return {"counts": counts, "own": own, "quality": quality, "receipt": receipt}
+        binding = _binding(snap)
+    # Оценка — в журнал (раздел 4 ТЗ, FR-11.2): вид правки и числа, без значений словаря.
+    was, will = {r["id"] for r in before_config["dictionary"]}, {r["id"] for r in config["dictionary"]}
+    repo.audit("settings_previewed", user_id, kind=operation["kind"],
+               policies=sum(event == "policy_changed" for event, _ in _changes(before_config, config)),
+               added=sum(1 for r in config["dictionary"] if r["id"] not in was),
+               removed=sum(1 for r in before_config["dictionary"] if r["id"] not in will))
+    payload = {"user": user_id, "expires": repo.clock.now().timestamp() + 600, "binding": binding, "config": config}
+    receipt = base64.urlsafe_b64encode(crypto.seal(repo.global_key, json.dumps(payload).encode(), _AAD)).decode()
+    shown = len(owners) >= MIN_OWNERS
+    return {"mine": mine, "others": others if shown else None, "owners": len(owners) if shown else None,
+            "min_owners": MIN_OWNERS, "pending": pending, "frozen": frozen, "own": own, "quality": quality,
+            "receipt": receipt}
 
 
 def apply(repo, user_id, receipt):
@@ -103,8 +167,9 @@ def apply(repo, user_id, receipt):
         raise ValueError("Предпросмотр недействителен") from None
     with repo.lock, transaction(repo.conn):
         if payload["user"] != user_id or payload["expires"] <= repo.clock.now().timestamp() or payload["binding"] != _binding(repo):
-            raise ValueError("Настройки или чаты изменились: оцените влияние ещё раз")
-        previous = base64.b64encode(crypto.seal(repo.global_key, json.dumps(snapshot(repo)).encode(), _UNDO)).decode()
+            raise ValueError("Настройки изменились: оцените влияние ещё раз")
+        current = snapshot(repo)
+        previous = base64.b64encode(crypto.seal(repo.global_key, json.dumps(current).encode(), _UNDO)).decode()
         repo.set_setting(_UNDO, previous)
         repo.set_setting("settings.impact.version", str(int(repo.setting("settings.impact.version") or "0") + 1))
         repo.conn.execute("DELETE FROM policies")
@@ -120,4 +185,6 @@ def apply(repo, user_id, receipt):
                 continue
             repo._insert_dictionary(row["list"], row["value"], EntityType(row["type"]) if row["type"] else None,
                                     tuple(row["aliases"]), row["comment"])
+        for event, details in _changes(current, payload["config"]):
+            repo.audit(event, user_id, **details)
         repo.audit("settings_changed", user_id, section="shared", action="preview_applied")

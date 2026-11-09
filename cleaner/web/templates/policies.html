@@ -2,25 +2,38 @@
 {% block title %}Политики — Cleaner{% endblock %}
 {% block content %}
 <h1>Политики типов</h1>
-<p class="lead">Что делать с найденным фрагментом каждого типа во всех чатах.</p>
+<p class="lead">Что делать с найденным фрагментом каждого типа во всех чатах. Правка применяется после оценки влияния.</p>
+<dl class="policy-help">
+  <dt>скрывать и восстанавливать</dt><dd>фрагмент заменяется меткой, в ответе модели метка снова становится оригиналом;</dd>
+  <dt>скрывать без восстановления</dt><dd>фрагмент заменяется меткой, в ответ модели оригинал не подставляется;</dd>
+  <dt>блокировать</dt><dd>пока такой фрагмент есть в тексте, очищенный результат нельзя скопировать или отправить;</dd>
+  <dt>не искать</dt><dd>тип не ищется, фрагмент остаётся в тексте как есть.</dd>
+</dl>
 <form method="post" action="/settings/policies">
   {% include "_csrf.html" %}
+  {% for title, rows in groups %}
   <section class="panel">
+    <header class="panel-head"><h2 class="title">{{ title }}</h2></header>
     <table class="grid">
-      <thead><tr><th>Тип</th><th>Политика</th></tr></thead>
+      <thead><tr><th>Тип</th><th>Политика</th><th></th></tr></thead>
       <tbody>
-      {% for code, name in types.items() %}
+      {% for code, name in rows %}
       <tr>
-        <td>{{ name }}</td>
+        <td>{{ name }}{% if current[code] != defaults[code] %} <span class="badge warn" title="По умолчанию — {{ names[defaults[code]] }}">изменено</span>{% endif %}</td>
         <td><select name="policy-{{ code.value }}" aria-label="{{ name }}">
           {% for policy, label in names.items() %}<option value="{{ policy.value }}"{% if current[code] == policy %} selected{% endif %}>{{ label }}</option>{% endfor %}
         </select></td>
+        <td>{% if current[code] != defaults[code] %}<button name="reset" value="{{ code.value }}" title="Оценить возврат к «{{ names[defaults[code]] }}»">Вернуть умолчание</button>{% endif %}</td>
       </tr>
       {% endfor %}
       </tbody>
     </table>
   </section>
-  <button class="primary" name="action" value="impact">Оценить влияние</button>
+  {% endfor %}
+  <div class="sticky-bottom">
+    <button form="undo-impact">Оценить возврат предыдущей конфигурации</button>
+    <button class="primary" name="action" value="impact">Оценить влияние</button>
+  </div>
 </form>
-<form method="post" action="/settings/impact/undo">{% include "_csrf.html" %}<button>Оценить возврат предыдущей конфигурации</button></form>
+<form id="undo-impact" method="post" action="/settings/impact/undo">{% include "_csrf.html" %}</form>
 {% endblock %}
