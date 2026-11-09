@@ -43,7 +43,7 @@ def test_settings_hosts_loopback_and_local_sockets_pass(guard):
     for host in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost", "10.20.0.5"):
         guard.connect(host)
     guard.watch.hook("socket.connect", (None, "/run/cleaner.sock"))          # AF_UNIX
-    guard.lookup("10.20.0.10", 5464)                                        # числовой адрес: uvicorn разбирает свой
+    guard.lookup("10.20.0.10", 5464)                                      # числовой адрес: uvicorn разбирает свой
     guard.lookup(PROVIDER)
     guard.connect("192.0.2.44")                                             # адрес разрешённого имени
     guard.connect("2001:db8::44%eth0")
