@@ -89,6 +89,15 @@ pytestmark = pytest.mark.integration
         "1:1:1.1.1." * 5000,
         # Узлы без точек в командах и поле syslog: команды без узла, список узлов, метки времени подряд.
         "sc psexec mstsc " * 5000, "psexec \\\\a" + ",a" * 10000, "Nov 9 10:01:02 " * 5000,
+        # Пустое поле перед следующей строкой, пароль в известных командах, поле auth Docker (идея «Учётные данные по
+        # контексту»).
+        "password=\n" * 20000, "curl -u " * 10000, "curl " + "a " * 50000 + "-u x:y", "sqlcmd -P " * 10000,
+        "psexec -p " * 10000, "plink -pw " * 10000, "schtasks /p " * 10000, "net user a " * 10000,
+        "docker login -p " * 10000, '"auth":"' * 20000,
+        # Учётная запись по контексту: ключи входа, слово «логин», журнал Windows, sshd, пары после «доступ».
+        "user=" * 20000, "a_user:" * 15000, "ab" * 50000 + "user=x", "логин " * 20000, "Account Name: a\n" * 8000,
+        "Account Domain:" * 10000, "Failed password for " * 6000, "Invalid user a " * 8000, "доступ " * 20000,
+        "доступ a:" * 15000, "доступ " + "a/" * 50000,
     ],
     ids=[
         "dotted", "dn", "letters", "commas", "colons", "long_key", "token", "pwd", "a_pass", "eights", "apostrophes",
@@ -112,6 +121,10 @@ pytestmark = pytest.mark.integration
         "escaped_at_chain", "escaped_at_run", "escaped_at_logins", "escaped_backslash_at",
         "dn_escaped_commas", "dn_backslashes", "computer_list", "computer_quoted_list", "ipv6_v4_tails",
         "remote_tools", "psexec_list", "syslog_stamps",
+        "empty_fields", "curl_users", "curl_words", "sqlcmd_passwords", "psexec_passwords", "plink_passwords",
+        "schtasks_passwords", "net_users", "docker_logins", "docker_auths",
+        "user_keys", "user_key_prefixes", "glued_user_key", "login_words", "event_names", "event_domains",
+        "sshd_failed", "sshd_invalid", "access_words", "access_pairs", "access_slashes",
     ],
 )
 def test_every_layer_is_fast_on_a_long_run_without_spaces(text):

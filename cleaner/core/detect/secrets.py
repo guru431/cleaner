@@ -1,6 +1,8 @@
 """Слой 2: пароли, ключи и токены — по виду значения и по контексту."""
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from bisect import bisect_right
 from collections.abc import Callable
@@ -86,7 +88,10 @@ _VALUE = rf"""(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)'|{_BARE})"""
 # предел длины имени пропускал длинные ключи (spring….client-secret), а без предела выражение
 # со словом внутри перебирало «tokentoken…» квадратичное время. Значение разбирается отдельно и
 # только у ключа со словом секрета: пара без него не съедает соседнюю («id:token=…»).
-_KEY_NAME = re.compile(r"""(?<![\w.-])(?P<key>[\w.-]++)["']?\s*[:=]\s*""")
+_KEY_NAME = re.compile(r"""(?<![\w.-])(?P<key>[\w.-]++)["']?\s*[:=](?P<gap>\s*)""")
+# Значение со следующей строки («Пароль:\nQwerty123») — значение, а следующее поле («DB_PASSWORD=\nDB_USER=app», YAML
+# «password:\n  user: app») — нет: поле пусто. Иначе следующее поле становилось искомым секретом чата.
+_FIELD = re.compile(r"""["']?[\w.-]++["']?[ \t]*+(?:=|:(?=[\s"']|$))""")
 _KEY_WORD = re.compile(
     r"password|passwd|passphrase|pass|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key"
     r"|credential|пароль",
@@ -143,7 +148,43 @@ _COMMANDS = (
     ),
     re.compile(r"m(?<![\w-]m)(?:ysql|ariadb)[\w.-]*(?:[ \t]+(?!-p)[^\s|;&]++){0,20}?[ \t]+-p" + _VALUE),
     re.compile(r"s(?<![\w-]s)shpass[ \t]+-p[ \t]*" + _VALUE),
+    # «curl -u имя:пароль» (--user, у прокси -U и --proxy-user) — пароль после первого «:»; без «:» curl спросит пароль.
+    re.compile(
+        r"c(?<![\w-]c)url(?:\.exe)?(?:[ \t]+(?!-[uU]|--(?:proxy-)?user)[^\s|;&]++){0,20}?"
+        r"[ \t]+(?:-[uU][ \t]*+|--(?:proxy-)?user(?:[ \t]++|=))"
+        rf"""(?:"[^":\r\n]*+:(?P<dq>[^"\r\n]+)"|'[^':\r\n]*+:(?P<sq>[^'\r\n]+)'|[^\s:"']*+:{_BARE})"""
+    ),
+    # «sqlcmd -P пароль» и bcp, слитно или через пробел («-p» у sqlcmd — статистика); следующий флаг — не пароль.
+    re.compile(
+        r"[sSbB](?<![\w-][sSbB])(?i:(?<=[sS])qlcmd|(?<=[bB])cp)(?:\.exe)?(?:[ \t]+(?!-P)[^\s|;&]++){0,30}?"
+        r"[ \t]+-P(?:[ \t]++(?!-))?" + _VALUE
+    ),
+    # «psexec -u имя -p пароль», «plink -pw пароль» (и pscp, psftp), «schtasks /rp пароль» и «/p пароль» к «/u».
+    re.compile(
+        r"[pP](?<![\w-][pP])(?i:sexec)(?:64)?(?:\.exe)?(?:[ \t]+(?!-p[ \t])[^\s|;&]++){0,20}?[ \t]+-p[ \t]++(?![-/])"
+        + _VALUE
+    ),
+    re.compile(
+        r"[pP](?<![\w-][pP])(?i:link|scp|sftp)(?:\.exe)?(?:[ \t]+(?!-pw[ \t])[^\s|;&]++){0,20}?[ \t]+-pw[ \t]++"
+        + _VALUE
+    ),
+    re.compile(
+        r"[sS](?<![\w-][sS])(?i:chtasks)(?:\.exe)?(?:[ \t]+(?!/(?i:r?p)[ \t])[^\s|;&]++){0,40}?[ \t]+/(?i:r?p)[ \t]++(?![/*])"
+        + _VALUE
+    ),
+    # «docker login -p пароль» и podman («--password» находит _CLI).
+    re.compile(
+        r"[dp](?<![\w-][dp])(?:(?<=d)ocker|(?<=p)odman)(?:\.exe)?[ \t]+login(?:[ \t]+(?!-p[ \t=])[^\s|;&]++){0,20}?"
+        r"[ \t]+-p(?:[ \t]++|=)(?!-)" + _VALUE
+    ),
 )
+# «net user имя пароль» — второе слово после «user», кроме параметров и «*» (запрос пароля). Флага перед паролем нет,
+# поэтому слово прозы («net user ivanov покажет сведения») — не пароль (_prose_word).
+_NET_USER = re.compile(
+    r"n(?<![\w-]n)et[ \t]+user[ \t]+(?:\"[^\"\r\n]+\"|(?![/*\"])\S++)[ \t]+(?![/*])" + _VALUE, re.IGNORECASE
+)
+# Поле «auth» файла config.json Docker — base64 от «имя:пароль»; значение без «:» после раскодирования — не оно.
+_DOCKER_AUTH = re.compile(r'"auth"[ \t]*:[ \t]*"(?P<dq>[A-Za-z0-9+/]{4,}={0,2})"')
 _ADD_KEY = re.compile(
     r"""<add\s+key\s*=\s*(?P<q>["'])(?P<key>[^"'<>\r\n]+)(?P=q)\s+value\s*=\s*"""
     r"""(?:"(?P<dq>[^"\r\n]+)"|'(?P<sq>[^'\r\n]+)')""",
@@ -621,6 +662,16 @@ def _not_a_value(key: str, value: str) -> bool:
     )
 
 
+def _docker_auth(value: str) -> bool:
+    """Значение поля «auth» — base64 от «имя:пароль» с непустым паролем."""
+    try:
+        decoded = base64.b64decode(value, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return False
+    login, colon, password = decoded.partition(":")
+    return bool(colon and password) and decoded.isprintable()
+
+
 def _bitlocker(key: str) -> bool:
     return all(int(group) % 11 == 0 and int(group) < 65536 * 11 for group in key.split("-"))
 
@@ -650,6 +701,8 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         # Цена — пара внутри отвергнутого значения («PWD=/x?token=…») не ищется.
         if m.start() < parsed_until or not _secret_key(key):
             continue
+        if ("\n" in m.group("gap") or "\r" in m.group("gap")) and _FIELD.match(text, m.end()):
+            continue                           # поле пусто, на следующей строке — другое поле
         value = _VALUE_AT.match(text, m.end())
         if not value:
             continue
@@ -672,6 +725,15 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
             bounds = _value(m, minimum=2 if pattern is _CLI or pattern in _COMMANDS else 3)
             if bounds and not (pattern in (_AUTH, _BEARER) and _WORDS.fullmatch(text, *bounds)):
                 spans.append(Span(*bounds, EntityType.SECRET, name))
+    for m in _NET_USER.finditer(text):
+        bounds = _value(m, minimum=2)
+        # Русское слово или слово прозы без кавычек — продолжение фразы, а не пароль: цена — такой пароль открыт.
+        word = text[bounds[0]:bounds[1]].rstrip(_TRAILING).lower() if bounds and m.group("bare") is not None else ""
+        if bounds and not (_RUSSIAN_WORD.fullmatch(word) or word in _PROSE_WORDS):
+            spans.append(Span(*bounds, EntityType.SECRET, name))
+    for m in _DOCKER_AUTH.finditer(text):
+        if _docker_auth(m.group("dq")):
+            spans.append(Span(*m.span("dq"), EntityType.SECRET, name))
     for m in _PHRASE.finditer(text):
         if m.group("sep") is None or _copula(m) or _dictionary_word_after_words(m):
             span = _after_dash(m)

@@ -1126,3 +1126,81 @@ def test_password_at_its_place_in_a_known_command_is_found(text, value):
 )
 def test_known_command_without_a_password_is_left_alone(text):
     assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "DB_PASSWORD=\nDB_USER=billing_app", "DB_PASSWORD=\r\nDB_USER=billing_app", "password:\n  user: app",
+        '{"password":\n  "user": "app"}', "DB_PASSWORD=\n\nexport_dir=/tmp",
+    ],
+    ids=["env", "crlf", "yaml", "json", "blank_line"],
+)
+def test_empty_password_field_leaves_the_next_field_alone(text):
+    """FINDINGS «Слой 2: пустое поле пароля делает следующую строку секретом всего чата»: пробелы после «:» и «=»
+    переходили перевод строки, и следующее поле («DB_USER=billing_app», «user:») становилось искомым секретом чата."""
+    assert found(text) == set()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [("Пароль:\nQwerty123", "Qwerty123"), ("password:\n  Qwerty123", "Qwerty123"), ("token=\nab12cd34ef", "ab12cd34ef")],
+)
+def test_value_on_the_line_after_the_key_is_still_found(text, value):
+    assert found(text) == {value}
+
+
+def _docker_auth(credentials: str) -> str:
+    import base64
+
+    return base64.b64encode(credentials.encode()).decode()
+
+
+@pytest.mark.parametrize(
+    "text, value",
+    [
+        ("curl -u ivanov:Qwerty123 https://api.example/v1", "Qwerty123"),
+        ("curl -s -X POST -uivanov:Qwerty123 https://api.example/v1", "Qwerty123"),
+        ('curl --user "ivanov:S3cr3t pass" https://api.example/v1', "S3cr3t pass"),
+        ("curl --user=ivanov:Qwerty123 https://api.example/v1", "Qwerty123"),
+        ("curl.exe -x proxy:3128 -U ivanov:Qwerty123 https://api.example/v1", "Qwerty123"),
+        ('sqlcmd -S sql01 -U sa -P Qwerty123 -Q "select 1"', "Qwerty123"),
+        ("bcp crm.dbo.orders out orders.dat -S sql01 -U app -PQwerty123 -c", "Qwerty123"),
+        (r"psexec \srv-app01 -u CONTOSO\ivanov -p Qwerty123 cmd", "Qwerty123"),
+        (r"PsExec64.exe -u ivanov -p Qwerty123 \srv-app01 cmd", "Qwerty123"),
+        ("plink -ssh -l ivanov -pw Qwerty123 srv-db01", "Qwerty123"),
+        ("pscp.exe -pw Qwerty123 a.txt ivanov@srv-db01:/tmp", "Qwerty123"),
+        (r"schtasks /create /tn Backup /tr backup.cmd /sc daily /ru CONTOSO\svc_backup /rp Qwerty123", "Qwerty123"),
+        (r"SCHTASKS /Query /S srv-app01 /U CONTOSO\ivanov /P Qwerty123", "Qwerty123"),
+        ("net user ivanov Qwerty123 /add", "Qwerty123"),
+        ('NET USER "Ivan Petrov" Qwerty123 /domain', "Qwerty123"),
+        ("docker login -u ivanov -p Qwerty123 registry.example", "Qwerty123"),
+        ("podman login --username ivanov -p=Qwerty123 registry.example", "Qwerty123"),
+        ('{"auths": {"registry.example": {"auth": "%s"}}}' % _docker_auth("ivanov:Qwerty123"),
+         _docker_auth("ivanov:Qwerty123")),
+    ],
+)
+def test_password_at_its_place_in_more_known_commands_is_found(text, value):
+    """Идея «Учётные данные по контексту…»: пароль на своём месте в curl, sqlcmd, bcp, psexec, plink, pscp, schtasks,
+    net user, docker login и в поле auth файла config.json Docker."""
+    assert found(text) == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "curl -u ivanov https://api.example/v1", 'curl -u "$API_USER:$API_PASS" https://api.example/v1',
+        "curl -I https://api.example/v1 -o out.txt", "curl -x proxy:3128 https://api.example/v1",
+        'sqlcmd -S sql01 -E -Q "select 1"', "sqlcmd -S sql01 -U sa -P -Q x", "sqlcmd -S sql01 -p",
+        r"psexec \srv-app01 -s -i cmd", "plink -ssh srv-db01 -i key.ppk",
+        "schtasks /query /fo list", r"schtasks /create /tn Backup /tr backup.cmd /ru ivanov /rp *",
+        "schtasks /create /tn Backup /tr backup.cmd /ru SYSTEM",
+        "net user", "net user ivanov", "net user ivanov /domain", "net user ivanov *", "net user ivanov /active:no",
+        "Команда net user ivanov покажет сведения", "net user ivanov is the command",
+        "docker login registry.example", "docker login -u ivanov --password-stdin registry.example",
+        "docker run -p 8080:80 nginx",
+        '{"auth": "%s"}' % _docker_auth("ivanov"), '{"auth": "basic"}', '{"auth": ""}',
+    ],
+)
+def test_more_known_commands_without_a_password_are_left_alone(text):
+    assert found(text) == set()
