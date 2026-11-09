@@ -390,7 +390,9 @@ def create_app(
             standard = exc.detail == HTTPStatus(exc.status_code).phrase
             message = _STATUS_TEXT.get(exc.status_code, exc.detail) if standard else exc.detail
             return _json_error(exc.status_code, message, exc.headers)
-        return _error_page(request, exc.status_code, _STATUS_TEXT.get(exc.status_code, exc.detail))
+        # Странице — так же: причина маршрута («Текст не найден») видна, стандартная фраза Starlette — по-русски.
+        standard = exc.detail == HTTPStatus(exc.status_code).phrase
+        return _error_page(request, exc.status_code, _STATUS_TEXT.get(exc.status_code, exc.detail) if standard else exc.detail)
 
     @app.exception_handler(RequestValidationError)
     async def bad_request(request: Request, exc: RequestValidationError) -> Response:

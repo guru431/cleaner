@@ -111,7 +111,7 @@ def test_stream_of_a_chat_deleted_during_lookup_is_not_found(ivan, repo, monkeyp
 
     monkeypatch.setattr(repo, "load_state", deleted)
     response = ivan.get(f"/chats/{chat_id}/items/{item_id}/stream")
-    assert response.status_code == 404 and "Страница не найдена" in response.text
+    assert response.status_code == 404 and "Ответ не найден" in response.text
 
 
 def test_stream_stops_before_restoring_after_the_browser_disconnects(ivan, app, repo, monkeypatch):
