@@ -1,10 +1,16 @@
 """Скорость шлюза агентов (спецификация 2026-10-28, раздел 13; AC-5.7): полный путь — маршрут шлюза (TestClient) →
 служба → заглушка провайдера на петле, слои 1–3.
 
-Добавка — p95 двадцати запросов через шлюз (после двух прогревочных) минус медиана двадцати прямых запросов httpx к
-заглушке с телом, которое она получила от шлюза. Пороги — раздел 13: 0,3 с на запросе из повторённых блоков с телом
-1 МиБ, в том числе на чате с 20 000 сущностей; 3 с на 100 000 знаков нового содержимого (NFR-4). Только integration:
-первый запрос очищает 1 МиБ (около 15 с), пороги в секундах краснеют от нагрузки машины.
+Добавка — p95 сорока запросов через шлюз (после двух прогревочных) минус медиана сорока прямых запросов httpx к
+заглушке с телом, которое она получила от шлюза: у p95 из двадцати исход решало одно значение (аудит 09.11.2026). Пороги —
+раздел 13: 0,3 с на запросе из повторённых блоков с телом 1 МиБ, в том числе на чате с 20 000 сущностей; 3 с на
+100 000 знаков нового содержимого (NFR-4). Только integration: первый запрос очищает 1 МиБ (около 15 с), пороги в
+секундах краснеют от нагрузки машины.
+
+Абсолютный порог не видит, как тает запас: каждая добавка сравнивается и с прошлым замером на этой же машине
+(`data/gateway-speed.json`, вне Git; кэш pytest не годится — его отключают через PYTEST_ADDOPTS). Рост больше чем в
+полтора раза и больше чем на 50 мс — отказ с обоими числами, а выросшее значение точкой отсчёта не становится; после
+осознанного изменения файл удаляют (аудит 09.11.2026: добавка выросла на 54 % за пять дней).
 
   pytest tests/test_gateway_speed.py -m integration -rP      # строки «gateway-speed …» — в выводе прошедших тестов
 """
@@ -12,6 +18,7 @@ import json
 import math
 import statistics
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -29,7 +36,9 @@ MIB = 1024 * 1024
 ADDED = 0.3                     # с, p95 добавки на повторённых блоках
 NFR_4 = 3.0                     # с на 100 000 знаков нового содержимого
 FIRST_TEXT = 0.6                # с до первой дельты текста: добавка и одно слово
-WARMUP, COUNT = 2, 20
+WARMUP, COUNT = 2, 40
+GROWTH, GROWTH_ABS = 1.5, 0.05  # рост к прошлому замеру на этой машине: во сколько раз и на сколько секунд
+HISTORY = Path(__file__).resolve().parents[1] / "data" / "gateway-speed.json"
 TASK = "Разбери журналы входа за ночь и найди сбойные узлы"
 PATHS = {"anthropic": "/agent/anthropic/v1/messages?beta=true", "responses": "/agent/openai/v1/responses"}
 ENDS = {"anthropic": "message_stop", "responses": "response.completed"}
@@ -90,11 +99,21 @@ def direct(stub: StubProvider) -> float:
     return statistics.median(times)
 
 
-def report(name: str, times: list[float], base: float, by_median: bool = False) -> float:
-    """Добавка: p95 (или медиана) времени через шлюз минус прямое время; строка «gateway-speed …» — в вывод теста."""
+def report(request, times: list[float], base: float, by_median: bool = False) -> float:
+    """Добавка: p95 (или медиана) времени через шлюз минус прямое время; строка «gateway-speed …» — в вывод теста.
+    Сравнение с прошлым замером этого теста на этой машине — до проверки абсолютного порога."""
+    name = request.node.name
     p50, p95 = statistics.median(times), sorted(times)[math.ceil(0.95 * len(times)) - 1]
     added = (p50 if by_median else p95) - base
-    print(f"gateway-speed {name}: p50={p50:.3f} p95={p95:.3f} direct={base:.3f} added={added:.3f}")
+    history = json.loads(HISTORY.read_text(encoding="utf-8")) if HISTORY.exists() else {}
+    previous = history.get(name)
+    change = f" previous={previous:.3f} ({(added / previous - 1) * 100:+.0f} %)" if previous else ""
+    print(f"gateway-speed {name}: p50={p50:.3f} p95={p95:.3f} direct={base:.3f} added={added:.3f}{change}")
+    if previous:            # выросшая добавка не становится новой точкой отсчёта сама собой
+        assert not (added > previous * GROWTH and added - previous > GROWTH_ABS), (
+            f"добавка выросла с {previous:.3f} до {added:.3f} с к прошлому замеру на этой машине")
+    HISTORY.parent.mkdir(exist_ok=True)
+    HISTORY.write_text(json.dumps(history | {name: round(added, 4)}, indent=1), encoding="utf-8")
     return added
 
 
@@ -108,7 +127,7 @@ def test_repeated_1_mib_body_adds_at_most_300_ms(keys, stub, repo, request, prot
     through_gateway(keys, protocol, [payload])          # первый запрос: тело очищается и ложится в журнал
     times = through_gateway(keys, protocol, [payload] * (WARMUP + COUNT))[WARMUP:]
     assert last_send(repo)["blocks_new"] == 0
-    assert report(request.node.name, times, direct(stub)) <= ADDED
+    assert report(request, times, direct(stub)) <= ADDED
 
 
 def test_next_turn_with_a_small_new_block_adds_at_most_300_ms(keys, stub, repo, request):
@@ -117,7 +136,7 @@ def test_next_turn_with_a_small_new_block_adds_at_most_300_ms(keys, stub, repo, 
     turns = [add_result("anthropic", payload, 100 + n, fictional_lines(3, 5_000 + 3 * n)[:200]) for n in range(WARMUP + COUNT)]
     times = through_gateway(keys, "anthropic", turns)[WARMUP:]
     assert last_send(repo)["blocks_new"] == 2                 # вызов команды и её вывод
-    assert report(request.node.name, times, direct(stub)) <= ADDED
+    assert report(request, times, direct(stub)) <= ADDED
 
 
 def test_repeated_body_on_a_chat_of_20000_entities_adds_at_most_300_ms(keys, stub, repo, request):
@@ -130,7 +149,7 @@ def test_repeated_body_on_a_chat_of_20000_entities_adds_at_most_300_ms(keys, stu
     repo.commit_chat(chat_id, state, version)
     times = through_gateway(keys, "anthropic", [payload] * COUNT)
     assert last_send(repo)["blocks_new"] == 0 and len(repo.load_state(chat_id)[0].entities) >= 20_000
-    assert report(request.node.name, times, direct(stub)) <= ADDED
+    assert report(request, times, direct(stub)) <= ADDED
 
 
 def test_new_100k_chars_are_cleaned_within_nfr_4(keys, stub, repo, request):
@@ -140,7 +159,7 @@ def test_new_100k_chars_are_cleaned_within_nfr_4(keys, stub, repo, request):
     assert {len(text) for text in texts} == {100_000}
     times = through_gateway(keys, "anthropic", [add_result("anthropic", payload, 200 + n, text) for n, text in enumerate(texts)])
     assert last_send(repo)["blocks_new"] == 2
-    assert report(request.node.name, times, direct(stub), by_median=True) <= NFR_4
+    assert report(request, times, direct(stub), by_median=True) <= NFR_4
 
 
 def test_first_text_reaches_the_agent_before_the_model_goes_on(repo, engines, clock, stub, request):
