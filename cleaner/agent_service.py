@@ -114,9 +114,27 @@ class _Prepared:
     replaced: Counter = field(default_factory=Counter)
     blocks: list[dict] = field(default_factory=list)
     guard: SecretGuard | None = None    # секреты в адресах чужих узлов в аргументах ответа (настройка ключа)
+    trusted: str = ""                   # очищенный текст пользователя и оператора — известные узлы SecretGuard
     unfamiliar: list[str] = field(default_factory=list)     # формы незнакомых полей и блоков: пути и type, без данных
     model_blocks: int = 0               # блоков модели в истории запроса
     model_fresh: int = 0                # из них не найдено в журнале out
+
+
+# Роли, текст которых дали пользователь и оператор агента (сообщения и системные инструкции): узлы в нём известны
+# SecretGuard. Результаты инструментов (tool_result, function_call_output, сообщения role=tool), описания инструментов и
+# текст модели — нет: их пишут внешние источники, в том числе враждебная страница.
+_TRUSTED_ROLES = frozenset({"user", "system", "developer"})
+
+
+def _trusted_text(proto: GatewayProtocol, body: dict, instruction: str = "") -> str:
+    """Текстовые блоки этих ролей в очищенном теле — как их увидела модель. Служебная инструкция Cleaner (instruction,
+    отдельным блоком или в конце строки system) не в счёт: метки-примеры в ней — не узлы пользователя."""
+    text = "\n".join(
+        unit.node["text"] for unit in proto.units(body)
+        if unit.kind == "text" and unit.role in _TRUSTED_ROLES and isinstance(unit.node, dict)
+        and isinstance(unit.node.get("text"), str)
+    )
+    return text.replace(instruction, "") if instruction else text
 
 
 # Имя поля или значение type, которое можно показать в квитанции: имя протокола, а не данные пользователя.
@@ -624,6 +642,8 @@ class AgentService:
             refused.reason = "leak_structural" if in_service else "leak"
             raise refused
         result.out, result.state = out, _snapshot(state)
+        if call.key.hold_secrets:
+            result.trusted = _trusted_text(proto, body, instruction)
         result.unfamiliar = sorted({_shape(unit) for unit in units if unit.kind == "other"})
         result.model_blocks = len(groups["out"])
         result.model_fresh = sum(1 for direction, _ in fresh if direction == "out")
@@ -723,7 +743,7 @@ class AgentService:
             return AgentReply(upstream.status, dict(upstream.headers), body=raw)
         stream = proto.stream(prepared.state, prepared.settings)
         if call.key.hold_secrets:
-            stream.budget.guard = prepared.guard = SecretGuard(prepared.out.body)
+            stream.budget.guard = prepared.guard = SecretGuard(prepared.trusted)
         if not call.body.get("stream"):
             try:
                 raw = upstream.read(_BODY_BYTES)
