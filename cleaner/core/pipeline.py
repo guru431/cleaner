@@ -48,6 +48,7 @@ _ROLE_MAILBOXES = frozenset({
     "postmaster", "hostmaster", "webmaster", "abuse", "noc", "security", "info", "marketing", "sales",
     "support", "noreply", "no-reply",
 })
+_CHECKED_SEPARATOR = "\n\x00\n"         # между строками одного прохода проверки утечек (checked_leaks)
 
 
 def _piece(text: str, span: MergedSpan, start: int, end: int, ctx: DetectContext) -> MergedSpan | None:
@@ -538,9 +539,11 @@ class AgentOutgoing:
 
 
 def checked_leaks(checked: list[str] | tuple[str, ...], state: ChatState, settings: Settings) -> list[Leak]:
-    """Утечки в строках одним проходом: таблица чата собирается один раз, а не на каждую строку. Разделитель — пустая
-    строка: написание через перевод строки не тянется, и находки на стыке строк не бывает."""
-    return leakcheck.check("\n\n".join(checked), state, settings) if checked else []
+    """Утечки в строках одним проходом: таблица чата собирается один раз, а не на каждую строку. Разделитель — знак NUL
+    между переводами строк: пробельные знаки нормализация сводит в один пробел, и через пустую строку написание из двух
+    слов тянулось бы («Анна» в конце одной строки и «Смирнова» в начале следующей); NUL не пробел и не буква, поэтому
+    находки на стыке строк не бывает."""
+    return leakcheck.check(_CHECKED_SEPARATOR.join(checked), state, settings) if checked else []
 
 
 def build_agent_outgoing(

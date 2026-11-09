@@ -14,33 +14,64 @@
       <label class="field"><span>Тип</span><select name="type">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select></label>
       <label class="field"><span>Варианты написания</span><span class="control">
         <textarea name="aliases" rows="2"></textarea>
-        <small class="hint">По одному в строке</small>
+        <small class="hint">По одному в строке. Значение ищется как записано, без других падежей: «Смирновой Анне», «по Проекту Полярис» — отдельные варианты или отметка ниже.</small>
       </span></label>
+      <div class="field"><span>Падежи</span><span class="control">
+        <label class="check"><input type="checkbox" name="inflect" value="1"> Искать во всех падежах</label>
+        <small class="hint">Для людей, организаций, адресов и терминов списка «всегда скрывать»: формы значения и вариантов в единственном числе строятся по словарю русского языка; «Оценить добавление» их покажет.</small>
+      </span></div>
       <label class="field"><span>Комментарий</span><input name="comment"></label>
       <div class="buttons"><button class="primary" name="action" value="impact">Оценить добавление</button></div>
     </form>
   </div>
 </section>
 
-{% for title, rows in (("Всегда скрывать", always), ("Никогда не скрывать", never)) %}
+{# Отбор по списку и типу — коды в адресе (GET), поиск — формой POST: значение не попадает в адрес. Страницы — на сервере,
+   по DICTIONARY_PAGE строк: выгрузка AD — тысячи строк, у каждой своя форма удаления. #}
+<form method="post" action="/settings/dictionary/search" class="inline-form table-bar">
+  {% include "_csrf.html" %}
+  <input name="q" value="{{ q }}" placeholder="Значение или вариант" aria-label="Поиск по значению и вариантам">
+  <select name="list" aria-label="Список">
+    <option value="">Все списки ({{ total }})</option>
+    {% for code, name in lists.items() %}<option value="{{ code }}"{% if code == shown_list %} selected{% endif %}>{{ name }} ({{ by_list[code] }})</option>{% endfor %}
+  </select>
+  <select name="type" aria-label="Тип">
+    <option value="">Все типы</option>
+    {% for code, name, count in present %}<option value="{{ code.value }}"{% if code == shown_type %} selected{% endif %}>{{ name }} ({{ count }})</option>{% endfor %}
+  </select>
+  <button>Показать</button>
+  <span class="muted" data-shown>{% if chosen %}Показаны {{ first }}–{{ first + rows | length - 1 }} из {{ chosen }}{% else %}Показаны 0 из 0{% endif %}</span>
+  {% if pages > 1 %}
+  <nav class="pager" aria-label="Страницы словаря">
+    {% if q %}
+    {% if number > 1 %}<button name="page" value="{{ number - 1 }}" rel="prev">← Предыдущая</button>{% endif %}
+    <span class="muted">страница {{ number }} из {{ pages }}</span>
+    {% if number < pages %}<button name="page" value="{{ number + 1 }}" rel="next">Следующая →</button>{% endif %}
+    {% else %}
+    {% if number > 1 %}<a class="btn" href="/settings/dictionary{{ query(number - 1) }}" rel="prev">← Предыдущая</a>{% endif %}
+    <span class="muted">страница {{ number }} из {{ pages }}</span>
+    {% if number < pages %}<a class="btn" href="/settings/dictionary{{ query(number + 1) }}" rel="next">Следующая →</a>{% endif %}
+    {% endif %}
+  </nav>
+  {% endif %}
+</form>
+
 <section class="panel">
-  <header class="panel-head"><h2 class="title">{{ title }}</h2><span class="state">{{ rows | length }}</span></header>
   <table class="grid">
-    <thead><tr><th>Значение</th><th>Тип</th><th>Варианты</th><th>Комментарий</th><th></th></tr></thead>
+    <thead><tr><th>Значение</th><th>Список</th><th>Тип</th><th>Варианты</th><th>Комментарий</th><th></th></tr></thead>
     <tbody>
     {% for r in rows %}
     <tr>
-      <td class="mono">{{ r.value }}</td><td class="nowrap">{{ types[r.type] if r.type else "" }}</td>
-      <td class="mono">{{ r.aliases | join(", ") }}</td><td>{{ r.comment }}</td>
+      <td class="mono">{{ r.value }}</td><td class="nowrap">{{ lists[r.list] }}</td><td class="nowrap">{{ types[r.type] if r.type else "" }}</td>
+      <td class="mono">{{ r.aliases | join(", ") }}{% if r.inflect %}<div class="sub">во всех падежах</div>{% endif %}</td><td>{{ r.comment }}</td>
       <td class="actions"><form method="post" action="/settings/dictionary/{{ r.id }}/delete">{% include "_csrf.html" %}<button class="danger" name="action" value="impact">Оценить удаление</button></form></td>
     </tr>
     {% else %}
-    <tr><td colspan="5" class="empty">Пусто</td></tr>
+    <tr><td colspan="6" class="empty">{% if total %}Ничего не найдено{% else %}Пусто{% endif %}</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </section>
-{% endfor %}
 
 <section class="panel">
   <header class="panel-head"><h2 class="title">Импорт из CSV</h2><span class="state">выгрузка AD или DNS; сначала предпросмотр</span></header>

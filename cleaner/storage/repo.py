@@ -15,7 +15,8 @@ from pathlib import Path
 
 from cleaner.clock import Clock
 from cleaner.core.agent import ledger
-from cleaner.core.types import ChatState, CustomPattern, DictEntry, EntityType, Policy, Settings, default_policies
+from cleaner.core.detect import dictionary
+from cleaner.core.types import ChatState, CustomPattern, EntityType, Policy, Settings, default_policies
 from cleaner.storage import crypto
 from cleaner.storage.codec import state_from_json, state_to_json
 from cleaner.storage.db import transaction
@@ -123,6 +124,7 @@ class DictionaryRow:
     value: str
     aliases: tuple[str, ...]
     comment: str
+    inflect: bool = False         # искать во всех падежах (detect.dictionary.entry)
 
 
 @dataclass(frozen=True)
@@ -1095,27 +1097,30 @@ class Repository:
     # --- словарь, шаблоны, политики -------------------------------------------
 
     def _insert_dictionary(
-        self, list_: str, value: str, type_: EntityType | None, aliases: tuple[str, ...], comment: str
+        self, list_: str, value: str, type_: EntityType | None, aliases: tuple[str, ...], comment: str,
+        inflect: bool = False,
     ) -> str:
         entry_id = uuid.uuid4().hex
         key = self.global_key
         self.conn.execute(
-            "INSERT INTO dictionary(id, list, type, value_enc, aliases_enc, comment_enc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO dictionary(id, list, type, value_enc, aliases_enc, comment_enc, created_at, inflect)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 entry_id, list_, type_.value if type_ else None,
                 self._enc(key, value, f"dictionary.value:{entry_id}"),
                 self._enc(key, json.dumps(list(aliases), ensure_ascii=False), f"dictionary.aliases:{entry_id}"),
                 self._enc(key, comment, f"dictionary.comment:{entry_id}"),
-                self._now(),
+                self._now(), int(inflect),
             ),
         )
         return entry_id
 
     def add_dictionary(
-        self, list_: str, value: str, type_: EntityType | None = None, aliases: tuple[str, ...] = (), comment: str = ""
+        self, list_: str, value: str, type_: EntityType | None = None, aliases: tuple[str, ...] = (), comment: str = "",
+        inflect: bool = False,
     ) -> str:
         with self.lock:
-            return self._insert_dictionary(list_, value, type_, aliases, comment)
+            return self._insert_dictionary(list_, value, type_, aliases, comment, inflect)
 
     def add_dictionary_many(self, list_: str, values: list[str], type_: EntityType | None = None) -> int:
         """Импорт из CSV: тысячи строк одной транзакцией, а не по записи на диск каждая."""
@@ -1131,7 +1136,7 @@ class Repository:
                 row["id"], row["list"], EntityType(row["type"]) if row["type"] else None,
                 self._dec(key, row["value_enc"], f"dictionary.value:{row['id']}"),
                 tuple(json.loads(self._dec(key, row["aliases_enc"], f"dictionary.aliases:{row['id']}"))),
-                self._dec(key, row["comment_enc"], f"dictionary.comment:{row['id']}"),
+                self._dec(key, row["comment_enc"], f"dictionary.comment:{row['id']}"), bool(row["inflect"]),
             )
             for row in self._all("SELECT * FROM dictionary ORDER BY created_at, id")
         ]
@@ -1174,7 +1179,9 @@ class Repository:
     def settings(self) -> Settings:
         """Настройки ядра. Значения «никогда не скрывать» приводятся к нижнему регистру здесь, на границе."""
         rows = self.dictionary()
-        always = tuple(DictEntry(r.type, r.value, r.aliases) for r in rows if r.list == "always" and r.type is not None)
+        always = tuple(
+            dictionary.entry(r.type, r.value, r.aliases, r.inflect) for r in rows if r.list == "always" and r.type is not None
+        )
         never = frozenset(v.strip().lower() for r in rows if r.list == "never" for v in (r.value, *r.aliases) if v.strip())
         patterns = tuple(CustomPattern(p.name, p.regex, p.type) for p in self.patterns() if p.enabled)
         return Settings(always=always, never=never, patterns=patterns, policies=self.policies())

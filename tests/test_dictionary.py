@@ -62,3 +62,36 @@ def test_slow_pattern_stops_the_layer(monkeypatch):
     ctx = DetectContext(Settings(patterns=(CustomPattern("плохой", r"^(a|aa)+$", T.TERM),)))
     with pytest.raises(DetectorError):
         dictionary.detect("a" * 40 + "!", ctx)
+
+
+def test_known_number_added_later_is_found_by_digits_like_a_fresh_table():
+    """FINDINGS «Известный чату номер в другой записи не скрывается…»: ключи номеров берутся из памяти вместе с таблицей
+    написаний и дополняются новыми сущностями так же, как при сборке с начала; выделение пользователя по цифрам не ищется."""
+    text = "ИНН 77 07 08 38 93, тел. 903 111-22-33"
+    known = (("ivanov", T.ACCOUNT), ("7707083893", T.INN))
+    assert found(text, DetectContext(Settings(), known=known)) == {(T.INN, "77 07 08 38 93", "dict")}
+    longer = DetectContext(Settings(), known=known + (("+7 (903) 111-22-33", T.PHONE),))
+    assert found(text, longer) == {(T.INN, "77 07 08 38 93", "dict"), (T.PHONE, "903 111-22-33", "dict")}
+    before = [(span.start, span.end, span.type) for span in dictionary.detect(text, longer)]
+    dictionary._cache.clear()
+    assert [(span.start, span.end, span.type) for span in dictionary.detect(text, longer)] == before
+    assert found(text, DetectContext(Settings(), manual=(("7707083893", T.INN, "none"),))) == set()
+
+
+@pytest.mark.parametrize("type_, value, forms", [
+    (T.PERSON, "Смирнова Анна Петровна", {"Смирновой Анне Петровне", "Смирновой Анны Петровны", "Смирнову Анну Петровну"}),
+    (T.TERM, "Проект Полярис", {"Проекту Полярис", "Проекте Полярис", "Проекта Полярис"}),
+    (T.ADDRESS, "Красная площадь", {"Красной площади", "Красной площадью"}),
+    (T.ORG, "Министерство финансов", {"Министерства финансов", "Министерству финансов"}),
+], ids=["person", "term", "address", "org"])
+def test_inflected_forms_of_a_dictionary_entry(type_, value, forms):
+    """IDEAS «Словарь: падежные формы для людей, организаций и терминов»: формы — косвенные падежи всей фразы и, кроме
+    людей, её начала до первого существительного. Слова в кавычках, сокращения и латиница не склоняются; у прочих типов
+    форм нет."""
+    assert forms <= set(dictionary.inflected(type_, value))
+    assert value not in dictionary.inflected(type_, value)
+    assert dictionary.inflected(T.ORG, "ООО «Ромашка»") == ()
+    assert dictionary.inflected(T.HOST, "Проект") == ()
+    entry = dictionary.entry(type_, value, ("Вариант",), True)
+    assert entry.aliases[0] == "Вариант" and forms <= set(entry.aliases)
+    assert dictionary.entry(type_, value, ("Вариант",), False) == DictEntry(type_, value, ("Вариант",))

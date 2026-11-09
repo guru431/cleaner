@@ -7,7 +7,7 @@ import json
 import threading
 from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import regex
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from cleaner.core.detect.base import DetectorError, load_builtin
 from cleaner import settings_impact
 from cleaner.core import cache
-from cleaner.core.detect.dictionary import PATTERN_TIMEOUT
+from cleaner.core.detect.dictionary import INFLECTED_TYPES, PATTERN_TIMEOUT, entry
 from cleaner.core.detect.llm import CompletionError
 from cleaner.core.entities import hostmap
 from cleaner.core.types import EntityType, Policy, default_policies
@@ -72,12 +72,12 @@ def _list(value: str) -> str:
     return value
 
 
-def _impact(request, viewer, operation):
+def _impact(request, viewer, operation, **shown):
     try:
         result = settings_impact.preview(repo_of(request), viewer.user.id, operation)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
-    return page(request, "settings_impact.html", viewer, **result)
+    return page(request, "settings_impact.html", viewer, **result, **shown)
 
 
 @router.post("/impact/apply")
@@ -153,13 +153,67 @@ def save_policies(request: Request, form: dict[str, str] = Depends(get_form), vi
 
 # --- словарь и импорт (FR-10.1–10.3) ------------------------------------------
 
+DICTIONARY_PAGE = 100
+LIST_NAMES = {"always": "всегда скрывать", "never": "никогда не скрывать"}
+
+
+def _dictionary_query(list_: str, type_: str, number: int) -> str:
+    """Отбор и страница словаря в адресе — только коды списка и типа и номер; искомое значение в адрес не попадает."""
+    pairs = (("list", list_), ("type", type_), ("page", number if number > 1 else ""))
+    query = urlencode({key: value for key, value in pairs if value})
+    return f"?{query}" if query else ""
+
+
+def _folded(value: str) -> str:
+    return value.casefold().replace("ё", "е")
+
+
+def _dictionary_page(request: Request, viewer: Viewer, list_: str, type_: str, raw_page: str, wanted: str = "") -> Response:
+    """Словарь страницами по DICTIONARY_PAGE строк (выгрузка AD — тысячи строк): отбор по списку, типу и поиск по значению
+    и вариантам без учёта регистра и «ё». Неизвестные список и тип — отказ, номер страницы — в пределах."""
+    if list_:
+        _list(list_)
+    shown_type = _type(type_) if type_ else None
+    rows = repo_of(request).dictionary()
+    rows.sort(key=lambda r: r.list != "always")             # «всегда скрывать» первым, внутри — в порядке добавления
+    by_list = Counter(r.list for r in rows)
+    by_type = Counter(r.type for r in rows if r.type is not None)
+    needle = _folded(wanted.strip())
+    chosen = [
+        r for r in rows
+        if (not list_ or r.list == list_) and (shown_type is None or r.type is shown_type)
+        and (not needle or any(needle in _folded(value) for value in (r.value, *r.aliases)))
+    ]
+    pages = max(1, -(-len(chosen) // DICTIONARY_PAGE))
+    number = min(pages, max(1, int(raw_page))) if raw_page.isdigit() and len(raw_page) < 7 else 1
+    return page(
+        request, "dictionary.html", viewer, types=render.TYPE_NAMES, lists=LIST_NAMES,
+        rows=chosen[(number - 1) * DICTIONARY_PAGE:number * DICTIONARY_PAGE], total=len(rows), chosen=len(chosen),
+        by_list=by_list, present=[(t, render.TYPE_NAMES[t], by_type[t]) for t in EntityType if by_type[t]],
+        shown_list=list_, shown_type=shown_type, q=wanted.strip(), first=(number - 1) * DICTIONARY_PAGE + 1,
+        number=number, pages=pages, query=lambda target: _dictionary_query(list_, type_, target),
+    )
+
+
 @router.get("/dictionary")
 def dictionary(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
-    rows = repo_of(request).dictionary()
-    return page(
-        request, "dictionary.html", viewer, types=render.TYPE_NAMES,
-        always=[r for r in rows if r.list == "always"], never=[r for r in rows if r.list == "never"],
-    )
+    params = request.query_params
+    return _dictionary_page(request, viewer, params.get("list", ""), params.get("type", ""), params.get("page", "1"))
+
+
+@router.post("/dictionary/search")
+def search_dictionary(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    """Поиск — формой POST: значение не попадает ни в адрес, ни в журнал запросов. Без искомого — переход к адресу с
+    отбором, как у ссылок страниц."""
+    list_, type_, number = form.get("list", ""), form.get("type", ""), form.get("page", "1")
+    if not form.get("q", "").strip():
+        if list_:
+            _list(list_)
+        if type_:
+            _type(type_)
+        page_number = int(number) if number.isdigit() and len(number) < 7 else 1
+        return _redirect("/settings/dictionary" + _dictionary_query(list_, type_, page_number))
+    return _dictionary_page(request, viewer, list_, type_, number, form["q"])
 
 
 @router.post("/dictionary")
@@ -169,14 +223,17 @@ def add_entry(request: Request, form: dict[str, str] = Depends(get_form), viewer
         raise HTTPException(400, "Укажите значение")
     type_ = _type(form.get("type", "")) if list_ == "always" else None
     aliases = tuple(alias.strip() for alias in form.get("aliases", "").splitlines() if alias.strip())
+    # Падежные формы — у людей, организаций, адресов и терминов списка «всегда скрывать»; у прочих отметка не хранится.
+    inflect = form.get("inflect") == "1" and type_ in INFLECTED_TYPES
     repo = repo_of(request)
     if repo.in_dictionary(list_, value):
         raise HTTPException(400, DUPLICATE)
     if form.get("action") == "impact":
         row = {"id": "", "list": list_, "value": value, "type": type_.value if type_ else None,
-               "aliases": list(aliases), "comment": form.get("comment", "").strip()}
-        return _impact(request, viewer, {"kind": "add", "rows": [row]})
-    repo.add_dictionary(list_, value, type_, aliases, form.get("comment", "").strip())
+               "aliases": list(aliases), "comment": form.get("comment", "").strip(), "inflect": inflect}
+        forms = [form for form in entry(type_, value, aliases, True).aliases if form not in aliases] if inflect else []
+        return _impact(request, viewer, {"kind": "add", "rows": [row]}, inflected_forms=forms)
+    repo.add_dictionary(list_, value, type_, aliases, form.get("comment", "").strip(), inflect)
     repo.audit("dictionary_changed", viewer.user.id, action="add", list=list_)
     return _redirect("/settings/builtin" if form.get("back") == "builtin" else "/settings/dictionary")
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 
 from cleaner.core import surrogates
 from cleaner.core.entities import netmap, ops
-from cleaner.core.match import Forms
+from cleaner.core.match import DIGIT_TYPES, Digits, Forms, digit_keys
 from cleaner.core.types import STRICT_TYPES, ChatState, DictEntry, EntityType, Policy, Settings
 
 # Записи адресов — как их находит слой 3: IPv4 (и с нулями впереди, и через «\.» или «\\.») с длиной префикса и без, IPv6
@@ -82,8 +82,8 @@ _Entities = tuple[tuple[str, ...], tuple[EntityType, ...], tuple[tuple[str, ...]
 
 @dataclass(frozen=True)
 class _Index:
-    """Таблицы проверки одного содержимого: открытые значения, написания сущностей и словаря, ключи адресов (ключ
-    сущности — раньше ключа словаря, у сущностей — первой по порядку). После сборки не меняются."""
+    """Таблицы проверки одного содержимого: открытые значения, написания сущностей и словаря, ключи адресов и цифровых
+    значений (ключ сущности — раньше ключа словаря, у сущностей — первой по порядку). После сборки не меняются."""
 
     open_values: frozenset[str]
     opened: Forms[None]
@@ -91,6 +91,8 @@ class _Index:
     always: Forms[None]
     entity_keys: dict[str, str]
     keys: dict[str, str | None]
+    entity_digits: dict[str, str]
+    digits: Digits[str | None]
 
 
 # Таблицы последней проверки каждого чата (не больше _INDEXES чатов, как STATE_CACHE шлюза): на 20 000 сущностях их
@@ -177,11 +179,13 @@ def _opened(open_values: frozenset[str]) -> Callable[[str, EntityType], bool]:
 def _searched(
     pairs: Iterable[tuple[str | None, EntityType, Iterable[str]]], off: frozenset[EntityType],
     opened: Callable[[str, EntityType], bool],
-) -> tuple[list[tuple[str, str, str | None]], dict[str, str | None]]:
-    """Написания, которые ищутся, и ключи адресов. Адрес IP сравнивается и по адресу: написания — только записи, которые
-    чат видел. Ключи — канонические записи тех же написаний, поэтому открытые и выключенные политикой не участвуют."""
+) -> tuple[list[tuple[str, str, str | None]], dict[str, str | None], dict[str, str | None]]:
+    """Написания, которые ищутся, ключи адресов и цифровых значений. Адрес IP сравнивается и по адресу, телефон, ИНН,
+    паспорт и другие номера — по цифрам (match.digit_keys): написания — только записи, которые чат видел. Ключи —
+    канонические записи тех же написаний, поэтому открытые и выключенные политикой не участвуют."""
     forms: list[tuple[str, str, str | None]] = []
     keys: dict[str, str | None] = {}
+    digits: dict[str, str | None] = {}
     for payload, type_, values in pairs:
         if type_ in off:
             continue
@@ -191,29 +195,33 @@ def _searched(
                 key = netmap.canonical_key(form) if type_ is EntityType.IP else None
                 if key is not None:
                     keys.setdefault(key, payload)
-    return forms, keys
+                for key in digit_keys(type_, form) if type_ in DIGIT_TYPES else ():
+                    digits.setdefault(key, payload)
+    return forms, keys, digits
 
 
 def _build(
     entities: _Entities, always: tuple[DictEntry, ...], off: frozenset[EntityType], open_values: frozenset[str],
 ) -> _Index:
     opened = _opened(open_values)
-    entity_forms, entity_keys = _searched(zip(*entities), off, opened)
-    always_forms, always_keys = _searched(
+    entity_forms, entity_keys, entity_digits = _searched(zip(*entities), off, opened)
+    always_forms, always_keys, always_digits = _searched(
         ((None, entry.type, (entry.value, *entry.aliases)) for entry in always), off, opened,
     )
     return _Index(
         open_values, Forms([(value, "letters", None) for value in open_values]), Forms(entity_forms),
-        Forms(always_forms), entity_keys, always_keys | entity_keys,
+        Forms(always_forms), entity_keys, always_keys | entity_keys, entity_digits, Digits(always_digits | entity_digits),
     )
 
 
 def _extend(index: _Index, entities: _Entities, off: frozenset[EntityType]) -> _Index:
     """Таблицы index и сущностей entities после его сущностей — те же, что собранные с начала."""
-    forms, keys = _searched(zip(*entities), off, _opened(index.open_values))
+    forms, keys, digits = _searched(zip(*entities), off, _opened(index.open_values))
     added = {key: payload for key, payload in keys.items() if key not in index.entity_keys}
+    numbers = {key: payload for key, payload in digits.items() if key not in index.entity_digits}
     return replace(
         index, entities=index.entities.extended(forms), entity_keys=index.entity_keys | added, keys=index.keys | added,
+        entity_digits=index.entity_digits | numbers, digits=index.digits.extended(numbers),
     )
 
 
@@ -233,4 +241,10 @@ def check(text: str, state: ChatState, settings: Settings) -> list[Leak]:
     found |= {Leak(start, end, None) for start, end, _ in index.always.find(remaining)}
     if index.keys:
         found |= _other_notations(remaining, index.keys, state, found)
+    if index.digits.keys:
+        # Номер в другой записи: «9031112233» при известном «+7 (903) 111-22-33». Найденное написанием — уже находка.
+        found |= {
+            Leak(start, end, payload)
+            for start, end, payload in index.digits.find(remaining, [(leak.start, leak.end) for leak in found])
+        }
     return sorted(found, key=lambda leak: (leak.start, leak.end))
