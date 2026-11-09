@@ -163,6 +163,30 @@ def test_chat_composer_tab_is_remembered(ivan):
                      r'<button type="button" role="tab" data-tab="text"', page)
 
 
+def test_chat_composer_is_one_action_per_step(ivan, repo):
+    """Идея «чат — выбор модели одним действием…»: список модели отправляет форму сам (кнопка — только без JS),
+    форматы загрузки — в «Форматы и ограничения», Ctrl+Enter и вставка снимка экрана — в app.js; основная кнопка
+    следующего шага — только в маршруте. Находка о выделении: поле из выделения не считается начатым вводом."""
+    provider = repo.add_provider(Provider("", "Облако", "openai", "https://llm.example/v1", "bearer", "sk-test-0123", ("m-1",), 512))
+    chat_id = ivan.chat()
+    ivan.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+    item_id = repo.items(chat_id)[0].id
+    review = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    ivan.post(f"/chats/{chat_id}/items/{item_id}/reviewed", digest=re.search(r'name="digest" value="([0-9a-f]{64})"', review).group(1))
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert re.search(r'<form method="post" action="/chats/[0-9a-f]+/provider" class="auto-submit" data-auto-submit>', page)
+    assert "<summary>Форматы и ограничения</summary>" in page and "Ctrl+V" in page
+    assert page.count(f'href="/chats/{chat_id}/manual"') == 1                    # «Копировать очищенное…» в маршруте
+    ivan.post(f"/chats/{chat_id}/provider", choice=f"{provider}|m-1")
+    page = ivan.get(f"/chats/{chat_id}").text
+    assert page.count(f'href="/chats/{chat_id}/send"') == 1 and "Подтвердить отправку…" in page
+    css = (WEB / "static" / "app.css").read_text(encoding="utf-8")
+    script = (WEB / "static" / "app.js").read_text(encoding="utf-8")
+    assert "html.js .auto-submit > button { display: none; }" in css
+    assert 'addEventListener("paste"' in script and "form.requestSubmit()" in script and "event.ctrlKey || event.metaKey" in script
+    assert 'field.dataset.fromSelection = ""' in script and '"fromSelection" in field.dataset' in script
+
+
 def test_layer_switch_states_its_layer_and_state(ivan):
     """На кнопке — что слой даёт, номер слоя и состояние — в подсказке (идея аудита 21.10.2026)."""
     chat_id = ivan.chat()

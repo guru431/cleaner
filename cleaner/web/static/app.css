@@ -327,6 +327,7 @@ mark.leak, mark.blocked { background: var(--t-secret); outline: 1px solid var(--
 .route li + li::before { content: "→"; margin-right: 4px; color: var(--muted); }
 .route li.done { color: var(--good); }
 .route li.on { color: var(--fg); font-weight: 600; }
+.route li.skipped { color: var(--warn); }
 .route .btn { height: 24px; padding: 0 8px; }
 .composer { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 8px 16px 12px; background: var(--bg-sub); border-top: 1px solid var(--line); }
 .send-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -502,3 +503,21 @@ html:not(.js) .key-mode, html:not(.js) .key-summary { display: none; }
   .top .brand { margin-right: 4px; }
   .top .who { max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
 }
+
+/* --- чат, проверка, таблица замен: аудит интерфейса 09.11.2026 ------------------------------------------ */
+
+/* Выбор облачной модели отправляется списком (app.js); кнопка «Выбрать» — только без JS. */
+html.js .auto-submit > button { display: none; }
+.upload-help { flex-basis: 100%; }
+.upload-help > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.upload-help ul { margin: 4px 0 0; padding-left: 20px; }
+/* Проверка: переходы — стрелками (подпись в title), снятие замены в строке — одной иконкой. */
+button.arrow { min-width: 28px; padding: 0 6px; justify-content: center; }
+button.icon-only { padding: 0 6px; }
+html:not(.js) .review-keys { display: none; }
+.review-keys { margin: 0 0 8px; }
+:root.view-reading .review-legend { order: -2; }
+.gold-offer form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+/* Поиск в таблице замен — на странице (app.js); без JS искать нечем. */
+.entities-find .search { width: 280px; }
+html:not(.js) .entities-find { display: none; }

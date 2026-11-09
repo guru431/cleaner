@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_ui.html" import icon %}
 {% block title %}Таблица замен — {{ chat.title }} — Cleaner{% endblock %}
 {% macro back_field() %}{% if back %}<input type="hidden" name="back" value="{{ back }}">{% endif %}{% endmacro %}
 {% block main %}
@@ -32,11 +33,17 @@
   </nav>
   {% endif %}
 </form>
+{# Поиск по замене и оригиналу — на странице (app.js), как поиск на проверке: значение не уходит в адрес. Ищет среди
+   строк этой страницы; поле — без имени и вне форм, поэтому не отправляется. #}
+<div class="table-bar inline-form entities-find">
+  <span class="search">{{ icon("search") }}<input type="search" id="entities-find" autocomplete="off" placeholder="Найти замену или оригинал" aria-label="Найти замену или оригинал в таблице на этой странице"></span>
+  <span class="muted" data-entities-found aria-live="polite"{% if pages > 1 %} data-pages="{{ pages }}"{% endif %}></span>
+</div>
 {% if chat.kind == "agent" %}
 <p class="sub">Чат шлюза агентов: правки действуют на следующие запросы агента, уже отправленные блоки идущих разговоров не меняются. Разные написания одного значения — разные замены: присоединить замену и задать значение при восстановлении здесь нельзя.</p>
 {% endif %}
 <section class="panel">
-  <table class="grid">
+  <table class="grid" id="entities-table">
     <thead><tr><th>Замена</th><th>Тип</th><th>Оригинал</th><th class="num">Вхождений</th><th>Действия</th></tr></thead>
     <tbody>
     {% for r in rows %}
@@ -46,10 +53,8 @@
       <td>{{ r.restore_value }}{% if r.forms | length > 1 %}<div class="sub">{{ r.forms | join(", ") }}</div>{% endif %}</td>
       <td class="num">{{ r.count }}</td>
       <td class="actions">
-        {# Снять замену, сменить тип, присоединить — через предпросмотр последствий (/preview). #}
-        <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/unmask/preview">
-          {% include "_csrf.html" %}{{ back_field() }}<button class="danger" title="Открыть предпросмотр снятия {{ r.surrogates | join(', ') }} во всём чате">Снять замену…</button>
-        </form>
+        {# Снять замену, сменить тип, присоединить — через предпросмотр последствий (/preview). «Изменить…» — первым,
+           опасное «Снять замену…» — последним, за чертой (app.css, td.actions). #}
         <details class="inline" name="edit">
           <summary class="btn" aria-label="Изменить замену {{ r.surrogates | join(', ') }}">Изменить…</summary>
           <div class="pop">
@@ -76,6 +81,9 @@
             {% endif %}
           </div>
         </details>
+        <form method="post" action="/chats/{{ chat.id }}/entities/{{ r.id }}/unmask/preview">
+          {% include "_csrf.html" %}{{ back_field() }}<button class="danger" title="Открыть предпросмотр снятия {{ r.surrogates | join(', ') }} во всём чате">Снять замену…</button>
+        </form>
       </td>
     </tr>
     {% else %}

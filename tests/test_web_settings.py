@@ -176,6 +176,25 @@ def test_disabled_account_is_deleted_with_all_its_chats(boss, browser, repo, app
     assert boss.post(f"/settings/users/{petr}/delete", confirm="petr").status_code == 404
 
 
+def test_deleted_account_takes_the_gold_examples_of_its_chats(boss, browser, repo):
+    """Находка «Удаление чата «безвозвратно»…»: удаление учётной записи удаляет чаты тем же путём, что и кнопка, —
+    с примерами эталона из них. Пример, который владелец сам оставил в наборе при удалении чата, остаётся: он уже
+    передан в общий набор, и удаляет его администратор на странице «Эталонный набор»."""
+    other = browser()
+    petr = other.user("petr")
+    other.login("petr")
+    for title in ("Оставленный", "Текущий"):
+        chat_id = other.chat(title)
+        other.post(f"/chats/{chat_id}/input", text="почта a@x.example")
+        other.post(f"/chats/{chat_id}/items/{repo.items(chat_id)[0].id}/gold", purpose="tuning", source=title)
+    left = next(chat for chat in repo.chat_ids(petr) if repo.chat(chat).title == "Оставленный")
+    other.post(f"/chats/{left}/delete", confirm="yes", gold_shown="yes")
+    boss.post(f"/settings/users/{petr}/disable", disabled="yes")
+    assert boss.post(f"/settings/users/{petr}/delete", confirm="petr").status_code == 303
+    assert [row.metadata["source"] for row in repo.gold()] == ["Оставленный"]
+    assert [e.details for e in repo.audit_events("chat_deleted")] == [{"via": "user_deleted", "gold": 1}, {"gold_kept": 1}]
+
+
 def test_every_password_form_names_whose_password_it_is(boss):
     """Форма нового пароля без поля логина: менеджер паролей браузера записал бы новый пароль пользователя к учётной
     записи вошедшего администратора. Логин строки — скрытым полем без name: на сервер он не уходит."""

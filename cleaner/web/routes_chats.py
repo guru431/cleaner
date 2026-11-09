@@ -100,6 +100,18 @@ def shown_digest(item: Item) -> str:
 STAGES = ("Исходник", "Проверка", "Передача", "Восстановленный ответ")
 
 
+def no_question(view: ChatView) -> str:
+    """Почему передавать нечего — подсказка недоступных кнопок передачи: последним в запросе должен быть вопрос
+    (раздел 10.1). Ответ, не полученный или оборванный ошибкой, не ход диалога — вопрос уходит снова (FR-8.9).
+    Пусто — передать можно."""
+    if not view.items:
+        return "В чате ещё нет текста: сначала добавьте текст или вопрос"
+    last = view.items[-1]
+    if isinstance(last, AnswerView) and last.item.status != "failed" and not last.item.meta.get("aborted"):
+        return "Последним в чате стоит ответ: сначала добавьте текст или вопрос"
+    return ""
+
+
 def route(view: ChatView, chat_id: str, chosen: bool) -> dict[str, object]:
     """Маршрут чата (аудит интерфейса 21.10.2026): этап по последним элементам, готовность текстов и основное действие
     следующего шага. Готовность — по всем входным текстам чата: запрос собирается из всей истории (раздел 10.1), и
@@ -109,13 +121,16 @@ def route(view: ChatView, chat_id: str, chosen: bool) -> dict[str, object]:
     if not entries:
         return {"stage": 0, "state": "", "action": None, "hint": "Вставьте текст или загрузите файл ниже"}
     last = entries[-1]
-    if isinstance(last, AnswerView):
-        if last.item.status in ("queued", "running"):
-            return {"stage": 3, "state": "", "action": None, "hint": "Модель отвечает…"}
-        if last.item.status != "failed" and not last.item.meta.get("aborted"):
-            return {"stage": 3, "state": "", "action": None, "hint": "Продолжить — следующий текст или вопрос ниже"}
-        # Ответ не получен — вопрос уходит снова (FR-8.9): этап передачи.
     inputs = [entry for entry in entries if isinstance(entry, InputView)]
+    if isinstance(last, AnswerView):
+        # Проверка пройдена, только если все тексты отмечены проверенными; иначе этап «пропущен», а не зелёная галочка.
+        skipped = (1,) if any(entry.readiness not in ("reviewed", "failed") for entry in inputs) else ()
+        if last.item.status in ("queued", "running"):
+            return {"stage": 3, "state": "", "action": None, "hint": "Модель отвечает…", "skipped": skipped}
+        if last.item.status != "failed" and not last.item.meta.get("aborted"):
+            return {"stage": 3, "state": "", "action": None, "hint": "Продолжить — следующий текст или вопрос ниже",
+                    "skipped": skipped}
+        # Ответ не получен — вопрос уходит снова (FR-8.9): этап передачи.
     ready = [entry.readiness for entry in inputs]
     if "processing" in ready:
         return {"stage": 0, "state": "processing", "action": None, "hint": "Дождитесь очистки"}
@@ -307,6 +322,7 @@ def chat_page(request: Request, chat_id: str, q: str = "", viewer: Viewer = Depe
         local=request.app.state.engines is not None,
         local_hint=_local_hint(request) if request.app.state.engines is not None else "",
         local_pending=LOCAL_PENDING if local_pending(entry.item for entry in view.items) else "",
+        gold_count=len(repo_of(request).chat_gold(chat_id)), no_question=no_question(view),
     )
 
 
@@ -325,7 +341,10 @@ def delete(request: Request, chat_id: str, form: dict[str, str] = Depends(get_fo
     own_chat(request, chat_id, viewer)
     if form.get("confirm") != "yes":
         raise HTTPException(400, "Подтвердите удаление")          # FR-1.4
-    service_of(request).delete_chat(chat_id, viewer.user.id)
+    # Отметка «и примеры эталона» включена по умолчанию; снятой её видно только по полю gold_shown: форма без отметки
+    # (примеров не было при показе, прежние формы) удаляет и примеры, появившиеся с тех пор.
+    keep = form.get("gold_shown") == "yes" and form.get("gold") != "yes"
+    service_of(request).delete_chat(chat_id, viewer.user.id, gold=not keep)
     return RedirectResponse("/chats", status_code=303)
 
 
@@ -438,7 +457,8 @@ def retry(request: Request, chat_id: str, item_id: str, form: dict[str, str] = D
 
 @router.post("/chats/{chat_id}/items/{item_id}/reviewed")
 def mark_reviewed(request: Request, chat_id: str, item_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    """«Отметить проверенным» на экране проверки: отметка показанного очищенного текста (поле digest)."""
+    """«Отметить проверенным» на экране проверки: отметка показанного очищенного текста (поле digest). Возврат — с
+    необязательным предложением сохранить текст как эталон (offer=gold — слово, не данные)."""
     own_chat(request, chat_id, viewer)
     try:
         service_of(request).mark_reviewed(chat_id, viewer.user.id, item_id, form.get("digest", ""))
@@ -446,7 +466,7 @@ def mark_reviewed(request: Request, chat_id: str, item_id: str, form: dict[str, 
         raise HTTPException(400, str(exc)) from None
     except KeyError:
         raise HTTPException(404, "Текст не найден") from None
-    return RedirectResponse(f"/chats/{chat_id}/items/{item_id}", status_code=303)
+    return RedirectResponse(f"/chats/{chat_id}/items/{item_id}?offer=gold", status_code=303)
 
 
 @router.post("/chats/{chat_id}/layers")

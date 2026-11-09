@@ -1092,6 +1092,17 @@ class Repository:
     def delete_gold(self, gold_id: str) -> bool:
         return self._run("DELETE FROM gold WHERE id = ?", gold_id) == 1
 
+    def chat_gold(self, chat_id: str) -> list[str]:
+        """Примеры эталона, сохранённые из чата: отметка chat в метаданных (ChatService.save_gold) или источник по
+        умолчанию «chat:<id>» у сохранённых до отметки. Расшифровываются только метаданные, не тексты."""
+        key = self.global_key
+        found = []
+        for row in self._all("SELECT id, metadata_enc FROM gold WHERE metadata_enc IS NOT NULL"):
+            metadata = json.loads(self._dec(key, row["metadata_enc"], f"gold.metadata:{row['id']}"))
+            if metadata.get("chat") == chat_id or metadata.get("source") == f"chat:{chat_id}":
+                found.append(row["id"])
+        return found
+
     # --- словарь, шаблоны, политики -------------------------------------------
 
     def _insert_dictionary(
