@@ -1078,7 +1078,7 @@ class Repository:
                 )
 
     def ledger_page(self, chat_id: str, offset: int, limit: int) -> list[tuple[LedgerEntry, str]]:
-        """Записи журнала чата шлюза — новые первыми — и время первой записи каждой."""
+        """Записи журнала чата шлюза — новые первыми — и время первой записи каждой; limit -1 — все."""
         key = self._dek(chat_id)
         rows = self._all(
             "SELECT l.* FROM agent_ledger l JOIN agent_conversations c ON c.id = l.conversation WHERE c.chat_id = ? "
@@ -1317,21 +1317,42 @@ class Repository:
             self._now(), user_id, chat_id, event, json.dumps(details, ensure_ascii=False),
         )
 
-    def audit_events(
-        self, event: str | None = None, user_id: str | None = None,
-        since: str | None = None, before: str | None = None, limit: int | None = 200,
-    ) -> list[AuditRow]:
-        """Свежие первыми. since и before — начало строки ISO: «2026-10-14» отбирает с начала суток (UTC).
-        limit None — без предела (выгрузка CSV)."""
-        sql, args = "SELECT * FROM audit WHERE 1 = 1", []
-        for condition, value in (("event = ?", event), ("user_id = ?", user_id), ("ts >= ?", since), ("ts < ?", before)):
+    @staticmethod
+    def _audit_where(
+        event: str | None, user_id: str | None, since: str | None, before: str | None, kind: str | None,
+    ) -> tuple[str, list]:
+        """Условие отбора журнала; событие и время идут по индексам audit_by_event и audit_by_ts."""
+        sql, args = " WHERE 1 = 1", []
+        for condition, value in (
+            ("event = ?", event), ("user_id = ?", user_id), ("ts >= ?", since), ("ts < ?", before),
+            ("json_extract(details, '$.kind') = ?", kind),
+        ):
             if value:
                 sql += f" AND {condition}"
                 args.append(value)
-        sql += " ORDER BY id DESC"
+        return sql, args
+
+    def audit_count(
+        self, event: str | None = None, user_id: str | None = None,
+        since: str | None = None, before: str | None = None, kind: str | None = None,
+    ) -> int:
+        """Число событий отбора audit_events — без загрузки строк и разбора JSON."""
+        where, args = self._audit_where(event, user_id, since, before, kind)
+        return self._one("SELECT COUNT(*) FROM audit" + where, *args)[0]
+
+    def audit_events(
+        self, event: str | None = None, user_id: str | None = None,
+        since: str | None = None, before: str | None = None, limit: int | None = 200,
+        kind: str | None = None, offset: int = 0,
+    ) -> list[AuditRow]:
+        """Свежие первыми. since и before — начало строки ISO: «2026-10-14» отбирает с начала суток (UTC).
+        limit None — без предела (выгрузка CSV); kind — поле kind в подробностях (вид ошибки);
+        offset — сколько свежих пропустить (страницы журнала)."""
+        where, args = self._audit_where(event, user_id, since, before, kind)
+        sql = "SELECT * FROM audit" + where + " ORDER BY id DESC"
         if limit is not None:
-            sql += " LIMIT ?"
-            args.append(limit)
+            sql += " LIMIT ? OFFSET ?"
+            args += [limit, offset]
         return [
             AuditRow(row["id"], row["ts"], row["user_id"], row["chat_id"], row["event"], json.loads(row["details"]))
             for row in self._all(sql, *args)

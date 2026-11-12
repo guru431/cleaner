@@ -40,14 +40,25 @@ def connect(path: Path | str) -> sqlite3.Connection:
     return conn
 
 
+def _statements(script: str) -> Iterator[str]:
+    """Скрипт по одному оператору: executescript сам фиксирует открытую транзакцию."""
+    statement = ""
+    for piece in script.split(";"):
+        statement += piece + ";"
+        if sqlite3.complete_statement(statement):
+            yield statement
+            statement = ""
+
+
 def _apply(conn: sqlite3.Connection, script: str, version: int) -> None:
-    """Скрипт и номер версии — одной транзакцией: сбой посередине не оставляет половину схемы."""
-    try:
-        conn.executescript(f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version = {version};\nCOMMIT;")
-    except BaseException:
-        if conn.in_transaction:
-            conn.execute("ROLLBACK")
-        raise
+    """Скрипт и номер версии — одной транзакцией: сбой посередине не оставляет половину схемы.
+    Версия перечитывается под замком: другой процесс мог применить этот номер, пока мы ждали."""
+    with transaction(conn):
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= version:
+            return
+        for statement in _statements(script):
+            conn.execute(statement)
+        conn.execute(f"PRAGMA user_version = {version}")
 
 
 def migrate(conn: sqlite3.Connection, directory: Path | None = None) -> None:

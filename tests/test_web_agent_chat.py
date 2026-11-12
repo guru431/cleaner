@@ -103,6 +103,25 @@ def test_agent_chat_counts_values_left_open_in_frozen_blocks(ivan, gateway, repo
     assert "в 1 блоке" in page
 
 
+def test_agent_chat_counts_open_values_in_the_whole_ledger_on_request(ivan, gateway, repo, monkeypatch):
+    """FR-14.8, 7.3: замороженный блок с открытым значением — начало разговора — уходит на дальние страницы; проверка
+    всего журнала находит его с любой страницы и показывает только такие блоки."""
+    from cleaner.web import routes_chats
+
+    chat = gateway()
+    state, version = repo.load_state(chat)
+    state.rules.append(ChatRule("mask", "Заря", T.TERM))
+    repo.commit_chat(chat, state, version)
+    gateway("Новый разговор: проект Заря")
+    monkeypatch.setattr(routes_chats, "LEDGER_PAGE", 1)
+    first = ivan.get(f"/chats/{chat}").text
+    assert "В показанных записях известные значения открыты в 0 блоках" in first and 'href="?open=1"' in first
+    whole = ivan.get(f"/chats/{chat}", open="1").text
+    assert "Во всём журнале чата известные значения открыты в 1 блоке" in whole
+    assert whole.count("открыто значение</span>") == 1 and "Старше</a>" not in whole
+    assert "Проверь узел srv-dc01.corp.contoso.ru, проект Заря" in whole
+
+
 def test_agent_chat_refuses_input_and_send(ivan, gateway):
     chat = gateway()
     for path, fields in (

@@ -155,6 +155,37 @@ def test_key_rotate_rewraps_the_keys_and_the_old_key_no_longer_opens_the_base(ho
     assert old_wrap not in raw and old_global.encode("ascii") not in raw
 
 
+def test_key_rotate_with_the_wal_held_by_another_connection_asks_to_repeat(home, monkeypatch, capsys, clock):
+    """Смена необратима: если базу держит другое соединение (копия, eval), прежние обёртки ключей остаются в
+    cleaner.db-wal — команда сохраняет новый ключ, но возвращает 1 и просит повторить rotate."""
+    key = init(home)
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    database = home / "data" / "cleaner.db"
+    reader = db.connect(database)
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM chats").fetchone()
+    connect = db.connect
+
+    def impatient(path):
+        conn = connect(path)
+        conn.execute("PRAGMA busy_timeout = 0")        # без трёх ожиданий по 5 с
+        return conn
+
+    monkeypatch.setattr(db, "connect", impatient)
+    capsys.readouterr()
+    try:
+        assert main(["key", "rotate", "--env-file", str(home / "new.env")]) == 1
+    finally:
+        reader.execute("COMMIT")
+        reader.close()
+    assert "журнал WAL не усечён" in capsys.readouterr().err
+    name, new_key = (home / "new.env").read_text(encoding="ascii").strip().split("=", 1)
+    assert name == crypto.MASTER_KEY_ENV and new_key != key
+    fresh = open_repo(database, new_key, clock)
+    assert fresh.audit_events("master_key_rotated")[0].details == {"chats": 0, "wal": "busy", "by": "cli"}
+    fresh.conn.close()
+
+
 def test_key_rotate_refuses_while_the_service_runs(home, monkeypatch, offline_env, capsys, clock):
     """Ревью: простаивающее соединение службы не мешает ни транзакции, ни усечению WAL, а служба держит прежний ключ в
     памяти и обёртывает им ключи новых чатов — после перезапуска с новым ключом они не открываются. Служба держит замок

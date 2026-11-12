@@ -344,6 +344,29 @@ def test_cloud_send_taken_off_the_queue_ends_the_wait_and_is_not_logged_as_sent(
     assert repo.item(chat, item.id).status == "done" and len(repo.audit_events("cloud_send")) == 1
 
 
+def test_cloud_send_taken_off_the_queue_is_failed_before_the_wait_ends(repo, monkeypatch):
+    """Опрос SSE /api/v1, увидев finished, читает элемент и отдаёт окончательное done: к этому моменту элемент уже
+    failed, а не running (как в run_send)."""
+    user = repo.create_user("owner", "hash", "user")
+    chat = repo.create_chat(user, "Чат")
+    provider = repo.add_provider(Provider("", "Облако", "openai", "https://llm.example/v1", "bearer", "invented", ("m-1",), 512))
+    sends = Jobs(Deferred())
+    service = ChatService(repo, send_submit=sends.submit, budget=sends.budget, cloud_send=lambda *a, **kw: iter(["Ответ"]))
+    service.add_input(chat, user, "Вопрос")
+    service.set_provider(chat, provider, "m-1")
+    item = service.send(chat, user, service.outgoing(chat).outgoing.context.digest())
+    seen = []
+    finish = service.live.finish
+
+    def watched(item_id):
+        seen.append(repo.item(chat, item_id).status)
+        finish(item_id)
+
+    monkeypatch.setattr(service.live, "finish", watched)
+    assert sends.cancel(next(iter(sends._tasks.values())).id, user)
+    assert seen == ["failed"] and service.live.get(item.id) is None
+
+
 def test_local_answer_taken_off_the_queue_is_not_logged_as_answered(repo, engines):
     """Как у cloud_send: событие local_answer пишется, когда задание началось; снятый с очереди вопрос локальной
     модели не дошёл до неё."""

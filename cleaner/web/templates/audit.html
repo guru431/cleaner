@@ -12,6 +12,7 @@
   <button formaction="/settings/audit/export" title="Все строки с этим отбором, без предела страницы; выгрузка записывается в журнал">Выгрузить CSV</button>
 </form>
 <section class="panel">
+  <p class="muted">Событий по отбору — {{ total }}{% if rows and rows | length < total %}; показаны {{ offset + 1 }}–{{ offset + rows | length }}, свежие первыми{% endif %}.</p>
   <table class="grid">
     <thead><tr><th>Время</th><th>Пользователь</th><th>Чат</th><th>Событие</th><th>Подробности</th></tr></thead>
     <tbody>
@@ -28,5 +29,11 @@
     {% endfor %}
     </tbody>
   </table>
+  {% if newer or older %}
+  <p class="buttons">
+    {% if newer %}<a class="btn" href="{{ newer }}">Новее</a>{% endif %}
+    {% if older %}<a class="btn" href="{{ older }}">Старше</a>{% endif %}
+  </p>
+  {% endif %}
 </section>
 {% endblock %}

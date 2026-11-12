@@ -115,8 +115,8 @@ def _cards(request: Request) -> dict[str, tuple[str, str, str]]:
     users = repo.users()
     disabled = sum(user.disabled for user in users)
     since = (request.app.state.clock.now() - timedelta(days=1)).isoformat(timespec="seconds")
-    events = len(repo.audit_events(since=since, limit=None))
-    errors = len(repo.audit_events("error", since=since, limit=None))
+    events = repo.audit_count(since=since)
+    errors = repo.audit_count("error", since=since)
     gold = _gold_state(request)
     if engines is None:
         local = ("bad", "не подключена", "слои 4 и 5 и сканы недоступны")
@@ -214,7 +214,8 @@ def _service(request: Request) -> dict:
         })
     slots = app.state.agent_slots
     since = (now - timedelta(days=CHECKPOINT_DAYS)).isoformat(timespec="seconds")
-    checkpoint = [row for row in repo.audit_events("error", since=since, limit=None) if row.details.get("kind") == "CheckpointBusy"]
+    checkpoint = repo.audit_count("error", since=since, kind="CheckpointBusy")
+    last = repo.audit_events("error", since=since, limit=1, kind="CheckpointBusy") if checkpoint else []
     database, wal = _db_size(repo)
     models = engines.status()["models"] if engines is not None else {}
     local = local_settings(repo)
@@ -224,7 +225,7 @@ def _service(request: Request) -> dict:
                    "state": _busy(max(jobs / budget.max_jobs, used / budget.max_bytes))},
         "pools": pools,
         "agents": {"busy": slots.busy, "limit": slots.limit, "refused": slots.refused, "state": _busy(slots.busy / slots.limit)},
-        "checkpoint": {"count": len(checkpoint), "last": checkpoint[0].ts if checkpoint else "", "days": CHECKPOINT_DAYS},
+        "checkpoint": {"count": checkpoint, "last": last[0].ts if last else "", "days": CHECKPOINT_DAYS},
         "database": {"mib": round(database / _MIB, 1), "wal_mib": round(wal / _MIB, 1)},
         "models": {"present": sum(models.values()), "total": len(models)},
         "local": {"connected": engines is not None, "key": bool(engines is not None and engines.status()["key"]),
@@ -834,17 +835,33 @@ def _day_start(request: Request, value: str, shift: int = 0) -> str | None:
     return start.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+AUDIT_PAGE = 500
+
+
 @router.get("/audit")
 def audit(
     request: Request, event: str = "", user: str = "", since: str = "", until: str = "",
     viewer: Viewer = Depends(get_admin),
 ) -> Response:
+    """Страница — AUDIT_PAGE событий отбора, свежие первыми; число всех событий отбора и кнопки «Новее/Старше»:
+    шлюз пишет события на каждый ход, и отбор за день не помещается на одну страницу."""
     repo = repo_of(request)
-    rows = repo.audit_events(event or None, user or None, _day_start(request, since), _day_start(request, until, 1), limit=500)
+    raw = request.query_params.get("offset", "0")
+    offset = int(raw) if raw.isdigit() and len(raw) < 9 else 0
+    selection = (event or None, user or None, _day_start(request, since), _day_start(request, until, 1))
+    rows = repo.audit_events(*selection, limit=AUDIT_PAGE, offset=offset)
+    total = repo.audit_count(*selection)
+    filters = {key: value for key, value in (("event", event), ("user", user), ("since", since), ("until", until)) if value}
+
+    def link(start: int) -> str:
+        return "/settings/audit?" + urlencode(filters | ({"offset": start} if start else {}))
+
     accounts = repo.users()
     return page(
         request, "audit.html", viewer, rows=rows, logins={u.id: u.login for u in accounts}, users=accounts,
-        events=EVENTS, event=event, user=user, since=since, until=until,
+        events=EVENTS, event=event, user=user, since=since, until=until, total=total, offset=offset,
+        newer=link(max(offset - AUDIT_PAGE, 0)) if offset else "",
+        older=link(offset + AUDIT_PAGE) if offset + len(rows) < total else "",
     )
 
 
