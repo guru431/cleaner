@@ -95,7 +95,8 @@ if [[ -f "$CONF" ]]; then
 адрес не менялся — верните HOST_IP в профиле"
 fi
 if [[ "${CLEANER_REISSUE_CERT:-0}" != "1" && -s "$TLS/cert.pem" ]]; then
-    san=$(openssl x509 -in "$TLS/cert.pem" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d ' ')
+    # || true: до ловушки сбой openssl под set -e завершил бы установщик молча, без сообщения ниже.
+    san=$(openssl x509 -in "$TLS/cert.pem" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d ' ') || true
     [[ ",${san}," == *",IPAddress:${HOST_IP},"* && ",${san}," == *",DNS:${CERT_NAME},"* ]] \
         || fail "сертификат $TLS/cert.pem выпущен для ${san:-неизвестно}, а в профиле HOST_IP=${HOST_IP}, CERT_NAME=${CERT_NAME}. \
 Выпустите его заново: ${REISSUE_HINT}"
