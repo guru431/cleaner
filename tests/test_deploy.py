@@ -265,7 +265,8 @@ def test_installer_refuses_a_profile_address_the_config_and_certificate_do_not_c
     # Ревью 12.11.2026: до ловушки сбой openssl в $(…) под set -e завершал установщик без сообщения.
     assert "| tr -d ' ') || true" in san
     assert text.index("-ext subjectAltName") < text.index('mv "$TLS/cert.pem" "$TLS/cert.pem.prev-$STAMP"')
-    assert 'REISSUE_HINT="sudo CLEANER_REISSUE_CERT=1 bash ' in text
+    # Профиль, выбранный CLEANER_HOST, подсказка называет: без неё перевыпуск искал бы профиль по hostname.
+    assert 'REISSUE_HINT="sudo ${CLEANER_HOST:+CLEANER_HOST=$HOST_NAME }CLEANER_REISSUE_CERT=1 bash ' in text
     docs = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
     section = docs[docs.index("## Смена адреса или имени"):docs.index("## Проверки локального периметра")]
     assert "sudo CLEANER_REISSUE_CERT=1 bash" in section and "sudoedit /etc/cleaner/cleaner.toml" in section
