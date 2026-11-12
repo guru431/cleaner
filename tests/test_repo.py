@@ -256,6 +256,22 @@ def test_queued_item_is_processed_and_its_fields_round_trip(repo):
         repo.set_item_status(chat, "0" * 32, "failed", "причина")
 
 
+def test_request_choice_writes_only_numbers_of_the_chat_items(repo):
+    """Ревью 12.11.2026: «Пересобрать» с огромным shown держал замок базы секунды — по UPDATE на каждый номер.
+    Номера, которых в чате нет, не пишутся и не мешают записи остальных."""
+    user, chat = new_chat(repo)
+    for _ in range(3):
+        repo.add_item(chat, input_item("текст", "текст"))
+    statements = []
+    repo.conn.set_trace_callback(statements.append)
+    try:
+        repo.set_excluded(chat, range(1, 5001), {2, 4000})
+    finally:
+        repo.conn.set_trace_callback(None)
+    assert repo.excluded_seqs(chat) == frozenset({2})
+    assert sum(s.lstrip().upper().startswith("UPDATE") for s in statements) <= 3
+
+
 def test_failure_reason_is_kept_and_cleared(repo):
     user, chat = new_chat(repo)
     item = repo.add_item(chat, Item(uuid.uuid4().hex, 0, "input", "текст", None, status="queued"))

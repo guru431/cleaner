@@ -826,10 +826,12 @@ class Repository:
 
     def set_excluded(self, chat_id: str, shown: Iterable[int], excluded: Iterable[int]) -> None:
         """Выбор «Состава запроса»: у показанных номеров (shown) отметка ставится исключённым и снимается с остальных;
-        у непоказанных элементов не меняется."""
-        excluded = set(excluded)
+        у непоказанных элементов не меняется. Пишутся только номера элементов чата: форма может прислать сколько угодно
+        чужих номеров, и по UPDATE на каждый держали бы общий замок секунды."""
+        shown, excluded = set(shown), set(excluded)
         with self.lock, transaction(self.conn):
-            for seq in set(shown):
+            seqs = {row["seq"] for row in self.conn.execute("SELECT seq FROM items WHERE chat_id = ?", (chat_id,))}
+            for seq in shown & seqs:
                 self.conn.execute(
                     "UPDATE items SET excluded = ? WHERE chat_id = ? AND seq = ?", (int(seq in excluded), chat_id, seq),
                 )
