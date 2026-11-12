@@ -1,4 +1,5 @@
 import ipaddress
+from dataclasses import replace
 
 import pytest
 
@@ -157,6 +158,18 @@ def test_address_in_a_known_fake_subnet_is_derived(settings):
     result = restore(state, f"Основной {fake}, резервный {neighbour}", settings)
     assert result.text == "Основной 10.1.2.5, резервный 10.1.2.99"
     assert kinds(result) == ["restored", "derived"]
+
+
+def test_no_derived_addresses_once_addresses_are_not_searched(settings):
+    """Наблюдение 12.11.2026: при политике «не искать» адреса новых текстов уходят открытыми, и адрес в подсети,
+    выданной до смены политики, вероятнее открытый, чем новый адрес модели, — он остаётся как написан."""
+    state = infra_state()
+    fake = next(text for text, surrogate in state.surrogates.items() if surrogate.kind == "ip")
+    neighbour = fake.rsplit(".", 1)[0] + ".99"
+    off = replace(settings, policies={**settings.policies, T.IP: Policy.OFF})
+    result = restore(state, f"Основной {fake}, резервный {neighbour}", off)
+    assert result.text == f"Основной 10.1.2.5, резервный {neighbour}"
+    assert kinds(result) == ["restored"]
 
 
 def test_open_addresses_in_a_known_fake_subnet_stay_as_written():
