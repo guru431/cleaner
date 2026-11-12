@@ -146,6 +146,10 @@ _TRAILING = ".,;:!?)'’"
 _PROFILE_PLACEHOLDERS = frozenset(
     {"name", "username", "user", "yourname", "your_name", "you", "login", "имя", "логин", "пользователь"}
 )
+# Личный сайт OneDrive: «https://romashka-my.sharepoint.com/personal/ivanov_romashka_onmicrosoft_com/…» и путь от корня
+# сайта «/personal/ivanov_romashka_onmicrosoft_com/Documents». Сегмент — учётная запись ivanov@romashka.onmicrosoft.com,
+# в которой SharePoint заменил «@» и «.» на «_» (_onedrive).
+_ONEDRIVE = re.compile(r"(?<![\w-])personal/(?P<login>[\w-]{1,253})(?![\w-])", re.IGNORECASE)
 _SID = re.compile(r"(?<![\w-])S-1-5-21-\d+-\d+-\d+(?:-\d+)?(?![\w-])")
 # Число компонентов ограничено: без предела цепочка «CN=a,CN=a,…» без DC даёт квадратичный перебор. Знак значения
 # бывает экранирован (RFC 4514): «CN=Ivanov\, Ivan» — фамилия и имя, в строке JSON — «\\,». Значение берётся без отката
@@ -466,6 +470,12 @@ def _accounts(text: str, ctx: DetectContext) -> Iterator[Span]:
         ):
             start = m.start(group)
             yield Span(start, start + len(login), EntityType.ACCOUNT, name)
+    for m in _ONEDRIVE.finditer(text):
+        # Учётная запись — имя входа и домен с известным суффиксом через «_» (не меньше трёх частей): папка
+        # «personal/notes» или «personal/my_notes» — не она.
+        login = m.group("login")
+        if login.count("_") >= 2 and hostmap.has_known_suffix(login.replace("_", ".")):
+            yield Span(m.start("login"), m.end("login"), EntityType.ACCOUNT, name)
 
 
 def detect(text: str, ctx: DetectContext) -> list[Span]:

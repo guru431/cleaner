@@ -381,6 +381,27 @@ def test_slack_service_node_is_not_searched():
     assert sanitize(state, text, Settings()).sanitized == text
 
 
+@pytest.mark.parametrize("text, login", [
+    (
+        "Файл https://romashka-my.sharepoint.com/personal/ivanov_romashka_onmicrosoft_com/Documents/x.docx недоступен",
+        "ivanov_romashka_onmicrosoft_com",
+    ),
+    ("Get-PnPFolder -Url /personal/i_petrov_romashka_ru/Documents", "i_petrov_romashka_ru"),
+])
+def test_onedrive_personal_site_segment_is_an_account(text, login):
+    """Находка 12.11: сегмент личного сайта OneDrive — учётная запись ivanov@romashka.onmicrosoft.com, в которой «@» и «.»
+    заменены на «_», — уходил открытым. Теперь он — учётная запись и восстанавливается как написан."""
+    assert (T.ACCOUNT, login) in found(text)
+    state = ChatState(chat_id="onedrive", net_key=bytes(32))
+    sanitized = sanitize(state, text, Settings()).sanitized
+    assert login not in sanitized and "romashka" not in sanitized
+    assert restore(state, sanitized, Settings()).text == text
+
+
+def test_personal_folder_is_not_an_account():
+    assert values("Папки personal/notes, /data/personal/my_notes и personal/2026_q3_plan") == set()
+
+
 def test_never_listed_tenant_resource_stays():
     ctx = DetectContext(Settings(never=frozenset({"romashka-sql.database.windows.net"})))
     assert values("Сервер romashka-sql.database.windows.net и romashka-kv.vault.azure.net", ctx) == {
