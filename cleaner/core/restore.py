@@ -13,7 +13,8 @@ from html.entities import html5 as _ENTITIES
 
 from cleaner.core import surrogates
 from cleaner.core.detect.base import load_builtin
-from cleaner.core.entities import hostmap, labels, macsid, netmap
+from cleaner.core.detect.infra import _VERSION_BEFORE
+from cleaner.core.entities import hostmap, labels, macsid, netmap, ops
 from cleaner.core.entities.names import FIXED_RANK
 from cleaner.core.types import ChatState, EntityType, Policy, Settings, Surrogate
 
@@ -346,6 +347,7 @@ def _tolerant_pattern() -> re.Pattern[str]:
 
 _TOLERANT = _tolerant_pattern()
 _PREFIX_AFTER = re.compile(r"/\d")
+_PREFIX_LENGTH = re.compile(r"/(\d{1,2})(?!\d)")
 # Рядом с заменой — точка (или «\.», «\\.») и часть имени или метка: замена — часть имени.
 _PART_BEFORE = re.compile(r"[\w>\]-]\\{0,2}\.$")
 _PART_AFTER = re.compile(r"\\{0,2}\.[^\W_]")
@@ -496,6 +498,7 @@ class _Restorer:
         self.exact = surrogates.Finder(state)
         self.issued = set(state.issued.values())      # свои замены сущностей; имени узла целиком среди них нет
         self.fake_nets: set[int] = set()
+        self._open_addresses: set[str] | None = None     # открытые адреса — при первом адресе в фиктивной подсети
         self.macs = {}
         # Имя длиннее 253 знаков чаты, сохранённые до 15.10.2026, хранят целиком; его части выданы и сами, и оно
         # проверяется по ним (6.4) — иначе дерево ниже было бы глубиной в тысячи частей.
@@ -1022,7 +1025,7 @@ class _Restorer:
         except ValueError:
             return None
         bits = netmap.private_bits(ip)
-        if bits is None or (int(ip) >> 8) not in self.fake_nets:
+        if bits is None or (int(ip) >> 8) not in self.fake_nets or self._went_open(m, ip, bits):
             return None
         if self._hidden(EntityType.IP):
             self.counters["kept"] += 1
@@ -1030,6 +1033,20 @@ class _Restorer:
         original = str(ipaddress.IPv4Address(netmap.unmap_private(int(ip), bits, self.state.net_key)))
         self.counters["derived"] += 1
         return original.replace(".", hostmap.separator(m.group())), "derived"
+
+    def _went_open(self, m: re.Match[str], ip: ipaddress.IPv4Address, bits: int) -> bool:
+        """Мог ли адрес в подсети выданной подмены уйти открытым (6.2): из списка «никогда не скрывать» или правила
+        «открыть», частный диапазон целиком («192.168.0.0/16» — длина префикса не больше неизменных бит, адрес сети) и
+        номер версии («version 10.94.7.12») — их слой 3 не скрывает, как и infra._ipv4. Такой адрес — не новый адрес модели
+        (FR-7.6), и обратная перестановка дала бы чужой."""
+        if self._open_addresses is None:
+            self._open_addresses = netmap.addresses(ops.open_values(self.state, self.settings))
+        if str(ip) in self._open_addresses:
+            return True
+        prefix = _PREFIX_LENGTH.match(m.string, m.end())
+        if prefix and int(prefix.group(1)) <= bits and int(ip) & ((1 << (32 - int(prefix.group(1)))) - 1) == 0:
+            return True
+        return _VERSION_BEFORE.search(m.string[max(0, m.start() - 16):m.start()]) is not None
 
     def _known_host(self, host: str, guard: SecretGuard) -> bool:
         """Узел адреса известен, если его назвали пользователь или оператор (SecretGuard.trusted): имя есть в их тексте

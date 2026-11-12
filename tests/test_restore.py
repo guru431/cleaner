@@ -4,7 +4,7 @@ import pytest
 
 from cleaner.core.entities import hostmap, labels, netmap, ops
 from cleaner.core.pipeline import sanitize
-from cleaner.core.restore import RestoreResult, StreamRestorer, restore
+from cleaner.core.restore import RestoreResult, StreamRestorer, originals, restore
 from cleaner.core.types import ChatRule, ChatState, Entity, Policy, Settings, Surrogate, default_policies
 from cleaner.core.types import EntityType as T
 
@@ -157,6 +157,32 @@ def test_address_in_a_known_fake_subnet_is_derived(settings):
     result = restore(state, f"Основной {fake}, резервный {neighbour}", settings)
     assert result.text == "Основной 10.1.2.5, резервный 10.1.2.99"
     assert kinds(result) == ["restored", "derived"]
+
+
+def test_open_addresses_in_a_known_fake_subnet_stay_as_written():
+    """FINDINGS P2 «Восстановление переписывает открытые частные адреса из подсети /24 выданной подмены»: адрес,
+    ушедший открытым, — из «никогда не скрывать», открытый правилом, частный диапазон целиком, номер версии — в
+    подсети выданной подмены остаётся как написан, и в ответе, и в аргументе инструмента. Новый адрес модели в той же
+    подсети, и с длиной префикса узла, — по-прежнему производный (FR-7.6)."""
+    key = bytes(range(32))
+    base = int(ipaddress.IPv4Address("192.168.0.0"))
+    real = next(base + (n << 8) + 5 for n in range(256) if netmap.map_private(base + (n << 8) + 5, 16, key) >> 8 == base >> 8)
+    real_net = str(ipaddress.IPv4Address(real)).rsplit(".", 1)[0]
+    state = ChatState(chat_id="nets", net_key=key)
+    opened = Settings(never=frozenset({"192.168.0.77"}))
+    ops.unmask(state, "192.168.0.78")
+    assert sanitize(state, f"адрес {ipaddress.IPv4Address(real)}", opened).sanitized == "адрес 192.168.0.5"
+    answer = (
+        "сеть 192.168.0.0/16, шлюзы 192.168.0.77 и 192.168.0.78, version 192.168.0.12, "
+        "узлы 192.168.0.9 и 192.168.0.10/16"
+    )
+    expected = (
+        "сеть 192.168.0.0/16, шлюзы 192.168.0.77 и 192.168.0.78, version 192.168.0.12, "
+        f"узлы {real_net}.9 и {real_net}.10/16"
+    )
+    result = restore(state, answer, opened)
+    assert (result.text, kinds(result)) == (expected, ["derived", "derived"])
+    assert originals(state, opened, exact=True)(answer) == expected
 
 
 def test_reformatted_mac_is_recognised(settings):

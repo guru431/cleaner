@@ -21,6 +21,11 @@ _ADDRESS_TOKEN = re.compile(
     r"|(?<![\w:.])(?:(?=\w*[^\W\dA-Fa-f])\w+:|\w{5,}:)?"
     r"(?P<v6>(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![\w:])"
 )
+# Записи MAC в тексте — как их находит восстановление.
+_MAC_TOKEN = re.compile(
+    r"(?<![\w:.-])[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}(?![\w:-])"
+    r"|(?<![\w.])[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}(?![\w.])"
+)
 _LEGAL_FORMS = frozenset(
     {"ооо", "зао", "оао", "пао", "ао", "ип", "нко", "гуп", "муп", "фгуп", "llc", "inc", "ltd", "gmbh", "corp", "co"}
 )
@@ -147,6 +152,7 @@ class Resolver:
         self.real_ips: set[str] = set()
         self._text_addresses: set[str] | None = None
         self._open_addresses: set[str] | None = None
+        self._macs: set[str] | None = None          # ключи открытых MAC и MAC текста (_mac_taken)
         self._text_names: set[str] | None = None
         self._text_labels: set[str] | None = None
         self._searched: set[str] | None = None      # написания сущностей чата — при первом слиянии находок (_remember)
@@ -455,11 +461,23 @@ class Resolver:
         style = macsid.style_of(value)
 
         def make() -> str:
+            # Как у адреса (_ip): подмена не совпадает с MAC другой сущности, открытым MAC и MAC в тексте — иначе
+            # восстановление сделало бы из них это устройство. При совпадении — следующий номер, как у имён (_free_number).
+            while self._mac_taken(macsid.mac_key(macsid.fake_mac(entity.number, style))):
+                entity.number = self._next(entity.type)
             fake = macsid.fake_mac(entity.number, style)
             self.state.surrogates[fake] = Surrogate(entity.id, value, "mac")
             return fake
 
         return entity, self._issue(entity, f"mac{style}", make)
+
+    def _mac_taken(self, key: str) -> bool:
+        """Есть ли MAC с этим ключом (macsid.mac_key) среди сущностей чата, открытых значений или в тексте. Открытые и
+        текстовые собираются при первой подмене MAC."""
+        if self._macs is None:
+            self._macs = {macsid.mac_key(value) for value in self.open_values}
+            self._macs |= {macsid.mac_key(m.group()) for m in _MAC_TOKEN.finditer(self.text)}
+        return key in self._macs or (T.MAC, key) in self.index
 
     def _sid(self, value: str, type_: EntityType, origin: str) -> tuple[Entity, str] | None:
         m = macsid.SID.fullmatch(value)
