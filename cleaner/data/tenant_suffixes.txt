@@ -16,14 +16,33 @@ openai.azure.com
 cognitiveservices.azure.com
 postgres.database.azure.com
 mysql.database.azure.com
+mariadb.database.azure.com
+mongo.cosmos.azure.com
+table.cosmos.azure.com
+cassandra.cosmos.azure.com
+gremlin.cosmos.azure.com
+services.ai.azure.com
+managedhsm.azure.net
+*.kusto.windows.net
+*.eventgrid.azure.net
+*.batch.azure.com
 *.cloudapp.azure.com
 mail.protection.outlook.com
 visualstudio.com
-# AWS: реестр ECR и вход в консоль — по номеру учётной записи
+# AWS: реестр ECR и вход в консоль — по номеру учётной записи; регион слева от суффикса арендатором не считается
 dkr.ecr.*.amazonaws.com
 *.rds.amazonaws.com
 *.eks.amazonaws.com
 *.es.amazonaws.com
+*.redshift.amazonaws.com
+*.docdb.amazonaws.com
+*.cache.amazonaws.com
+*.vpce.amazonaws.com
+# Балансировщик NLB, Amazon MSK, EFS, MemoryDB: служба перед регионом (в частном разделе только «*.elb.amazonaws.com»)
+elb.*.amazonaws.com
+kafka.*.amazonaws.com
+efs.*.amazonaws.com
+memorydb.*.amazonaws.com
 # Публичное имя EC2 в us-east-1 («ec2-203-0-113-10.compute-1.amazonaws.com») — адрес сервера; в частном разделе оно
 # целиком суффикс («*.compute-1.amazonaws.com»), в других регионах арендатора выделяет сам раздел («*.compute.amazonaws.com»)
 compute-1.amazonaws.com

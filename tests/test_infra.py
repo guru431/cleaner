@@ -290,6 +290,23 @@ TENANT_NAMES = (
     "romashka.sharepoint.com",
     "ec2-203-0-113-10.compute-1.amazonaws.com",
     "ec2-198-51-100-7.eu-west-1.compute.amazonaws.com",
+    "123456789012.signin.aws.amazon.com",
+    "my-nlb-0123456789abcdef.elb.eu-west-1.amazonaws.com",
+    "romashka-redis.abc123.0001.euw1.cache.amazonaws.com",
+    "romashka-dwh.abc123.eu-west-1.redshift.amazonaws.com",
+    "romashka-docdb.cluster-abc123.eu-west-1.docdb.amazonaws.com",
+    "b-1.romashka-kafka.abc123.c2.kafka.eu-west-1.amazonaws.com",
+    "fs-0123abcd.efs.eu-west-1.amazonaws.com",
+    "clustercfg.romashka.abc123.memorydb.eu-west-1.amazonaws.com",
+    "vpce-0123abcd-ef01.vpce-svc-0123.eu-west-1.vpce.amazonaws.com",
+    "romashka.westeurope.kusto.windows.net",
+    "romashka.mongo.cosmos.azure.com",
+    "romashka.table.cosmos.azure.com",
+    "romashka.mariadb.database.azure.com",
+    "romashka.managedhsm.azure.net",
+    "romashka-topic.westeurope-1.eventgrid.azure.net",
+    "romashka.westeurope.batch.azure.com",
+    "romashka.services.ai.azure.com",
 )
 SERVICE_NAMES = (
     "login.microsoftonline.com", "update.microsoft.com", "management.azure.com", "s3.amazonaws.com",
@@ -298,6 +315,9 @@ SERVICE_NAMES = (
     "registry-1.docker.io", "lambda.us-east-1.amazonaws.com", "s3.eu-west-1.amazonaws.com",
     "dkr.ecr.eu-west-1.amazonaws.com", "code.visualstudio.com", "app.vssps.visualstudio.com", "login.windows.net",
     "blob.core.windows.net", "database.windows.net", "vault.azure.net",
+    # Регион AWS и служебная часть перед суффиксом арендатора — не арендатор.
+    "docs.aws.amazon.com", "console.aws.amazon.com", "eu-west-1.signin.aws.amazon.com",
+    "api.openai.azure.com", "help.kusto.windows.net",
     # Публичные реестры пакетов и CDN — того же рода, что pypi.org и docker.io; в частном разделе их доменов нет.
     "files.pythonhosted.org", "registry.npmjs.org", "ghcr.io", "aka.ms", "cdn.jsdelivr.net",
 )

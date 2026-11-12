@@ -225,6 +225,9 @@ def _tenant_list(listed: frozenset[str]) -> tuple[tuple[tuple[str, ...], ...], f
 
 # Частей с конца имени, которых хватает самому длинному суффиксу арендатора вместе с частью перед ним.
 _TENANT_DEPTH = 8
+# Регион AWS («eu-west-1», «us-gov-west-1») — не метка арендатора: «eu-west-1.signin.aws.amazon.com» — региональный вход в
+# консоль, а не учётная запись, как «123456789012.signin.aws.amazon.com».
+_REGION = re.compile(r"[a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\d")
 
 
 def _tenant(name: str, domain: str, listed: frozenset[str], generic: frozenset[str]) -> int:
@@ -233,8 +236,8 @@ def _tenant(name: str, domain: str, listed: frozenset[str], generic: frozenset[s
     («romashka.blob.core.windows.net»; сам «googleapis.com» в разделе, и «www.googleapis.com» — не арендатор), или от
     суффикса встроенного списка («romashka.visualstudio.com»); из подходящих берётся самый длинный суффикс — он точнее.
     «!имя» списка — суффикс или служба с частью перед суффиксом, которые арендатора не выделяют
-    («lambda.us-east-1.amazonaws.com», «code.visualstudio.com»). Служебная часть (generic: «api.openai.azure.com») — не
-    метка арендатора. Проверяются последние _TENANT_DEPTH частей: длина имени на время не влияет."""
+    («lambda.us-east-1.amazonaws.com», «code.visualstudio.com»). Служебная часть (generic: «api.openai.azure.com») и
+    регион AWS (_REGION) — не метка арендатора. Проверяются последние _TENANT_DEPTH частей: длина имени на время не влияет."""
     start = len(name)
     for _ in range(_TENANT_DEPTH):
         start = name.rfind(".", 0, start)
@@ -253,7 +256,9 @@ def _tenant(name: str, domain: str, listed: frozenset[str], generic: frozenset[s
         if all(part in ("*", label) for part, label in zip(entry, labels[-size:])):
             if ".".join(labels[-size:]) not in exceptions and ".".join(labels[-size - 1:]) not in exceptions:
                 found = size
-    return 0 if found and labels[-found - 1] in generic else found
+    if found and (labels[-found - 1] in generic or _REGION.fullmatch(labels[-found - 1])):
+        return 0
+    return found
 
 
 def tenant_suffix(value: str) -> int:
