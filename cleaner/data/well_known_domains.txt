@@ -86,6 +86,7 @@ github.io
 gitlab.io
 sharepoint.com
 atlassian.net
+atlassian.com
 slack.com
 okta.com
 # Имена из кода, совпадающие с доменом: окончание само по себе частое у настоящих узлов (.io)

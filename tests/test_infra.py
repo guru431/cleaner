@@ -314,7 +314,7 @@ TENANT_NAMES = (
     "romashka.services.ai.azure.com",
 )
 SERVICE_NAMES = (
-    "login.microsoftonline.com", "update.microsoft.com", "management.azure.com", "s3.amazonaws.com",
+    "admin.atlassian.com", "id.atlassian.com", "login.microsoftonline.com", "update.microsoft.com", "management.azure.com", "s3.amazonaws.com",
     "storage.googleapis.com", "dev.azure.com", "www.googleapis.com", "fonts.googleapis.com",
     "raw.githubusercontent.com", "login.live.com", "graph.microsoft.com", "api.github.com", "pypi.org", "docker.io",
     "registry-1.docker.io", "lambda.us-east-1.amazonaws.com", "s3.eu-west-1.amazonaws.com",
