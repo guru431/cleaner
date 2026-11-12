@@ -191,7 +191,7 @@ def test_other_owners_counts_hidden_below_threshold_and_preview_is_audited(repo)
     shown = settings_impact.preview(repo, admin, operation)
     assert shown["others"]["chats"] == settings_impact.MIN_OWNERS and shown["owners"] == settings_impact.MIN_OWNERS
     events = repo.audit_events("settings_previewed", user_id=admin)
-    assert len(events) == 2 and events[0].details == {"kind": "add", "policies": 0, "added": 1, "removed": 0}
+    assert len(events) == 2 and events[0].details == {"kind": "add", "policies": 0, "added": 1, "removed": 0, "edited": 0}
     assert "Ромашка" not in str([e.details for e in events])
 
 

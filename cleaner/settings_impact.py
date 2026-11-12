@@ -98,6 +98,11 @@ def changed(repo, operation):
         config["dictionary"].extend(operation["rows"])
     elif operation["kind"] == "delete":
         config["dictionary"] = [r for r in config["dictionary"] if r["id"] != operation["id"]]
+    elif operation["kind"] == "edit":
+        row = operation["row"]
+        if not any(r["id"] == row["id"] for r in config["dictionary"]):
+            raise ValueError("Запись не найдена")
+        config["dictionary"] = [row if r["id"] == row["id"] else r for r in config["dictionary"]]
     elif operation["kind"] == "undo":
         raw = repo.setting(_UNDO)
         if not raw:
@@ -112,6 +117,8 @@ def changed(repo, operation):
         config["dictionary"] = [r for r in config["dictionary"] if r["id"] not in added]
         present = {(r["list"], r["value"].lower()) for r in config["dictionary"]}
         config["dictionary"].extend(r for r in undo["removed"] if (r["list"], r["value"].lower()) not in present)
+        former = {r["id"]: r for r in undo.get("edited", ())}
+        config["dictionary"] = [former.get(r["id"], r) for r in config["dictionary"]]
         for type_, (was, applied) in undo["policies"].items():
             if config["policies"].get(type_) == applied:
                 config["policies"][type_] = was
@@ -123,13 +130,17 @@ def changed(repo, operation):
 def _changes(before, config, imported=False):
     """События журнала по каждому изменению — с теми же полями, что пишут прямые правки (FR-11.1), без значений.
     imported — правка из импорта CSV (признак import операции): добавленные — как импорт, при любом их числе;
-    иначе — как добавление. Несколько добавленных или удалённых (возврат) — одним событием с числом."""
+    иначе — как добавление. Несколько добавленных, удалённых или изменённых (возврат) — одним событием с числом."""
     events = [("policy_changed", {"type": type_, "policy": policy}) for type_, policy in sorted(config["policies"].items())
               if before["policies"].get(type_) != policy]
     kept, known = {r["id"] for r in config["dictionary"]}, {r["id"] for r in before["dictionary"]}
+    changed_rows = listed(before, config)["edited"]
     for list_ in ("always", "never"):
         removed = sum(1 for r in before["dictionary"] if r["list"] == list_ and r["id"] not in kept)
         added = sum(1 for r in config["dictionary"] if r["list"] == list_ and r["id"] not in known)
+        edited = sum(1 for was, _ in changed_rows if was["list"] == list_)
+        if edited:
+            events.append(("dictionary_changed", {"action": "edit", "list": list_} | ({"count": edited} if edited > 1 else {})))
         if removed:
             events.append(("dictionary_changed", {"action": "delete", "list": list_} | ({"count": removed} if removed > 1 else {})))
         if added and imported:
@@ -186,7 +197,8 @@ def preview(repo, user_id, operation):
     repo.audit("settings_previewed", user_id, kind="import" if operation.get("import") else operation["kind"],
                policies=sum(event == "policy_changed" for event, _ in _changes(before_config, config)),
                added=sum(1 for r in config["dictionary"] if r["id"] not in was),
-               removed=sum(1 for r in before_config["dictionary"] if r["id"] not in will))
+               removed=sum(1 for r in before_config["dictionary"] if r["id"] not in will),
+               edited=len(listed(before_config, config)["edited"]))
     payload = {"user": user_id, "expires": repo.clock.now().timestamp() + 600, "binding": binding, "config": config,
                "import": bool(operation.get("import"))}
     receipt = base64.urlsafe_b64encode(crypto.seal(repo.global_key, json.dumps(payload).encode(), _AAD)).decode()
@@ -215,9 +227,11 @@ def apply(repo, user_id, receipt):
         added = [repo._insert_dictionary(row["list"], row["value"], EntityType(row["type"]) if row["type"] else None,
                                          tuple(row["aliases"]), row["comment"], row.get("inflect", False))
                  for row in changes["added"]]
+        for _, row in changes["edited"]:
+            repo.update_dictionary(row["id"], tuple(row["aliases"]), row["comment"], row.get("inflect", False))
         # Для возврата хранится обратная правка этого применения, а не прежняя конфигурация целиком: иначе возврат
         # молча удалял бы записи, добавленные после применения мимо оценки.
-        undo = {"added": added, "removed": changes["removed"],
+        undo = {"added": added, "removed": changes["removed"], "edited": [was for was, _ in changes["edited"]],
                 "policies": {type_: [was, policy] for type_, was, policy in changes["policies"]}}
         repo.set_setting(_UNDO, base64.b64encode(crypto.seal(repo.global_key, json.dumps(undo).encode(), _UNDO)).decode())
         for event, details in _changes(current, payload["config"], payload.get("import", False)):

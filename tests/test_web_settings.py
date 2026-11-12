@@ -127,6 +127,46 @@ def test_dictionary_entry_in_all_cases_shows_its_forms_and_is_kept_by_apply(boss
     assert sorted((r.value, r.inflect) for r in repo.dictionary()) == [("srv01.corp.example", False), ("Проект Полярис", True)]
 
 
+def test_import_and_review_tab_can_mark_entries_for_all_cases(boss, repo):
+    """FINDINGS «Импорт CSV и „В словарь“ не дают отметить „искать во всех падежах“»: отметка из формы импорта
+    проходит предпросмотр и оценку, у типа без падежей не хранится; вкладка экрана проверки пишет её сразу."""
+    fields = {"csv": "Name\r\nСмирнова Анна\r\n", "delimiter": "comma", "column": "Name", "list": "always", "inflect": "1"}
+    preview = boss.post("/settings/dictionary/import", action="preview", type="PERSON", **fields)
+    assert 'name="inflect" value="1"' in preview.text and "во всех падежах" in preview.text
+    shown = boss.post("/settings/dictionary/import", action="impact", type="PERSON", **fields)
+    receipt = re.search(r'name="receipt" value="([^"]+)"', shown.text).group(1)
+    assert boss.post("/settings/impact/apply", receipt=receipt).status_code == 303
+    boss.post("/settings/dictionary/import", action="save", type="HOST",
+              **(fields | {"csv": "Name\r\nsrv01.corp.example\r\n"}))
+    chat_id = boss.chat()
+    boss.post(f"/chats/{chat_id}/dictionary", value="Ромашка-Плюс", list="always", type="ORG", inflect="1")
+    assert sorted((r.value, r.inflect) for r in repo.dictionary()) == [
+        ("srv01.corp.example", False), ("Ромашка-Плюс", True), ("Смирнова Анна", True)]
+    assert any("Смирновой Анне" in entry.aliases for entry in repo.settings().always)
+
+
+def test_dictionary_entry_is_edited_through_the_impact_preview_and_can_be_undone(boss, repo):
+    """Правка записи — варианты, комментарий, падежи — через оценку влияния, событием журнала без значения."""
+    entry = repo.add_dictionary("always", "Проект Полярис", T.TERM, (), "вымышленный")
+    assert 'action="/settings/dictionary/' + entry + '/edit"' in boss.get("/settings/dictionary").text
+    shown = boss.post(f"/settings/dictionary/{entry}/edit", aliases="Полярис\nPolaris", comment="новый", inflect="1")
+    assert shown.status_code == 200 and "Изменяются записи: 1" in shown.text and "Проекту Полярис" in shown.text
+    [row] = repo.dictionary()
+    assert row.aliases == () and not row.inflect                               # оценка ничего не пишет
+    receipt = re.search(r'name="receipt" value="([^"]+)"', shown.text).group(1)
+    assert boss.post("/settings/impact/apply", receipt=receipt).status_code == 303
+    [row] = repo.dictionary()
+    assert (row.id, row.aliases, row.comment, row.inflect) == (entry, ("Полярис", "Polaris"), "новый", True)
+    assert repo.audit_events("dictionary_changed")[0].details == {"action": "edit", "list": "always"}
+    assert repo.audit_events("settings_previewed")[0].details["edited"] == 1
+    undo = boss.post("/settings/impact/undo")
+    receipt = re.search(r'name="receipt" value="([^"]+)"', undo.text).group(1)
+    boss.post("/settings/impact/apply", receipt=receipt)
+    [row] = repo.dictionary()
+    assert (row.aliases, row.comment, row.inflect) == ((), "вымышленный", False)
+    assert boss.post(f"/settings/dictionary/{'0' * 32}/edit", aliases="x").status_code == 404
+
+
 def test_pattern_is_tried_on_a_sample_before_saving(boss, repo, monkeypatch):
     fields = {"name": "Инвентарный", "regex": r"INV-\d{6}", "type": "TERM"}
     tried = boss.post("/settings/patterns", sample="INV-123456 и INV-12", action="test", **fields)

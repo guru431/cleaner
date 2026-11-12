@@ -11,6 +11,7 @@
   <input type="hidden" name="delimiter" value="{{ delimiter }}">
   <input type="hidden" name="list" value="{{ list_ }}">
   <input type="hidden" name="type" value="{{ type_.value if type_ else '' }}">
+  {% if inflect %}<input type="hidden" name="inflect" value="1">{% endif %}
   <label for="column">Колонка</label>
   <select id="column" name="column">{% for h in headers %}<option{% if h == column %} selected{% endif %}>{{ h }}</option>{% endfor %}</select>
   <button name="action" value="preview">Показать</button>
@@ -18,7 +19,7 @@
 </form>
 {% if column in headers %}
 <section class="panel">
-  <header class="panel-head"><h2 class="title">Новые значения</h2><span class="state">В колонке значений: {{ total }}, новых для списка: {{ new | length }}{% if new | length > shown | length %}; показаны первые {{ shown | length }}{% endif %}.</span></header>
+  <header class="panel-head"><h2 class="title">Новые значения</h2><span class="state">В колонке значений: {{ total }}, новых для списка: {{ new | length }}{% if new | length > shown | length %}; показаны первые {{ shown | length }}{% endif %}.{% if inflect %} Ищутся во всех падежах.{% endif %}</span></header>
   <div class="panel-body">
     <ul class="values">{% for v in shown %}<li>{{ v }}</li>{% endfor %}</ul>
   </div>

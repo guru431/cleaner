@@ -64,7 +64,20 @@
     <tr>
       <td class="mono">{{ r.value }}</td><td class="nowrap">{{ lists[r.list] }}</td><td class="nowrap">{{ types[r.type] if r.type else "" }}</td>
       <td class="mono">{{ r.aliases | join(", ") }}{% if r.inflect %}<div class="sub">во всех падежах</div>{% endif %}</td><td>{{ r.comment }}</td>
-      <td class="actions"><form method="post" action="/settings/dictionary/{{ r.id }}/delete">{% include "_csrf.html" %}<button class="danger" name="action" value="impact">Оценить удаление</button></form></td>
+      <td class="actions">
+        <details class="inline" name="edit">
+          <summary class="btn">Изменить</summary>
+          <div class="pop">
+            <form method="post" action="/settings/dictionary/{{ r.id }}/edit" class="form">
+              {% include "_csrf.html" %}
+              <label class="field"><span>Варианты написания</span><textarea name="aliases" rows="2">{{ r.aliases | join("\n") }}</textarea></label>
+              {% if r.list == "always" and r.type in inflected %}<label class="check"><input type="checkbox" name="inflect" value="1"{% if r.inflect %} checked{% endif %}> Искать во всех падежах</label>{% endif %}
+              <label class="field"><span>Комментарий</span><input name="comment" value="{{ r.comment }}"></label>
+              <div class="buttons"><button class="primary">Оценить правку</button></div>
+            </form>
+          </div>
+        </details>
+        <form method="post" action="/settings/dictionary/{{ r.id }}/delete">{% include "_csrf.html" %}<button class="danger" name="action" value="impact">Оценить удаление</button></form></td>
     </tr>
     {% else %}
     <tr><td colspan="6" class="empty">{% if total %}Ничего не найдено{% else %}Пусто{% endif %}</td></tr>
@@ -83,6 +96,10 @@
       <label class="field"><span>Разделитель</span><select name="delimiter"><option value="comma">запятая</option><option value="semicolon">точка с запятой</option><option value="tab">табуляция</option></select></label>
       <label class="field"><span>Список</span><select name="list"><option value="always">всегда скрывать</option><option value="never">никогда не скрывать</option></select></label>
       <label class="field"><span>Тип</span><select name="type">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select></label>
+      <div class="field"><span>Падежи</span><span class="control">
+        <label class="check"><input type="checkbox" name="inflect" value="1"> Искать во всех падежах</label>
+        <small class="hint">Для людей, организаций, адресов и терминов списка «всегда скрывать»; у прочих отметка не хранится.</small>
+      </span></div>
       <div class="buttons"><button name="action" value="preview" class="primary">Показать, что будет добавлено</button></div>
     </form>
   </div>

@@ -341,6 +341,7 @@ def _dictionary_page(request: Request, viewer: Viewer, list_: str, type_: str, r
         by_list=by_list, present=[(t, render.TYPE_NAMES[t], by_type[t]) for t in EntityType if by_type[t]],
         shown_list=list_, shown_type=shown_type, q=wanted.strip(), first=(number - 1) * DICTIONARY_PAGE + 1,
         number=number, pages=pages, query=lambda target: _dictionary_query(list_, type_, target),
+        inflected=INFLECTED_TYPES,
     )
 
 
@@ -400,6 +401,21 @@ def delete_entry(request: Request, entry_id: str, form: dict[str, str] = Depends
     return _redirect("/settings/dictionary")
 
 
+@router.post("/dictionary/{entry_id}/edit")
+def edit_entry(request: Request, entry_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    """Правка записи — варианты, комментарий и отметка падежей — только через оценку влияния; значение, список и тип
+    не меняются (другое значение — новая запись). Отметка падежей — по тем же правилам, что при добавлении."""
+    row = next((r for r in repo_of(request).dictionary() if r.id == entry_id), None)
+    if row is None:
+        raise HTTPException(404, "Запись не найдена")
+    aliases = tuple(alias.strip() for alias in form.get("aliases", "").splitlines() if alias.strip())
+    inflect = form.get("inflect") == "1" and row.list == "always" and row.type in INFLECTED_TYPES
+    edited = {"id": row.id, "list": row.list, "value": row.value, "type": row.type.value if row.type else None,
+              "aliases": list(aliases), "comment": form.get("comment", "").strip(), "inflect": inflect}
+    forms = [form for form in entry(row.type, row.value, aliases, True).aliases if form not in aliases] if inflect else []
+    return _impact(request, viewer, {"kind": "edit", "row": edited}, inflected_forms=forms)
+
+
 def _csv_column(text: str, delimiter: str, column: str) -> tuple[list[str], list[str]]:
     """Заголовки и значения колонки: без пустых и повторов, в порядке файла."""
     rows = list(csv.reader(io.StringIO(text.lstrip("﻿")), delimiter=delimiter))
@@ -424,6 +440,7 @@ def import_csv(request: Request, form: dict[str, str] = Depends(get_form), viewe
     if delimiter is None:
         raise HTTPException(400, "Выберите разделитель")
     type_ = _type(form.get("type", "")) if list_ == "always" else None
+    inflect = form.get("inflect") == "1" and type_ in INFLECTED_TYPES      # как в ручной форме
     text, column = form.get("csv", ""), form.get("column", "").strip()
     try:
         headers, values = _csv_column(text, delimiter, column)
@@ -437,14 +454,16 @@ def import_csv(request: Request, form: dict[str, str] = Depends(get_form), viewe
             raise HTTPException(400, "Выберите колонку из первой строки файла")
         if form.get("action") == "impact":
             return _impact(request, viewer, {"kind": "add", "import": True, "rows": [
-                {"id": "", "list": list_, "value": value, "type": type_.value if type_ else None, "aliases": [], "comment": ""}
+                {"id": "", "list": list_, "value": value, "type": type_.value if type_ else None, "aliases": [], "comment": "",
+                 "inflect": inflect}
                 for value in new]})
-        repo.add_dictionary_many(list_, new, type_)
+        repo.add_dictionary_many(list_, new, type_, inflect)
         repo.audit("dictionary_import", viewer.user.id, list=list_, count=len(new))
         return _redirect("/settings/dictionary")
     return page(
         request, "import_preview.html", viewer, csv_text=text, headers=headers, column=column,
         delimiter=form.get("delimiter", ""), list_=list_, type_=type_, new=new, total=len(values), shown=new[:_SHOWN],
+        inflect=inflect,
     )
 
 

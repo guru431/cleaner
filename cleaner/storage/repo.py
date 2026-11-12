@@ -1195,12 +1195,23 @@ class Repository:
         with self.lock:
             return self._insert_dictionary(list_, value, type_, aliases, comment, inflect)
 
-    def add_dictionary_many(self, list_: str, values: list[str], type_: EntityType | None = None) -> int:
+    def add_dictionary_many(
+        self, list_: str, values: list[str], type_: EntityType | None = None, inflect: bool = False,
+    ) -> int:
         """Импорт из CSV: тысячи строк одной транзакцией, а не по записи на диск каждая."""
         with self.lock, transaction(self.conn):
             for value in values:
-                self._insert_dictionary(list_, value, type_, (), "")
+                self._insert_dictionary(list_, value, type_, (), "", inflect)
         return len(values)
+
+    def update_dictionary(self, entry_id: str, aliases: tuple[str, ...], comment: str, inflect: bool) -> None:
+        """Правка записи: варианты, комментарий и отметка падежей; значение, список и тип не меняются."""
+        key = self.global_key
+        self._run(
+            "UPDATE dictionary SET aliases_enc = ?, comment_enc = ?, inflect = ? WHERE id = ?",
+            self._enc(key, json.dumps(list(aliases), ensure_ascii=False), f"dictionary.aliases:{entry_id}"),
+            self._enc(key, comment, f"dictionary.comment:{entry_id}"), int(inflect), entry_id,
+        )
 
     def dictionary(self) -> list[DictionaryRow]:
         key = self.global_key
