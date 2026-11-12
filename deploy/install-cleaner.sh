@@ -165,6 +165,11 @@ if [[ ! -s "$TLS/cert.pem" || ! -s "$TLS/key.pem" ]]; then
             -addext "extendedKeyUsage=serverAuth" 2>&1
     ); then
         echo "$out" >&2
+        if [[ -e "$TLS/cert.pem.prev-$STAMP" ]]; then      # перевыпуск: прежний сертификат — на место
+            mv -f "$TLS/cert.pem.prev-$STAMP" "$TLS/cert.pem"
+            mv -f "$TLS/key.pem.prev-$STAMP" "$TLS/key.pem"
+            log "прежний сертификат возвращён на место"
+        fi
         fail "сертификат не выпущен — причина в выводе openssl выше"
     fi
     chown root:cleaner "$TLS/key.pem" "$TLS/cert.pem"

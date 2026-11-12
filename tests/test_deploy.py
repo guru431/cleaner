@@ -338,6 +338,15 @@ def test_installer_issues_a_certificate_claude_code_trusts():
     assert 'mv "$TLS/cert.pem" "$TLS/cert.pem.prev-$STAMP"' in reissue and 'mv "$TLS/key.pem" "$TLS/key.pem.prev-$STAMP"' in reissue
 
 
+def test_installer_returns_the_previous_certificate_when_the_reissue_fails():
+    """Ревью 12.11.2026: CLEANER_REISSUE_CERT=1 переименовывал cert.pem и key.pem, и при сбое openssl служба оставалась
+    без сертификата. Прежний возвращается до выхода с ошибкой."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    failed = text[text.index('echo "$out" >&2'):text.index('fail "сертификат не выпущен')]
+    assert 'mv -f "$TLS/cert.pem.prev-$STAMP" "$TLS/cert.pem"' in failed
+    assert 'mv -f "$TLS/key.pem.prev-$STAMP" "$TLS/key.pem"' in failed
+
+
 def test_installer_issues_a_certificate_codex_trusts():
     """Проверка 18.4 плана 5В: Codex (rustls, webpki) не принимает сертификатом сервера сертификат УЦ — а `openssl req
     -x509` без basicConstraints ставит CA:TRUE. Самоподписанный с CA:FALSE, keyCertSign и serverAuth принимают Codex,
