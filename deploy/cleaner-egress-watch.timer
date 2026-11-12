@@ -1,0 +1,10 @@
+[Unit]
+Description=Cleaner: сверка таблицы cleaner_egress раз в 5 минут
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Unit=cleaner-egress-watch.service
+
+[Install]
+WantedBy=timers.target

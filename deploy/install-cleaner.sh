@@ -31,6 +31,7 @@ UNIT=/etc/systemd/system/cleaner.service
 CHECK=/usr/local/sbin/check-cleaner.sh
 EGRESS=/usr/local/sbin/cleaner-egress.sh
 EGRESS_UNIT=/etc/systemd/system/cleaner-egress.service
+EGRESS_WATCH=/etc/systemd/system/cleaner-egress-watch
 HOST_ENV=$ETC/host.env
 PORT=5464
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -266,9 +267,14 @@ install -o root -g root -m 0644 "$SRC/deploy/check_ipv6.py" /usr/local/sbin/clea
 # Границы выхода наружу (этап 3): цепочка ставится до перезапуска службы — без неё служба не стартует.
 install -o root -g root -m 0755 "$SRC/deploy/cleaner-egress.sh" "$EGRESS"
 install -o root -g root -m 0644 "$SRC/deploy/cleaner-egress.service" "$EGRESS_UNIT"
+# Таймер ставит таблицу заново, если её снял «flush ruleset» перезапуска nftables (раздел 15 спецификации).
+install -o root -g root -m 0644 "$SRC/deploy/cleaner-egress-watch.service" "$EGRESS_WATCH.service"
+install -o root -g root -m 0644 "$SRC/deploy/cleaner-egress-watch.timer" "$EGRESS_WATCH.timer"
 systemctl daemon-reload
 systemctl enable cleaner-egress.service >/dev/null 2>&1
 systemctl restart cleaner-egress.service
+systemctl enable cleaner-egress-watch.timer >/dev/null 2>&1
+systemctl restart cleaner-egress-watch.timer
 
 # --- первая установка: база, главный ключ, первый администратор -------------------
 if [[ ! -f "$ENVF" && ! -f "$DATA/cleaner.db" ]]; then

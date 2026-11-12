@@ -94,6 +94,32 @@ def test_installer_sets_the_egress_chain_before_the_service_restarts():
     assert text.index("systemctl restart cleaner-egress.service") < text.index("systemctl restart cleaner.service\ncode=")
 
 
+def test_timer_restores_the_egress_table_after_a_ruleset_flush():
+    """Идея 12.11.2026: «flush ruleset» из /etc/nftables.conf снимает и таблицу cleaner_egress, а проверяют её только
+    при старте службы. Таймер раз в 5 минут сверяет таблицу и при провале ставит её заново; установщик ставит таймер
+    вместе с таблицей, check-cleaner.sh проверяет, что он активен."""
+    text = EGRESS.read_text(encoding="utf-8")
+    watch = text[text.index('if [[ "${1:-}" == "watch" ]]; then'):text.index("uid=$(id -u")]
+    assert watch.index("if check 2>/dev/null; then exit 0; fi") < watch.index("systemctl restart cleaner-egress.service")
+    assert "<4>cleaner-egress:" in watch
+    service = (DEPLOY / "cleaner-egress-watch.service").read_text(encoding="utf-8")
+    timer = (DEPLOY / "cleaner-egress-watch.timer").read_text(encoding="utf-8")
+    assert "\r" not in service + timer
+    for line in ("Type=oneshot", "ExecStart=/usr/local/sbin/cleaner-egress.sh watch"):
+        assert line in service.splitlines(), line
+    for line in ("OnBootSec=5min", "OnUnitActiveSec=5min", "Unit=cleaner-egress-watch.service", "WantedBy=timers.target"):
+        assert line in timer.splitlines(), line
+    installer = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    for line in ('install -o root -g root -m 0644 "$SRC/deploy/cleaner-egress-watch.service" "$EGRESS_WATCH.service"',
+                 'install -o root -g root -m 0644 "$SRC/deploy/cleaner-egress-watch.timer" "$EGRESS_WATCH.timer"'):
+        assert installer.index(line) < installer.index("systemctl daemon-reload\nsystemctl enable cleaner-egress")
+    assert "systemctl enable cleaner-egress-watch.timer" in installer
+    assert "systemctl restart cleaner-egress-watch.timer" in installer
+    check = (DEPLOY / "check-cleaner.sh").read_text(encoding="utf-8")
+    assert 'systemctl is-active cleaner-egress-watch.timer' in check
+    assert "*.timer   text eol=lf" in (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+
+
 def _pins(path: Path) -> dict[str, str]:
     pins = {}
     for line in path.read_text(encoding="utf-8").splitlines():

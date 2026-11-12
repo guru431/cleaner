@@ -4,6 +4,7 @@
 #
 #   cleaner-egress.sh          — поставить таблицу nftables inet cleaner_egress (юнит cleaner-egress.service)
 #   cleaner-egress.sh check    — код 0, если таблица на месте и кончается отказом (ExecStartPre=+ у cleaner.service)
+#   cleaner-egress.sh watch    — check, а при провале — заново поставить таблицу (cleaner-egress-watch.timer)
 #
 # Пакеты учётной записи cleaner:
 #   к внутренним сетям сервера              → пропустить
@@ -28,12 +29,31 @@ HOST_ENV=/etc/cleaner/host.env
 # shellcheck source=/dev/null
 if [[ -f "$HOST_ENV" ]]; then . "$HOST_ENV"; fi
 
-if [[ "${1:-}" == "check" ]]; then
+check() {
+    local rules
     rules=$(nft list table inet "$TABLE" 2>/dev/null) \
-        || { echo "cleaner-egress: нет таблицы $TABLE — выход наружу не ограничен" >&2; exit 1; }
+        || { echo "cleaner-egress: нет таблицы $TABLE — выход наружу не ограничен" >&2; return 1; }
     grep -q "skuid .* jump cleaner" <<< "$rules" && grep -q "reject with tcp reset" <<< "$rules" \
-        || { echo "cleaner-egress: таблица $TABLE без отбора по учётной записи или без отказа" >&2; exit 1; }
-    exit 0
+        || { echo "cleaner-egress: таблица $TABLE без отбора по учётной записи или без отказа" >&2; return 1; }
+}
+
+if [[ "${1:-}" == "check" ]]; then
+    if check; then exit 0; fi
+    exit 1
+fi
+
+# Таблицу снимает «flush ruleset», с которого начинается /etc/nftables.conf Debian и Ubuntu
+# (systemctl restart nftables, nft -f /etc/nftables.conf): выход наружу открывается, второй слой входа пропадает,
+# а служба работает дальше. Таймер раз в 5 минут ставит таблицу заново; «<4>» — уровень warning в журнале systemd.
+if [[ "${1:-}" == "watch" ]]; then
+    if check 2>/dev/null; then exit 0; fi
+    echo "<4>cleaner-egress: таблица $TABLE пропала или неполна — ставлю заново" >&2
+    systemctl restart cleaner-egress.service
+    if check; then
+        echo "<4>cleaner-egress: таблица $TABLE поставлена заново" >&2
+        exit 0
+    fi
+    exit 1
 fi
 
 uid=$(id -u "$USER_NAME") || { echo "нет пользователя $USER_NAME" >&2; exit 1; }

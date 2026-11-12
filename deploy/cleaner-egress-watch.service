@@ -1,0 +1,8 @@
+[Unit]
+Description=Cleaner: сверка таблицы cleaner_egress и её восстановление
+# Таблицу снимает «flush ruleset» (перезапуск nftables): тогда она ставится заново через cleaner-egress.service.
+After=cleaner-egress.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cleaner-egress.sh watch

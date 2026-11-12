@@ -132,6 +132,11 @@ if [[ "$(systemctl is-active cleaner-egress.service)" == "active" ]]; then
 else
     bad "cleaner-egress.service не активен"
 fi
+if [[ "$(systemctl is-active cleaner-egress-watch.timer 2>/dev/null)" == "active" ]]; then
+    ok "cleaner-egress-watch.timer сверяет таблицу раз в 5 минут"
+else
+    bad "cleaner-egress-watch.timer не активен — таблицу, снятую перезапуском nftables, никто не вернёт"
+fi
 if bash /usr/local/sbin/cleaner-egress.sh check >"$WORK/egress-table.txt" 2>&1; then
     ok "таблица nftables inet cleaner_egress на месте: отбор по учётной записи и отказ"
 else
