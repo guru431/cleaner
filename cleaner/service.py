@@ -452,12 +452,16 @@ class ChatService:
         item_id = args[1]
 
         def cancelled(reason):
-            self.live.finish(item_id)           # ответ облака снят с очереди: страница и SSE не ждут его бесконечно
-            if kind == "risk":
-                self.repo.set_item_risk_status(chat_id, item_id, args[3], "interrupted", ("queued",))
-            elif self.repo.item(chat_id, item_id) is not None:
-                self.repo.set_item_status(chat_id, item_id, "failed", reason)
-            self.repo.audit("job_cancelled", user_id, chat_id, item_id=item_id)
+            try:
+                if kind == "risk":
+                    self.repo.set_item_risk_status(chat_id, item_id, args[3], "interrupted", ("queued",))
+                elif self.repo.item(chat_id, item_id) is not None:
+                    self.repo.set_item_status(chat_id, item_id, "failed", reason)
+                self.repo.audit("job_cancelled", user_id, chat_id, item_id=item_id)
+            finally:
+                # ответ облака снят с очереди: страница и SSE не ждут его бесконечно. После записи состояния —
+                # иначе опрос увидит finished и отдаст окончательное done ещё со status=running (как в run_send)
+                self.live.finish(item_id)
 
         try:
             pool.submit_reserved(fn, args, reservation, user=user_id, chat=chat_id, item=item_id,
