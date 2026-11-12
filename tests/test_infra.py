@@ -287,7 +287,12 @@ TENANT_NAMES = (
     "123456789012.dkr.ecr.eu-west-1.amazonaws.com",
     "romashka.storage.googleapis.com",
     "romashka.github.io",
+    "romashka.gitlab.io",
     "romashka.sharepoint.com",
+    "romashka-my.sharepoint.com",
+    "romashka.atlassian.net",
+    "romashka.slack.com",
+    "romashka.okta.com",
     "ec2-203-0-113-10.compute-1.amazonaws.com",
     "ec2-198-51-100-7.eu-west-1.compute.amazonaws.com",
     "123456789012.signin.aws.amazon.com",
@@ -320,6 +325,9 @@ SERVICE_NAMES = (
     "api.openai.azure.com", "help.kusto.windows.net",
     # Публичные реестры пакетов и CDN — того же рода, что pypi.org и docker.io; в частном разделе их доменов нет.
     "files.pythonhosted.org", "registry.npmjs.org", "ghcr.io", "aka.ms", "cdn.jsdelivr.net",
+    # Многоарендные SaaS: сам домен вендора, служебная часть перед ним и служба из «!имя» встроенного списка.
+    "github.io", "www.github.io", "sharepoint.com", "www.sharepoint.com", "atlassian.net", "api.slack.com",
+    "app.slack.com", "hooks.slack.com", "login.okta.com",
 )
 
 
@@ -368,6 +376,10 @@ def test_azure_sql_connection_string_hides_the_server_and_restores():
         "Модель romashka-oai.openai.azure.com, вход login.windows.net, EndpointSuffix=core.windows.net",
         "Откройте portal.azure.com, management.azure.com и dev.azure.com/org; вход login.windows.net",
     ),
+    (
+        "Портал romashka.sharepoint.com, сайт romashka.github.io, задачи romashka.atlassian.net",
+        "Вход через login.okta.com, вебхук hooks.slack.com, сайт sharepoint.com",
+    ),
 ])
 def test_vendor_service_names_stay_after_a_tenant_name(tenant, services):
     """Находка 12.11: подмена имени арендатора делала облачный домен вендора («amazonaws.com», «windows.net») сущностью
@@ -392,12 +404,27 @@ def test_vendor_service_names_stay_after_a_tenant_name(tenant, services):
     ("123456789012.dkr.ecr.eu-west-1.amazonaws.com", "host-1.dkr.ecr.eu-west-1.amazonaws.com"),
     ("app.romashka.visualstudio.com", "host-1.sub-2.visualstudio.com"),
     ("www.romashka.visualstudio.com", "www.host-1.visualstudio.com"),
+    ("romashka.github.io", "host-1.github.io"),
+    ("romashka-my.sharepoint.com", "host-1.sharepoint.com"),
+    ("romashka.slack.com", "host-1.slack.com"),
 ])
 def test_tenant_name_keeps_the_cloud_suffix(value, fake):
     """У имени арендатора подменяются метки арендатора и части слева от неё, суффикс арендатора остаётся: модель видит,
     что это Azure SQL, хранилище, Key Vault или бакет."""
     state = ChatState(chat_id="tenant", net_key=bytes(32))
     assert sanitize(state, f"Ресурс {value} недоступен", Settings()).sanitized == f"Ресурс {fake} недоступен"
+
+
+def test_saas_tenants_get_own_labels_under_the_open_vendor_domain():
+    """Находка 12.11: домены SaaS вне списка общеизвестных скрывались целиком — «romashka.sharepoint.com» делал
+    «sharepoint.com» сущностью DOMAIN, и любое имя под ним получало ту же фиктивную доменную часть: модель не видела, что
+    это SharePoint. Теперь у каждого арендатора своя подмена метки, домен вендора открыт."""
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    text = "Портал romashka.sharepoint.com, личный romashka-my.sharepoint.com, партнёр contoso.sharepoint.com"
+    sanitized = sanitize(state, text, Settings()).sanitized
+    assert sanitized == "Портал host-1.sharepoint.com, личный host-2.sharepoint.com, партнёр host-3.sharepoint.com"
+    assert not [entity for entity in state.entities.values() if entity.type is T.DOMAIN]
+    assert restore(state, sanitized, Settings()).text == text
 
 
 def test_tenant_names_round_trip_in_any_writing():

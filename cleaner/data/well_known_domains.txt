@@ -81,5 +81,12 @@ chatgpt.com
 opencode.ai
 ollama.com
 huggingface.co
+# Многоарендные SaaS: левую часть выбирает организация (data/tenant_suffixes.txt), домен вендора открыт
+github.io
+gitlab.io
+sharepoint.com
+atlassian.net
+slack.com
+okta.com
 # Имена из кода, совпадающие с доменом: окончание само по себе частое у настоящих узлов (.io)
 java.io

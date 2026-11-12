@@ -49,6 +49,14 @@ compute-1.amazonaws.com
 signin.aws.amazon.com
 # Google Cloud
 storage.googleapis.com
+# SaaS: сайт, портал или рабочее пространство организации («romashka.github.io», «romashka-my.sharepoint.com»).
+# «github.io» и «gitlab.io» в частном разделе есть, но сами общеизвестные домены, и раздел их арендатора не выделяет
+github.io
+gitlab.io
+sharepoint.com
+atlassian.net
+slack.com
+okta.com
 # «!имя» — не арендатор: суффикс частного раздела, слева от которого стоит служба
 # («lambda.us-east-1.amazonaws.com»), или служба под суффиксом арендатора с частью перед ней.
 !us-east-1.amazonaws.com
@@ -60,3 +68,13 @@ storage.googleapis.com
 !vssps.visualstudio.com
 !vsaex.visualstudio.com
 !vstoken.visualstudio.com
+!app.slack.com
+!hooks.slack.com
+!files.slack.com
+!status.slack.com
+!join.slack.com
+!login.okta.com
+!developer.okta.com
+!help.okta.com
+!support.okta.com
+!status.okta.com
