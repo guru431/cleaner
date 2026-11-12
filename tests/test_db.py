@@ -96,6 +96,32 @@ def test_failed_migration_leaves_the_previous_version(tmp_path):
     assert "extra" not in {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
 
 
+def test_two_processes_apply_a_migration_once(tmp_path, monkeypatch):
+    """Второй процесс прочёл прежнюю версию до того, как первый применил миграцию, — повтора нет."""
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    first = db.connect(tmp_path / "cleaner.db")
+    second = db.connect(tmp_path / "cleaner.db")
+    db.migrate(first, migrations)
+    (migrations / "0002_extra.sql").write_text(
+        "-- столбец; с точкой с запятой в комментарии\nALTER TABLE items ADD COLUMN extra TEXT;\n"
+        "UPDATE settings SET value = value || 'x';\n",
+        encoding="utf-8",
+    )
+    first.execute("INSERT INTO settings(key, value) VALUES ('a', '')")
+    apply = db._apply
+
+    def race(conn, script, version):
+        if conn is second:
+            db.migrate(first, migrations)      # первый успел между чтением версии и записью
+        apply(conn, script, version)
+
+    monkeypatch.setattr(db, "_apply", race)
+    db.migrate(second, migrations)
+    assert second.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert second.execute("SELECT value FROM settings").fetchone()[0] == "x"
+
+
 def test_migration_numbers_must_follow_each_other(tmp_path):
     (tmp_path / "0003_gap.sql").write_text("SELECT 1;", encoding="utf-8")
     with pytest.raises(RuntimeError):
