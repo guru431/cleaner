@@ -11,6 +11,9 @@ web.core.windows.net
 search.windows.net
 redis.cache.windows.net
 vault.azure.net
+vaultcore.azure.net
+purview.azure.com
+*.datafactory.azure.net
 documents.azure.com
 openai.azure.com
 cognitiveservices.azure.com
@@ -41,6 +44,7 @@ privatelink.web.core.windows.net
 privatelink.search.windows.net
 privatelink.redis.cache.windows.net
 privatelink.servicebus.windows.net
+privatelink.vaultcore.azure.net
 privatelink.managedhsm.azure.net
 privatelink.documents.azure.com
 privatelink.openai.azure.com
@@ -60,17 +64,20 @@ dkr.ecr.*.amazonaws.com
 *.es.amazonaws.com
 *.redshift.amazonaws.com
 *.docdb.amazonaws.com
+*.neptune.amazonaws.com
 *.cache.amazonaws.com
 # ElastiCache: бессерверный кэш и конечная точка настройки кластера — служебное слово перед регионом
 serverless.*.cache.amazonaws.com
 clustercfg.*.cache.amazonaws.com
 cfg.*.cache.amazonaws.com
 *.vpce.amazonaws.com
-# Балансировщик NLB, Amazon MSK, EFS, MemoryDB: служба перед регионом (в частном разделе только «*.elb.amazonaws.com»)
+# Балансировщик NLB, Amazon MSK, EFS, MemoryDB, Amazon MQ: служба перед регионом (в частном разделе только
+# «*.elb.amazonaws.com»)
 elb.*.amazonaws.com
 kafka.*.amazonaws.com
 efs.*.amazonaws.com
 memorydb.*.amazonaws.com
+mq.*.amazonaws.com
 # Публичное имя EC2 в us-east-1 («ec2-203-0-113-10.compute-1.amazonaws.com») — адрес сервера; в частном разделе оно
 # целиком суффикс («*.compute-1.amazonaws.com»), в других регионах арендатора выделяет сам раздел («*.compute.amazonaws.com»)
 compute-1.amazonaws.com

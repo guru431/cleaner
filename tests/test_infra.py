@@ -325,6 +325,12 @@ TENANT_NAMES = (
     "romashka-redis-abc123.serverless.euw1.cache.amazonaws.com",
     "romashka.abc123.clustercfg.euw1.cache.amazonaws.com",
     "romashka.enterprise.slack.com",
+    # Key Vault в CNAME и nslookup, Purview, Data Factory, Neptune, Amazon MQ.
+    "romashka-kv.privatelink.vaultcore.azure.net",
+    "romashka.purview.azure.com",
+    "romashka.westeurope.datafactory.azure.net",
+    "x.cluster-abc123.eu-west-1.neptune.amazonaws.com",
+    "b-1234abcd.mq.eu-west-1.amazonaws.com",
 )
 SERVICE_NAMES = (
     "admin.atlassian.com", "id.atlassian.com", "login.microsoftonline.com", "update.microsoft.com", "management.azure.com", "s3.amazonaws.com",
@@ -344,6 +350,7 @@ SERVICE_NAMES = (
     # Голые зоны Private Link и служебные суффиксы без метки арендатора.
     "privatelink.blob.core.windows.net", "privatelink.database.windows.net", "privatelink.openai.azure.com",
     "serverless.euw1.cache.amazonaws.com", "clustercfg.euw1.cache.amazonaws.com", "enterprise.slack.com",
+    "privatelink.vaultcore.azure.net", "purview.azure.com", "mq.eu-west-1.amazonaws.com",
 )
 
 
