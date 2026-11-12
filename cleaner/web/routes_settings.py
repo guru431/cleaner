@@ -51,7 +51,7 @@ EVENTS = (
     "key_created", "key_disabled", "agent_send", "agent_refused", "agent_withheld", "agent_chat_created", "agent_pruned",
     "key_restarted", "request_prepared",
     "user_deleted", "master_key_rotated", "logout_all", "audit_export", "egress_refused", "service_started",
-    "settings_previewed", "api_keys_revoked_all", "user_role_changed",
+    "settings_previewed", "api_keys_revoked_all", "user_role_changed", "audit_purged",
 )
 PROTOCOL_NAMES = {"openai": "OpenAI-совместимый", "anthropic": "Anthropic-совместимый", "responses": "OpenAI Responses"}
 AUTH_NAMES = {"bearer": "Authorization: Bearer", "x-api-key": "x-api-key"}

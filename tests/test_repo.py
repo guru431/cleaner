@@ -196,6 +196,24 @@ def test_session_opens_only_for_the_checked_password_of_an_enabled_account(repo)
     assert [repo.session(token) is not None for token in ("t0", "t1", "t2")] == [False, False, True]
 
 
+def test_audit_older_than_a_year_is_purged_once_a_day(repo, clock):
+    """Решение владельца 12.11.2026: журнал хранится AUDIT_DAYS дней. Очистка — с первым событием после запуска и
+    после смены дня, одним DELETE; сколько удалено — событием audit_purged."""
+    repo.audit("login", "u1")
+    clock.advance(days=200)
+    repo.audit("logout", "u1")
+    clock.advance(days=200)                         # «login» старше года, «logout» — нет
+    repo.audit("login", "u2")
+    assert [(row.event, row.details) for row in repo.audit_events()] == [
+        ("audit_purged", {"count": 1, "days": 365}), ("login", {}), ("logout", {})]
+    repo.conn.execute("INSERT INTO audit(ts, event) VALUES ('2000-01-01T00:00:00+00:00', 'login')")
+    repo.audit("logout", "u2")                      # тот же день: очистка не повторяется
+    assert repo.audit_count("login", before="2001") == 1
+    clock.advance(days=1)
+    repo.audit("login", "u3")
+    assert repo.audit_count("login", before="2001") == 0
+
+
 def test_role_of_the_last_active_admin_stays(repo):
     """Идея «Смена роли…»: снять роль с последнего активного администратора нельзя, и когда есть отключённый. Проверка
     и запись — одним UPDATE: два администратора, снимающие роль друг с друга разом, его не обойдут."""

@@ -13,6 +13,7 @@ import zlib
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from cleaner.clock import Clock
@@ -36,6 +37,7 @@ class CheckpointBusy(Exception):
 
 
 _CHECKPOINT_ATTEMPTS = 3            # каждая попытка сама ждёт читателей до busy_timeout (5 с)
+AUDIT_DAYS = 365                    # срок хранения журнала (решение владельца 12.11.2026); для долгого — выгрузка CSV
 SUFFIXES_KEY = "internal_suffixes.extra"        # внутренние суффиксы администратора (FR-10.5), список JSON
 
 
@@ -223,6 +225,7 @@ class Repository:
         self._chat_delete_hooks: list[weakref.WeakMethod] = []
         self._readers = 0                         # открытые снимки reading()
         self._wal_due = False                     # усечение WAL отложено до закрытия снимков
+        self._audit_purged = ""                   # день последней очистки журнала (_purge_audit)
 
     # --- служебное ---------------------------------------------------------
 
@@ -1336,10 +1339,22 @@ class Repository:
 
     def audit(self, event: str, user_id: str | None = None, chat_id: str | None = None, **details: object) -> None:
         """Только идентификаторы и счётчики: оригиналы и тексты сюда не передаются (FR-11.2)."""
+        now = self.clock.now()
         self._run(
             "INSERT INTO audit(ts, user_id, chat_id, event, details) VALUES (?, ?, ?, ?, ?)",
-            self._now(), user_id, chat_id, event, json.dumps(details, ensure_ascii=False),
+            now.isoformat(timespec="seconds"), user_id, chat_id, event, json.dumps(details, ensure_ascii=False),
         )
+        if self._audit_purged != now.date().isoformat():
+            self._purge_audit(now)
+
+    def _purge_audit(self, now: datetime) -> None:
+        """Раз в сутки — с первым событием после запуска и после смены дня — удаляет события старше AUDIT_DAYS одним
+        DELETE по индексу audit_by_ts; планировщика у службы нет, а событие пишется на каждом шаге работы. Сколько
+        удалено — событием audit_purged (день отмечен заранее, и оно очистку не повторяет)."""
+        self._audit_purged = now.date().isoformat()
+        removed = self._run("DELETE FROM audit WHERE ts < ?", (now - timedelta(days=AUDIT_DAYS)).isoformat(timespec="seconds"))
+        if removed:
+            self.audit("audit_purged", count=removed, days=AUDIT_DAYS)
 
     @staticmethod
     def _audit_where(
