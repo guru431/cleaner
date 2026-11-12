@@ -41,6 +41,7 @@ SUFFIXES_KEY = "internal_suffixes.extra"        # внутренние суфф�
 # Слои 4 и 5 по умолчанию для чатов без явного решения (FR-3.8). Слой 4 включён по умолчанию;
 # слой 5 — после замера задачи 23 (раздел 19 спецификации).
 DEFAULT_LAYERS = {"ner": True, "llm": False}
+LABEL_STYLES = ("angle", "square")
 # Слои 4 и 5 для ключа шлюза — выключены, пока не включены явно (решение владельца 4, спецификация 2026-10-28).
 KEY_LAYERS = {"ner": False, "llm": False}
 _IN_CHUNK = 500         # отпечатков в одном запросе IN: предел переменных SQLite
@@ -420,11 +421,13 @@ class Repository:
             raise KeyError(chat_id)
         return crypto.unseal(self.master, row["dek_wrapped"], f"chat-dek:{chat_id}")
 
-    def create_chat(self, user_id: str, title: str, label_style: str = "angle", kind: str = "chat") -> str:
-        """kind="agent" — чат шлюза: состояние в режиме написаний (спецификация 2026-10-28, 6.3, 11)."""
+    def create_chat(self, user_id: str, title: str, label_style: str | None = None, kind: str = "chat") -> str:
+        """kind="agent" — чат шлюза: состояние в режиме написаний (спецификация 2026-10-28, 6.3, 11).
+        Без label_style — вид метки из настройки администратора (FR-5.10); чат хранит его в состоянии."""
         chat_id = uuid.uuid4().hex
         dek = crypto.new_key()
-        state = ChatState(chat_id=chat_id, net_key=os.urandom(32), label_style=label_style, written=kind == "agent")
+        state = ChatState(chat_id=chat_id, net_key=os.urandom(32), label_style=label_style or self.label_style(),
+                          written=kind == "agent")
         now = self._now()
         self._run(
             "INSERT INTO chats(id, user_id, title_enc, dek_wrapped, state_enc, version, created_at, updated_at, kind) "
@@ -830,6 +833,15 @@ class Repository:
 
     def set_layer_defaults(self, values: dict[str, bool]) -> None:
         self.set_setting("layers.default", json.dumps({name: bool(values[name]) for name in DEFAULT_LAYERS}))
+
+    def label_style(self) -> str:
+        """Вид метки новых чатов (FR-5.10): angle — <ТИП_N>, square — [[ТИП_N]]."""
+        return self.setting("labels.style") or "angle"
+
+    def set_label_style(self, style: str) -> None:
+        if style not in LABEL_STYLES:
+            raise ValueError(style)
+        self.set_setting("labels.style", style)
 
     # --- подключения к облачным моделям (FR-8.1, FR-8.3) --------------------------------
 

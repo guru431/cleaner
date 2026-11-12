@@ -48,7 +48,7 @@ class Body(BaseModel):
 
 class ChatIn(Body):
     title: str = ""
-    label_style: Literal["angle", "square"] = "angle"
+    label_style: Literal["angle", "square"] | None = None          # без поля — настройка администратора (FR-5.10)
     layers: dict[Literal["ner", "llm"], bool] = {}
 
 

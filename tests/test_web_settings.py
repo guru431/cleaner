@@ -167,6 +167,23 @@ def test_dictionary_entry_is_edited_through_the_impact_preview_and_can_be_undone
     assert boss.post(f"/settings/dictionary/{'0' * 32}/edit", aliases="x").status_code == 404
 
 
+def test_label_style_setting_applies_to_new_chats_only(boss, ivan, api, repo):
+    """FINDINGS «FR-5.10: вид метки [[ТИП_N]] в интерфейсе не выбрать»: настройка администратора действует на новые
+    консультации, чаты шлюза агентов и чаты API без своего поля; созданные чаты и явное поле API не меняются."""
+    style = lambda chat_id: repo.load_state(chat_id)[0].label_style
+    before = boss.chat()
+    assert 'value="angle" checked' in boss.get("/settings/labels").text
+    assert ivan.post("/settings/label-style", style="square").status_code == 403
+    assert boss.post("/settings/label-style", style="curly").status_code == 400
+    assert boss.post("/settings/label-style", style="square").status_code == 303
+    assert repo.audit_events("settings_changed")[0].details == {"section": "label_style", "style": "square"}
+    assert 'value="square" checked' in boss.get("/settings/labels").text
+    agent = repo.create_chat(repo.user_by_login("boss").id, "Агент", kind="agent")    # путь agent_service
+    program = api()
+    plain, explicit = (program.post("/api/v1/chats", json=body).json()["id"] for body in ({}, {"label_style": "angle"}))
+    assert [style(c) for c in (before, boss.chat(), agent, plain, explicit)] == ["angle", "square", "square", "square", "angle"]
+
+
 def test_pattern_is_tried_on_a_sample_before_saving(boss, repo, monkeypatch):
     fields = {"name": "Инвентарный", "regex": r"INV-\d{6}", "type": "TERM"}
     tried = boss.post("/settings/patterns", sample="INV-123456 и INV-12", action="test", **fields)

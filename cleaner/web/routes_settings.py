@@ -956,8 +956,21 @@ def labels(
     rows = _label_report(repo_of(request), _day_start(request, since), _day_start(request, until, 1), source)
     return page(
         request, "labels.html", viewer, rows=rows, since=since, until=until, source=source, sources=LABEL_SOURCES,
-        share=LABEL_DISTORTION_SHARE, minimum=LABEL_MIN_LABELS,
+        share=LABEL_DISTORTION_SHARE, minimum=LABEL_MIN_LABELS, styles=LABEL_STYLES, style=repo_of(request).label_style(),
     )
+
+
+@router.post("/label-style")
+def save_label_style(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    """Вид метки в новых чатах (FR-5.10): консультации, чаты шлюза агентов и чаты API без явного label_style.
+    Созданные чаты сохраняют свой вид."""
+    style = form.get("style", "")
+    if style not in LABEL_STYLES:
+        raise HTTPException(400, "Неизвестный вид метки")
+    repo = repo_of(request)
+    repo.set_label_style(style)
+    repo.audit("settings_changed", viewer.user.id, section="label_style", style=style)
+    return _redirect("/settings/labels")
 
 
 # --- эталонный набор (FR-6.10, QA-1) ----------------------------------------------------
