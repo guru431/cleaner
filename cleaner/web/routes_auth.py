@@ -76,6 +76,7 @@ def _logged_in(request: Request, expected: str, name: str, user: User | None, pa
         repo.audit("login_failed", user.id if user else None)
         return _login_page(request, expected, 401, "Неверный логин или пароль")
     throttle.succeeded(name)
+    _drop_expired(request)
     repo.audit("login", user.id)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
@@ -106,11 +107,21 @@ def _signed_out(path: str = "/login") -> Response:
     return response
 
 
+def _drop_expired(request: Request) -> None:
+    """Истёкшие сессии всех пользователей — при входе, на странице сессий и перед «Выйти везде»: иначе
+    брошенная сессия, которую браузер больше не пришлёт (get_viewer), жила бы в базе вечно."""
+    now = request.app.state.clock.now()
+    repo_of(request).delete_expired_sessions(
+        (now - IDLE).isoformat(timespec="seconds"), (now - MAX_AGE).isoformat(timespec="seconds"),
+    )
+
+
 # --- своя учётная запись: сессии и пароль ------------------------------------------------
 
 @router.get("/account/sessions")
 def sessions(request: Request, viewer: Viewer = Depends(get_viewer)) -> Response:
-    """Свои сессии: начало, последнее действие и когда истечёт. Адресов и браузеров сессия не хранит."""
+    """Свои действующие сессии: начало, последнее действие и когда истечёт. Адресов и браузеров сессия не хранит."""
+    _drop_expired(request)
     rows = [
         {
             "current": session.token_hash == viewer.session.token_hash, "created_at": session.created_at,
@@ -127,7 +138,8 @@ def sessions(request: Request, viewer: Viewer = Depends(get_viewer)) -> Response
 
 @router.post("/account/sessions/logout-all")
 def logout_all(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    """Выйти на всех устройствах — и на этом тоже."""
+    """Выйти на всех устройствах — и на этом тоже. В событии — число действовавших сессий."""
+    _drop_expired(request)
     repo = repo_of(request)
     repo.audit("logout_all", viewer.user.id, sessions=repo.delete_sessions(viewer.user.id))
     return _signed_out()

@@ -113,6 +113,26 @@ def test_user_lists_sessions_and_logs_out_everywhere(browser, repo, clock):
     assert event.details == {"sessions": 2}
 
 
+def test_expired_sessions_are_deleted_and_not_listed(browser, repo, clock):
+    """Находка «Истёкшие сессии не удаляются…»: брошенные сессии жили в базе вечно, «Мои сессии» показывали их,
+    а «Выйти везде» считала. Теперь истёкшие по простою и по сроку от входа удаляются."""
+    first, second, third = browser(), browser(), browser()
+    first.user("ivan")
+    third.user("petr")
+    first.login("ivan")
+    third.login("petr")
+    clock.advance(hours=7)
+    second.login("ivan")
+    first.get("/")                                     # простой первой — с этой минуты, срок от входа — прежний
+    clock.advance(hours=5, seconds=1)                  # первая старше MAX_AGE, у petr простой дольше IDLE
+    page = second.get("/account/sessions").text
+    assert page.count("<tr class=\"session") == 1 and "эта" in page
+    assert [row[0] for row in repo.conn.execute("SELECT user_id FROM sessions")] == [repo.user_by_login("ivan").id]
+    second.post("/account/sessions/logout-all")
+    [event] = repo.audit_events("logout_all")
+    assert event.details == {"sessions": 1}
+
+
 def test_user_changes_own_password_with_the_current_one(browser, repo):
     b, other = browser(), browser()
     user = b.user("ivan")

@@ -390,6 +390,11 @@ class Repository:
         """«Выйти на всех устройствах»: все сессии пользователя; число закрытых."""
         return self._run("DELETE FROM sessions WHERE user_id = ?", user_id)
 
+    def delete_expired_sessions(self, seen_before: str, created_before: str) -> int:
+        """Истёкшие сессии всех пользователей — без запросов с seen_before или открытые до created_before
+        (простой и срок от входа, web/deps.py). Брошенную сессию браузер больше не пришлёт. Число удалённых."""
+        return self._run("DELETE FROM sessions WHERE last_seen_at < ? OR created_at < ?", seen_before, created_before)
+
     def touch_session(self, token_hash: str) -> None:
         self._run("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", self._now(), token_hash)
 
