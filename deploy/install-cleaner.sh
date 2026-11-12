@@ -410,12 +410,20 @@ else
     log "Если что-то пошло не так — подождите 10 минут, ufw выключится сам."
 fi
 # Правило для сети, которой больше нет в CLIENTS, установщик не снимает — его могли поставить и вручную, — а называет:
-# check-cleaner.sh считает лишнее правило провалом.
+# check-cleaner.sh считает лишнее правило провалом. Сеть — поле после ALLOW (после ALLOW IN); ALLOW OUT и ALLOW FWD —
+# не входящие к службе. Правила без протокола тоже открывают порт; ufw пишет адрес без /32, правила IPv6 — с «(v6)».
 while read -r net; do
-    [[ " $CLIENTS " == *" $net "* ]] && continue
+    for client in $CLIENTS; do
+        [[ "${net%/32}" == "${client%/32}" ]] && continue 2
+    done
     log "ВНИМАНИЕ: порт ${PORT} открыт и для ${net}, а в CLIENTS профиля её нет. Если это больше не клиент — \
 найдите номер правила (sudo ufw status numbered) и удалите его: sudo ufw delete <номер>"
-done < <(grep -E "^${PORT}/tcp +ALLOW +" <<< "$RULES" | awk '{print $3}')
+done < <(awk -v port="$PORT" '$1 == port || $1 == port "/tcp" {
+    for (i = 2; i < NF && $i != "ALLOW"; i++) ;
+    if ($i != "ALLOW" || $(i + 1) == "OUT" || $(i + 1) == "FWD") next
+    i += ($(i + 1) == "IN") ? 2 : 1
+    print $i ($(i + 1) == "(v6)" ? " (v6)" : "")
+}' <<< "$RULES")
 
 log "отпечаток сертификата — сверить в браузере при первом входе:"
 openssl x509 -in "$TLS/cert.pem" -noout -fingerprint -sha256

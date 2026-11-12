@@ -333,8 +333,12 @@ def test_installer_rollback_returns_the_egress_files_with_the_code_and_keeps_the
 def test_installer_names_ufw_rules_of_nets_no_longer_in_the_profile():
     """Находка 12.11.2026: правила для сетей, убранных из CLIENTS, оставались молча — установщик их называет."""
     text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
-    stale = text[text.index('[[ " $CLIENTS " == *" $net "* ]] && continue'):text.index("отпечаток сертификата")]
+    stale = text[text.index('[[ "${net%/32}" == "${client%/32}" ]] && continue 2'):text.index("отпечаток сертификата")]
     assert "sudo ufw delete <номер>" in stale and '<<< "$RULES"' in stale
+    # Ревью 12.11.2026: сеть бралась третьим полем — «IN», «OUT» вместо адреса; правила без /tcp и (v6) пропускались,
+    # а одиночный адрес, который ufw пишет без /32, считался чужим.
+    assert '$1 == port || $1 == port "/tcp"' in stale
+    assert '$(i + 1) == "OUT"' in stale and '$(i + 1) == "IN"' in stale and '" (v6)"' in stale
 
 
 def test_installer_stops_a_service_waiting_for_its_automatic_restart():
