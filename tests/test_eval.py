@@ -51,6 +51,17 @@ def test_precision_and_masked_versions_codes_and_well_known_domains():
     assert (report.overmasked, report.candidates) == (1, 3)
 
 
+def test_tenant_resource_is_not_a_well_known_candidate():
+    """Ресурс арендатора под общеизвестным доменом слой 3 скрывает по праву (5.4) — его замена не лишняя; служебное имя
+    вендора — кандидат, как раньше."""
+    text = "Сервер romashka-sql.database.windows.net, вход login.microsoftonline.com"
+    tenant, vendor = text.index("romashka-sql"), text.index("login.")
+    report = evaluate([example(text)], lambda t: [(tenant, tenant + 33, T.HOST)])
+    assert (report.candidates, report.overmasked) == (1, 0)
+    report = evaluate([example(text)], lambda t: [(vendor, len(text), T.HOST)])
+    assert (report.candidates, report.overmasked) == (1, 1)
+
+
 def test_classes_follow_qa_3():
     ex = example("ООО «Ромашка», Петров", (0, 13, T.ORG, 0, "dictionary"), (15, 21, T.PERSON, 1, ""))
     report = evaluate([ex], lambda t: [(0, 13, T.ORG)])

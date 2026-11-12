@@ -24,6 +24,9 @@ dkr.ecr.*.amazonaws.com
 *.rds.amazonaws.com
 *.eks.amazonaws.com
 *.es.amazonaws.com
+# Публичное имя EC2 в us-east-1 («ec2-203-0-113-10.compute-1.amazonaws.com») — адрес сервера; в частном разделе оно
+# целиком суффикс («*.compute-1.amazonaws.com»), в других регионах арендатора выделяет сам раздел («*.compute.amazonaws.com»)
+compute-1.amazonaws.com
 signin.aws.amazon.com
 # Google Cloud
 storage.googleapis.com

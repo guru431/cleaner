@@ -288,6 +288,8 @@ TENANT_NAMES = (
     "romashka.storage.googleapis.com",
     "romashka.github.io",
     "romashka.sharepoint.com",
+    "ec2-203-0-113-10.compute-1.amazonaws.com",
+    "ec2-198-51-100-7.eu-west-1.compute.amazonaws.com",
 )
 SERVICE_NAMES = (
     "login.microsoftonline.com", "update.microsoft.com", "management.azure.com", "s3.amazonaws.com",
@@ -296,6 +298,8 @@ SERVICE_NAMES = (
     "registry-1.docker.io", "lambda.us-east-1.amazonaws.com", "s3.eu-west-1.amazonaws.com",
     "dkr.ecr.eu-west-1.amazonaws.com", "code.visualstudio.com", "app.vssps.visualstudio.com", "login.windows.net",
     "blob.core.windows.net", "database.windows.net", "vault.azure.net",
+    # Публичные реестры пакетов и CDN — того же рода, что pypi.org и docker.io; в частном разделе их доменов нет.
+    "files.pythonhosted.org", "registry.npmjs.org", "ghcr.io", "aka.ms", "cdn.jsdelivr.net",
 )
 
 
@@ -303,7 +307,8 @@ SERVICE_NAMES = (
 def test_tenant_resource_under_a_well_known_domain_is_hidden(value):
     """Находка 12.11: левую часть имени под многоарендным облачным доменом выбирает организация — учётная запись
     хранилища, сервер Azure SQL, бакет, номер учётной записи AWS. Суффикс арендатора — из частного раздела списка
-    публичных суффиксов или встроенного списка (data/tenant_suffixes.txt)."""
+    публичных суффиксов или встроенного списка (data/tenant_suffixes.txt). Публичное имя EC2 содержит адрес сервера:
+    «ec2-…compute-1.amazonaws.com» в частном разделе целиком суффикс, поэтому «compute-1.amazonaws.com» — во встроенном."""
     assert not infra.well_known(value, CTX)
     assert values(f"Ресурс {value} недоступен") == {value}
 

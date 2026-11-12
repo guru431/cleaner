@@ -18,6 +18,7 @@ live.com
 outlook.com
 azure.com
 azure.net
+aka.ms
 visualstudio.com
 github.com
 githubusercontent.com
@@ -34,9 +35,13 @@ cloudflare.com
 mozilla.org
 python.org
 pypi.org
+pythonhosted.org
 npmjs.com
+npmjs.org
 docker.com
 docker.io
+ghcr.io
+jsdelivr.net
 ubuntu.com
 debian.org
 redhat.com

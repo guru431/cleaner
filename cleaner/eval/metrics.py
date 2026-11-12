@@ -11,8 +11,9 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from cleaner.core.detect.base import load_builtin
-from cleaner.core.types import EntityType
+from cleaner.core.detect.base import DetectContext
+from cleaner.core.detect.infra import well_known
+from cleaner.core.types import EntityType, Settings
 
 T = EntityType
 
@@ -115,12 +116,11 @@ def _common(a: Sequence[tuple[int, int]], b: Sequence[tuple[int, int]]) -> int:
 
 
 def _candidates(text: str) -> list[tuple[int, int]]:
-    domains = load_builtin().well_known_domains
+    """Версии, коды ошибок и общеизвестные имена — по тому же правилу, что слой 3 (infra.well_known): ресурс арендатора
+    под общеизвестным доменом («romashka-sql.database.windows.net») кандидатом лишней замены не считается."""
+    ctx = DetectContext(Settings())
     found = [m.span() for m in _VERSION.finditer(text)] + [m.span() for m in _ERROR.finditer(text)]
-    for m in _DOTTED.finditer(text):
-        name = m.group().lower()
-        if any(name == domain or name.endswith("." + domain) for domain in domains):
-            found.append(m.span())
+    found += [m.span() for m in _DOTTED.finditer(text) if well_known(m.group(), ctx)]
     return found
 
 
