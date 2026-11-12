@@ -90,6 +90,13 @@ def _reading(repo):
             conn.close()
 
 
+def _undo(repo):
+    raw = repo.setting(_UNDO)
+    if not raw:
+        raise ValueError("Предыдущей конфигурации нет")
+    return json.loads(crypto.unseal(repo.global_key, base64.b64decode(raw), _UNDO))
+
+
 def changed(repo, operation):
     config = copy.deepcopy(snapshot(repo))
     if operation["kind"] == "policies":
@@ -104,10 +111,7 @@ def changed(repo, operation):
             raise ValueError("Запись не найдена")
         config["dictionary"] = [row if r["id"] == row["id"] else r for r in config["dictionary"]]
     elif operation["kind"] == "undo":
-        raw = repo.setting(_UNDO)
-        if not raw:
-            raise ValueError("Предыдущей конфигурации нет")
-        undo = json.loads(crypto.unseal(repo.global_key, base64.b64decode(raw), _UNDO))
+        undo = _undo(repo)
         if "dictionary" in undo:            # снимок прежнего вида (до 12.11.2026) — конфигурация целиком
             return undo
         # Обратная правка последнего применения: записи, добавленные потом мимо оценки (экран проверки, ручное
@@ -192,6 +196,9 @@ def preview(repo, user_id, operation):
         quality = [{"title": title, "before": runner.share(*old.classes.get(title, (0, 0))),
                     "after": runner.share(*new.classes.get(title, (0, 0)))} for title in set(old.classes) | set(new.classes)]
         binding = _binding(snap)
+        # Возврат по снимку прежнего вида подставляет конфигурацию целиком: страница объясняет, почему удаляются
+        # записи, добавленные после последнего применения.
+        former = operation["kind"] == "undo" and "dictionary" in _undo(snap)
     # Оценка — в журнал (раздел 4 ТЗ, FR-11.2): вид правки и числа, без значений словаря.
     was, will = {r["id"] for r in before_config["dictionary"]}, {r["id"] for r in config["dictionary"]}
     repo.audit("settings_previewed", user_id, kind="import" if operation.get("import") else operation["kind"],
@@ -205,7 +212,7 @@ def preview(repo, user_id, operation):
     shown = len(owners) >= MIN_OWNERS
     return {"mine": mine, "others": others if shown else None, "owners": len(owners) if shown else None,
             "min_owners": MIN_OWNERS, "pending": pending, "frozen": frozen, "own": own, "quality": quality,
-            "receipt": receipt, "kind": operation["kind"], "changes": listed(before_config, config)}
+            "receipt": receipt, "kind": operation["kind"], "changes": listed(before_config, config), "former": former}
 
 
 def apply(repo, user_id, receipt):

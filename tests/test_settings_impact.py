@@ -1,4 +1,6 @@
 """Shared previews never disclose another owner's text or mutate a chat."""
+import base64
+import json
 import re
 import threading
 
@@ -7,6 +9,7 @@ import pytest
 from cleaner import settings_impact
 from cleaner.core.types import EntityType as T, Policy, default_policies
 from cleaner.service import ChatService
+from cleaner.storage import crypto
 from cleaner.web import routes_settings
 
 
@@ -137,8 +140,22 @@ def test_undo_keeps_an_entry_added_from_the_review_after_the_apply(boss, repo):
     undo = boss.post("/settings/impact/undo")
     assert "Что изменит возврат" in undo.text and "Удаляются записи: 1" in undo.text
     assert "Ромашка-Плюс" in undo.text and "Лютик-Опт" not in undo.text
+    assert "до обновления Cleaner" not in undo.text
     assert boss.post("/settings/impact/apply", receipt=_receipt(undo)).status_code == 303
     assert [r.value for r in repo.dictionary()] == ["Лютик-Опт"]
+
+
+def test_undo_by_a_former_snapshot_warns_that_later_entries_are_removed(boss, repo):
+    """Ревью 12.11.2026: последнее применение до обновления оставило снимок конфигурации целиком — возврат удаляет
+    записи, добавленные потом; страница оценки говорит почему. Возврат не запрещён."""
+    repo.add_dictionary("always", "Ромашка-Плюс", T.ORG)
+    former = json.dumps(settings_impact.snapshot(repo)).encode()
+    repo.set_setting(settings_impact._UNDO, base64.b64encode(crypto.seal(repo.global_key, former, settings_impact._UNDO)).decode())
+    repo.add_dictionary("always", "Лютик-Опт", T.ORG)
+    undo = boss.post("/settings/impact/undo")
+    assert "до обновления Cleaner" in undo.text and "Удаляются записи: 1" in undo.text and "Лютик-Опт" in undo.text
+    assert boss.post("/settings/impact/apply", receipt=_receipt(undo)).status_code == 303
+    assert [r.value for r in repo.dictionary()] == ["Ромашка-Плюс"]
 
 
 def test_undo_returns_deleted_entries_and_former_policies_but_keeps_later_edits(repo):
