@@ -174,14 +174,17 @@ def _stricter(settings: Settings, found: EntityType, wanted: EntityType) -> bool
 _DOTTED_NAME = re.compile(r"[\w-]+(?:\.[\w-]+)+")
 
 
-def _name_parts(value: str, added: dict[str, EntityType]) -> list[tuple[str, EntityType, EntityType]]:
+def _name_parts(
+    value: str, added: dict[str, EntityType], ruled: frozenset[str],
+) -> list[tuple[str, EntityType, EntityType]]:
     """Новые правила на целой части имени с точками, свой тип части и тип правила. Части — те же, что подменяет
     resolve._name: слева от домена (HOST) и сам регистрируемый домен (DOMAIN); правило на другом хвосте или на
-    нескольких частях имя поглощает (merge._name_kept). Имя длиннее имени DNS целиком не записывается (resolve)."""
+    нескольких частях имя поглощает (merge._name_kept). Имя длиннее имени DNS целиком не записывается (resolve).
+    ruled — правила HOST и DOMAIN чата (resolve.name_rules): на суффиксе арендатора они делят имя как обычное."""
     name = hostmap.dotted(value)
     if len(name) > hostmap.MAX_NAME or not _DOTTED_NAME.fullmatch(name):
         return []
-    left, registrable = resolve.name_parts(name, False)
+    left, registrable = resolve.name_parts(name, False, ruled)
     candidates = [*((part, EntityType.HOST) for part in left), *(((registrable, EntityType.DOMAIN),) if registrable else ())]
     return [(part, own, added[normalize(part)]) for part, own in candidates if normalize(part) in added]
 
@@ -1159,6 +1162,7 @@ class ChatService:
                 normalize(r.value): r.type for r in state.rules if r.action == "mask" and r not in before
             }
             held, applied = None, False
+            ruled = resolve.name_rules((r.value, r.type) for r in state.rules if r.action == "mask")
             leaks.clear()                       # при повторе на свежем состоянии считаем заново
             pairs = []
             for item in items:
@@ -1173,7 +1177,7 @@ class ChatService:
                     if wanted is None:
                         # Правило на целой части имени с точками (исключение владельца 15.10.2026): легло, если часть
                         # получила метку его типа; нет — её держит политика HOST или DOMAIN (resolve._manual).
-                        parts = _name_parts(value, added)
+                        parts = _name_parts(value, added, ruled)
                         for _, own, wanted in parts:
                             if _labelled(state, span.surrogate, wanted):
                                 applied = True

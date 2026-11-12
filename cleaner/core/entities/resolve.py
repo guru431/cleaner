@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import partial
 from uuid import uuid4
@@ -96,15 +96,26 @@ def _ip_text(value: str) -> str:
     return f"{ip}/{prefix}"
 
 
-def name_parts(value: str, precedes: bool) -> tuple[list[str], str]:
+def name_parts(value: str, precedes: bool, ruled: Iterable[str] = ()) -> tuple[list[str], str]:
     """Части имени через точку слева от домена и домен (5.10): в части имени перед заменой и в части без точки домена нет.
     По ним выдаёт подмены _name, и по ним же конвейер судит о типах частей адреса (pipeline._types). У имени арендатора
     (infra.tenant_suffix: «romashka-sql.database.windows.net») домена тоже нет: части — слева от суффикса арендатора, а
-    сам суффикс остаётся в подмене как есть."""
+    сам суффикс остаётся в подмене как есть. ruled — значения правил пользователя «скрывать» типа HOST или DOMAIN
+    (name_rules): правило на суффиксе арендатора или его целых частях («windows.net», «database.windows.net») велит
+    скрыть и суффикс, и имя делится как обычное (hostmap.parts) — иначе значение правила здесь оставалось бы открытым."""
     if precedes or "." not in value:
         return value.split("."), ""
     kept = infra.tenant_suffix(value)
+    if kept and ruled:
+        suffix = "." + ".".join(value.lower().split(".")[-kept:]) + "."
+        if any(f".{rule}." in suffix for rule in ruled):
+            kept = 0
     return (value.split(".")[:-kept], "") if kept else hostmap.parts(value)
+
+
+def name_rules(rules: Iterable[tuple[str, EntityType | None]]) -> frozenset[str]:
+    """Значения правил «скрывать» типа HOST и DOMAIN — через точку и в нижнем регистре (name_parts)."""
+    return frozenset(hostmap.dotted(value).lower() for value, type_ in rules if type_ in (T.HOST, T.DOMAIN))
 
 
 def _fake_forms(fake: str) -> set[str]:
@@ -156,6 +167,7 @@ class Resolver:
             normalize(r.value): r.type for r in state.rules
             if r.action == "mask" and r.type is not None and r.type not in (T.HOST, T.DOMAIN)
         }
+        self.name_rules = name_rules((r.value, r.type) for r in state.rules if r.action == "mask")
         self.real_ips: set[str] = set()
         self._text_addresses: set[str] | None = None
         self._open_addresses: set[str] | None = None
@@ -593,7 +605,7 @@ class Resolver:
             return self._manual(value, T.HOST) or self._part(value, origin, leading=True, standalone=True)
         # Часть имени рядом с заменой — не имя целиком (5.10): в частях перед заменой домена нет, одиночная часть после
         # неё — тоже часть. Первой часть после замены не бывает, и отдельным написанием никакая из них не становится.
-        left, registrable = name_parts(value, precedes)
+        left, registrable = name_parts(value, precedes, self.name_rules)
         # Суффикс арендатора («database.windows.net») подмены не получает: облачный домен вендора — не сущность (5.4).
         kept = [] if registrable else value.split(".")[len(left):]
         retyped = self._manual(registrable, T.DOMAIN) if registrable else None

@@ -132,15 +132,16 @@ _NAME_TYPES = (EntityType.HOST, EntityType.DOMAIN)
 
 
 def _name_kept(
-    text: str, group: list[Span], start: int, end: int, policies: Mapping[EntityType, Policy],
+    text: str, group: list[Span], start: int, end: int, policies: Mapping[EntityType, Policy], ctx: DetectContext,
 ) -> EntityType | None:
     """Тип имени узла, домена или адреса e-mail, если правила пользователя в нём легли на целые части имени (раздел 6.4:
     каждая часть слева и домен; у адреса — имени после «@»). Такое правило имя не поглощает: часть получит его тип при
     подмене (resolve._name), адрес — свою метку, в которой скрыта и часть. Правило типа со строже политикой, чем у
     адреса, адрес поглощает: метка адреса не блокировала бы выдачу и восстанавливалась бы целиком (у имени узла политику
     части держит resolve._name). Части — как у подмены (resolve.name_parts): суффикс арендатора («database.windows.net»)
-    подмены не получает, и правило на нём или его части имя поглощает, иначе значение правила осталось бы открытым."""
-    from cleaner.core.entities.resolve import name_parts     # resolve импортирует этот модуль
+    подмены не получает, и правило на нём или его части имя поглощает, иначе значение правила осталось бы открытым.
+    Правило типа HOST или DOMAIN на суффиксе арендатора делит имя как обычное (resolve.name_parts)."""
+    from cleaner.core.entities.resolve import name_parts, name_rules     # resolve импортирует этот модуль
     name = next((
         s for s in group
         if s.source != "manual" and s.type in (*_NAME_TYPES, EntityType.EMAIL) and (s.start, s.end) == (start, end)
@@ -153,8 +154,8 @@ def _name_kept(
     dotted = hostmap.dotted(text[start:end])        # имя через «\.» и «\\.» — как через точку
     if name is None or not _DOTTED_NAME.fullmatch(dotted):
         return None
-    left, registrable = name_parts(dotted, False)
-    labels = [m.span() for m in _NAME_PART.finditer(text, start, end)]
+    left, registrable = name_parts(dotted, False, name_rules((value, type_) for value, type_, _ in ctx.manual))
+    labels =[m.span() for m in _NAME_PART.finditer(text, start, end)]
     edges = {*labels[:len(left)], *([(labels[len(left)][0], end)] if registrable else [])}
     return name.type if all((s.start, s.end) in edges for s in group if s.source == "manual") else None
 
@@ -209,7 +210,7 @@ def merge(text: str, spans: Iterable[Span], ctx: DetectContext) -> list[MergedSp
                     opened = netmap.addresses(ctx.settings.never | ctx.unmask)
                 if netmap.canonical_forms(value) & opened:
                     continue
-        kept = senior.source == "manual" and _name_kept(text, group, start, end, policies)
+        kept = senior.source == "manual" and _name_kept(text, group, start, end, policies, ctx)
         type_ = kept or senior.type
         if senior.source == "manual":
             # Решение пользователя тоже не смягчает политику автоматической находки того же значения: выделение

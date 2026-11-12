@@ -465,6 +465,21 @@ def test_user_rule_on_a_tenant_name_part(rule, expected):
     assert restore(state, sanitized, Settings()).text == text
 
 
+@pytest.mark.parametrize("rule", ["windows.net", "database.windows.net"])
+@pytest.mark.parametrize("type_", [T.DOMAIN, T.HOST])
+def test_host_or_domain_rule_on_a_tenant_suffix_hides_the_suffix(rule, type_):
+    """Правило «скрыть» типа HOST или DOMAIN на суффиксе арендатора или его части: раньше имя арендатора оставляло
+    суффикс открытым («host-1.database.windows.net»), и значение правила в одном месте скрывалось, а в другом уходило.
+    Теперь такое имя делится как обычное, и суффикс подменяется."""
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    state.rules.append(ChatRule("mask", rule, type_))
+    text = "Вход login.windows.net и сервер romashka-sql.database.windows.net"
+    sanitized = sanitize(state, text, Settings()).sanitized
+    assert "windows.net" not in sanitized and "romashka" not in sanitized
+    assert sanitized.endswith("сервер host-1.sub-2.domain-1.example")
+    assert restore(state, sanitized, Settings()).text == text
+
+
 def test_tenant_names_round_trip_in_any_writing():
     """Восстановление подмены имени арендатора — по выданной строке, как у прочих имён: заглавными, с точкой в конце, в
     адресе ссылки."""

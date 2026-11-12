@@ -18,7 +18,7 @@ from cleaner.core.detect import credentials
 from cleaner.core.detect.base import DetectContext, Detector
 from cleaner.core.detect.merge import MergedSpan, merge
 from cleaner.core.entities import hostmap, labels, netmap, ops
-from cleaner.core.entities.resolve import ResolvedSpan, Resolver, name_parts
+from cleaner.core.entities.resolve import ResolvedSpan, Resolver, name_parts, name_rules
 from cleaner.core.leakcheck import Leak
 from cleaner.core.match import normalize
 from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
@@ -92,7 +92,10 @@ def _types(text: str, piece: MergedSpan, ctx: DetectContext) -> list[EntityType]
     не мягче (resolve._manual)."""
     if piece.type is not EntityType.HOST:
         return [piece.type]
-    left, registrable = name_parts(hostmap.dotted(text[piece.start:piece.end]), piece.precedes)
+    left, registrable = name_parts(
+        hostmap.dotted(text[piece.start:piece.end]), piece.precedes,
+        name_rules((value, type_) for value, type_, _ in ctx.manual),
+    )
     retyped = {
         normalize(value): type_ for value, type_, _ in ctx.manual
         if type_ is not None and type_ not in (EntityType.HOST, EntityType.DOMAIN)
