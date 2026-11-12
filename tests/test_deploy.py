@@ -256,7 +256,12 @@ def test_installer_refuses_a_profile_address_the_config_and_certificate_do_not_c
     assert text.index('FIRST_INSTALL=1') < checks < text.index("useradd --system")
     assert checks < text.index('install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"') < text.index("trap 'rollback")
     san = text[text.index("-ext subjectAltName"):text.index("# --- учётная запись")]
-    assert '*",IPAddress:${HOST_IP},"*' in san and '*",DNS:${CERT_NAME},"*' in san
+    # Ревью 12.11.2026: проверка HTTPS идёт по адресу; отказ — только при чужом IP, другое имя — предупреждение,
+    # иначе обновление требовало бы перевыпуска (новый отпечаток у всех клиентов шлюза).
+    ip_check, dns_check = san.index('*",IPAddress:${HOST_IP},"*'), san.index('*",DNS:${CERT_NAME},"*')
+    assert san[ip_check:dns_check].count("|| fail ") == 1
+    dns = san[dns_check:san.index("\nfi\n", dns_check)]
+    assert '|| log "ВНИМАНИЕ:' in dns and "|| fail" not in dns and "${REISSUE_HINT}" in dns
     # Ревью 12.11.2026: до ловушки сбой openssl в $(…) под set -e завершал установщик без сообщения.
     assert "| tr -d ' ') || true" in san
     assert text.index("-ext subjectAltName") < text.index('mv "$TLS/cert.pem" "$TLS/cert.pem.prev-$STAMP"')
@@ -264,6 +269,7 @@ def test_installer_refuses_a_profile_address_the_config_and_certificate_do_not_c
     docs = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
     section = docs[docs.index("## Смена адреса или имени"):docs.index("## Проверки локального периметра")]
     assert "sudo CLEANER_REISSUE_CERT=1 bash" in section and "sudoedit /etc/cleaner/cleaner.toml" in section
+    assert "только предупреждение" in section
 
 
 def test_server_dependencies_take_torch_without_cuda():
