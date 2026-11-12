@@ -48,7 +48,10 @@ def test_address_equal_to_an_earlier_surrogate_is_treated_as_already_replaced(st
     fake = sanitize(state, "узел 10.1.2.5", settings).spans[0].surrogate
     again = sanitize(state, f"проверьте {fake}", settings)
     assert again.sanitized == f"проверьте {fake}"
-    assert [notice.code for notice in again.notices] == ["surrogate_in_input"]
+    # Частный адрес — отдельным уведомлением: подмена может совпасть с настоящим адресом другого узла (6.2).
+    assert [notice.code for notice in again.notices] == ["surrogate_private_ip"]
+    public = sanitize(state, "узел 8.8.4.4", settings).spans[0].surrogate
+    assert [notice.code for notice in sanitize(state, f"и {public}", settings).notices] == ["surrogate_in_input"]
 
 
 def test_sanitizing_the_same_text_twice_changes_nothing(state, settings):

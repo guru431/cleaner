@@ -201,7 +201,7 @@ class Layers:
 
 @dataclass(frozen=True)
 class Notice:
-    code: str       # surrogate_in_input | foreign_label
+    code: str       # surrogate_in_input | surrogate_private_ip | foreign_label
     start: int
     end: int
     held: tuple[EntityType, ...] = ()       # у выданной замены — типы её сущностей (_pasted)
@@ -355,6 +355,16 @@ def _pasted(state: ChatState, settings: Settings, hits: list[surrogates.Hit]) ->
     return [by_key[hit.key] for hit in hits]
 
 
+def _pasted_code(state: ChatState, key: str) -> str:
+    """Код уведомления о выданной замене. Подмена частного IPv4 переставляется в том же диапазоне (6.2) и может совпасть с
+    настоящим адресом другого узла, появившимся после её выдачи: отличить его от вставленной замены нельзя, и уведомление
+    об этом — отдельное (surrogate_private_ip); шлюз агентов держит такой блок (7.4 спецификации шлюза)."""
+    surrogate = state.surrogates.get(key)
+    if surrogate is not None and surrogate.kind == "ip" and netmap.private_bits(netmap.parse(key)[0]) is not None:
+        return "surrogate_private_ip"
+    return "surrogate_in_input"
+
+
 def sanitize(
     state: ChatState, text: str, settings: Settings, layers: Layers = Layers(),
     detectors: tuple[ModuleType, ...] = DETECTORS,
@@ -364,7 +374,8 @@ def sanitize(
     hits = surrogates.Finder(state, loose=True).finditer(text)
     protected = [hit.span() for hit in hits]
     notices = [
-        Notice("surrogate_in_input", hit.start(), hit.end(), held) for hit, held in zip(hits, _pasted(state, settings, hits))
+        Notice(_pasted_code(state, hit.key), hit.start(), hit.end(), held)
+        for hit, held in zip(hits, _pasted(state, settings, hits))
     ]
     for m in labels.SHAPE.finditer(text):
         if m.group() not in state.surrogates:
