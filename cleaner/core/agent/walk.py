@@ -341,12 +341,13 @@ def is_model_block(unit: Unit) -> bool:
 def placeholder(unit: Unit, reason: str) -> object:
     """Пометка удержанного блока того же вида (7.4): у результата инструмента — его содержимым."""
     text = ledger.placeholder(reason)
+    node = unit.node if isinstance(unit.node, dict) else {}     # описание инструмента не объектом («tools»: ["x"])
     if unit.kind == "tool_result":
-        return dict(known_fields(unit.kind, unit.node), content=text)
+        return dict(known_fields(unit.kind, node), content=text)
     if unit.kind == "tool_use":     # вызов остаётся вызовом: на его id ссылается результат
-        return dict(known_fields(unit.kind, unit.node), input={"cleaner": text})
+        return dict(known_fields(unit.kind, node), input={"cleaner": text})
     if unit.kind == "tool_def":     # удерживается целиком: прочие ключи описания уходили бы с удержанным значением
-        return {**{key: value for key, value in unit.node.items() if key in ("name", "type")}, "description": text,
+        return {**{key: value for key, value in node.items() if key in ("name", "type")}, "description": text,
                 "input_schema": {"type": "object"}}
     return {"type": "text", "text": text}
 

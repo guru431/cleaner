@@ -213,6 +213,17 @@ def test_withheld_tool_call_keeps_its_pair_with_the_result(gw, monkeypatch):
                      "input": {"cleaner": ledger.placeholder(ledger.REASONS["failed"])}}]
 
 
+def test_tool_definition_that_is_not_an_object_is_withheld(gw):
+    """FINDINGS «Шлюз Anthropic: описание инструмента не объектом роняет обработку запроса»: очистка такого описания
+    падает, и пометка удержания не должна падать снова — агент получает ответ, а не внутреннюю ошибку."""
+    gw.stub.script.append(model_turn("Готово"))
+    request = body(TASK)
+    request["tools"] = [*request["tools"], "x"]
+    gw.send(request)
+    tools = gw.stub.requests[0]["body"]["tools"]
+    assert tools[-1] == {"description": ledger.placeholder(ledger.REASONS["failed"]), "input_schema": {"type": "object"}}
+
+
 def test_parallel_requests_share_replacements(gw, repo):
     gw.stub.script += [model_turn("Раз"), model_turn("Два")]
     tasks = ("Первый: узел srv-dc01.corp.contoso.ru", "Второй: узел srv-dc01.corp.contoso.ru")
