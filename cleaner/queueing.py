@@ -19,10 +19,12 @@ class Budget:
         self._lock = threading.Lock()
         self._used: dict[str | None, tuple[int, int]] = {}
 
-    def reserve(self, user: str | None, size: int = 0, count: int = 1) -> Reservation:
+    def reserve(self, user: str | None, size: int = 0, count: int = 1, user_bytes: int | None = None) -> Reservation:
+        """user_bytes — свой личный предел объёма вместо общего для пользователей (у адреса клиента он меньше)."""
         with self._lock:
             jobs, bytes_ = self._used.get(user, (0, 0))
-            if user is not None and (jobs + count > self.user_jobs or bytes_ + size > self.user_bytes):
+            personal = self.user_bytes if user_bytes is None else user_bytes
+            if user is not None and (jobs + count > self.user_jobs or bytes_ + size > personal):
                 raise QueueFull(True)
             if sum(v[0] for v in self._used.values()) + count > self.max_jobs or sum(v[1] for v in self._used.values()) + size > self.max_bytes:
                 raise QueueFull()

@@ -1,6 +1,7 @@
 """Сборка веб-приложения: маршруты, заголовки безопасности, страницы ошибок."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -54,6 +55,17 @@ AGENT_WORKERS = 8
 
 
 _UPLOAD_HEADROOM = 1024 * 1024      # поля формы и заголовки частей multipart сверх самого файла
+# Пауза в приёме тела запроса: дольше без единого куска — 408, и резерв бюджета отпущен. У uvicorn своего срока приёма
+# тела нет. Срок на паузу, а не на всё тело: медленная, но идущая загрузка большого файла не обрывается. 60 с — как
+# client_body_timeout у nginx: живой клиент столько не молчит посреди тела.
+BODY_PAUSE = 60.0
+# Резерв входного бюджета берётся до проверки входа и ключа, поэтому — под адресом клиента с личным пределом в четверть
+# общего бюджета (512 МиБ): зависшие тела с одного узла не занимают весь бюджет, и вход, ввод текста и /api/v1
+# остальных принимаются. Четверти хватает на четыре запроса агента по 32 МиБ.
+ADDRESS_BODY_BYTES = 128 * 1024 * 1024
+# Форма входа — логин, пароль и токен формы. 64 КиБ uvicorn и так держит в буфере каждого соединения (предел управления
+# потоком), поэтому вход общий бюджет не резервирует и при занятом бюджете не получает 503.
+LOGIN_BODY_BYTES = 64 * 1024
 _UPLOAD_PATH = re.compile(r"(?:/chats/[^/]+/upload|/api/v1/chats/[^/]+/files)")
 _CERT_BLOCK = re.compile(rb"-----BEGIN CERTIFICATE-----\r?\n.*?-----END CERTIFICATE-----", re.DOTALL)
 
@@ -100,8 +112,9 @@ class BodyLimit:
     """Предел тела запроса для всех маршрутов, вход тоже. Считаются принятые байты, а не заголовок
     Content-Length: у тела, присланного частями (chunked), этого заголовка нет.
 
-    Резерв общего бюджета — объём из Content-Length (без него — предел маршрута) и только на время приёма тела:
-    принятое тело дальше ограничивают очередь заданий и предел запросов агентов (AgentSlots), а не бюджет."""
+    Резерв общего бюджета — объём из Content-Length (без него — предел маршрута), под адресом клиента
+    (ADDRESS_BODY_BYTES) и только на время приёма тела: принятое тело дальше ограничивают очередь заданий и предел
+    запросов агентов (AgentSlots), а не бюджет. Пауза в приёме тела дольше BODY_PAUSE — отказ 408."""
 
     def __init__(self, app: ASGIApp, limit: int = MAX_BODY_BYTES):
         self.app = app
@@ -109,9 +122,11 @@ class BodyLimit:
 
     def _limit(self, scope: Scope) -> int:
         """У загрузки файла (страница и /api/v1) свой предел — max_file_mb (FR-2.2); у шлюза агентов — 32 МиБ (вся
-        история разговора); у остальных запросов — общий."""
+        история разговора); у входа — LOGIN_BODY_BYTES; у остальных запросов — общий."""
         if scope["path"].startswith("/agent/"):
             return AGENT_BODY_BYTES
+        if scope["path"] == "/login":
+            return LOGIN_BODY_BYTES
         if _UPLOAD_PATH.fullmatch(scope["path"]):
             return scope["app"].state.max_file_bytes + _UPLOAD_HEADROOM
         return self.limit
@@ -123,15 +138,24 @@ class BodyLimit:
         received = 0
         limit = self._limit(scope)
         reservation = None
+        complete = False
 
         async def limited() -> Message:
-            nonlocal received
-            message = await receive()
+            nonlocal received, complete
+            if complete:
+                return await receive()          # после тела ответ ждёт разрыва соединения минутами: без срока
+            try:
+                async with asyncio.timeout(BODY_PAUSE):
+                    message = await receive()
+            except TimeoutError:
+                raise StarletteHTTPException(408, "Тело запроса не пришло вовремя") from None
             received += len(message.get("body", b""))
             if received > limit:
                 raise StarletteHTTPException(413, "Слишком большой запрос")
-            if reservation and (message["type"] == "http.disconnect" or not message.get("more_body", False)):
-                reservation.release()           # тело принято целиком: поток ответа резерв не держит
+            if message["type"] == "http.disconnect" or not message.get("more_body", False):
+                complete = True
+                if reservation:
+                    reservation.release()       # тело принято целиком: поток ответа резерв не держит
             return message
 
         writing = scope.get("method") in ("POST", "PUT", "PATCH")
@@ -140,14 +164,17 @@ class BodyLimit:
             await _agent_busy(scope, slots.limit)(scope, receive, send)
             return
         try:
-            if writing and not _UPLOAD_PATH.fullmatch(scope["path"]):
+            if writing and not _UPLOAD_PATH.fullmatch(scope["path"]) and scope["path"] != "/login":
                 # FastAPI читает JSON до проверки dependency ключа. Общий входной бюджет нужен уже здесь:
                 # число и объём синхронных API-запросов ограничены и до их разбора, не только у service.add_*.
                 # Тело сверх заявленного (заголовок вместе с chunked) — тоже отказ 413: резерв меньше принятого не бывает.
                 declared = _declared_length(scope)
                 limit = limit if declared is None else min(declared, limit)
+                client = scope.get("client")
+                address = f"адрес {client[0] if client else ''}"
                 try:
-                    reservation = scope["app"].state.jobs.budget.reserve(None, limit, count=0)
+                    reservation = scope["app"].state.jobs.budget.reserve(
+                        address, limit, count=0, user_bytes=ADDRESS_BODY_BYTES)
                 except QueueFull as exc:
                     await _queue_error(Request(scope), exc)(scope, receive, send)
                     return

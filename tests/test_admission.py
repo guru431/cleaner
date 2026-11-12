@@ -12,6 +12,7 @@ from starlette.datastructures import Headers
 from cleaner.queueing import Budget, QueueFull
 from cleaner.service import ChatService
 from cleaner.storage.repo import Item, Provider
+from cleaner.web import app as app_module
 from cleaner.web import deps
 from cleaner.web.app import BodyLimit
 from cleaner.web.jobs import CANCELLED, EXPIRED, FILE_CANCELLED, Jobs
@@ -135,6 +136,106 @@ def test_body_reservation_is_the_declared_length_and_bounds_the_body(app):
     asyncio.run(_call(app, inner, "POST", "/api/v1/chats", b"{} and more", declared))
     assert seen == [(0, 2), (0, deps.MAX_BODY_BYTES), (0, 2), 413]
     assert budget.usage() == (0, 0)
+
+
+def test_hanging_unauthenticated_bodies_of_one_address_leave_login_api_and_other_addresses(app):
+    """64 соединения с одного узла заявляют по 8 МиБ и тела не шлют: под адресом — не больше четверти бюджета
+    (дальше 429), а вход, /api/v1 с другого узла и вход при занятом бюджете принимаются (раньше — 503 всем)."""
+    budget = app.state.jobs.budget
+    stalled = asyncio.Event()
+
+    async def inner(scope, receive, send):
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def call(path, client, body=b"{}", headers=()):
+        scope = {"type": "http", "method": "POST", "path": path, "app": app, "headers": list(headers), "client": client}
+        sent = []
+
+        async def receive():
+            if not body:
+                await stalled.wait()
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        await BodyLimit(inner)(scope, receive, send)
+        return sent[0]["status"]
+
+    async def scenario():
+        eight = [(b"content-length", str(deps.MAX_BODY_BYTES).encode())]
+        attacker = ("10.0.0.66", 4000)
+        held = [asyncio.create_task(call("/api/v1/chats", attacker, b"", eight)) for _ in range(64)]
+        await asyncio.sleep(0)
+        busy = budget.usage()[1]
+        other = await call("/api/v1/chats", ("10.0.0.7", 4000))
+        login = await call("/login", ("10.0.0.7", 4000), b"login=ivan")
+        stalled.set()
+        return busy, other, login, await asyncio.gather(*held)
+
+    busy, other, login, held = asyncio.run(scenario())
+    assert busy == 16 * deps.MAX_BODY_BYTES == app_module.ADDRESS_BODY_BYTES
+    assert other == login == 200
+    assert held.count(200) == 16 and held.count(429) == 48
+    assert budget.usage() == (0, 0)
+    budget.max_bytes = 0                            # бюджет занят целиком: вход его не резервирует
+    assert asyncio.run(call("/login", ("10.0.0.7", 4000), b"login=ivan")) == 200
+    assert asyncio.run(call("/api/v1/chats", ("10.0.0.7", 4000))) == 503
+
+
+def _asgi(app, path, receive, headers=()):
+    """Запрос через всё приложение (обработчики ошибок, guard); возвращает (статус, тело ответа)."""
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST", "scheme": "http",
+        "path": path, "raw_path": path.encode(), "root_path": "", "query_string": b"",
+        "headers": [(b"content-type", b"application/json"), *headers],
+        "client": ("10.0.0.66", 4000), "server": ("cleaner.test", 80),
+    }
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    return sent[0]["status"], b"".join(m.get("body", b"") for m in sent[1:])
+
+
+def test_stalled_body_gets_408_and_frees_the_reservation(app, monkeypatch):
+    """Тело не идёт дольше паузы BODY_PAUSE — 408 вместо вечного резерва. Срок подменён: без реального ожидания."""
+    monkeypatch.setattr(app_module, "BODY_PAUSE", 0)
+    held = []
+
+    async def stalled():
+        held.append(app.state.jobs.budget.usage())
+        await asyncio.Event().wait()
+
+    status, body = _asgi(app, "/api/v1/chats", stalled, [(b"content-length", b"100")])
+    assert status == 408 and json.loads(body)["error"]["message"] == "Тело запроса не пришло вовремя"
+    assert held == [(0, 100)] and app.state.jobs.budget.usage() == (0, 0)
+
+
+def test_body_pause_bounds_each_wait_not_the_whole_body_or_the_reply(monkeypatch):
+    """Медленное, но идущее тело принимается, хотя всё вместе дольше паузы; после тела ожидание разрыва без срока
+    (поток ответа агенту и SSE идут минутами)."""
+    monkeypatch.setattr(app_module, "BODY_PAUSE", 0.1)
+    app = SimpleNamespace(state=SimpleNamespace(agent_slots=None, jobs=SimpleNamespace(budget=Budget())))
+    chunks = [{"type": "http.request", "body": b"x", "more_body": True}] * 5 + [{"type": "http.request", "body": b""}]
+    seen = []
+
+    async def receive():
+        await asyncio.sleep(0.02 if chunks else 0.15)       # тело — 0,12 с кусками по 0,02; разрыв — через 0,15
+        return chunks.pop(0) if chunks else {"type": "http.disconnect"}
+
+    async def inner(scope, receive_, send):
+        while (await receive_()).get("more_body"):
+            seen.append("chunk")
+        seen.append(await receive_())
+
+    scope = {"type": "http", "method": "POST", "path": "/api/v1/chats", "app": app, "headers": [], "client": None}
+    asyncio.run(BodyLimit(inner)(scope, receive, None))
+    assert seen == ["chunk"] * 5 + [{"type": "http.disconnect"}]
 
 
 def test_upload_admission_refuses_before_streaming_raw_bytes(app):
