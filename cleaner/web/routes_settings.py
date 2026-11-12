@@ -51,7 +51,7 @@ EVENTS = (
     "key_created", "key_disabled", "agent_send", "agent_refused", "agent_withheld", "agent_chat_created", "agent_pruned",
     "key_restarted", "request_prepared",
     "user_deleted", "master_key_rotated", "logout_all", "audit_export", "egress_refused", "service_started",
-    "settings_previewed", "api_keys_revoked_all",
+    "settings_previewed", "api_keys_revoked_all", "user_role_changed",
 )
 PROTOCOL_NAMES = {"openai": "OpenAI-совместимый", "anthropic": "Anthropic-совместимый", "responses": "OpenAI Responses"}
 AUTH_NAMES = {"bearer": "Authorization: Bearer", "x-api-key": "x-api-key"}
@@ -742,6 +742,23 @@ def change_password(request: Request, user_id: str, form: dict[str, str] = Depen
     repo = repo_of(request)
     repo.set_password(user_id, _hash(form))          # закрывает сессии этого пользователя
     repo.audit("password_changed", viewer.user.id, target=user_id)
+    return _redirect("/settings/users")
+
+
+@router.post("/users/{user_id}/role")
+def change_role(request: Request, user_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin)) -> Response:
+    """Роль на месте — без отключения и потери чатов. С себя роль не снимается; последнего активного администратора
+    защищает и repo.set_role (два администратора, снимающие роль друг с друга разом)."""
+    _target(request, user_id)
+    role = form.get("role", "")
+    if role not in ("admin", "user"):
+        raise HTTPException(400, "Неизвестная роль")
+    if role != "admin" and user_id == viewer.user.id:
+        raise HTTPException(400, "Нельзя снять роль администратора с себя")
+    repo = repo_of(request)
+    if not repo.set_role(user_id, role):
+        raise HTTPException(400, "Нельзя снять роль с последнего активного администратора")
+    repo.audit("user_role_changed", viewer.user.id, target=user_id, role=role)
     return _redirect("/settings/users")
 
 

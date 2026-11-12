@@ -2,7 +2,8 @@
 {% block title %}Пользователи — Cleaner{% endblock %}
 {% block content %}
 <h1>Пользователи</h1>
-<p class="lead">Смена пароля и отключение закрывают все сессии пользователя. Удалить можно только отключённую учётную запись.</p>
+<p class="lead">Смена пароля и отключение закрывают все сессии пользователя. Удалить можно только отключённую учётную запись.
+Роль меняется сразу, чаты и ключи остаются; снять роль администратора с себя и с последнего активного администратора нельзя.</p>
 <section class="panel">
   <table class="grid">
     <thead><tr><th>Логин</th><th>Роль</th><th>Состояние</th><th>Новый пароль</th><th></th></tr></thead>
@@ -10,7 +11,16 @@
     {% for u in rows %}
     <tr>
       <td>{{ u.login }}</td>
-      <td>{{ "администратор" if u.role == "admin" else "пользователь" }}</td>
+      <td>
+        <form method="post" action="/settings/users/{{ u.id }}/role">
+          {% include "_csrf.html" %}
+          <select name="role" aria-label="Роль {{ u.login }}">
+            <option value="user"{% if u.role != "admin" %} selected{% endif %}>пользователь</option>
+            <option value="admin"{% if u.role == "admin" %} selected{% endif %}>администратор</option>
+          </select>
+          <button>Сменить</button>
+        </form>
+      </td>
       <td>{% if u.disabled %}<span class="badge bad">отключён</span>{% else %}<span class="badge good">активен</span>{% endif %}</td>
       <td>
         <form method="post" action="/settings/users/{{ u.id }}/password">

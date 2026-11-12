@@ -222,13 +222,20 @@ def cmd_user(args: argparse.Namespace) -> int:
             if repo.user_by_login(args.login) is not None:
                 raise ValueError(f"пользователь {args.login} уже есть")
             password_hash = auth.hash_password(_secret(args.password_file, f"Пароль {args.login}: "))
-            user_id = repo.create_user(args.login, password_hash, args.role)
-            repo.audit("user_created", target=user_id, role=args.role, by="cli")
+            role = args.role or "user"
+            user_id = repo.create_user(args.login, password_hash, role)
+            repo.audit("user_created", target=user_id, role=role, by="cli")
             return 0
         user = repo.user_by_login(args.login)
         if user is None:
             raise ValueError(f"нет пользователя {args.login}")
-        if args.action == "disable":
+        if args.action == "role":
+            if args.role is None:
+                raise ValueError("укажите роль: --role admin|user")
+            if not repo.set_role(user.id, args.role):
+                raise ValueError(f"{args.login} — последний активный администратор: сначала назначьте другого")
+            repo.audit("user_role_changed", target=user.id, role=args.role, by="cli")
+        elif args.action == "disable":
             repo.set_disabled(user.id, True)
             repo.audit("user_disabled", target=user.id, by="cli")
         else:
@@ -422,9 +429,9 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("serve", help="запустить службу")
 
     user = commands.add_parser("user", help="учётные записи")
-    user.add_argument("action", choices=("add", "disable", "passwd"))
+    user.add_argument("action", choices=("add", "disable", "passwd", "role"))
     user.add_argument("login")
-    user.add_argument("--role", choices=("admin", "user"), default="user")
+    user.add_argument("--role", choices=("admin", "user"), help="add — по умолчанию user; role — обязательна")
     user.add_argument("--password-file", help="пароль — первой строкой файла")
 
     apikey = commands.add_parser("apikey", help="ключи доступа программ к /api/v1")

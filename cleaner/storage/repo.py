@@ -336,6 +336,17 @@ class Repository:
             self.conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
             self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
 
+    def set_role(self, user_id: str, role: str) -> bool:
+        """Роль учётной записи; чаты, ключи и сессии остаются (права читаются при каждом запросе). Снять роль с
+        последнего активного администратора нельзя: проверка и запись — одним UPDATE, и два администратора,
+        снимающие роль друг с друга разом, не оставят службу без администратора. False — записи нет или она
+        последний активный администратор."""
+        return self._run(
+            "UPDATE users SET role = ? WHERE id = ? AND (? = 'admin' OR role != 'admin' OR disabled = 1 "
+            "OR EXISTS (SELECT 1 FROM users WHERE role = 'admin' AND disabled = 0 AND id != ?))",
+            role, user_id, role, user_id,
+        ) == 1
+
     def set_disabled(self, user_id: str, disabled: bool) -> None:
         with self.lock, transaction(self.conn):
             self.conn.execute("UPDATE users SET disabled = ? WHERE id = ?", (int(disabled), user_id))

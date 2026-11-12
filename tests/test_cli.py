@@ -99,6 +99,29 @@ def test_users_key_export_import_and_backup(home, monkeypatch, clock):
     assert main(["backup", str(home / "copy.db")]) == 1                           # существующий файл не трогается
 
 
+def test_user_role_keeps_the_last_active_admin(home, monkeypatch, clock):
+    """Идея «Смена роли…»: cleaner user role меняет роль на месте; последнего активного администратора (отключённый
+    не в счёт) команда роли не лишает. Роль задаётся явно: без --role команда ничего не меняет."""
+    key = init(home)
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
+    secret = str(home / "secret.txt")
+    assert main(["user", "add", "anna", "--role", "admin", "--password-file", secret]) == 0
+    assert main(["user", "disable", "anna"]) == 0
+    assert main(["user", "role", "boss", "--role", "user"]) == 1
+    assert main(["user", "role", "anna"]) == 1
+    assert main(["user", "role", "nobody", "--role", "admin"]) == 1
+    assert main(["user", "add", "ivan", "--password-file", secret]) == 0
+    assert main(["user", "role", "ivan", "--role", "admin"]) == 0
+    assert main(["user", "role", "boss", "--role", "user"]) == 0
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    assert {u.login: u.role for u in repo.users()} == {"anna": "admin", "boss": "user", "ivan": "admin"}
+    ivan, boss = repo.user_by_login("ivan").id, repo.user_by_login("boss").id
+    assert [e.details for e in repo.audit_events("user_role_changed")] == [
+        {"target": boss, "role": "user", "by": "cli"}, {"target": ivan, "role": "admin", "by": "cli"},
+    ]
+    repo.conn.close()
+
+
 def test_key_rotate_rewraps_the_keys_and_the_old_key_no_longer_opens_the_base(home, monkeypatch, clock):
     """Идея «Смена главного ключа»: обёртки ключей чатов и общего ключа — новым ключом одной транзакцией, затем
     контрольная точка WAL; содержимое читается новым ключом, прежний не открывает ни базу, ни её файлы."""
