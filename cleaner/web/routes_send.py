@@ -35,11 +35,10 @@ def _numbers(values: Iterable[str]) -> set[int]:
     return {int(value) for value in values if value.isdigit() and len(value) < 10}
 
 
-def _exclude(request: Request) -> frozenset[int]:
-    """Исключённые пользователем элементы — номерами из адреса (номера не данные; GET «Пересобрать»): показанные на
-    странице выбора (shown) без отмеченных (include). Без shown — все включены, как при первом открытии."""
-    params = request.query_params
-    return frozenset(_numbers(params.get("shown", "").split(",")) - _numbers(params.getlist("include")))
+def _exclude(request: Request, chat_id: str) -> frozenset[int]:
+    """Исключённые пользователем элементы — запомненные в чате (раздел 10.1): отметку ставят «Состав запроса»
+    и переключатель в ленте, и она действует на следующих ходах, пока её не снимут. Новые элементы входят."""
+    return repo_of(request).excluded_seqs(chat_id)
 
 
 def _glued(preview: Preview) -> list[int]:
@@ -89,7 +88,7 @@ def confirm(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer)
     (раздел 10.1): отправка — только кнопкой после пересборки, с отпечатком этого состава."""
     chat = writable_chat(request, chat_id, viewer)
     try:
-        preview = service_of(request).outgoing(chat_id, _exclude(request))
+        preview = service_of(request).outgoing(chat_id, _exclude(request, chat_id))
     except EditRefused as exc:
         raise HTTPException(409, str(exc)) from None
     shown = _request(preview)
@@ -97,7 +96,7 @@ def confirm(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer)
     return page(
         request, "send.html", viewer, chat=chat, provider=preview.provider,
         model=outgoing.context.model if outgoing else "", digest=outgoing.context.digest() if outgoing else "",
-        action=f"/chats/{chat_id}/send", **shown,
+        back="send", **shown,
     )
 
 
@@ -108,7 +107,7 @@ def manual(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer))
     и когда сборка выдала бы новые замены (stale): страница предлагает очистить тексты чата заново."""
     chat = writable_chat(request, chat_id, viewer)
     try:
-        preview = service_of(request).manual(chat_id, _exclude(request))
+        preview = service_of(request).manual(chat_id, _exclude(request, chat_id))
     except EditRefused as exc:
         # Собрать нечего (последним стоит ответ, текст ещё очищается): страница с причиной, а не «Ошибка 409».
         preview = Preview(None, None, [], refused=str(exc).rstrip("."))
@@ -119,8 +118,28 @@ def manual(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer))
         context = outgoing.context
         text = render.dialogue(context.system, [(m.role, m.text) for m in context.messages], outgoing.leaks)
     return page(
-        request, "manual.html", viewer, chat=chat, text=text, stale=preview.stale, action=f"/chats/{chat_id}/manual", **shown,
+        request, "manual.html", viewer, chat=chat, text=text, stale=preview.stale, back="manual", **shown,
     )
+
+
+@router.post("/chats/{chat_id}/request")
+def pick(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
+    """«Пересобрать» в «Составе запроса» (раздел 10.1): выбор запоминается в чате, затем та же страница собирает запрос
+    заново. shown — номера показанных элементов, in-N — отмеченные (номера не данные). Отправки и копирования здесь нет."""
+    writable_chat(request, chat_id, viewer)
+    shown = _numbers(form.get("shown", "").split(","))
+    repo_of(request).set_excluded(chat_id, shown, {seq for seq in shown if f"in-{seq}" not in form})
+    back = "manual" if form.get("back") == "manual" else "send"
+    return RedirectResponse(f"/chats/{chat_id}/{back}", status_code=303)
+
+
+@router.post("/chats/{chat_id}/items/{item_id}/request")
+def toggle(request: Request, chat_id: str, item_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
+    """Переключатель в ленте: элемент не входит в запросы (excluded=yes) или снова входит."""
+    writable_chat(request, chat_id, viewer)
+    if not repo_of(request).set_item_excluded(chat_id, item_id, form.get("excluded") == "yes"):
+        raise HTTPException(404, "Элемент не найден")
+    return RedirectResponse(f"/chats/{chat_id}#item-{item_id}", status_code=303)
 
 
 @router.post("/chats/{chat_id}/send")

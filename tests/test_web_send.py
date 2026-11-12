@@ -207,14 +207,17 @@ def three_items(ivan, provider) -> str:
 
 
 def test_confirmation_can_leave_items_out_and_sends_only_that_selection(ivan, provider, cloud):
-    """Сокращение контекста: состав — в адресе номерами, отправка — только кнопкой с отпечатком этого состава."""
+    """Сокращение контекста: «Пересобрать» запоминает состав в чате, отправка — только кнопкой с отпечатком этого состава."""
     chat_id = three_items(ivan, provider)
     full = ivan.get(f"/chats/{chat_id}/send").text
-    assert all(f'name="include" value="{seq}" checked' in full for seq in (1, 2, 3))
-    short = ivan.get(f"/chats/{chat_id}/send", shown="1,2,3", include=["1", "3"]).text
+    assert all(f'name="in-{seq}" value="yes" checked' in full for seq in (1, 2, 3))
+    picked = ivan.post(f"/chats/{chat_id}/request", shown="1,2,3", back="send", **{"in-1": "yes", "in-3": "yes"})
+    assert picked.status_code == 303 and picked.headers["location"] == f"/chats/{chat_id}/send"
+    assert cloud == []                                                                   # пересборка не отправляет
+    short = ivan.get(f"/chats/{chat_id}/send").text
     assert "Исключено: Ответ модели 2" in short and 'name="exclude" value="2"' in short
     assert "соседние вопросы уйдут одним сообщением" in short
-    assert 'name="include" value="2">' in short and "Ответ про" not in short
+    assert 'name="in-2" value="yes">' in short and "Ответ про" not in short
     assert ivan.post(f"/chats/{chat_id}/send", digest=digest(short)).status_code == 400    # без состава — другой запрос
     assert cloud == []
     assert ivan.post(f"/chats/{chat_id}/send", digest=digest(short), exclude="2").status_code == 303
@@ -224,9 +227,50 @@ def test_confirmation_can_leave_items_out_and_sends_only_that_selection(ivan, pr
 
 def test_leaving_out_the_last_question_keeps_the_choice_without_a_send_button(ivan, provider):
     chat_id = three_items(ivan, provider)
-    page = ivan.get(f"/chats/{chat_id}/send", shown="1,2,3", include=["1", "2"]).text
+    ivan.post(f"/chats/{chat_id}/request", shown="1,2,3", **{"in-1": "yes", "in-2": "yes"})
+    page = ivan.get(f"/chats/{chat_id}/send").text
     assert "Последним в запросе должен быть вопрос" in page and "Пересобрать" in page
     assert 'name="digest"' not in page
+
+
+def test_excluded_item_stays_out_of_the_next_turn_until_returned(ivan, repo, provider, cloud):
+    """Идея 12.11.2026: исключённый на ходе 2 элемент не уходит на ходе 3 без повторной отметки; новые элементы входят."""
+    chat_id = three_items(ivan, provider)
+    ivan.post(f"/chats/{chat_id}/request", shown="1,2,3", back="send", **{"in-1": "yes", "in-3": "yes"})
+    assert ivan.post(f"/chats/{chat_id}/send", digest=digest(ivan.get(f"/chats/{chat_id}/send").text), exclude="2").status_code == 303
+    cloud.clear()
+    ivan.post(f"/chats/{chat_id}/input", text="Третий вопрос")                           # ход 3: страница открыта заново
+    page = ivan.get(f"/chats/{chat_id}/send").text
+    assert 'name="exclude" value="2"' in page and 'name="in-5" value="yes" checked' in page
+    # Ручной перенос собирает тот же состав: из двух ответов модели — только ответ облака.
+    assert ivan.get(f"/chats/{chat_id}/manual").text.count("=== Ответ модели ===") == 1
+    assert ivan.post(f"/chats/{chat_id}/send", digest=digest(page), exclude="2").status_code == 303
+    [ctx] = cloud
+    # Вопросы 1 и 3 склеены без ответа 2; ответ облака 4 и новый вопрос 5 входят.
+    assert [m.role for m in ctx.messages] == ["user", "assistant", "user"]
+    assert "Второй вопрос" in ctx.messages[0].text and ctx.messages[-1].text == "Третий вопрос"
+
+
+def test_feed_toggle_takes_an_item_out_of_requests_and_back(ivan, repo, provider):
+    chat_id = three_items(ivan, provider)
+    answer = next(i for i in repo.items(chat_id) if i.seq == 2)
+    feed = ivan.get(f"/chats/{chat_id}").text
+    assert "не входит в запросы" not in feed and f'action="/chats/{chat_id}/items/{answer.id}/request"' in feed
+    assert ivan.post(f"/chats/{chat_id}/items/{answer.id}/request", excluded="yes").status_code == 303
+    feed = ivan.get(f"/chats/{chat_id}").text
+    assert "не входит в запросы" in feed and "Вернуть в запросы" in feed
+    assert "Исключено: Ответ модели 2" in ivan.get(f"/chats/{chat_id}/send").text
+    assert ivan.post(f"/chats/{chat_id}/items/{answer.id}/request", excluded="no").status_code == 303
+    assert "Исключено" not in ivan.get(f"/chats/{chat_id}/send").text
+    assert ivan.post(f"/chats/{chat_id}/items/{'z' * 32}/request", excluded="yes").status_code == 404
+    assert ivan.post(f"/chats/{chat_id}/items/{answer.id}/request").status_code == 303      # без поля — снова входит
+    assert repo.excluded_seqs(chat_id) == frozenset()
+
+
+def test_request_choice_needs_the_form_token(ivan, repo, provider):
+    chat_id = three_items(ivan, provider)
+    response = ivan.client.post(f"/chats/{chat_id}/request", data={"shown": "1,2,3", "in-1": "yes"})
+    assert response.status_code == 403 and repo.excluded_seqs(chat_id) == frozenset()
 
 
 def test_manual_transfer_shows_the_whole_cleaned_dialogue_with_roles(ivan, provider):

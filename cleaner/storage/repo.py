@@ -118,6 +118,7 @@ class Item:
     model_spans: list[dict] = field(default_factory=list)  # находки слоёв 4–5: start, end, type, source, score
     risk_status: str = ""                                # "" | queued | running | done | failed | interrupted
     reviewed_at: str = ""                                # когда пользователь отметил очищенный текст проверенным; "" — нет
+    excluded: bool = False                               # исключён пользователем из запросов облачной модели (10.1)
 
 
 @dataclass(frozen=True)
@@ -578,6 +579,7 @@ class Repository:
             spans=json.loads(row["spans"]), notices=json.loads(row["notices"]), exposed=json.loads(row["exposed"]),
             created_at=row["created_at"], source=row["source"], status=row["status"], meta=json.loads(row["meta"]),
             model_spans=json.loads(row["model_spans"]), risk_status=row["risk_status"], reviewed_at=row["reviewed_at"] or "",
+            excluded=bool(row["excluded"]),
         )
 
     def items(self, chat_id: str) -> list[Item]:
@@ -807,6 +809,26 @@ class Repository:
                 return False
             self.conn.execute("UPDATE items SET reviewed_at = ? WHERE id = ?", (self._now(), item_id))
         return True
+
+    # --- элементы, исключённые из запросов облачной модели (раздел 10.1) --------------
+
+    def excluded_seqs(self, chat_id: str) -> frozenset[int]:
+        """Номера элементов, которые пользователь исключил из запросов: без расшифровки, для состава по умолчанию."""
+        return frozenset(row["seq"] for row in self._all("SELECT seq FROM items WHERE chat_id = ? AND excluded = 1", chat_id))
+
+    def set_item_excluded(self, chat_id: str, item_id: str, excluded: bool) -> bool:
+        """Отметка «не входит в запросы» у одного элемента; False — элемента нет."""
+        return self._run("UPDATE items SET excluded = ? WHERE id = ? AND chat_id = ?", int(excluded), item_id, chat_id) == 1
+
+    def set_excluded(self, chat_id: str, shown: Iterable[int], excluded: Iterable[int]) -> None:
+        """Выбор «Состава запроса»: у показанных номеров (shown) отметка ставится исключённым и снимается с остальных;
+        у непоказанных элементов не меняется."""
+        excluded = set(excluded)
+        with self.lock, transaction(self.conn):
+            for seq in set(shown):
+                self.conn.execute(
+                    "UPDATE items SET excluded = ? WHERE chat_id = ? AND seq = ?", (int(seq in excluded), chat_id, seq),
+                )
 
     def item_risk(self, chat_id: str, item_id: str) -> dict | None:
         row = self._one("SELECT risk_enc FROM items WHERE id = ? AND chat_id = ?", item_id, chat_id)

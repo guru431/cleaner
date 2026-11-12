@@ -85,6 +85,7 @@
           <button type="button" data-copy="text-{{ e.id }}">{{ icon("copy") }}<span>Скопировать</span></button>
           <a class="btn" href="/chats/{{ chat.id }}/items/{{ e.id }}/download" download>{{ icon("download") }}Скачать .txt</a>
           {% endif %}
+          {% include "_request_mark.html" %}
         </span>
         {% endif %}
       </header>
@@ -123,6 +124,7 @@
           {% elif not polling and e.status != "failed" %}
           <button type="button" data-copy="text-{{ e.id }}">{{ icon("copy") }}<span>Скопировать</span></button>
           {% endif %}
+          {% include "_request_mark.html" %}
         </span>
       </header>
       {% if streaming %}

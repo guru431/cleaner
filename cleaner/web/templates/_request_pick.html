@@ -1,7 +1,9 @@
 {# Состав запроса (раздел 10.1, сокращение контекста): отметки «включить в запрос» по номерам элементов, «Пересобрать» —
-   GET с номерами в адресе (номера не данные). Отправка и копирование — только того, что собрано на этой странице. #}
+   POST: выбор запоминается в чате для следующих ходов, затем страница собирается заново (номера не данные). Отправка
+   и копирование — только того, что собрано на этой странице. #}
 {% if picks %}
-<form method="get" action="{{ action }}" class="panel pick">
+<form method="post" action="/chats/{{ chat.id }}/request" class="panel pick">
+  {% include "_csrf.html" %}<input type="hidden" name="back" value="{{ back }}">
   <header class="panel-head">
     <h2 class="title">Состав запроса</h2>
     <span class="state">{% if outgoing %}итоговый объём — {{ total }} знаков, сообщений — {{ count }} и системная часть{% else %}не собран{% endif %}</span>
@@ -10,7 +12,7 @@
   <div class="panel-body">
     <input type="hidden" name="shown" value="{{ shown }}">
     <div class="pick-list">
-      {% for p in picks %}<label class="check"><input type="checkbox" name="include" value="{{ p.seq }}"{% if p.on %} checked{% endif %}> {{ p.role }} {{ p.seq }} <span class="muted">— {{ p.chars }} знаков</span></label>{% endfor %}
+      {% for p in picks %}<label class="check"><input type="checkbox" name="in-{{ p.seq }}" value="yes"{% if p.on %} checked{% endif %}> {{ p.role }} {{ p.seq }} <span class="muted">— {{ p.chars }} знаков</span></label>{% endfor %}
     </div>
     <small class="hint">Уберите то, что модели для ответа не нужно: замены не скрывают того, что следует из остального текста (ТЗ, раздел 12). Правила чата и известные значения применяются ко всему, что остаётся.</small>
     {% if excluded %}

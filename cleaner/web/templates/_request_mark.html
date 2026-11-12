@@ -1,0 +1,6 @@
+{# Элемент ленты, исключённый из запросов облачной модели (раздел 10.1): пометка и переключатель. Отметка запоминается
+   в чате и действует на следующих ходах; её же ставит и снимает «Состав запроса». #}
+{% if e.pickable %}
+{% if e.excluded %}<span class="badge" title="Не уходит облачной модели ни при отправке, ни при переносе вручную, пока отметку не снимут">не входит в запросы</span>{% endif %}
+<form method="post" action="/chats/{{ chat.id }}/items/{{ e.id }}/request">{% include "_csrf.html" %}<input type="hidden" name="excluded" value="{{ 'no' if e.excluded else 'yes' }}"><button title="{% if e.excluded %}Элемент снова войдёт в запросы{% else %}Элемент не войдёт в следующие запросы, пока отметку не снимут{% endif %}">{% if e.excluded %}Вернуть в запросы{% else %}Не включать в запросы{% endif %}</button></form>
+{% endif %}
