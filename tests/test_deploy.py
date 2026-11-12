@@ -284,6 +284,28 @@ def test_installer_stops_the_service_before_it_replaces_the_code_and_rollback_st
     assert "$STOPPED -eq 1" in rollback
 
 
+def test_installer_rollback_returns_the_profile_and_the_egress_files_with_the_code():
+    """Находка 12.11.2026: откат возвращал код, окружение и юнит, а новые host.env, сценарий таблицы и юниты оставались;
+    сломанный новый сценарий не дал бы стартовать и прежней службе. Копия снимается до первой записи host.env."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    aux = text[text.index("AUX_FILES=("):text.index("AUX_PREV=")]
+    for name in ("$HOST_ENV", "$CHECK", "cleaner-check-ipv6.py", "$EGRESS", "$EGRESS_UNIT", "$EGRESS_WATCH.service",
+                 "$EGRESS_WATCH.timer"):
+        assert name in aux, name
+    assert text.index("AUX_PREV=$(mktemp -d)") < text.index('install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"')
+    rollback = text[text.index("rollback() {"):text.index("trap 'rollback")]
+    assert "if restore_aux; then" in rollback
+    assert rollback.index("restore_aux") < rollback.index("systemctl daemon-reload") < rollback.index(
+        "systemctl restart cleaner-egress.service")
+
+
+def test_installer_names_ufw_rules_of_nets_no_longer_in_the_profile():
+    """Находка 12.11.2026: правила для сетей, убранных из CLIENTS, оставались молча — установщик их называет."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    stale = text[text.index('[[ " $CLIENTS " == *" $net "* ]] && continue'):text.index("отпечаток сертификата")]
+    assert "sudo ufw delete <номер>" in stale and '<<< "$RULES"' in stale
+
+
 def test_installer_stops_a_service_waiting_for_its_automatic_restart():
     """Находка 12.11.2026: служба, падающая по кругу, между попытками в activating (auto-restart), и `is-active`
     её не останавливал — отложенный запуск новой версии мог поднять схему базы раньше копии."""

@@ -5,7 +5,8 @@
 #   sudo bash install-cleaner.sh <каталог доставки> [логин первого администратора]
 #
 # Адрес, сети клиентов и шлюз — в профиле хоста deploy/hosts/<hostname -s>.conf (другое имя —
-# CLEANER_HOST=<имя>); профиля нет — установка не начинается.
+# sudo CLEANER_HOST=<имя> bash install-cleaner.sh …: переменная — после sudo, sudo сбрасывает окружение);
+# профиля нет — установка не начинается.
 #
 # Каталог доставки — распакованный `git archive` репозитория Cleaner в каталоге под root
 # (`/root/stage-cleaner` с правами 0700 или `sudo mktemp -d`). git отдаёт файлы с LF по .gitattributes,
@@ -14,7 +15,8 @@
 # с клавиатуры (ssh -t).
 #
 # Откат: если после выкатки самопроверка не прошла или служба не ответила по HTTPS,
-# возвращаются прежние код, окружение и юнит. Копия базы живёт только до ответа службы.
+# возвращаются прежние код, окружение, юнит, профиль host.env, сценарии проверки и границ выхода наружу
+# с их юнитами. Копия базы живёт только до ответа службы.
 # Правило ufw ставится под отложенным откатом ufw-failsafe, который установщик взводит сам;
 # снять страховку — после проверки НОВЫМ SSH-подключением.
 set -euo pipefail
@@ -99,6 +101,17 @@ if [[ "${CLEANER_REISSUE_CERT:-0}" != "1" && -s "$TLS/cert.pem" ]]; then
 Выпустите его заново: ${REISSUE_HINT}"
 fi
 
+# --- вспомогательные файлы: откат возвращает их вместе с кодом ----------------------
+# Иначе после отката при прежнем коде остались бы новые host.env и сценарий таблицы, а сломанный новый сценарий
+# не дал бы стартовать и прежней службе (ExecStartPre её юнита). Копия — до первой записи (host.env ниже).
+AUX_FILES=("$HOST_ENV" "$CHECK" /usr/local/sbin/cleaner-check-ipv6.py "$EGRESS" "$EGRESS_UNIT"
+           "$EGRESS_WATCH.service" "$EGRESS_WATCH.timer")
+AUX_PREV=$(mktemp -d)
+trap 'rm -rf "$AUX_PREV"' EXIT
+for f in "${AUX_FILES[@]}"; do
+    if [[ -e "$f" ]]; then cp -a "$f" "$AUX_PREV/$(basename "$f")"; fi
+done
+
 # --- учётная запись и каталоги --------------------------------------------------
 # Своя учётная запись, не aiservice: цепочка наблюдения сервера пишет исходящие
 # попытки aiservice как происшествия. /opt/cleaner, а не /opt/ai: туда cleaner не войдёт.
@@ -179,13 +192,29 @@ schema_version() {  # номер схемы базы; читается от clea
         'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA user_version").fetchone()[0])' \
         "$DATA/cleaner.db"
 }
+# Возвращает вспомогательные файлы из копии; файл, которого до прогона не было, снимается (юнит — с отключением).
+# Код возврата 0 — что-то изменилось и таблицу надо поставить прежним сценарием заново.
+restore_aux() {
+    local f saved changed=1
+    for f in "${AUX_FILES[@]}"; do
+        saved="$AUX_PREV/$(basename "$f")"
+        if [[ -e "$saved" ]]; then
+            cmp -s "$saved" "$f" || { cp -a "$saved" "$f" && changed=0; }
+        elif [[ -e "$f" ]]; then
+            case "$f" in *.service|*.timer) systemctl disable --now "$(basename "$f")" >/dev/null 2>&1 || true ;; esac
+            rm -f "$f" && changed=0
+        fi
+    done
+    return $changed
+}
 rollback() {
     trap - ERR
     log "ОТКАТ: $1"
-    local swapped=0
+    local swapped=0 aux=0
     if [[ -n "$PREV_CODE" ]]; then rm -rf "$APP/cleaner"; mv "$PREV_CODE" "$APP/cleaner"; swapped=1; fi
     if [[ -n "$PREV_VENV" ]]; then rm -rf "$APP/.venv"; mv "$PREV_VENV" "$APP/.venv"; swapped=1; fi
     if [[ -n "$PREV_UNIT" ]]; then cp -a "$PREV_UNIT" "$UNIT"; swapped=1; fi
+    if restore_aux; then aux=1; log "профиль, сценарии и юниты границ выхода наружу возвращены"; fi
     rm -rf "$APP/.venv.new" "$APP/cleaner.new"
     # Новая версия могла успеть поднять схему базы при старте: прежний код такую базу не откроет.
     if [[ -n "$DB_BACKUP" && "$(schema_version 2>/dev/null || echo '?')" != "$SCHEMA_BEFORE" ]]; then
@@ -195,6 +224,10 @@ rollback() {
         log "база возвращена из копии $DB_BACKUP: новая версия успела изменить её схему"
     fi
     systemctl daemon-reload || true
+    if [[ $aux -eq 1 && -e "$EGRESS_UNIT" ]]; then
+        systemctl restart cleaner-egress.service || true          # таблица — прежним сценарием, до запуска службы
+        systemctl try-restart cleaner-egress-watch.timer || true
+    fi
     if [[ $FIRST_INSTALL -eq 1 ]]; then
         systemctl disable --now cleaner.service >/dev/null 2>&1 || true
         log "первая установка не удалась: служба остановлена, ключ и база не тронуты"
@@ -357,6 +390,13 @@ else
     log "После этого снимите страховку:  sudo systemctl stop ufw-failsafe.timer"
     log "Если что-то пошло не так — подождите 10 минут, ufw выключится сам."
 fi
+# Правило для сети, которой больше нет в CLIENTS, установщик не снимает — его могли поставить и вручную, — а называет:
+# check-cleaner.sh считает лишнее правило провалом.
+while read -r net; do
+    [[ " $CLIENTS " == *" $net "* ]] && continue
+    log "ВНИМАНИЕ: порт ${PORT} открыт и для ${net}, а в CLIENTS профиля её нет. Если это больше не клиент — \
+найдите номер правила (sudo ufw status numbered) и удалите его: sudo ufw delete <номер>"
+done < <(grep -E "^${PORT}/tcp +ALLOW +" <<< "$RULES" | awk '{print $3}')
 
 log "отпечаток сертификата — сверить в браузере при первом входе:"
 openssl x509 -in "$TLS/cert.pem" -noout -fingerprint -sha256
