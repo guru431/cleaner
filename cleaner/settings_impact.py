@@ -27,8 +27,27 @@ MIN_OWNERS = 3
 
 
 def snapshot(repo):
-    return {"policies": {t.value: p.value for t, p in repo.policies().items()},
-            "dictionary": [asdict(row) for row in repo.dictionary()]}
+    """Политики и словарь в виде JSON: типы — строками, варианты — списками, как после квитанции."""
+    return json.loads(json.dumps({"policies": {t.value: p.value for t, p in repo.policies().items()},
+                                  "dictionary": [asdict(row) for row in repo.dictionary()]}))
+
+
+def _fields(row):
+    """Изменяемые поля записи словаря — то, что меняет правка записи."""
+    return list(row["aliases"]), row["comment"], bool(row.get("inflect", False))
+
+
+def listed(before, config):
+    """Изменения конфигурации по спискам: удаляемые и добавляемые записи, изменяемые записи (было, станет) и
+    изменяемые политики (тип, было, станет). Значения словаря — для страницы оценки администратора, не для журнала."""
+    was = {r["id"]: r for r in before["dictionary"]}
+    will = {r["id"] for r in config["dictionary"]}
+    return {"removed": [r for r in before["dictionary"] if r["id"] not in will],
+            "added": [r for r in config["dictionary"] if r["id"] not in was],
+            "edited": [(was[r["id"]], r) for r in config["dictionary"]
+                       if r["id"] in was and _fields(r) != _fields(was[r["id"]])],
+            "policies": [(t, before["policies"].get(t), p) for t, p in sorted(config["policies"].items())
+                         if before["policies"].get(t) != p]}
 
 
 def settings_for(repo, config):
@@ -79,11 +98,30 @@ def changed(repo, operation):
         config["dictionary"].extend(operation["rows"])
     elif operation["kind"] == "delete":
         config["dictionary"] = [r for r in config["dictionary"] if r["id"] != operation["id"]]
+    elif operation["kind"] == "edit":
+        row = operation["row"]
+        if not any(r["id"] == row["id"] for r in config["dictionary"]):
+            raise ValueError("Запись не найдена")
+        config["dictionary"] = [row if r["id"] == row["id"] else r for r in config["dictionary"]]
     elif operation["kind"] == "undo":
         raw = repo.setting(_UNDO)
         if not raw:
             raise ValueError("Предыдущей конфигурации нет")
-        config = json.loads(crypto.unseal(repo.global_key, base64.b64decode(raw), _UNDO))
+        undo = json.loads(crypto.unseal(repo.global_key, base64.b64decode(raw), _UNDO))
+        if "dictionary" in undo:            # снимок прежнего вида (до 12.11.2026) — конфигурация целиком
+            return undo
+        # Обратная правка последнего применения: записи, добавленные потом мимо оценки (экран проверки, ручное
+        # добавление, импорт), и политики, изменённые потом, остаются. Возвращённая запись, значение которой уже снова
+        # есть в том же списке, не дублируется.
+        added = set(undo["added"])
+        config["dictionary"] = [r for r in config["dictionary"] if r["id"] not in added]
+        present = {(r["list"], r["value"].lower()) for r in config["dictionary"]}
+        config["dictionary"].extend(r for r in undo["removed"] if (r["list"], r["value"].lower()) not in present)
+        former = {r["id"]: r for r in undo.get("edited", ())}
+        config["dictionary"] = [former.get(r["id"], r) for r in config["dictionary"]]
+        for type_, (was, applied) in undo["policies"].items():
+            if config["policies"].get(type_) == applied:
+                config["policies"][type_] = was
     else:
         raise ValueError("Неизвестная правка настроек")
     return config
@@ -92,13 +130,17 @@ def changed(repo, operation):
 def _changes(before, config, imported=False):
     """События журнала по каждому изменению — с теми же полями, что пишут прямые правки (FR-11.1), без значений.
     imported — правка из импорта CSV (признак import операции): добавленные — как импорт, при любом их числе;
-    иначе — как добавление. Несколько добавленных или удалённых (возврат) — одним событием с числом."""
+    иначе — как добавление. Несколько добавленных, удалённых или изменённых (возврат) — одним событием с числом."""
     events = [("policy_changed", {"type": type_, "policy": policy}) for type_, policy in sorted(config["policies"].items())
               if before["policies"].get(type_) != policy]
     kept, known = {r["id"] for r in config["dictionary"]}, {r["id"] for r in before["dictionary"]}
+    changed_rows = listed(before, config)["edited"]
     for list_ in ("always", "never"):
         removed = sum(1 for r in before["dictionary"] if r["list"] == list_ and r["id"] not in kept)
         added = sum(1 for r in config["dictionary"] if r["list"] == list_ and r["id"] not in known)
+        edited = sum(1 for was, _ in changed_rows if was["list"] == list_)
+        if edited:
+            events.append(("dictionary_changed", {"action": "edit", "list": list_} | ({"count": edited} if edited > 1 else {})))
         if removed:
             events.append(("dictionary_changed", {"action": "delete", "list": list_} | ({"count": removed} if removed > 1 else {})))
         if added and imported:
@@ -155,14 +197,15 @@ def preview(repo, user_id, operation):
     repo.audit("settings_previewed", user_id, kind="import" if operation.get("import") else operation["kind"],
                policies=sum(event == "policy_changed" for event, _ in _changes(before_config, config)),
                added=sum(1 for r in config["dictionary"] if r["id"] not in was),
-               removed=sum(1 for r in before_config["dictionary"] if r["id"] not in will))
+               removed=sum(1 for r in before_config["dictionary"] if r["id"] not in will),
+               edited=len(listed(before_config, config)["edited"]))
     payload = {"user": user_id, "expires": repo.clock.now().timestamp() + 600, "binding": binding, "config": config,
                "import": bool(operation.get("import"))}
     receipt = base64.urlsafe_b64encode(crypto.seal(repo.global_key, json.dumps(payload).encode(), _AAD)).decode()
     shown = len(owners) >= MIN_OWNERS
     return {"mine": mine, "others": others if shown else None, "owners": len(owners) if shown else None,
             "min_owners": MIN_OWNERS, "pending": pending, "frozen": frozen, "own": own, "quality": quality,
-            "receipt": receipt}
+            "receipt": receipt, "kind": operation["kind"], "changes": listed(before_config, config)}
 
 
 def apply(repo, user_id, receipt):
@@ -174,22 +217,23 @@ def apply(repo, user_id, receipt):
         if payload["user"] != user_id or payload["expires"] <= repo.clock.now().timestamp() or payload["binding"] != _binding(repo):
             raise ValueError("Настройки изменились: оцените влияние ещё раз")
         current = snapshot(repo)
-        previous = base64.b64encode(crypto.seal(repo.global_key, json.dumps(current).encode(), _UNDO)).decode()
-        repo.set_setting(_UNDO, previous)
+        changes = listed(current, payload["config"])
         repo.set_setting("settings.impact.version", str(int(repo.setting("settings.impact.version") or "0") + 1))
         repo.conn.execute("DELETE FROM policies")
         for type_, policy in payload["config"]["policies"].items():
             repo.set_policy(EntityType(type_), Policy(policy))
-        current_ids = {row.id for row in repo.dictionary()}
-        wanted_rows = payload["config"]["dictionary"]
-        wanted_ids = {row["id"] for row in wanted_rows}
-        for entry_id in current_ids - wanted_ids:
-            repo.delete_dictionary(entry_id)
-        for row in wanted_rows:
-            if row["id"] in current_ids:
-                continue
-            repo._insert_dictionary(row["list"], row["value"], EntityType(row["type"]) if row["type"] else None,
-                                    tuple(row["aliases"]), row["comment"], row.get("inflect", False))
+        for row in changes["removed"]:
+            repo.delete_dictionary(row["id"])
+        added = [repo._insert_dictionary(row["list"], row["value"], EntityType(row["type"]) if row["type"] else None,
+                                         tuple(row["aliases"]), row["comment"], row.get("inflect", False))
+                 for row in changes["added"]]
+        for _, row in changes["edited"]:
+            repo.update_dictionary(row["id"], tuple(row["aliases"]), row["comment"], row.get("inflect", False))
+        # Для возврата хранится обратная правка этого применения, а не прежняя конфигурация целиком: иначе возврат
+        # молча удалял бы записи, добавленные после применения мимо оценки.
+        undo = {"added": added, "removed": changes["removed"], "edited": [was for was, _ in changes["edited"]],
+                "policies": {type_: [was, policy] for type_, was, policy in changes["policies"]}}
+        repo.set_setting(_UNDO, base64.b64encode(crypto.seal(repo.global_key, json.dumps(undo).encode(), _UNDO)).decode())
         for event, details in _changes(current, payload["config"], payload.get("import", False)):
             repo.audit(event, user_id, **details)
         repo.audit("settings_changed", user_id, section="shared", action="preview_applied")

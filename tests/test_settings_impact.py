@@ -122,6 +122,48 @@ def test_apply_writes_the_same_audit_events_as_direct_edits(repo):
     assert "Ромашка" not in str([e.details for e in repo.audit_events()])
 
 
+def _receipt(response):
+    assert response.status_code == 200, response.text
+    return re.search(r'name="receipt" value="([^"]+)"', response.text).group(1)
+
+
+def test_undo_keeps_an_entry_added_from_the_review_after_the_apply(boss, repo):
+    """FINDINGS «Возврат предыдущей конфигурации молча удаляет записи словаря, добавленные с экрана проверки»: возврат —
+    обратная правка последнего применения; страница оценки перечисляет, что он удалит."""
+    added = boss.post("/settings/dictionary", list="always", value="Ромашка-Плюс", type="ORG", action="impact")
+    assert boss.post("/settings/impact/apply", receipt=_receipt(added)).status_code == 303
+    chat_id = boss.chat()
+    boss.post(f"/chats/{chat_id}/dictionary", value="Лютик-Опт", list="always", type="ORG")
+    undo = boss.post("/settings/impact/undo")
+    assert "Что изменит возврат" in undo.text and "Удаляются записи: 1" in undo.text
+    assert "Ромашка-Плюс" in undo.text and "Лютик-Опт" not in undo.text
+    assert boss.post("/settings/impact/apply", receipt=_receipt(undo)).status_code == 303
+    assert [r.value for r in repo.dictionary()] == ["Лютик-Опт"]
+
+
+def test_undo_returns_deleted_entries_and_former_policies_but_keeps_later_edits(repo):
+    admin = repo.create_user("admin", "hash", "admin")
+
+    def run(operation):
+        settings_impact.apply(repo, admin, settings_impact.preview(repo, admin, operation)["receipt"])
+
+    entry = repo.add_dictionary("always", "Проект Полярис", T.TERM, ("Полярис",), "вымышленный", True)
+    run({"kind": "delete", "id": entry})
+    repo.add_dictionary("never", "intranet.example")                    # мимо оценки
+    shown = settings_impact.preview(repo, admin, {"kind": "undo"})
+    assert [r["value"] for r in shown["changes"]["added"]] == ["Проект Полярис"] and shown["changes"]["removed"] == []
+    settings_impact.apply(repo, admin, shown["receipt"])
+    assert sorted((r.value, r.aliases, r.comment, r.inflect) for r in repo.dictionary()) == [
+        ("intranet.example", (), "", False), ("Проект Полярис", ("Полярис",), "вымышленный", True)]
+    run({"kind": "policies", "policies": {"EMAIL": "block", "PHONE": "hide"}})
+    repo.set_policy(T.PHONE, Policy.OFF)                                 # правка после применения
+    shown = settings_impact.preview(repo, admin, {"kind": "undo"})
+    assert shown["changes"]["policies"] == [("EMAIL", "block", "mask")]
+    settings_impact.apply(repo, admin, shown["receipt"])
+    assert repo.policies()[T.EMAIL] is Policy.MASK and repo.policies()[T.PHONE] is Policy.OFF
+    assert len(repo.dictionary()) == 2
+
+
 def test_csv_import_of_one_new_row_is_logged_as_an_import(boss, repo):
     """Импорт отличается по признаку из маршрута импорта, а не по числу записей: CSV с одной новой строкой —
     dictionary_import, как при прямом сохранении импорта."""
@@ -149,7 +191,7 @@ def test_other_owners_counts_hidden_below_threshold_and_preview_is_audited(repo)
     shown = settings_impact.preview(repo, admin, operation)
     assert shown["others"]["chats"] == settings_impact.MIN_OWNERS and shown["owners"] == settings_impact.MIN_OWNERS
     events = repo.audit_events("settings_previewed", user_id=admin)
-    assert len(events) == 2 and events[0].details == {"kind": "add", "policies": 0, "added": 1, "removed": 0}
+    assert len(events) == 2 and events[0].details == {"kind": "add", "policies": 0, "added": 1, "removed": 0, "edited": 0}
     assert "Ромашка" not in str([e.details for e in events])
 
 

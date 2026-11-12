@@ -238,6 +238,7 @@
       <input name="value" placeholder="Значение" required aria-label="Значение">
       <select name="list" aria-label="Список"><option value="always">всегда скрывать</option><option value="never">никогда не скрывать</option></select>
       <select name="type" aria-label="Тип">{% for code, name in types.items() %}<option value="{{ code.value }}">{{ name }}</option>{% endfor %}</select>
+      <label class="check" title="Для людей, организаций, адресов и терминов списка «всегда скрывать»"><input type="checkbox" name="inflect" value="1"> во всех падежах</label>
       <button class="primary">Добавить</button>
     </form>
   </div>

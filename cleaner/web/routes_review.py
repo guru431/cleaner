@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlencode
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
+from cleaner.core.detect.dictionary import INFLECTED_TYPES
 from cleaner.core.entities import ops
 from cleaner.core.match import find_forms
 from cleaner.core.risk import KINDS
@@ -474,7 +475,8 @@ def to_dictionary(request: Request, chat_id: str, form: dict[str, str] = Depends
     repo = repo_of(request)
     if repo.in_dictionary(list_, value):
         raise HTTPException(400, DUPLICATE)
-    repo.add_dictionary(list_, value, _type(form) if list_ == "always" else None)
+    type_ = _type(form) if list_ == "always" else None
+    repo.add_dictionary(list_, value, type_, inflect=form.get("inflect") == "1" and type_ in INFLECTED_TYPES)
     repo.audit("dictionary_changed", viewer.user.id, chat_id, action="add", list=list_)
     service_of(request).refresh(chat_id, viewer.user.id)
     return RedirectResponse(_back(chat_id, form), status_code=303)

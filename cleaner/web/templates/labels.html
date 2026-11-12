@@ -39,4 +39,14 @@
     </tbody>
   </table>
 </section>
+<section class="panel">
+  <header class="panel-head"><h2 class="title">Вид метки в новых чатах</h2><span class="state">консультации, чаты шлюза агентов и чаты API без своего выбора; созданные чаты сохраняют свой вид</span></header>
+  <div class="panel-body">
+    <form method="post" action="/settings/label-style" class="inline-form">
+      {% include "_csrf.html" %}
+      {% for value, shown in styles.items() %}<label class="check"><input type="radio" name="style" value="{{ value }}"{% if value == style %} checked{% endif %}> <span class="mono">{{ shown }}</span></label>
+      {% endfor %}<button class="primary">Сохранить</button>
+    </form>
+  </div>
+</section>
 {% endblock %}

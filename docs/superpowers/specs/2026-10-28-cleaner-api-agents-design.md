@@ -379,7 +379,7 @@ JSON, ключ — `X-Cleaner-Key` (любой ключ, `upstream` не нуж�
 
 | Метод и путь | Что делает | Ответ |
 |---|---|---|
-| `POST /api/v1/chats` `{title?, label_style?, layers?}` | новый чат | `{id}` |
+| `POST /api/v1/chats` `{title?, label_style?, layers?}` | новый чат; без `label_style` — вид метки из настройки администратора (FR-5.10) | `{id}` |
 | `GET /api/v1/chats` | чаты владельца ключа | `[{id, title, updated_at}]` |
 | `DELETE /api/v1/chats/{id}` | удалить (FR-1.4, без подтверждения — вызов и есть подтверждение) | 204 |
 | `POST /api/v1/chats/{id}/texts` `{text, wait?}` | очистить текст | 200 `{item_id, status, deliverable, sanitized, replacements[{start,end,type,replacement}], notices[{code,start,end}], leaks, blocked}` (позиции — в исходном тексте; `sanitized` — только при `deliverable`) или 202 `{item_id, status}`, если не уложилось в `wait` (0–60 с, по умолчанию 30) |
