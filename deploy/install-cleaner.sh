@@ -87,7 +87,7 @@ FIRST_INSTALL=1
 # --- адрес и имя: настройки и сертификат создаются один раз и должны совпадать с профилем ---------
 # Иначе проверка HTTPS по новому адресу получила бы «код 000» и откатила код, а новый host.env остался бы.
 # Сверка — до любых изменений, host.env записывается после неё.
-REISSUE_HINT="sudo ${CLEANER_HOST:+CLEANER_HOST=$HOST_NAME }CLEANER_REISSUE_CERT=1 bash $SRC/deploy/install-cleaner.sh $SRC (переменная — после sudo: sudo сбрасывает окружение)"
+REISSUE_HINT="sudo ${CLEANER_HOST:+CLEANER_HOST=$HOST_NAME }CLEANER_REISSUE_CERT=1 bash $SRC/deploy/install-cleaner.sh $SRC (переменные — после sudo: sudo сбрасывает окружение)"
 if [[ -f "$CONF" ]]; then
     conf_host=$(sed -n 's/^host *= *"\([^"]*\)".*/\1/p' "$CONF" | head -n 1)
     [[ "$conf_host" == "$HOST_IP" ]] || fail "в $CONF host = \"${conf_host}\", а в профиле HOST_IP=${HOST_IP}. \
@@ -387,7 +387,8 @@ log "служба отвечает: https://${HOST_IP}:${PORT}/login"
 RULES="$(ufw status 2>/dev/null || true)"
 missing=()
 for net in $CLIENTS; do
-    grep -qE "^${PORT}/tcp +ALLOW +${net//./\\.}( |$)" <<< "$RULES" || missing+=("$net")
+    shown=${net%/32}                    # ufw пишет адрес узла без /32: иначе правило «не находилось» на каждом прогоне
+    grep -qE "^${PORT}(/tcp)? +ALLOW( IN)? +${shown//./\\.}( |$)" <<< "$RULES" || missing+=("$net")
 done
 if [[ ${#missing[@]} -eq 0 ]]; then
     log "правила ufw для ${PORT} уже есть — страховку не взвожу"

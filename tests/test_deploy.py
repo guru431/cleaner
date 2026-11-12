@@ -330,6 +330,17 @@ def test_installer_rollback_returns_the_egress_files_with_the_code_and_keeps_the
         "systemctl restart cleaner-egress.service")
 
 
+def test_ufw_rules_of_a_single_host_client_are_found_without_its_slash_32():
+    """Наблюдение 12.11.2026: ufw пишет адрес узла без /32, и клиент `x.x.x.x/32` из CLIENTS не находился — установщик
+    на каждом прогоне взводил страховку и добавлял правило заново, check-cleaner.sh проваливался. Правила ALLOW OUT
+    в счёт открытых портов не входят."""
+    installer = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    check = (DEPLOY / "check-cleaner.sh").read_text(encoding="utf-8")
+    for text in (installer, check):
+        assert "shown=${net%/32}" in text and "${shown//./\\\\.}" in text
+    assert 'grep -vE " ALLOW (OUT|FWD) "' in check
+
+
 def test_installer_names_ufw_rules_of_nets_no_longer_in_the_profile():
     """Находка 12.11.2026: правила для сетей, убранных из CLIENTS, оставались молча — установщик их называет."""
     text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")

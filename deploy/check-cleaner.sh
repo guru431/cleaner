@@ -100,12 +100,14 @@ fingerprint=$(openssl x509 -in "$CERT" -noout -fingerprint -sha256 2>/dev/null |
 
 echo "4. Экран"
 rules=$(ufw status 2>/dev/null || true)
-port_rules=$(grep -E "^${PORT}/tcp" <<< "$rules" || true)
+# Входящие правила порта: и без протокола, и IPv6 («(v6)») — они тоже открывают порт; ALLOW OUT и FWD — не к службе.
+port_rules=$(grep -E "^${PORT}(/tcp)? " <<< "$rules" | grep -vE " ALLOW (OUT|FWD) " || true)
 want=0
 have=0
 for net in $CLIENTS; do
     want=$((want + 1))
-    if grep -qE "ALLOW +${net//./\\.}( |$)" <<< "$port_rules"; then have=$((have + 1)); fi
+    shown=${net%/32}                    # ufw пишет адрес узла без /32
+    if grep -qE "ALLOW( IN)? +${shown//./\\.}( |$)" <<< "$port_rules"; then have=$((have + 1)); fi
 done
 if [[ "$(grep -c . <<< "$port_rules")" == "$want" && "$have" == "$want" ]]; then
     ok "порт ${PORT} открыт только для ${CLIENTS}"
