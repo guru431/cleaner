@@ -80,7 +80,9 @@ def _impact(request, viewer, operation, **shown):
         result = settings_impact.preview(repo_of(request), viewer.user.id, operation)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
-    return page(request, "settings_impact.html", viewer, **result, **shown)
+    return page(request, "settings_impact.html", viewer, **result, **shown, lists=LIST_NAMES, shown_rows=_SHOWN,
+                type_names={t.value: name for t, name in render.TYPE_NAMES.items()},
+                policy_names={p.value: name for p, name in POLICY_NAMES.items()})
 
 
 @router.post("/impact/apply")
