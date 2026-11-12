@@ -2,6 +2,7 @@
 
 Only invented control strings and an in-process HTTP transport are used.
 """
+import hashlib
 import json
 from dataclasses import replace
 from functools import partial
@@ -341,6 +342,29 @@ def test_receipts_link_reused_blocks_and_store_no_credentials(gateway, repo):
     assert b'"protocol"' not in raw and b'"layers"' not in raw
     foreign = repo.create_chat(call.user.id, "other", kind="agent")
     assert repo.agent_receipt(foreign, receipts[0]["id"]) is None
+
+
+def test_receipts_are_compressed_and_old_ones_still_read(gateway, repo):
+    """10.4: квитанция с отпечатками всей истории сжимается перед шифрованием; квитанции до сжатия читаются как прежде."""
+    make, _ = gateway
+    service, call = make()
+    service.handle(call)
+    chat_id = repo.api_key(call.key.id).chat_id
+    receipt = repo.agent_receipts(chat_id)[0]
+    content = {key: value for key, value in receipt.items() if key not in ("id", "conversation", "time")}
+    blocks = [{"direction": "in", "digest": hashlib.sha256(b"%d" % n).hexdigest(), "kind": "text", "status": "повторён"}
+              for n in range(1000)]
+    big = repo.add_agent_receipt(chat_id, receipt["conversation"], dict(content, blocks=blocks))
+    raw = repo.conn.execute("SELECT content_enc FROM agent_receipts WHERE id = ?", (big,)).fetchone()[0]
+    assert len(raw) * 3 < len(json.dumps(dict(content, blocks=blocks), ensure_ascii=False).encode())      # замер: 3,8 раза
+    assert repo.agent_receipt(chat_id, big)["blocks"] == blocks
+    old = json.dumps(content, ensure_ascii=False)              # запись до 12.11.2026: JSON без сжатия
+    repo.conn.execute(
+        "INSERT INTO agent_receipts(id, conversation, created_at, content_enc) VALUES (?, ?, ?, ?)",
+        ("old", receipt["conversation"], receipt["time"], repo._enc(repo._dek(chat_id), old, "agent_receipts.content:old")),
+    )
+    assert repo.agent_receipt(chat_id, "old") == dict(content, id="old", conversation=receipt["conversation"], time=receipt["time"])
+    assert {r["id"] for r in repo.agent_receipts(chat_id)} == {receipt["id"], big, "old"}
 
 
 @pytest.mark.parametrize("spaces", [255, 256, 257, 300, 1024])
