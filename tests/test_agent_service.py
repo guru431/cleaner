@@ -194,6 +194,36 @@ def test_blocked_media_and_failed_blocks_are_withheld(repo, engines, clock, stub
     assert repo.audit_events("agent_withheld")[0].details["reasons"] == {"media": 1, "blocked": 1, "failed": 1}
 
 
+def test_private_address_equal_to_an_issued_surrogate_is_withheld(gw, repo):
+    """Подмена частного адреса берётся из того же диапазона (6.2): настоящий адрес B, совпавший с подменой адреса A, ушёл
+    бы как «вставленная замена», а ответ о нём восстановился бы в A. Блок агента с таким адресом держится (7.4);
+    обычный частный адрес — заменяется, как прежде."""
+    task = "Проверь узел 10.1.2.5"
+
+    def reboot(request):
+        fake = re.search(r"10\.\d+\.\d+\.5", request["messages"][0]["content"][-1]["text"]).group()
+        return model_turn(f"Перезагружаю {fake}", ("toolu_1", "Bash", {"command": f"ssh {fake} reboot"}))
+
+    gw.stub.script.append(reboot)
+    blocks = agent_blocks(gw.send(body(task)))
+    fake = re.search(r"10\.\d+\.\d+\.5", gw.stub.requests[0]["body"]["messages"][0]["content"][-1]["text"]).group()
+    assert fake != "10.1.2.5"
+    assert blocks[0]["text"] == "Перезагружаю 10.1.2.5" and blocks[1]["input"] == {"command": "ssh 10.1.2.5 reboot"}
+    gw.stub.script.append(model_turn(f"Узел {fake} перезагружен"))
+    other = {"type": "text", "text": "соседний узел 10.7.8.9"}
+    second = body(task, assistant(*blocks), {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": f"занято: {fake} отвечает"}, other,
+    ]})
+    reply = gw.send(second)
+    sent = gw.stub.requests[1]["body"]["messages"][3]["content"]
+    assert sent[0] == {"type": "tool_result", "tool_use_id": "toolu_1",
+                       "content": ledger.placeholder(ledger.REASONS["address"])}
+    assert sent[1]["text"].startswith("соседний узел ") and "10.7.8.9" not in sent[1]["text"]
+    assert agent_blocks(reply)[0]["text"] == "Узел 10.1.2.5 перезагружен"      # подмена A — по-прежнему в A
+    assert repo.agent_receipts(gw.chat_of(second))[0]["withheld"] == {"address": 1}
+    assert repo.audit_events("agent_withheld")[0].details["reasons"] == {"address": 1}
+
+
 def test_withheld_tool_call_keeps_its_pair_with_the_result(gw, monkeypatch):
     """Удержанный вызов инструмента из истории остаётся вызовом с тем же id: результат инструмента ссылается на него, и
     блок text на его месте провайдер отклонил бы."""

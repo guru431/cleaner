@@ -678,10 +678,12 @@ class AgentService:
             if nested:
                 unit = replace(unit, node=node)
         blocked: list[str] = []
+        collided = False
         counts: Counter = Counter()
         detectors = (dictionary,) if unit.kind == "reasoning" else pipeline.DETECTORS
 
         def clean(text: str) -> str:
+            nonlocal collided
             if direction == "out":
                 found = pipeline.sanitize(state, text, settings, detectors=detectors)
             else:
@@ -691,6 +693,10 @@ class AgentService:
                     type_.value for notice in found.blocked_surrogates for type_ in notice.held
                     if settings.policies.get(type_) is Policy.BLOCK
                 )
+                # Подмена частного адреса в блоке агента: агент получает восстановленные адреса, и такая «подмена» —
+                # скорее настоящий адрес другого узла, совпавший с ней (6.2): ушёл бы открытым, а ответ о нём
+                # восстановился бы в чужой узел. Блок держится (7.4).
+                collided = collided or any(notice.code == "surrogate_private_ip" for notice in found.notices)
             blocked.extend(state.entities[span.entity_id].type.value for span in found.blocked)
             counts.update(state.entities[span.entity_id].type.value for span in found.spans)
             return found.sanitized
@@ -703,6 +709,8 @@ class AgentService:
             return proto.placeholder(unit, ledger.REASONS["failed"]), "failed", {}
         if blocked:
             return proto.placeholder(unit, ledger.REASONS["blocked"].format(type=blocked[0])), "blocked", {}
+        if collided:
+            return proto.placeholder(unit, ledger.REASONS["address"]), "address", {}
         if nested or proto.contains_media(unit):
             return node, "media", dict(counts)
         return node, "", dict(counts)
