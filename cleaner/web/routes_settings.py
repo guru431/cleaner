@@ -537,6 +537,7 @@ def builtin(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
         request, "builtin.html", viewer,
         lists=[
             ("Общеизвестные домены", sorted(lists.well_known_domains)),
+            ("Суффиксы арендатора под общеизвестными доменами", sorted(lists.tenant_suffixes)),
             ("Служебные имена узлов", sorted(lists.generic_labels)),
             ("Стандартные учётные записи", sorted(lists.builtin_accounts)),
             ("Внутренние суффиксы", sorted(hostmap.INTERNAL_SUFFIXES)),

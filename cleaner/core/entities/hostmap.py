@@ -32,6 +32,8 @@ def separator(value: str) -> str:
 # Только встроенная копия списка публичных суффиксов: в сеть библиотека не ходит.
 _extract = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, extra_suffixes=INTERNAL_SUFFIXES)
 extra_suffixes: tuple[str, ...] = ()
+# Список вместе с частным разделом — суффиксы, под которыми имена выбирают арендаторы («blob.core.windows.net»).
+_private = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
 
 
 def set_extra_suffixes(values: tuple[str, ...]) -> bool:
@@ -58,6 +60,12 @@ def split_name(name: str) -> tuple[list[str], str]:
         return labels, ""
     tail = len(result.suffix.split(".")) + (1 if result.domain else 0)
     return labels[:-tail], ".".join(labels[-tail:])
+
+
+def private_suffix(name: str) -> tuple[str, str]:
+    """Суффикс имени по списку публичных суффиксов вместе с частным разделом и часть прямо слева от него ('' — её нет)."""
+    result = _private(name.lower())
+    return result.domain, result.suffix
 
 
 def parts(name: str) -> tuple[list[str], str]:

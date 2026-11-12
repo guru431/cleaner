@@ -1,0 +1,40 @@
+# Суффиксы арендатора под общеизвестными доменами, которых нет в частном разделе списка публичных суффиксов:
+# часть слева от суффикса выбирает организация (учётная запись, сервер, бакет), и имя с ней — её ресурс,
+# а не общеизвестное имя (раздел 5.4). «*» — любая одна часть (регион, зона).
+# Azure
+database.windows.net
+file.core.windows.net
+queue.core.windows.net
+table.core.windows.net
+dfs.core.windows.net
+web.core.windows.net
+search.windows.net
+redis.cache.windows.net
+vault.azure.net
+documents.azure.com
+openai.azure.com
+cognitiveservices.azure.com
+postgres.database.azure.com
+mysql.database.azure.com
+*.cloudapp.azure.com
+mail.protection.outlook.com
+visualstudio.com
+# AWS: реестр ECR и вход в консоль — по номеру учётной записи
+dkr.ecr.*.amazonaws.com
+*.rds.amazonaws.com
+*.eks.amazonaws.com
+*.es.amazonaws.com
+signin.aws.amazon.com
+# Google Cloud
+storage.googleapis.com
+# «!имя» — не арендатор: суффикс частного раздела, слева от которого стоит служба
+# («lambda.us-east-1.amazonaws.com»), или служба под суффиксом арендатора с частью перед ней.
+!us-east-1.amazonaws.com
+!www.visualstudio.com
+!code.visualstudio.com
+!marketplace.visualstudio.com
+!my.visualstudio.com
+!app.visualstudio.com
+!vssps.visualstudio.com
+!vsaex.visualstudio.com
+!vstoken.visualstudio.com

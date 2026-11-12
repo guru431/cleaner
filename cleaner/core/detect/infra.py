@@ -214,23 +214,66 @@ def _longest(listed: frozenset[str]) -> int:
     return max(map(len, listed), default=0)
 
 
+@lru_cache(maxsize=16)
+def _tenant_list(listed: frozenset[str]) -> tuple[tuple[tuple[str, ...], ...], frozenset[str]]:
+    """Суффиксы арендатора по частям и исключения «!имя» встроенного списка (data/tenant_suffixes.txt)."""
+    return (
+        tuple(tuple(entry.split(".")) for entry in listed if not entry.startswith("!")),
+        frozenset(entry[1:] for entry in listed if entry.startswith("!")),
+    )
+
+
+# Частей с конца имени, которых хватает самому длинному суффиксу арендатора вместе с частью перед ним.
+_TENANT_DEPTH = 8
+
+
+def _tenant(name: str, domain: str, listed: frozenset[str]) -> bool:
+    """Перед общеизвестным доменом domain стоит метка арендатора — часть прямо слева от суффикса частного раздела списка
+    публичных суффиксов, который длиннее domain («romashka.blob.core.windows.net»; сам «googleapis.com» в разделе, и
+    «www.googleapis.com» — не арендатор), или от суффикса встроенного списка («romashka.visualstudio.com»). «!имя» списка
+    — суффикс или служба с частью перед суффиксом, которые арендатора не выделяют («lambda.us-east-1.amazonaws.com»,
+    «code.visualstudio.com»). Проверяются последние _TENANT_DEPTH частей: длина имени на время не влияет."""
+    start = len(name)
+    for _ in range(_TENANT_DEPTH):
+        start = name.rfind(".", 0, start)
+        if start < 0:
+            break
+    labels = name[start + 1:].split(".")
+    suffixes, exceptions = _tenant_list(listed)
+    left, suffix = hostmap.private_suffix(".".join(labels))
+    if left and len(suffix) > len(domain) and suffix not in exceptions and f"{left}.{suffix}" not in exceptions:
+        return True
+    for entry in suffixes:
+        size = len(entry)
+        if len(labels) > size and all(part in ("*", label) for part, label in zip(entry, labels[-size:])):
+            if ".".join(labels[-size:]) not in exceptions and ".".join(labels[-size - 1:]) not in exceptions:
+                return True
+    return False
+
+
 def well_known(value: str, ctx: DetectContext) -> bool:
-    """Общеизвестное имя или имя из списка «никогда не скрывать», включая поддомены. Суффиксы сверяются справа и не
-    длиннее самого длинного значения списков: цепочка из тысяч частей («abc.def.…») иначе проверялась бы
-    квадратичное время. «\\.» и «\\\\.» — точка."""
+    """Общеизвестное имя или имя из списка «никогда не скрывать», включая поддомены. Ресурс организации под
+    общеизвестным доменом — с меткой арендатора (_tenant) — общеизвестным не считается, если его нет в списке «никогда не
+    скрывать». Суффиксы сверяются справа и не длиннее самого длинного значения списков: цепочка из тысяч частей
+    («abc.def.…») иначе проверялась бы квадратичное время. «\\.» и «\\\\.» — точка."""
     name = hostmap.dotted(value.lower()).strip(".")
     known, never = ctx.builtin.well_known_domains, ctx.settings.never
     if "." not in name:
         return name in known or name in never or name in ctx.builtin.generic_labels
     longest = max(_longest(known), _longest(never))
+    tenant = False
     end = len(name)
     while end >= 0:
         dot = name.rfind(".", 0, end)
         if len(name) - dot - 1 > longest:
             return False
         suffix = name[dot + 1:]
-        if suffix in known or suffix in never:
+        if suffix in never:
             return True
+        if suffix in known and not tenant:
+            tenant = _tenant(name, suffix, ctx.builtin.tenant_suffixes)
+            if not tenant:
+                return True
         end = dot
     return False
 
