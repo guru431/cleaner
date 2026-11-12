@@ -113,8 +113,8 @@ def _cards(request: Request) -> dict[str, tuple[str, str, str]]:
     users = repo.users()
     disabled = sum(user.disabled for user in users)
     since = (request.app.state.clock.now() - timedelta(days=1)).isoformat(timespec="seconds")
-    events = len(repo.audit_events(since=since, limit=None))
-    errors = len(repo.audit_events("error", since=since, limit=None))
+    events = repo.audit_count(since=since)
+    errors = repo.audit_count("error", since=since)
     gold = _gold_state(request)
     if engines is None:
         local = ("bad", "не подключена", "слои 4 и 5 и сканы недоступны")
@@ -212,7 +212,8 @@ def _service(request: Request) -> dict:
         })
     slots = app.state.agent_slots
     since = (now - timedelta(days=CHECKPOINT_DAYS)).isoformat(timespec="seconds")
-    checkpoint = [row for row in repo.audit_events("error", since=since, limit=None) if row.details.get("kind") == "CheckpointBusy"]
+    checkpoint = repo.audit_count("error", since=since, kind="CheckpointBusy")
+    last = repo.audit_events("error", since=since, limit=1, kind="CheckpointBusy") if checkpoint else []
     database, wal = _db_size(repo)
     models = engines.status()["models"] if engines is not None else {}
     local = local_settings(repo)
@@ -222,7 +223,7 @@ def _service(request: Request) -> dict:
                    "state": _busy(max(jobs / budget.max_jobs, used / budget.max_bytes))},
         "pools": pools,
         "agents": {"busy": slots.busy, "limit": slots.limit, "refused": slots.refused, "state": _busy(slots.busy / slots.limit)},
-        "checkpoint": {"count": len(checkpoint), "last": checkpoint[0].ts if checkpoint else "", "days": CHECKPOINT_DAYS},
+        "checkpoint": {"count": checkpoint, "last": last[0].ts if last else "", "days": CHECKPOINT_DAYS},
         "database": {"mib": round(database / _MIB, 1), "wal_mib": round(wal / _MIB, 1)},
         "models": {"present": sum(models.values()), "total": len(models)},
         "local": {"connected": engines is not None, "key": bool(engines is not None and engines.status()["key"]),

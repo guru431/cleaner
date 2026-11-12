@@ -168,6 +168,23 @@ def test_users_sessions_and_audit(repo, clock):
     assert [a.event for a in repo.audit_events(before="2026-10-15")] == ["login"]
 
 
+def test_audit_counts_without_loading_rows_and_filters_by_index(repo, clock):
+    """Блок «Служба» опрашивается раз в 5 с: счётчики журнала — COUNT по индексам, без просмотра всей таблицы."""
+    repo.audit("error", kind="CheckpointBusy")
+    repo.audit("error", kind="Timeout")
+    clock.advance(days=2)
+    repo.audit("error", kind="CheckpointBusy")
+    repo.audit("agent_send")
+    since = "2026-10-15"
+    assert repo.audit_count(since=since) == 2 and repo.audit_count("error") == 3
+    assert repo.audit_count("error", kind="CheckpointBusy") == len(repo.audit_events("error", kind="CheckpointBusy")) == 2
+    assert repo.audit_count("error", since=since, kind="CheckpointBusy") == 1
+    for event, start in (("error", since), (None, since)):
+        where, args = repo._audit_where(event, None, start, None, None)
+        plan = " ".join(row[3] for row in repo.conn.execute("EXPLAIN QUERY PLAN SELECT COUNT(*) FROM audit" + where, args))
+        assert "USING COVERING INDEX audit_by_" in plan, plan
+
+
 def test_session_opens_only_for_the_checked_password_of_an_enabled_account(repo):
     """Аудит 21.10.2026: сессия сверяет хэш, проверенный при входе, с нынешним — в той же записи."""
     user = repo.create_user("ivan", "hash1", "user")
