@@ -13,7 +13,8 @@ from cleaner.core.agent.protocol import PROTOCOLS
 from cleaner.core.agent.responses import ResponsesStream
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import originals
-from cleaner.core.types import ChatState, Settings
+from cleaner.core.types import ChatState, Policy, Settings
+from cleaner.core.types import EntityType as T
 from cleaner.storage.repo import Provider
 from tests.stub_provider import StubProvider
 
@@ -342,6 +343,58 @@ def test_unknown_fields_of_items_are_cleaned(gw, stub):
         {"type": "message", "role": "user", "phase": note, "content": [{"type": "input_text", "text": "Проверь srv-dc01.corp.contoso.ru"}]},
     ]})
     assert "srv-dc01" not in stub.bodies()
+
+
+PHONE = "+7 (916) 123-45-67"
+BLOCKED = "[Cleaner: блок не передан — содержит значение типа PHONE]"
+ASK = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Привет"}]}
+DIAL = {"type": "function", "name": "dial", "description": "Звонок", "parameters": {"type": "object", "properties": {}}}
+DIAL_HELD = {"type": "function", "name": "dial", "description": BLOCKED, "parameters": {"type": "object"}}
+
+
+def _user(body: dict) -> dict:
+    return [item for item in body["input"] if item.get("role") == "user"][-1]
+
+
+def _typed(kind: str):
+    return lambda body: next(item for item in body["input"] if item.get("type") == kind)
+
+
+# Место значения → тело запроса Codex и то, что должно оказаться на этом месте у провайдера.
+WITHHELD_PLACES = {
+    "input_text": ({"input": [dict(ASK, content=[{"type": "input_text", "text": f"Звони {PHONE}"}])]},
+                   lambda body: _user(body)["content"], [{"type": "input_text", "text": BLOCKED}]),
+    "message_string": ({"input": [dict(ASK, content=f"Звони {PHONE}")]}, lambda body: _user(body)["content"], BLOCKED),
+    "input_string": ({"input": f"Звони {PHONE}"}, lambda body: _user(body)["content"], [{"type": "input_text", "text": BLOCKED}]),
+    "instructions": ({"instructions": f"Звони {PHONE}", "input": [ASK]}, lambda body: body["instructions"], BLOCKED),
+    "message_field": ({"input": [dict(ASK, phase=PHONE)]}, lambda body: _user(body)["phase"], {"type": "input_text", "text": BLOCKED}),
+    "function_call": ({"input": [ASK, {"type": "function_call", "call_id": "call_1", "name": "dial", "arguments": json.dumps({"to": PHONE})}]},
+                      lambda body: _typed("function_call")(body)["arguments"], json.dumps({"cleaner": BLOCKED}, ensure_ascii=False)),
+    "custom_tool_call": ({"input": [ASK, {"type": "custom_tool_call", "call_id": "call_1", "name": "apply_patch", "input": f"+Звони {PHONE}\n"}]},
+                         lambda body: _typed("custom_tool_call")(body)["input"], BLOCKED),
+    "local_shell_call": ({"input": [ASK, {"type": "local_shell_call", "call_id": "call_1", "action": {"type": "exec", "command": ["call", PHONE]}}]},
+                         lambda body: _typed("local_shell_call")(body)["action"], {"type": "exec", "command": ["echo", BLOCKED]}),
+    "tool_description": ({"input": [ASK], "tools": [dict(DIAL, description=f"Звонит на {PHONE}")]}, lambda body: body["tools"][0], DIAL_HELD),
+    "tool_parameters": ({"input": [ASK], "tools": [dict(DIAL, parameters={"type": "object", "properties": {"to": {"type": "string", "description": PHONE}}})]},
+                        lambda body: body["tools"][0], DIAL_HELD),
+    # Лишний ключ описания: пометка заменяет инструмент целиком, иначе номер ушёл бы в ней и запрос получал бы 400.
+    "tool_extra_key": ({"input": [ASK], "tools": [dict(DIAL, server_description=f"Номер {PHONE}")]}, lambda body: body["tools"][0], DIAL_HELD),
+    "unknown_item": ({"input": [ASK, {"type": "custom_note", "note": PHONE}]}, lambda body: body["input"][-1],
+                     {"type": "message", "role": "user", "content": [{"type": "input_text", "text": BLOCKED}]}),
+    "parameter": ({"input": [ASK], "note": PHONE}, lambda body: body["note"], BLOCKED),
+}
+
+
+@pytest.mark.parametrize("place", WITHHELD_PLACES)
+def test_blocked_value_is_withheld_in_every_place(gw, stub, repo, place):
+    """AC-5.5 вне вывода инструмента: значение типа с «блокировать» удерживает свой блок в любом месте тела Codex —
+    запрос уходит (200), номера у провайдера нет, на месте блока — пометка того же вида (7.4)."""
+    repo.set_policy(T.PHONE, Policy.BLOCK)
+    stub.script.append([*text_events(0, message("msg_1", "Готово"), []), completed(message("msg_1", "Готово"))])
+    extra, where, expected = WITHHELD_PLACES[place]
+    gw.send({"model": "gpt-5.5", "stream": True, **extra})
+    sent = stub.requests[0]["body"]
+    assert "123-45-67" not in stub.bodies() and where(sent) == expected
 
 
 def test_code_mode_exec_output_in_json_is_cleaned(gw, stub):

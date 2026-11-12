@@ -223,9 +223,9 @@ def placeholder(unit: Unit, reason: str) -> object:
         if "input" in node:
             return dict(call, input=text)
         return dict(call, action={"type": "exec", "command": ["echo", text]})
-    if unit.kind == "tool_def":
-        return {**node, "description": text, **({"parameters": {"type": "object"}} if "parameters" in node else {}),
-                **({"tools": []} if "tools" in node else {})}
+    if unit.kind == "tool_def":     # удерживается целиком: прочие ключи описания уходили бы с удержанным значением
+        return {**{key: value for key, value in node.items() if key in _TOOL_SERVICE}, "description": text,
+                **({"parameters": {"type": "object"}} if "parameters" in node else {}), **({"tools": []} if "tools" in node else {})}
     if node.get("type") == "text":                  # строкой: instructions, input, content
         return text_block(text)
     if unit.role == "params":
