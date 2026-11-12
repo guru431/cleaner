@@ -225,9 +225,16 @@ def _tenant_list(listed: frozenset[str]) -> tuple[tuple[tuple[str, ...], ...], f
 
 # Частей с конца имени, которых хватает самому длинному суффиксу арендатора вместе с частью перед ним.
 _TENANT_DEPTH = 8
-# Регион AWS («eu-west-1», «us-gov-west-1») — не метка арендатора: «eu-west-1.signin.aws.amazon.com» — региональный вход в
-# консоль, а не учётная запись, как «123456789012.signin.aws.amazon.com».
-_REGION = re.compile(r"[a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\d")
+# Регион AWS («eu-west-1», «us-gov-west-1», «us-isob-east-1») — не метка арендатора под доменом AWS:
+# «eu-west-1.signin.aws.amazon.com» — региональный вход в консоль, а не учётная запись, как
+# «123456789012.signin.aws.amazon.com». Только настоящие префиксы и направления регионов и только под доменами AWS
+# (_AWS): общий шаблон «xx-слово-1» принимал за регион имена ресурсов («my-bucket-1.s3.amazonaws.com»,
+# «hr-portal-2.sharepoint.com»), и они уходили открытыми.
+_REGION = re.compile(
+    r"(?:us|eu|ap|sa|ca|me|af|il|mx|cn)(?:-gov|-iso[a-z]?)?"
+    r"-(?:east|west|north|south|central|northeast|northwest|southeast|southwest)-\d{1,2}"
+)
+_AWS = ("amazonaws.com", "amazon.com", "amazonaws.com.cn")
 
 
 def _tenant(name: str, domain: str, listed: frozenset[str], generic: frozenset[str]) -> int:
@@ -256,7 +263,9 @@ def _tenant(name: str, domain: str, listed: frozenset[str], generic: frozenset[s
         if all(part in ("*", label) for part, label in zip(entry, labels[-size:])):
             if ".".join(labels[-size:]) not in exceptions and ".".join(labels[-size - 1:]) not in exceptions:
                 found = size
-    if found and (labels[-found - 1] in generic or _REGION.fullmatch(labels[-found - 1])):
+    if found and (labels[-found - 1] in generic or (_REGION.fullmatch(labels[-found - 1]) and (
+        ".".join(labels[-2:]) in _AWS or ".".join(labels[-3:]) in _AWS
+    ))):
         return 0
     return found
 

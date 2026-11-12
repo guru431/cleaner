@@ -312,6 +312,13 @@ TENANT_NAMES = (
     "romashka-topic.westeurope-1.eventgrid.azure.net",
     "romashka.westeurope.batch.azure.com",
     "romashka.services.ai.azure.com",
+    # Имя ресурса вида «xx-слово-1» — не регион AWS (регрессия 7f7b57c: такие имена уходили открытыми).
+    "my-bucket-1.s3.amazonaws.com",
+    "hr-files-2.s3.eu-west-1.amazonaws.com",
+    "kv-romashka-1.vault.azure.net",
+    "db-crm-1.database.windows.net",
+    "my-team-1.atlassian.net",
+    "hr-portal-2.sharepoint.com",
 )
 SERVICE_NAMES = (
     "admin.atlassian.com", "id.atlassian.com", "login.microsoftonline.com", "update.microsoft.com", "management.azure.com", "s3.amazonaws.com",
