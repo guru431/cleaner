@@ -220,6 +220,16 @@ def create_key(request: Request, form: dict[str, str] = Depends(get_form), viewe
     return RedirectResponse(f"/keys?issued={ticket}", status_code=303, headers={"cache-control": "no-store"})
 
 
+@router.post("/keys/revoke-all")
+def revoke_all_keys(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
+    """Все свои действующие ключи — насовсем (кнопка страниц сессий и пароля): смена пароля и «Выйти везде» их
+    не отзывают (раздел 6.1), а выпустить ключ мог и тот, кто завладел открытой сессией. Ключи других — нет и
+    у администратора."""
+    repo = repo_of(request)
+    repo.audit("api_keys_revoked_all", viewer.user.id, keys=repo.disable_api_keys(viewer.user.id))
+    return RedirectResponse("/keys", status_code=303)
+
+
 def _own_key(request: Request, key_id: str, viewer: Viewer) -> ApiKey:
     """Ключ владельца или любой — администратору; чужой и несуществующий неотличимы (404)."""
     key = repo_of(request).api_key(key_id)

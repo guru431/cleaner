@@ -93,6 +93,8 @@ class Throttle:
     """После пяти неудач подряд вход по логину откладывается: 1, 2, 4… секунды, не больше 5 минут.
 
     Неудачи и успехи входа записываются из пула потоков, поэтому записи меняются под замком.
+    Пароль входа идёт в счёт до проверки (attempt): пауза, прочитанная до Argon2, и неудача, записанная после,
+    пропускали к проверке все одновременные попытки разом.
     """
 
     FREE = 5
@@ -117,10 +119,32 @@ class Throttle:
 
     def failed(self, login: str) -> None:
         with self.lock:
-            count, _ = self.failures.pop(login.lower(), (0, None))
-            if len(self.failures) >= self._KEEP:
-                self._forget()
-            self.failures[login.lower()] = (count + 1, self.clock.now())
+            self._fail(login.lower())
+
+    def _fail(self, key: str) -> None:
+        count, _ = self.failures.pop(key, (0, None))
+        if len(self.failures) >= self._KEEP:
+            self._forget()
+        self.failures[key] = (count + 1, self.clock.now())
+
+    def attempt(self, login: str) -> float:
+        """Пауза логина; без паузы попытка сразу записывается неудачей — до проверки пароля. Верный пароль
+        снимает счёт (succeeded), непроверенный возвращает попытку (cancel). Одновременных проверок
+        одного логина поэтому не больше, чем последовательных: пять до первой паузы, затем по одной на паузу."""
+        with self.lock:
+            wait = self._wait(login.lower())
+            if not wait:
+                self._fail(login.lower())
+            return wait
+
+    def cancel(self, login: str) -> None:
+        """Попытка не состоялась (пароль не проверялся): одна неудача из счёта снимается."""
+        with self.lock:
+            count, last = self.failures.get(login.lower(), (0, None))
+            if count > 1:
+                self.failures[login.lower()] = (count - 1, last)
+            else:
+                self.failures.pop(login.lower(), None)
 
     def _forget(self) -> None:
         """Место под новый логин. Забываются записи без действующей паузы и меньше чем с пятью неудачами:

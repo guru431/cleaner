@@ -50,18 +50,19 @@ async def login(request: Request, form: dict[str, str] = Depends(_login_fields))
     try:
         password_ok = await auth.check_password(user.password_hash if user else None, str(form.get("password", "")))
     except auth.Busy:                   # пароль не проверялся: это не неудачная попытка
+        await run_in_threadpool(request.app.state.throttle.cancel, name)
         return _login_page(request, expected, 503, "Сервер занят проверкой других входов — попробуйте позже")
     return await run_in_threadpool(_logged_in, request, expected, name, user, password_ok)
 
 
 def _account(request: Request, name: str) -> tuple[float, User | None]:
-    """Пауза логина после неудач, а без паузы — его учётная запись."""
-    wait = request.app.state.throttle.wait(name)
+    """Пауза логина после неудач, а без паузы — попытка в счёт паузы (Throttle.attempt) и учётная запись."""
+    wait = request.app.state.throttle.attempt(name)
     return wait, None if wait else repo_of(request).user_by_login(name)
 
 
 def _logged_in(request: Request, expected: str, name: str, user: User | None, password_ok: bool) -> Response:
-    """Итог проверки: неудача идёт в счёт паузы и в журнал, успех открывает сессию.
+    """Итог проверки: неудача (уже в счёте паузы) идёт в журнал, успех снимает счёт и открывает сессию.
 
     user — снимок до проверки пароля: пока она шла, пароль могли сменить, а учётную запись — отключить. Сессия
     открывается, только если проверенный хэш всё ещё действует (create_session); нет — проверенный пароль
@@ -72,10 +73,10 @@ def _logged_in(request: Request, expected: str, name: str, user: User | None, pa
         not password_ok or user.disabled
         or not repo.create_session(auth.token_hash(token), user.id, csrf, user.password_hash)
     ):
-        throttle.failed(name)
         repo.audit("login_failed", user.id if user else None)
         return _login_page(request, expected, 401, "Неверный логин или пароль")
     throttle.succeeded(name)
+    _drop_expired(request)
     repo.audit("login", user.id)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
@@ -106,11 +107,21 @@ def _signed_out(path: str = "/login") -> Response:
     return response
 
 
+def _drop_expired(request: Request) -> None:
+    """Истёкшие сессии всех пользователей — при входе, на странице сессий и перед «Выйти везде»: иначе
+    брошенная сессия, которую браузер больше не пришлёт (get_viewer), жила бы в базе вечно."""
+    now = request.app.state.clock.now()
+    repo_of(request).delete_expired_sessions(
+        (now - IDLE).isoformat(timespec="seconds"), (now - MAX_AGE).isoformat(timespec="seconds"),
+    )
+
+
 # --- своя учётная запись: сессии и пароль ------------------------------------------------
 
 @router.get("/account/sessions")
 def sessions(request: Request, viewer: Viewer = Depends(get_viewer)) -> Response:
-    """Свои сессии: начало, последнее действие и когда истечёт. Адресов и браузеров сессия не хранит."""
+    """Свои действующие сессии: начало, последнее действие и когда истечёт. Адресов и браузеров сессия не хранит."""
+    _drop_expired(request)
     rows = [
         {
             "current": session.token_hash == viewer.session.token_hash, "created_at": session.created_at,
@@ -122,19 +133,26 @@ def sessions(request: Request, viewer: Viewer = Depends(get_viewer)) -> Response
         for session in repo_of(request).sessions(viewer.user.id)
     ]
     return page(request, "account_sessions.html", viewer, rows=rows, idle_hours=IDLE // timedelta(hours=1),
-                max_age_hours=MAX_AGE // timedelta(hours=1))
+                max_age_hours=MAX_AGE // timedelta(hours=1), active_keys=_active_keys(request, viewer))
+
+
+def _active_keys(request: Request, viewer: Viewer) -> int:
+    """Действующие ключи доступа: «Выйти везде» и смена пароля их не отзывают (спецификация 2026-10-28, 6.1)."""
+    return sum(not key.disabled for key in repo_of(request).api_keys(viewer.user.id))
 
 
 @router.post("/account/sessions/logout-all")
 def logout_all(request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
-    """Выйти на всех устройствах — и на этом тоже."""
+    """Выйти на всех устройствах — и на этом тоже. В событии — число действовавших сессий."""
+    _drop_expired(request)
     repo = repo_of(request)
     repo.audit("logout_all", viewer.user.id, sessions=repo.delete_sessions(viewer.user.id))
     return _signed_out()
 
 
 def _password_page(request: Request, viewer: Viewer, status_code: int = 200, error: str = "") -> Response:
-    return page(request, "account_password.html", viewer, status_code=status_code, error=error, min_password=auth.MIN_PASSWORD)
+    return page(request, "account_password.html", viewer, status_code=status_code, error=error, min_password=auth.MIN_PASSWORD,
+                active_keys=_active_keys(request, viewer))
 
 
 @router.get("/account/password")
@@ -148,26 +166,29 @@ def password_form(request: Request, viewer: Viewer = Depends(get_viewer)) -> Res
 async def change_own_password(
     request: Request, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer),
 ) -> Response:
-    login = viewer.user.login
-    wait = request.app.state.throttle.wait(login)
-    if wait:
-        return _password_page(request, viewer, 429, f"Слишком много попыток. Повторите через {math.ceil(wait)} с")
+    login, throttle = viewer.user.login, request.app.state.throttle
     new = str(form.get("password", ""))
+    # Страница читает базу (число ключей) — в пуле потоков, как и таблица неудач.
     if new != str(form.get("repeat", "")):
-        return _password_page(request, viewer, 400, "Новый пароль и повтор не совпадают")
+        return await run_in_threadpool(_password_page, request, viewer, 400, "Новый пароль и повтор не совпадают")
     if len(new) < auth.MIN_PASSWORD:
-        return _password_page(request, viewer, 400, f"Новый пароль короче {auth.MIN_PASSWORD} знаков")
+        return await run_in_threadpool(_password_page, request, viewer, 400, f"Новый пароль короче {auth.MIN_PASSWORD} знаков")
+    wait = await run_in_threadpool(throttle.attempt, login)          # в счёт паузы до проверки, как у входа
+    if wait:
+        return await run_in_threadpool(
+            _password_page, request, viewer, 429, f"Слишком много попыток. Повторите через {math.ceil(wait)} с",
+        )
     try:
         password_ok = await auth.check_password(viewer.user.password_hash, str(form.get("current", "")))
     except auth.Busy:
-        return _password_page(request, viewer, 503, "Сервер занят проверкой паролей — попробуйте позже")
+        await run_in_threadpool(throttle.cancel, login)
+        return await run_in_threadpool(_password_page, request, viewer, 503, "Сервер занят проверкой паролей — попробуйте позже")
     return await run_in_threadpool(_change_own_password, request, viewer, password_ok, new)
 
 
 def _change_own_password(request: Request, viewer: Viewer, password_ok: bool, new: str) -> Response:
     repo, throttle = repo_of(request), request.app.state.throttle
     if not password_ok:
-        throttle.failed(viewer.user.login)
         repo.audit("login_failed", viewer.user.id, stage="password_change")
         return _password_page(request, viewer, 400, "Текущий пароль неверен")
     throttle.succeeded(viewer.user.login)

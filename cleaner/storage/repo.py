@@ -336,6 +336,17 @@ class Repository:
             self.conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
             self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
 
+    def set_role(self, user_id: str, role: str) -> bool:
+        """Роль учётной записи; чаты, ключи и сессии остаются (права читаются при каждом запросе). Снять роль с
+        последнего активного администратора нельзя: проверка и запись — одним UPDATE, и два администратора,
+        снимающие роль друг с друга разом, не оставят службу без администратора. False — записи нет или она
+        последний активный администратор."""
+        return self._run(
+            "UPDATE users SET role = ? WHERE id = ? AND (? = 'admin' OR role != 'admin' OR disabled = 1 "
+            "OR EXISTS (SELECT 1 FROM users WHERE role = 'admin' AND disabled = 0 AND id != ?))",
+            role, user_id, role, user_id,
+        ) == 1
+
     def set_disabled(self, user_id: str, disabled: bool) -> None:
         with self.lock, transaction(self.conn):
             self.conn.execute("UPDATE users SET disabled = ? WHERE id = ?", (int(disabled), user_id))
@@ -389,6 +400,11 @@ class Repository:
     def delete_sessions(self, user_id: str) -> int:
         """«Выйти на всех устройствах»: все сессии пользователя; число закрытых."""
         return self._run("DELETE FROM sessions WHERE user_id = ?", user_id)
+
+    def delete_expired_sessions(self, seen_before: str, created_before: str) -> int:
+        """Истёкшие сессии всех пользователей — без запросов с seen_before или открытые до created_before
+        (простой и срок от входа, web/deps.py). Брошенную сессию браузер больше не пришлёт. Число удалённых."""
+        return self._run("DELETE FROM sessions WHERE last_seen_at < ? OR created_at < ?", seen_before, created_before)
 
     def touch_session(self, token_hash: str) -> None:
         self._run("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", self._now(), token_hash)
@@ -931,6 +947,10 @@ class Repository:
     def disable_api_key(self, key_id: str) -> bool:
         """Отзыв насовсем: включить отозванный ключ нельзя, выпускается новый."""
         return self._run("UPDATE api_keys SET disabled = 1 WHERE id = ?", key_id) == 1
+
+    def disable_api_keys(self, user_id: str) -> int:
+        """Отзыв всех действующих ключей пользователя; число отозванных."""
+        return self._run("UPDATE api_keys SET disabled = 1 WHERE user_id = ? AND disabled = 0", user_id)
 
     def touch_api_key(self, key_id: str) -> None:
         self._run("UPDATE api_keys SET last_used_at = ? WHERE id = ?", self._now(), key_id)

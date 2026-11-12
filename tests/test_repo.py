@@ -179,6 +179,19 @@ def test_session_opens_only_for_the_checked_password_of_an_enabled_account(repo)
     assert [repo.session(token) is not None for token in ("t0", "t1", "t2")] == [False, False, True]
 
 
+def test_role_of_the_last_active_admin_stays(repo):
+    """Идея «Смена роли…»: снять роль с последнего активного администратора нельзя, и когда есть отключённый. Проверка
+    и запись — одним UPDATE: два администратора, снимающие роль друг с друга разом, его не обойдут."""
+    boss = repo.create_user("boss", "hash", "admin")
+    anna = repo.create_user("anna", "hash", "admin")
+    repo.set_disabled(anna, True)
+    assert not repo.set_role(boss, "user") and repo.user(boss).role == "admin"
+    assert repo.set_role(anna, "user") and repo.set_role(anna, "admin")      # у отключённого — можно
+    repo.set_disabled(anna, False)
+    assert repo.set_role(boss, "user") and not repo.set_role(anna, "user")
+    assert not repo.set_role("нет", "admin")
+
+
 def test_backup_opens_with_the_same_key(tmp_path, repo, clock):
     user, chat = new_chat(repo, "Копия")
     repo.backup(tmp_path / "copy.db")

@@ -199,6 +199,29 @@ def test_users_are_created_given_new_passwords_and_disabled(boss, browser, repo)
     assert {"user_created", "password_changed", "user_disabled"} <= {e.event for e in repo.audit_events()}
 
 
+def test_admin_changes_a_role_but_not_his_own(boss, browser, repo):
+    """Идея «Смена роли учётной записи без потери её чатов»: роль меняется на месте, чаты остаются; снять роль
+    администратора с себя нельзя — и с единственным администратором, и при втором."""
+    other = browser()
+    petr = other.user("petr")
+    other.login("petr")
+    chat = other.chat("Свой чат")
+    me = repo.user_by_login("boss").id
+    assert boss.post(f"/settings/users/{me}/role", role="user").status_code == 400
+    assert other.get("/settings/users").status_code == 403
+    assert f'action="/settings/users/{petr}/role"' in boss.get("/settings/users").text
+    assert boss.post(f"/settings/users/{petr}/role", role="admin").headers["location"] == "/settings/users"
+    assert other.get("/settings/users").status_code == 200                   # роль действует сразу, без нового входа
+    refused = boss.post(f"/settings/users/{me}/role", role="user")
+    assert refused.status_code == 400 and "с себя" in refused.text
+    assert other.post(f"/settings/users/{petr}/role", role="owner").status_code == 400
+    assert other.post(f"/settings/users/{me}/role", role="user").status_code == 303
+    assert boss.get("/settings/users").status_code == 403
+    assert repo.user(me).role == "user" and repo.chat(chat) is not None
+    events = [(e.user_id, e.details) for e in repo.audit_events("user_role_changed")]
+    assert events == [(petr, {"target": me, "role": "user"}), (me, {"target": petr, "role": "admin"})]
+
+
 def test_disabled_account_is_deleted_with_all_its_chats(boss, browser, repo, app):
     """Идея «Удаление учётной записи вместе с её чатами»: только отключённая запись, с подтверждением логином; чаты —
     через ChatService.delete_chat (ключи чатов стёрты, журнал WAL усечён), в журнал — событие без данных."""
