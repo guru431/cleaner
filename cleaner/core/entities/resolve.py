@@ -35,6 +35,7 @@ _NAME = re.compile(r"[\w-]+(?:\.[\w-]+)*")
 # начала собирались бы квадратичное время.
 _ISSUED_NAME = re.compile(r"(host|sub|domain)-([0-9]{1,20})")
 _ENCODED_MAIL = re.compile(r"%40|%2b")      # в адресе, приведённом к нижнему регистру
+_TENANT_SEARCHED = 5        # знаков в метке арендатора, с которых она искома без цифр и дефиса (Resolver._part)
 
 
 @dataclass(frozen=True)
@@ -501,9 +502,18 @@ class Resolver:
         prefix = self._issue(entity, "sid", make)
         return entity, prefix + (f"-{rid}" if rid else "")
 
-    def _part(self, label: str, origin: str, leading: bool, standalone: bool = False) -> tuple[Entity, str]:
-        """Одна часть имени узла. Искомой становится только отдельная или «похожая на имя узла» часть."""
-        searchable = standalone or (leading and re.search(r"[\d-]", label) is not None)
+    def _part(
+        self, label: str, origin: str, leading: bool, standalone: bool = False, tenant: bool = False,
+    ) -> tuple[Entity, str]:
+        """Одна часть имени узла. Искомой становится только отдельная или «похожая на имя узла» часть. Метка арендатора
+        (tenant, 5.4) искома и без цифр и дефиса: имя учётной записи хранилища или сервера SQL («romashkabackup») стоит и
+        в «--account-name romashkabackup», «AccountName=romashkabackup;». Служебная часть меткой арендатора не бывает
+        (infra._tenant), а короче _TENANT_SEARCHED знаков метка — обычно слово или сокращение («test», «prod», «demo»,
+        «data»): искомой она скрывала бы его во всём чате."""
+        searchable = (
+            standalone or (leading and re.search(r"[\d-]", label) is not None)
+            or (tenant and len(label) >= _TENANT_SEARCHED)
+        )
         key = label if self.written else self.alias.get((T.HOST, normalize(label))) or label.lower()
         entity = self._entity(T.HOST, key, label, origin, searchable)
 
@@ -589,12 +599,13 @@ class Resolver:
         retyped = self._manual(registrable, T.DOMAIN) if registrable else None
         domain = retyped or (self._dns(registrable, origin) if registrable else None)
         fakes, owners, leading = [], [], not follows
-        for label in left:
+        tenant = len(left) - 1 if kept and whole else None      # метка арендатора — прямо слева от его суффикса
+        for position, label in enumerate(left):
             manual = self._manual(label, T.HOST)
             if manual is None and label.lower() in self.generic:
                 fakes.append(label)
                 continue
-            entity, fake = manual or self._part(label, origin, leading=leading)
+            entity, fake = manual or self._part(label, origin, leading=leading, tenant=position == tenant)
             leading = False         # первая — первая не служебная часть: у www.srv02.corp.contoso.ru это srv02
             owners.append((entity, manual is not None))
             fakes.append(fake)

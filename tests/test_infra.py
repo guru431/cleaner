@@ -404,6 +404,32 @@ def test_tenant_names_round_trip_in_any_writing():
     )
 
 
+@pytest.mark.parametrize("text", [
+    "Копия https://romashkabackup.blob.core.windows.net/x, az storage blob list --account-name romashkabackup",
+    "AccountName=romashkabackup;AccountKey=<SECRET>;EndpointSuffix=core.windows.net; хост romashkabackup.blob.core.windows.net",
+    "Сервер romashkasql.database.windows.net; sqlcmd -S romashkasql",
+])
+def test_tenant_label_without_digits_is_searched(text):
+    """Находка 12.11: часть имени становилась искомой, только если в ней цифра или дефис, а имена учётных записей хранилищ
+    Azure и серверов SQL обычно строчные буквы — и уходили открытыми рядом с именем, даже в той же строке. Метка
+    арендатора искома и без них."""
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    sanitized = sanitize(state, text, Settings()).sanitized
+    assert "romashka" not in sanitized
+    assert "EndpointSuffix=core.windows.net" in sanitized or "EndpointSuffix" not in text
+    assert restore(state, sanitized, Settings()).text == text
+
+
+def test_short_tenant_label_is_not_searched():
+    """Короткая метка арендатора («test», «prod», «demo») — обычно слово: искомой она не становится, иначе после
+    «test.blob.core.windows.net» скрывалось бы каждое «test» чата. Имя целиком скрывается."""
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    assert sanitize(state, "Хранилище test.blob.core.windows.net", Settings()).sanitized == (
+        "Хранилище host-1.blob.core.windows.net"
+    )
+    assert sanitize(state, "Запустите test и prod", Settings()).sanitized == "Запустите test и prod"
+
+
 def test_machine_account_and_share_names():
     result = found(r"Учётная запись SRV-APP01$ заблокирована, шара \\FS01\ADMIN$ и цена 100$")
     assert (T.HOST, "SRV-APP01") in result
