@@ -232,6 +232,7 @@ def _entries(view: ChatView) -> list[dict[str, object]]:
                 "ocr": len(item.meta.get("ocr_pages", [])),
                 "exposed": [", ".join(names.get(entity_id, ["?"])) for entity_id in item.exposed],
                 "html": render.highlight(item.sanitized or "", render.sanitized_marks(item, view.state, entry.leaks, blocked)),
+                "pickable": True, "excluded": item.excluded,
             })
         else:
             entries.append({
@@ -239,6 +240,9 @@ def _entries(view: ChatView) -> list[dict[str, object]]:
                 "status": item.status, "error": item.meta.get("error", ""), "model": item.meta.get("model", ""),
                 "provider": item.meta.get("provider", ""), "counters": entry.result.counters,
                 "html": render.highlight(entry.result.text, render.restored_marks(entry.result.segments)),
+                # Переключатель «не входит в запросы» — у ответа, который может стать ходом запроса (ChatService._turns).
+                "pickable": item.source != "local" and item.status in ("done", "partial") and bool(item.original)
+                and not item.meta.get("aborted"), "excluded": item.excluded,
             })
     return entries
 
