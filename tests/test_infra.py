@@ -8,7 +8,7 @@ from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities import hostmap
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import restore
-from cleaner.core.types import ChatState, DictEntry, Policy, Settings, default_policies
+from cleaner.core.types import ChatRule, ChatState, DictEntry, Policy, Settings, default_policies
 from cleaner.core.types import EntityType as T
 
 CTX = DetectContext(Settings())
@@ -424,6 +424,25 @@ def test_saas_tenants_get_own_labels_under_the_open_vendor_domain():
     sanitized = sanitize(state, text, Settings()).sanitized
     assert sanitized == "Портал host-1.sharepoint.com, личный host-2.sharepoint.com, партнёр host-3.sharepoint.com"
     assert not [entity for entity in state.entities.values() if entity.type is T.DOMAIN]
+    assert restore(state, sanitized, Settings()).text == text
+
+
+@pytest.mark.parametrize("rule, expected", [
+    ("romashka-sql", "Сервер <TERM_1>.database.windows.net"),
+    ("database", "Сервер <TERM_1>"),
+    ("windows.net", "Сервер <TERM_1>"),
+    ("database.windows.net", "Сервер <TERM_1>"),
+])
+def test_user_rule_on_a_tenant_name_part(rule, expected):
+    """Правило на метке арендатора — правило на целой части имени (5.7, шаг 4): часть получает его метку. Суффикс
+    арендатора подмены не получает, и правило на нём или его части имя поглощает, как правило не на целой части обычного
+    имени. Раньше части сверялись с разбиением без арендатора: «database» и «windows.net» считались целыми частями, имя не
+    поглощалось, а подмена оставляла суффикс как есть — значение правила уходило открытым."""
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    state.rules.append(ChatRule("mask", rule, T.TERM))
+    text = "Сервер romashka-sql.database.windows.net"
+    sanitized = sanitize(state, text, Settings()).sanitized
+    assert sanitized == expected
     assert restore(state, sanitized, Settings()).text == text
 
 
