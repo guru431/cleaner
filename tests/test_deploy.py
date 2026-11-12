@@ -256,12 +256,21 @@ def test_installer_refuses_a_profile_address_the_config_and_certificate_do_not_c
     assert text.index('FIRST_INSTALL=1') < checks < text.index("useradd --system")
     assert checks < text.index('install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"') < text.index("trap 'rollback")
     san = text[text.index("-ext subjectAltName"):text.index("# --- учётная запись")]
-    assert '*",IPAddress:${HOST_IP},"*' in san and '*",DNS:${CERT_NAME},"*' in san
+    # Ревью 12.11.2026: проверка HTTPS идёт по адресу; отказ — только при чужом IP, другое имя — предупреждение,
+    # иначе обновление требовало бы перевыпуска (новый отпечаток у всех клиентов шлюза).
+    ip_check, dns_check = san.index('*",IPAddress:${HOST_IP},"*'), san.index('*",DNS:${CERT_NAME},"*')
+    assert san[ip_check:dns_check].count("|| fail ") == 1
+    dns = san[dns_check:san.index("\nfi\n", dns_check)]
+    assert '|| log "ВНИМАНИЕ:' in dns and "|| fail" not in dns and "${REISSUE_HINT}" in dns
+    # Ревью 12.11.2026: до ловушки сбой openssl в $(…) под set -e завершал установщик без сообщения.
+    assert "| tr -d ' ') || true" in san
     assert text.index("-ext subjectAltName") < text.index('mv "$TLS/cert.pem" "$TLS/cert.pem.prev-$STAMP"')
-    assert 'REISSUE_HINT="sudo CLEANER_REISSUE_CERT=1 bash ' in text
+    # Профиль, выбранный CLEANER_HOST, подсказка называет: без неё перевыпуск искал бы профиль по hostname.
+    assert 'REISSUE_HINT="sudo ${CLEANER_HOST:+CLEANER_HOST=$HOST_NAME }CLEANER_REISSUE_CERT=1 bash ' in text
     docs = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
     section = docs[docs.index("## Смена адреса или имени"):docs.index("## Проверки локального периметра")]
     assert "sudo CLEANER_REISSUE_CERT=1 bash" in section and "sudoedit /etc/cleaner/cleaner.toml" in section
+    assert "только предупреждение" in section
 
 
 def test_server_dependencies_take_torch_without_cuda():
@@ -284,15 +293,37 @@ def test_installer_stops_the_service_before_it_replaces_the_code_and_rollback_st
     assert "$STOPPED -eq 1" in rollback
 
 
-def test_installer_rollback_returns_the_profile_and_the_egress_files_with_the_code():
-    """Находка 12.11.2026: откат возвращал код, окружение и юнит, а новые host.env, сценарий таблицы и юниты оставались;
-    сломанный новый сценарий не дал бы стартовать и прежней службе. Копия снимается до первой записи host.env."""
+def test_failed_first_install_leaves_the_next_run_a_first_install():
+    """Ревью 12.11.2026: откат первой установки снимал сценарий таблицы, но оставлял код и юнит — следующий прогон
+    считался обновлением, и его откат перезапускал по кругу службу без сценария из ExecStartPre."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    assert '[[ -d "$APP/cleaner" || -f "$UNIT" ]] && FIRST_INSTALL=0' in text.splitlines()
+    rollback = text[text.index("rollback() {"):text.index("trap 'rollback")]
+    first = rollback[rollback.index("if [[ $FIRST_INSTALL -eq 1 ]]; then"):rollback.index("elif [[ $swapped -eq 1")]
+    disable = first.index("systemctl disable --now cleaner.service")
+    assert disable < first.index('rm -rf "$APP/cleaner"') and disable < first.index('rm -f "$UNIT"')
+    assert first.index('rm -f "$UNIT"') < first.index("systemctl daemon-reload")
+    # База и ключ остаются: ветка «оба есть» следующего прогона обходится без init.
+    assert "$ENVF" not in first and "cleaner.db" not in first
+
+
+def test_installer_rollback_returns_the_egress_files_with_the_code_and_keeps_the_checked_profile():
+    """Находка 12.11.2026: откат возвращал код, окружение и юнит, а новые сценарий таблицы и юниты оставались;
+    сломанный новый сценарий не дал бы стартовать и прежней службе. Копия снимается до первой записи этих файлов.
+    Ревью 12.11.2026: host.env не возвращается — он сверен с host в cleaner.toml, а прежний разошёлся бы с ним."""
     text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
     aux = text[text.index("AUX_FILES=("):text.index("AUX_PREV=")]
-    for name in ("$HOST_ENV", "$CHECK", "cleaner-check-ipv6.py", "$EGRESS", "$EGRESS_UNIT", "$EGRESS_WATCH.service",
+    for name in ("$CHECK", "cleaner-check-ipv6.py", "$EGRESS", "$EGRESS_UNIT", "$EGRESS_WATCH.service",
                  "$EGRESS_WATCH.timer"):
         assert name in aux, name
-    assert text.index("AUX_PREV=$(mktemp -d)") < text.index('install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"')
+    assert "$HOST_ENV" not in aux
+    targets = {'"$CHECK"', "/usr/local/sbin/cleaner-check-ipv6.py", '"$EGRESS"', '"$EGRESS_UNIT"',
+               '"$EGRESS_WATCH.service"', '"$EGRESS_WATCH.timer"'}
+    writes = [line for line in text.splitlines() if line.startswith("install ") and line.split()[-1] in targets]
+    assert len(writes) == len(targets)
+    assert all(text.index("AUX_PREV=$(mktemp -d)") < text.index(line) for line in writes)
+    docs = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    assert "`host.env` остаётся новым" in docs
     rollback = text[text.index("rollback() {"):text.index("trap 'rollback")]
     assert "if restore_aux; then" in rollback
     assert rollback.index("restore_aux") < rollback.index("systemctl daemon-reload") < rollback.index(
@@ -302,8 +333,12 @@ def test_installer_rollback_returns_the_profile_and_the_egress_files_with_the_co
 def test_installer_names_ufw_rules_of_nets_no_longer_in_the_profile():
     """Находка 12.11.2026: правила для сетей, убранных из CLIENTS, оставались молча — установщик их называет."""
     text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
-    stale = text[text.index('[[ " $CLIENTS " == *" $net "* ]] && continue'):text.index("отпечаток сертификата")]
+    stale = text[text.index('[[ "${net%/32}" == "${client%/32}" ]] && continue 2'):text.index("отпечаток сертификата")]
     assert "sudo ufw delete <номер>" in stale and '<<< "$RULES"' in stale
+    # Ревью 12.11.2026: сеть бралась третьим полем — «IN», «OUT» вместо адреса; правила без /tcp и (v6) пропускались,
+    # а одиночный адрес, который ufw пишет без /32, считался чужим.
+    assert '$1 == port || $1 == port "/tcp"' in stale
+    assert '$(i + 1) == "OUT"' in stale and '$(i + 1) == "IN"' in stale and '" (v6)"' in stale
 
 
 def test_installer_stops_a_service_waiting_for_its_automatic_restart():
@@ -314,6 +349,8 @@ def test_installer_stops_a_service_waiting_for_its_automatic_restart():
     assert "is-active --quiet" not in stop
     assert '"$state" != "inactive" && "$state" != "failed"' in stop
     assert "STOPPED=1" in stop and "systemctl stop cleaner.service" in stop
+    # Ревью 12.11.2026: ловушка ERR функциями без set -E не наследуется — сбой stop выходил без отката.
+    assert 'systemctl stop cleaner.service || rollback "' in stop
 
 
 def test_installer_issues_a_certificate_claude_code_trusts():
@@ -325,6 +362,15 @@ def test_installer_issues_a_certificate_claude_code_trusts():
     assert '-addext "keyUsage=digitalSignature,keyEncipherment,keyCertSign"' in command
     reissue = text[text.index("CLEANER_REISSUE_CERT"):text.index("openssl req -x509")]
     assert 'mv "$TLS/cert.pem" "$TLS/cert.pem.prev-$STAMP"' in reissue and 'mv "$TLS/key.pem" "$TLS/key.pem.prev-$STAMP"' in reissue
+
+
+def test_installer_returns_the_previous_certificate_when_the_reissue_fails():
+    """Ревью 12.11.2026: CLEANER_REISSUE_CERT=1 переименовывал cert.pem и key.pem, и при сбое openssl служба оставалась
+    без сертификата. Прежний возвращается до выхода с ошибкой."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    failed = text[text.index('echo "$out" >&2'):text.index('fail "сертификат не выпущен')]
+    assert 'mv -f "$TLS/cert.pem.prev-$STAMP" "$TLS/cert.pem"' in failed
+    assert 'mv -f "$TLS/key.pem.prev-$STAMP" "$TLS/key.pem"' in failed
 
 
 def test_installer_issues_a_certificate_codex_trusts():
@@ -371,7 +417,9 @@ def test_check_looks_for_the_gateway_key_in_the_running_service_not_only_in_the_
     службу. Проверка смотрит окружение процесса, не печатая значения; установщик и инструкция велят перезапустить."""
     text = (DEPLOY / "check-cleaner.sh").read_text(encoding="utf-8")
     section = text[text.index('echo "8. '):text.index("models verify")]
-    assert 'tr \'\\0\' \'\\n\' < "/proc/$pid/environ" | grep -q \'^CLEANER_GATEWAY_KEY=..*\'' in section
+    # Ревью 12.11.2026: «tr … | grep -q» под pipefail ложно проваливался на окружении больше 64 КБ (SIGPIPE у tr).
+    assert 'grep -qz \'^CLEANER_GATEWAY_KEY=.\' "/proc/$pid/environ"' in section
+    assert "| grep" not in section[section.index("/proc/$pid/environ"):section.index("перезапустите службу")]
     assert "перезапустите службу" in section
     assert not re.search(r"echo[^\n]*environ|cat [^\n]*environ", section)
     hint = next(line for line in (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8").splitlines()

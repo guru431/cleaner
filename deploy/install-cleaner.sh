@@ -15,8 +15,8 @@
 # с клавиатуры (ssh -t).
 #
 # Откат: если после выкатки самопроверка не прошла или служба не ответила по HTTPS,
-# возвращаются прежние код, окружение, юнит, профиль host.env, сценарии проверки и границ выхода наружу
-# с их юнитами. Копия базы живёт только до ответа службы.
+# возвращаются прежние код, окружение, юнит, сценарии проверки и границ выхода наружу с их юнитами.
+# Профиль host.env остаётся новым: он сверен с host в cleaner.toml и с сертификатом. Копия базы живёт только до ответа службы.
 # Правило ufw ставится под отложенным откатом ufw-failsafe, который установщик взводит сам;
 # снять страховку — после проверки НОВЫМ SSH-подключением.
 set -euo pipefail
@@ -87,7 +87,7 @@ FIRST_INSTALL=1
 # --- адрес и имя: настройки и сертификат создаются один раз и должны совпадать с профилем ---------
 # Иначе проверка HTTPS по новому адресу получила бы «код 000» и откатила код, а новый host.env остался бы.
 # Сверка — до любых изменений, host.env записывается после неё.
-REISSUE_HINT="sudo CLEANER_REISSUE_CERT=1 bash $SRC/deploy/install-cleaner.sh $SRC (переменная — после sudo: sudo сбрасывает окружение)"
+REISSUE_HINT="sudo ${CLEANER_HOST:+CLEANER_HOST=$HOST_NAME }CLEANER_REISSUE_CERT=1 bash $SRC/deploy/install-cleaner.sh $SRC (переменная — после sudo: sudo сбрасывает окружение)"
 if [[ -f "$CONF" ]]; then
     conf_host=$(sed -n 's/^host *= *"\([^"]*\)".*/\1/p' "$CONF" | head -n 1)
     [[ "$conf_host" == "$HOST_IP" ]] || fail "в $CONF host = \"${conf_host}\", а в профиле HOST_IP=${HOST_IP}. \
@@ -95,16 +95,24 @@ if [[ -f "$CONF" ]]; then
 адрес не менялся — верните HOST_IP в профиле"
 fi
 if [[ "${CLEANER_REISSUE_CERT:-0}" != "1" && -s "$TLS/cert.pem" ]]; then
-    san=$(openssl x509 -in "$TLS/cert.pem" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d ' ')
-    [[ ",${san}," == *",IPAddress:${HOST_IP},"* && ",${san}," == *",DNS:${CERT_NAME},"* ]] \
-        || fail "сертификат $TLS/cert.pem выпущен для ${san:-неизвестно}, а в профиле HOST_IP=${HOST_IP}, CERT_NAME=${CERT_NAME}. \
+    # || true: до ловушки сбой openssl под set -e завершил бы установщик молча, без сообщения ниже.
+    san=$(openssl x509 -in "$TLS/cert.pem" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d ' ') || true
+    [[ ",${san}," == *",IPAddress:${HOST_IP},"* ]] \
+        || fail "сертификат $TLS/cert.pem выпущен для ${san:-неизвестно}, а в профиле HOST_IP=${HOST_IP}. \
 Выпустите его заново: ${REISSUE_HINT}"
+    # Имя — только предупреждение: проверка HTTPS установщика идёт по адресу, а сертификат, выпущенный раньше
+    # на другое имя, пришлось бы перевыпустить ради обновления — с новым отпечатком у всех клиентов шлюза.
+    [[ ",${san}," == *",DNS:${CERT_NAME},"* ]] \
+        || log "ВНИМАНИЕ: сертификат $TLS/cert.pem выпущен для ${san}, а в профиле CERT_NAME=${CERT_NAME}: \
+по имени ${CERT_NAME} клиенты его не примут. Если имя нужно, выпустите сертификат заново: ${REISSUE_HINT}"
 fi
 
 # --- вспомогательные файлы: откат возвращает их вместе с кодом ----------------------
-# Иначе после отката при прежнем коде остались бы новые host.env и сценарий таблицы, а сломанный новый сценарий
-# не дал бы стартовать и прежней службе (ExecStartPre её юнита). Копия — до первой записи (host.env ниже).
-AUX_FILES=("$HOST_ENV" "$CHECK" /usr/local/sbin/cleaner-check-ipv6.py "$EGRESS" "$EGRESS_UNIT"
+# Иначе после отката при прежнем коде остался бы новый сценарий таблицы, а сломанный новый сценарий
+# не дал бы стартовать и прежней службе (ExecStartPre её юнита). Копия — до первой записи (после ловушки отката).
+# host.env не возвращается: сверка выше гарантирует, что он совпадает с host в cleaner.toml, а прежний
+# профиль разошёлся бы с адресом, который слушает служба, и check-cleaner.sh проверял бы не тот адрес.
+AUX_FILES=("$CHECK" /usr/local/sbin/cleaner-check-ipv6.py "$EGRESS" "$EGRESS_UNIT"
            "$EGRESS_WATCH.service" "$EGRESS_WATCH.timer")
 AUX_PREV=$(mktemp -d)
 trap 'rm -rf "$AUX_PREV"' EXIT
@@ -159,6 +167,11 @@ if [[ ! -s "$TLS/cert.pem" || ! -s "$TLS/key.pem" ]]; then
             -addext "extendedKeyUsage=serverAuth" 2>&1
     ); then
         echo "$out" >&2
+        if [[ -e "$TLS/cert.pem.prev-$STAMP" ]]; then      # перевыпуск: прежний сертификат — на место
+            mv -f "$TLS/cert.pem.prev-$STAMP" "$TLS/cert.pem"
+            mv -f "$TLS/key.pem.prev-$STAMP" "$TLS/key.pem"
+            log "прежний сертификат возвращён на место"
+        fi
         fail "сертификат не выпущен — причина в выводе openssl выше"
     fi
     chown root:cleaner "$TLS/key.pem" "$TLS/cert.pem"
@@ -183,7 +196,8 @@ stop_service() {
     state=$(systemctl is-active cleaner.service 2>/dev/null || true)
     if [[ $STOPPED -eq 0 && -n "$state" && "$state" != "inactive" && "$state" != "failed" ]]; then
         STOPPED=1
-        systemctl stop cleaner.service
+        # Ловушка ERR внутри функций без set -E не срабатывает: set -e вышел бы без отката.
+        systemctl stop cleaner.service || rollback "служба не остановилась"
         log "служба остановлена до замены файлов"
     fi
 }
@@ -214,7 +228,7 @@ rollback() {
     if [[ -n "$PREV_CODE" ]]; then rm -rf "$APP/cleaner"; mv "$PREV_CODE" "$APP/cleaner"; swapped=1; fi
     if [[ -n "$PREV_VENV" ]]; then rm -rf "$APP/.venv"; mv "$PREV_VENV" "$APP/.venv"; swapped=1; fi
     if [[ -n "$PREV_UNIT" ]]; then cp -a "$PREV_UNIT" "$UNIT"; swapped=1; fi
-    if restore_aux; then aux=1; log "профиль, сценарии и юниты границ выхода наружу возвращены"; fi
+    if restore_aux; then aux=1; log "сценарии и юниты границ выхода наружу возвращены"; fi
     rm -rf "$APP/.venv.new" "$APP/cleaner.new"
     # Новая версия могла успеть поднять схему базы при старте: прежний код такую базу не откроет.
     if [[ -n "$DB_BACKUP" && "$(schema_version 2>/dev/null || echo '?')" != "$SCHEMA_BEFORE" ]]; then
@@ -230,7 +244,12 @@ rollback() {
     fi
     if [[ $FIRST_INSTALL -eq 1 ]]; then
         systemctl disable --now cleaner.service >/dev/null 2>&1 || true
-        log "первая установка не удалась: служба остановлена, ключ и база не тронуты"
+        # Код и юнит снимаются, чтобы следующий прогон снова был первой установкой: иначе он считался бы обновлением,
+        # и его откат перезапускал бы службу, чей ExecStartPre ссылается на уже снятый сценарий таблицы.
+        rm -rf "$APP/cleaner"
+        rm -f "$UNIT"
+        systemctl daemon-reload || true
+        log "первая установка не удалась: служба остановлена, код и юнит сняты, ключ и база не тронуты"
     elif [[ $swapped -eq 1 || $STOPPED -eq 1 ]]; then
         systemctl restart cleaner.service || true
         log "прежняя версия возвращена"
@@ -391,12 +410,20 @@ else
     log "Если что-то пошло не так — подождите 10 минут, ufw выключится сам."
 fi
 # Правило для сети, которой больше нет в CLIENTS, установщик не снимает — его могли поставить и вручную, — а называет:
-# check-cleaner.sh считает лишнее правило провалом.
+# check-cleaner.sh считает лишнее правило провалом. Сеть — поле после ALLOW (после ALLOW IN); ALLOW OUT и ALLOW FWD —
+# не входящие к службе. Правила без протокола тоже открывают порт; ufw пишет адрес без /32, правила IPv6 — с «(v6)».
 while read -r net; do
-    [[ " $CLIENTS " == *" $net "* ]] && continue
+    for client in $CLIENTS; do
+        [[ "${net%/32}" == "${client%/32}" ]] && continue 2
+    done
     log "ВНИМАНИЕ: порт ${PORT} открыт и для ${net}, а в CLIENTS профиля её нет. Если это больше не клиент — \
 найдите номер правила (sudo ufw status numbered) и удалите его: sudo ufw delete <номер>"
-done < <(grep -E "^${PORT}/tcp +ALLOW +" <<< "$RULES" | awk '{print $3}')
+done < <(awk -v port="$PORT" '$1 == port || $1 == port "/tcp" {
+    for (i = 2; i < NF && $i != "ALLOW"; i++) ;
+    if ($i != "ALLOW" || $(i + 1) == "OUT" || $(i + 1) == "FWD") next
+    i += ($(i + 1) == "IN") ? 2 : 1
+    print $i ($(i + 1) == "(v6)" ? " (v6)" : "")
+}' <<< "$RULES")
 
 log "отпечаток сертификата — сверить в браузере при первом входе:"
 openssl x509 -in "$TLS/cert.pem" -noout -fingerprint -sha256
