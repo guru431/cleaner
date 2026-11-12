@@ -142,8 +142,9 @@ _SHAPE_NAME = re.compile(r"[A-Za-z_$][\w.$-]{0,63}")
 
 
 def _shape(unit: walk.Unit) -> str:
-    """Форма незнакомого поля или блока (8.3) для квитанции: путь в теле с [] вместо номеров и значение type. Имя, не
-    похожее на имя поля протокола (ключ — значение пользователя), — «?»."""
+    """Форма незнакомого поля или блока (8.3) для квитанции: путь в теле с [] вместо номеров и значение type (у поля
+    внутри блока известного вида — type блока). Имя, не похожее на имя поля протокола (ключ — значение пользователя),
+    — «?»."""
     path = "".join(
         "[]" if isinstance(step, int) else ("." if i else "") + (step if _SHAPE_NAME.fullmatch(step) else "?")
         for i, step in enumerate(unit.path)
@@ -644,7 +645,9 @@ class AgentService:
         result.out, result.state = out, _snapshot(state)
         if call.key.hold_secrets:
             result.trusted = _trusted_text(proto, body, instruction)
-        result.unfamiliar = sorted({_shape(unit) for unit in units if unit.kind == "other"})
+        result.unfamiliar = sorted({_shape(unit) for unit in units if unit.kind == "other"} | {
+            _shape(replace(unit, path=(*unit.path, *extra))) for unit in units for extra in walk.extra_paths(unit)
+        })
         result.model_blocks = len(groups["out"])
         result.model_fresh = sum(1 for direction, _ in fresh if direction == "out")
         held = {entry.digest for entry in entries if entry.withheld}

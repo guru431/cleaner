@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from cleaner.core.agent import ledger, walk
 from cleaner.core.agent.stream import DeltaRestorer, RestorationBudget, map_strings, usage_numbers
 from cleaner.core.agent.walk import (
-    OTHER_KEYS, SCHEMA_KEYS, Unit, bare, parameter_strings, parsed_arguments, strings, text_block,
+    OTHER_KEYS, SCHEMA_KEYS, Unit, bare, extra_fields, known_fields, parameter_strings, parsed_arguments, strings,
+    text_block,
 )
 from cleaner.core.types import ChatState, Settings
 
@@ -177,21 +178,21 @@ def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
     """Новый узел с очищенным текстом в виде запроса: аргументы вызова — снова строкой JSON."""
     node = unit.node
     if unit.kind == "text":
-        return dict(node, text=clean(node["text"]))
+        return dict(extra_fields(unit.kind, node, clean, _ITEM_KEYS), text=clean(node["text"]))
     if unit.kind == "tool_result":
         output = node.get("output")
         if isinstance(output, str):
-            return dict(node, output=clean(output))
+            return dict(extra_fields(unit.kind, node, clean, _ITEM_KEYS), output=clean(output))
         if isinstance(output, list):
-            return dict(node, output=[_result_part(part, clean) for part in output])
+            return dict(extra_fields(unit.kind, node, clean, _ITEM_KEYS), output=[_result_part(part, clean) for part in output])
         return strings(node, clean, _ITEM_KEYS)
     if unit.kind == "tool_use":
         if "arguments" in node:
             arguments = node["arguments"]
             cleaned = clean(arguments) if isinstance(arguments, str) else json.dumps(strings(arguments, clean, frozenset()), ensure_ascii=False)
-            return dict(node, arguments=cleaned)
+            return dict(extra_fields(unit.kind, node, clean, _ITEM_KEYS), arguments=cleaned)
         if isinstance(node.get("input"), str):
-            return dict(node, input=clean(node["input"]))
+            return dict(extra_fields(unit.kind, node, clean, _ITEM_KEYS), input=clean(node["input"]))
         return strings(node, clean, _ITEM_KEYS)
     if unit.kind == "tool_def" and isinstance(node, dict):
         return _tool_def(node, clean)
@@ -214,13 +215,14 @@ def placeholder(unit: Unit, reason: str) -> object:
     if unit.kind == "reasoning":
         return [{"type": "summary_text", "text": text}]
     if unit.kind == "tool_result":
-        return dict(node, output=text)
+        return dict(known_fields(unit.kind, node), output=text)
     if unit.kind == "tool_use":
+        call = known_fields(unit.kind, node)
         if "arguments" in node:
-            return dict(node, arguments=json.dumps({"cleaner": text}, ensure_ascii=False))
+            return dict(call, arguments=json.dumps({"cleaner": text}, ensure_ascii=False))
         if "input" in node:
-            return dict(node, input=text)
-        return dict(node, action={"type": "exec", "command": ["echo", text]})
+            return dict(call, input=text)
+        return dict(call, action={"type": "exec", "command": ["echo", text]})
     if unit.kind == "tool_def":
         return {**node, "description": text, **({"parameters": {"type": "object"}} if "parameters" in node else {}),
                 **({"tools": []} if "tools" in node else {})}
