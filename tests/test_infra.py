@@ -298,6 +298,8 @@ SERVICE_NAMES = (
     "registry-1.docker.io", "lambda.us-east-1.amazonaws.com", "s3.eu-west-1.amazonaws.com",
     "dkr.ecr.eu-west-1.amazonaws.com", "code.visualstudio.com", "app.vssps.visualstudio.com", "login.windows.net",
     "blob.core.windows.net", "database.windows.net", "vault.azure.net",
+    # Публичные реестры пакетов и CDN — того же рода, что pypi.org и docker.io; в частном разделе их доменов нет.
+    "files.pythonhosted.org", "registry.npmjs.org", "ghcr.io", "aka.ms", "cdn.jsdelivr.net",
 )
 
 
