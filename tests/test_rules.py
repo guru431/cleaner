@@ -461,6 +461,42 @@ def test_numbers_with_non_breaking_spaces_and_typographic_dashes(text, type_, va
     assert (type_, value) in found(text)
 
 
+@pytest.mark.parametrize("text, type_, value", [
+    ("Оплата картой 4111 1111 1111 1111—основная", T.CARD, "4111 1111 1111 1111"),
+    ("карта—4111 1111 1111 1111", T.CARD, "4111 1111 1111 1111"),
+    ("Номер карты:―4111 1111 1111 1111", T.CARD, "4111 1111 1111 1111"),
+    ("карта 4111 1111 1111 1111− списано", T.CARD, "4111 1111 1111 1111"),
+    ("карта–4111 1111 1111 1111", T.CARD, "4111 1111 1111 1111"),
+    ("паспорт 4510 123456—выдан ОВД", T.PASSPORT, "4510 123456"),
+    ("паспорт—4510 123456", T.PASSPORT, "4510 123456"),
+    ("загранпаспорт—75 1234567", T.PASSPORT, "75 1234567"),
+    ("водительское удостоверение—77 АА 123456", T.PASSPORT, "77 АА 123456"),
+    ("СНИЛС—112-233-445 95", T.SNILS, "112-233-445 95"),
+    ("карта 4111 — 1111 — 1111 — 1111", T.CARD, "4111 — 1111 — 1111 — 1111"),
+    ("карта 4111 — 1111 — 1111 — 1111", T.CARD,
+     "4111 — 1111 — 1111 — 1111"),
+], ids=["card-em-dash-after", "card-em-dash-before", "card-horizontal-bar", "card-minus-after", "card-en-dash-before",
+        "passport-em-dash-after", "passport-em-dash-before", "foreign-passport-em-dash", "license-em-dash",
+        "snils-em-dash", "card-spaced-em-dash", "card-thin-spaced-em-dash"])
+def test_dash_next_to_a_number_does_not_hide_it(text, type_, value):
+    """FINDINGS «Слой 1: длинное тире вплотную к номеру прячет номер от поиска»: тире — разделитель, только когда по обе
+    стороны цифры; на краю номера оно не делает номер частью слова."""
+    assert (type_, value) in found(text)
+
+
+def test_dash_next_to_a_number_is_masked_by_the_pipeline(state, settings):
+    """Та же находка: номер с тире вплотную не уходит открытым."""
+    text = "Оплата картой 4111 1111 1111 1111—основная, паспорт—4510 123456, СНИЛС—112-233-445 95"
+    result = sanitize(state, text, settings)
+    assert "4111" not in result.sanitized and "123456" not in result.sanitized and "445" not in result.sanitized
+    assert restore(state, result.sanitized, settings).text == text
+
+
+def test_ascii_hyphen_still_joins_a_number_to_an_identifier():
+    """Дефис ASCII по-прежнему отсекает номер внутри обозначения: «ABC-4111…» — не карта."""
+    assert T.CARD not in types("артикул ABC-4111111111111111")
+
+
 @pytest.mark.parametrize("text, phone", [
     ("тел. +7 916 123\u201145\u201167", "+7 916 123\u201145\u201167"),
     ("тел. +7 (916) 123–45–67", "+7 (916) 123–45–67"),

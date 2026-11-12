@@ -55,12 +55,15 @@ _IPV4_DOMAIN = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 # Пробелы и тире между группами цифр: все пробелы категории Zs — неразрывные и узкие (Word, Outlook), тонкая шпация
 # (HTML «&thinsp;», копия с веб-страницы), шпации U+2000–U+200A, U+205F, U+3000, — типографские дефисы, тире и знак
 # минуса. Номера ищутся в копии текста той же длины, где эти знаки заменены пробелом и «-»: позиции находок те же,
-# значение берётся из оригинала.
+# значение берётся из оригинала. Тире становится «-», только когда по обе стороны цифры (между ними и тире — пробелы):
+# «4111—1111», «4111 — 1111». Иначе это пробел: «4111 1111 1111 1111—основная», «карта—4111 …» — после «-» номер
+# считался бы частью слова и уходил открытым. Дефис ASCII не меняется: «ABC-1234…» — номер внутри обозначения.
 # translate на длинном тексте не из ASCII — около 0,1 с, поэтому только когда такие знаки в нём есть.
 _SPACES = "\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u202f\u205f\u3000"
 _DASHES = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"
-_PLAIN = str.maketrans({**dict.fromkeys(_SPACES, " "), **dict.fromkeys(_DASHES, "-")})
+_PLAIN = str.maketrans({**dict.fromkeys(_SPACES, " "), **dict.fromkeys(_DASHES, " ")})
 _TYPOGRAPHIC = re.compile(f"[{_SPACES}{_DASHES}]")
+_DASH_BETWEEN_DIGITS = re.compile(f"(?<=\\d)([ {_SPACES}]*)[{_DASHES}](?=[ {_SPACES}]*\\d)")
 # +7 или 8 и ровно десять цифр с любыми разделителями в одной строке: «8 (4852) 12-34-56», «+7 916 1234567», «8.916.123.45.67».
 # Перевод строки телефон не переходит: «8» в конце строки и число на следующей — разные значения. «+» сам отделяет номер:
 # перед ним мешают только цифра и второй «+», буква — нет («тел+7…», конец пароля «Abc+7 916 …» — иначе десять цифр после
@@ -389,7 +392,8 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         if login and login.lower() not in skip:
             add(m.start("login"), m.start("login") + len(login), EntityType.ACCOUNT)
     if _TYPOGRAPHIC.search(text):
-        text = text.translate(_PLAIN)       # дальше — номера: та же длина, позиции те же (_PLAIN)
+        # дальше — номера: та же длина, позиции те же (_PLAIN)
+        text = _DASH_BETWEEN_DIGITS.sub(r"\1-", text).translate(_PLAIN)
     for pattern in (_PHONE_RU, _PHONE_INTL):
         for m in pattern.finditer(text):
             if pattern is _PHONE_RU and not _phone_groups(m.group()):

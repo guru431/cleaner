@@ -194,8 +194,10 @@ def test_replacement_and_other_addresses_are_not_leaks(state, settings):
     ("ИНН 7707083893", "ИНН 77 07 08 38 93", "77 07 08 38 93"),
     ("паспорт 4508 123456", "паспорт 4508　123456", "4508　123456"),
     ("ИНН 7707083893", "ИНН 77−07−08−38−93", "77−07−08−38−93"),
+    ("паспорт 4508 123456", "паспорт—4508 123456—выдан", "4508 123456"),
+    ("карта 4111 1111 1111 1111", "карта—4111 1111 1111 1111− списано", "4111 1111 1111 1111"),
 ], ids=["csv", "short_phone", "trunk_prefix", "plus_seven", "inn_spaced", "passport_joined", "inside_chain",
-        "inn_en_quad", "passport_ideographic_space", "inn_minus_sign"])
+        "inn_en_quad", "passport_ideographic_space", "inn_minus_sign", "passport_em_dash_edges", "card_dash_edges"])
 def test_known_number_is_found_in_another_notation(state, settings, written, other, found):
     """FINDINGS «Известный чату номер в другой записи не скрывается и не ловится проверкой утечек»: ключ цифровой
     сущности — её цифры, у телефона — и последние десять; проверка утечек сравнивает по ним, как адрес IP по адресу."""
