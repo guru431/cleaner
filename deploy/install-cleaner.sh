@@ -189,7 +189,8 @@ stop_service() {
     state=$(systemctl is-active cleaner.service 2>/dev/null || true)
     if [[ $STOPPED -eq 0 && -n "$state" && "$state" != "inactive" && "$state" != "failed" ]]; then
         STOPPED=1
-        systemctl stop cleaner.service
+        # Ловушка ERR внутри функций без set -E не срабатывает: set -e вышел бы без отката.
+        systemctl stop cleaner.service || rollback "служба не остановилась"
         log "служба остановлена до замены файлов"
     fi
 }

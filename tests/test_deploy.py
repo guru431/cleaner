@@ -323,6 +323,8 @@ def test_installer_stops_a_service_waiting_for_its_automatic_restart():
     assert "is-active --quiet" not in stop
     assert '"$state" != "inactive" && "$state" != "failed"' in stop
     assert "STOPPED=1" in stop and "systemctl stop cleaner.service" in stop
+    # Ревью 12.11.2026: ловушка ERR функциями без set -E не наследуется — сбой stop выходил без отката.
+    assert 'systemctl stop cleaner.service || rollback "' in stop
 
 
 def test_installer_issues_a_certificate_claude_code_trusts():
