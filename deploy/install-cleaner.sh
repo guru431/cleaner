@@ -145,8 +145,12 @@ SCHEMA_BEFORE=""
 STOPPED=0
 # Работающая служба останавливается до замены окружения и кода: её путь к пакету — $APP/cleaner, и после замены
 # ленивые импорты брали бы новые модули вперемешку с уже загруженными старыми, до самого перезапуска.
+# Останавливается в любом состоянии, кроме inactive и failed: служба, падающая по кругу (Restart=always), между
+# попытками в activating (auto-restart), и отложенный запуск новой версии успел бы поднять схему базы до её копии.
 stop_service() {
-    if [[ $STOPPED -eq 0 ]] && systemctl is-active --quiet cleaner.service; then
+    local state
+    state=$(systemctl is-active cleaner.service 2>/dev/null || true)
+    if [[ $STOPPED -eq 0 && -n "$state" && "$state" != "inactive" && "$state" != "failed" ]]; then
         STOPPED=1
         systemctl stop cleaner.service
         log "служба остановлена до замены файлов"
