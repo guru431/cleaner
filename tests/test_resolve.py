@@ -7,6 +7,7 @@ from cleaner.core.detect.merge import MergedSpan
 from cleaner.core.entities import ops
 from cleaner.core.entities.resolve import Resolver, canonical_key
 from cleaner.core.pipeline import sanitize
+from cleaner.core.restore import restore
 from cleaner.core.types import ChatState, DictEntry, Entity, Settings, Surrogate
 from cleaner.core.types import EntityType as T
 
@@ -154,6 +155,28 @@ def test_addresses_macs_and_sids(state):
     assert a.endswith(".5") and b.endswith(".77")
     assert (mac_colon, mac_dash) == ("02:00:00:00:00:01", "02-00-00-00-00-01")
     assert fake_sid == "S-1-5-21-1111111111-2222222222-3333333331-1104"
+
+
+def test_mac_surrogate_skips_open_known_and_written_macs(state):
+    """FINDINGS P3 «MAC: подмена выдаётся без сверки с открытыми и уже известными настоящими MAC»: подмена MAC, как у
+    адреса, не совпадает ни с MAC другой сущности чата, ни с открытым значением (в любой записи), ни с MAC в тексте —
+    берётся следующий номер."""
+    assert resolve(state, "шлюз 02:00:00:00:00:02", ("02:00:00:00:00:02", T.MAC)) == ["02:00:00:00:00:01"]
+    opened = Settings(never=frozenset({"02-00-00-00-00-03"}))
+    server = ("00:1A:2B:3C:4D:5E", T.MAC)
+    assert resolve(state, "сервер 00:1A:2B:3C:4D:5E", server, settings=opened) == ["02:00:00:00:00:04"]
+    text = "старый 02:00:00:00:00:05, новый 00:1A:2B:3C:4D:5F"
+    assert resolve(state, text, ("00:1A:2B:3C:4D:5F", T.MAC)) == ["02:00:00:00:00:06"]
+
+
+def test_open_mac_and_a_hidden_one_restore_to_their_own_devices(state):
+    """Та же находка целиком: открытый MAC вида подмены и другой MAC в одном тексте получали одну строку, и при
+    восстановлении оба становились вторым устройством."""
+    opened = Settings(never=frozenset({"02:00:00:00:00:01"}))
+    text = "шлюз 02:00:00:00:00:01, сервер 00:1A:2B:3C:4D:5E"
+    sanitized = sanitize(state, text, opened).sanitized
+    assert sanitized == "шлюз 02:00:00:00:00:01, сервер 02:00:00:00:00:02"
+    assert restore(state, sanitized, opened).text == text
 
 
 def test_address_colliding_with_an_open_value_gets_a_label(state):
