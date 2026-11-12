@@ -402,6 +402,27 @@ def test_password_after_four_to_six_words_and_a_colon_is_found(text, value, sear
     assert finds(text) == {(value, searchable)}
 
 
+@pytest.mark.parametrize(
+    "text, value, searchable",
+    [
+        ("пароль 482913", "482913", False), ("Wi-Fi пароль 12345678.", "12345678", False),
+        ("password 482913", "482913", False), ("the password is 48291374", "48291374", False),
+        ("the password was Xk9vLm2Qp7", "Xk9vLm2Qp7", True), ("Password was 482913", "482913", False),
+    ],
+    ids=["digits", "wifi", "english", "is_digits", "was", "was_digits"],
+)
+def test_password_right_after_the_word_is_found(text, value, searchable):
+    """FINDINGS «Слой 2: пароль из одних цифр сразу после «пароль»/password остаётся открытым»: после «:» или тире то же
+    значение скрывалось, а сразу после слова — только похожее на пароль, и связку was проза не знала. Число от шести цифр
+    скрывается только на своём месте, как после тире."""
+    assert finds(text) == {(value, searchable)}
+
+
+def test_short_number_or_word_right_after_password_is_left_alone():
+    for text in ("пароль 2024 года", "пароль от почты", "Пароль 12345 символов", "the password was changed", "password 2fa"):
+        assert found(text) == set(), text
+
+
 def test_prose_or_a_time_after_four_to_six_words_and_a_colon_is_left_alone():
     for text in (
         "Password policy for domain users: minimum 8 characters", "Пароль для входа в систему: тот же, что и раньше",

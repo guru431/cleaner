@@ -441,11 +441,23 @@ def test_placeholder_logins_in_a_url_are_not_masked():
     ("ИНН 77\u202f07\u202f08\u202f38\u202f93", T.INN, "77\u202f07\u202f08\u202f38\u202f93"),
     ("IBAN GB82\u2007WEST\u20071234\u20075698\u20077654\u200732", T.BANK_ACCOUNT, "GB82\u2007WEST\u20071234\u20075698\u20077654\u200732"),
     ("Дата рождения: 01–02–1980", T.BIRTHDATE, "01–02–1980"),
+    ("Оплата картой 4111 1111 1111 1111", T.CARD, "4111 1111 1111 1111"),
+    ("СНИЛС 112-233-445 95", T.SNILS, "112-233-445 95"),
+    ("паспорт 45 08 123456", T.PASSPORT, "45 08 123456"),
+    ("ИНН 77 07 08 38 93", T.INN, "77 07 08 38 93"),
+    ("IBAN GB82 WEST 1234 5698 7654 32", T.BANK_ACCOUNT,
+     "GB82 WEST 1234 5698 7654 32"),
+    ("карта 4111　1111　1111　1111", T.CARD, "4111　1111　1111　1111"),
+    ("карта 4111—1111—1111—1111", T.CARD, "4111—1111—1111—1111"),
+    ("СНИЛС 112−233−445−95", T.SNILS, "112−233−445−95"),
 ], ids=["card-nbsp", "card-en-dash", "passport-nbsp", "snils-nbsp", "snils-hyphen", "inn-narrow-nbsp", "iban-figure-space",
-        "birthdate-en-dash"])
+        "birthdate-en-dash", "card-thin-space", "snils-thin-space", "passport-hair-space", "inn-en-quad",
+        "iban-math-space", "card-ideographic-space", "card-em-dash", "snils-minus-sign"])
 def test_numbers_with_non_breaking_spaces_and_typographic_dashes(text, type_, value):
     """FINDINGS «Слой 1: номера карт, паспортов, СНИЛС, ИНН и счетов с неразрывным пробелом не находятся»: Word и Outlook
-    ставят U+00A0 и U+202F между группами, автозамена — тире; найденное значение — как в оригинале."""
+    ставят U+00A0 и U+202F между группами, автозамена — тире; найденное значение — как в оригинале. FINDINGS «Слой 1:
+    номера с тонкой шпацией U+2009 и другими пробелами Zs не находятся»: любой пробел Zs (HTML «&thinsp;», копия
+    с веб-страницы), длинное тире и знак минуса — тоже разделители."""
     assert (type_, value) in found(text)
 
 
