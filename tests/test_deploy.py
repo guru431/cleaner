@@ -125,6 +125,20 @@ def test_server_lock_carries_every_top_level_requirement(source, lock):
     assert names and names - set(_pins(ROOT / lock)) == set()
 
 
+def test_readme_dev_install_takes_the_application_lock_too():
+    """Находка 12.11.2026: «-c requirements.txt» в requirements-dev.in только ограничивает версии, и замок
+    разработки без замка приложения не ставил fastapi и др. — `cleaner init` из README падал на импорте."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    command = next(line for line in readme.splitlines() if "pip install" in line)
+    locks = re.findall(r"-r (\S+)", command)
+    pinned = set().union(*(_pins(ROOT / lock) for lock in locks))
+    for source in ("requirements.in", "requirements-dev.in"):
+        for line in (ROOT / source).read_text(encoding="utf-8").splitlines():
+            if match := re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", line):
+                assert re.sub(r"[-_.]+", "-", match.group()).lower() in pinned, (source, line)
+    assert "-r requirements-linux.txt -r requirements-dev-linux.txt" in readme
+
+
 @pytest.mark.parametrize("script", ["check-cleaner.sh", "install-cleaner.sh"])
 def test_scripts_use_the_addresses_and_paths_of_the_unit_and_the_config(script):
     """Установщик и проверка живут отдельно от юнита и настроек: порт и каталоги у них общие,

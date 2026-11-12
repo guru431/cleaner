@@ -22,12 +22,13 @@
 Создайте окружение: `python -m venv .venv`. На Windows:
 
 ```powershell
-.venv/Scripts/python.exe -m pip install --require-hashes -r requirements-dev.txt
+.venv/Scripts/python.exe -m pip install --require-hashes -r requirements.txt -r requirements-dev.txt
 .venv/Scripts/python.exe -m cleaner init --admin dev --env-file data/cleaner.env
 .venv/Scripts/python.exe -m cleaner models download
 ```
 
-На Linux используйте `.venv/bin/python` и `requirements-dev-linux.txt`.
+Замок `requirements-dev.txt` только добавляет тестовые пакеты к замку приложения.
+На Linux используйте `.venv/bin/python` и `-r requirements-linux.txt -r requirements-dev-linux.txt`.
 Модели слоя 4 и Docling занимают около 2 ГБ. Для запуска передайте переменные из
 `data/cleaner.env` окружению процесса и выполните `python -m cleaner serve` интерпретатором окружения.
 В Git Bash или Linux после активации окружения:
