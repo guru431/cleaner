@@ -145,7 +145,9 @@ def toggle(request: Request, chat_id: str, item_id: str, form: dict[str, str] = 
 @router.post("/chats/{chat_id}/send")
 def send(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_viewer)) -> Response:
     writable_chat(request, chat_id, viewer)
-    exclude = frozenset(_numbers(form.get("exclude", "").split(",")))
+    # Исключённое после показа (переключатель в ленте в другой вкладке) тоже не уходит: состав меняется, отпечаток
+    # не совпадает — отказ «Запрос изменился после показа» вместо отправки помеченного элемента облаку.
+    exclude = frozenset(_numbers(form.get("exclude", "").split(","))) | _exclude(request, chat_id)
     try:
         item = service_of(request).send(chat_id, viewer.user.id, form.get("digest", ""), exclude)
     except EditRefused as exc:

@@ -218,7 +218,8 @@ def test_confirmation_can_leave_items_out_and_sends_only_that_selection(ivan, pr
     assert "Исключено: Ответ модели 2" in short and 'name="exclude" value="2"' in short
     assert "соседние вопросы уйдут одним сообщением" in short
     assert 'name="in-2" value="yes">' in short and "Ответ про" not in short
-    assert ivan.post(f"/chats/{chat_id}/send", digest=digest(short)).status_code == 400    # без состава — другой запрос
+    # Состав формы входит в отпечаток: исключённый в форме вопрос 1 — другой запрос.
+    assert ivan.post(f"/chats/{chat_id}/send", digest=digest(short), exclude="1,2").status_code == 400
     assert cloud == []
     assert ivan.post(f"/chats/{chat_id}/send", digest=digest(short), exclude="2").status_code == 303
     [ctx] = cloud
@@ -265,6 +266,19 @@ def test_feed_toggle_takes_an_item_out_of_requests_and_back(ivan, repo, provider
     assert ivan.post(f"/chats/{chat_id}/items/{'z' * 32}/request", excluded="yes").status_code == 404
     assert ivan.post(f"/chats/{chat_id}/items/{answer.id}/request").status_code == 303      # без поля — снова входит
     assert repo.excluded_seqs(chat_id) == frozenset()
+
+
+def test_item_excluded_in_another_tab_is_not_sent_from_an_older_confirmation(ivan, repo, provider, cloud):
+    """Ревью 12.11.2026: страница подтверждения открыта с ответом 2, в другой вкладке ответ 2 исключён из запросов —
+    «Отправить» в первой вкладке не отправляет его облаку, а отказывает: запрос изменился после показа."""
+    chat_id = three_items(ivan, provider)
+    page = ivan.get(f"/chats/{chat_id}/send").text
+    assert 'name="exclude" value=""' in page
+    answer = next(i for i in repo.items(chat_id) if i.seq == 2)
+    ivan.post(f"/chats/{chat_id}/items/{answer.id}/request", excluded="yes")
+    response = ivan.post(f"/chats/{chat_id}/send", digest=digest(page), exclude="")
+    assert response.status_code == 400 and "Запрос изменился после показа" in response.text
+    assert cloud == []
 
 
 def test_request_choice_needs_the_form_token(ivan, repo, provider):
