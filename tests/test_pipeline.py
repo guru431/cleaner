@@ -54,6 +54,18 @@ def test_address_equal_to_an_earlier_surrogate_is_treated_as_already_replaced(st
     assert [notice.code for notice in sanitize(state, f"и {public}", settings).notices] == ["surrogate_in_input"]
 
 
+def test_link_local_surrogate_gets_the_private_notice(state, settings):
+    """Подмена локального адреса канала IPv6 — номер по порядку в том же fe80::/10 (6.3) и может совпасть с настоящим
+    шлюзом (fe80::1), как подмена частного IPv4. Подмена из документационного 2001:db8::/32 — обычное уведомление."""
+    fake = sanitize(state, "inet6 fe80::1c2d:3eff:fe4f:5a6b/64", settings).spans[0].surrogate
+    assert fake.startswith("fe80::")
+    route = sanitize(state, f"default via {fake.split('/')[0]} dev eth0", settings)
+    assert [notice.code for notice in route.notices] == ["surrogate_private_ip"]
+    doc = sanitize(state, "inet6 2a00:1450:4010::65", settings).spans[0].surrogate
+    assert doc.startswith("2001:db8:")
+    assert [notice.code for notice in sanitize(state, f"и {doc}", settings).notices] == ["surrogate_in_input"]
+
+
 def test_sanitizing_the_same_text_twice_changes_nothing(state, settings):
     text = r"CONTOSO\ivanov, i.ivanov@contoso.ru, 10.1.2.5, srv-dc01.corp.contoso.ru"
     first = sanitize(state, text, settings)
