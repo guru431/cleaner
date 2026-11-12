@@ -224,6 +224,29 @@ def test_private_address_equal_to_an_issued_surrogate_is_withheld(gw, repo):
     assert repo.audit_events("agent_withheld")[0].details["reasons"] == {"address": 1}
 
 
+def test_link_local_address_equal_to_an_issued_surrogate_is_withheld(gw, repo):
+    """Подмены локальных адресов канала IPv6 выдаются по порядку в fe80::/10 (6.3): fe80::1 — и первая подмена, и частый
+    настоящий шлюз. Блок агента с ним держится, как с частным IPv4 (7.4); блок с подменой из 2001:db8::/32 — нет."""
+    task = "Проверь интерфейс: inet6 fe80::1c2d:3eff:fe4f:5a6b/64 и узел 2a00:1450:4010::65"
+    gw.stub.script.append(model_turn("Смотрю маршруты", ("toolu_1", "Bash", {"command": "ip -6 route"})))
+    blocks = agent_blocks(gw.send(body(task)))
+    first = gw.stub.requests[0]["body"]["messages"][0]["content"][-1]["text"]
+    link = re.search(r"fe80::[0-9a-f]+", first).group()
+    doc = re.search(r"2001:db8:[0-9a-f:]+", first).group()
+    gw.stub.script.append(model_turn("Шлюз виден"))
+    second = body(task, assistant(*blocks), {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": f"default via {link} dev eth0"},
+        {"type": "text", "text": f"и маршрут к {doc}"},
+    ]})
+    gw.send(second)
+    sent = gw.stub.requests[1]["body"]["messages"][3]["content"]
+    assert sent[0] == {"type": "tool_result", "tool_use_id": "toolu_1",
+                       "content": ledger.placeholder(ledger.REASONS["address"])}
+    assert sent[1] == {"type": "text", "text": f"и маршрут к {doc}"}
+    assert "default via" not in gw.stub.bodies()
+    assert repo.agent_receipts(gw.chat_of(second))[0]["withheld"] == {"address": 1}
+
+
 def test_withheld_tool_call_keeps_its_pair_with_the_result(gw, monkeypatch):
     """Удержанный вызов инструмента из истории остаётся вызовом с тем же id: результат инструмента ссылается на него, и
     блок text на его месте провайдер отклонил бы."""

@@ -356,11 +356,12 @@ def _pasted(state: ChatState, settings: Settings, hits: list[surrogates.Hit]) ->
 
 
 def _pasted_code(state: ChatState, key: str) -> str:
-    """Код уведомления о выданной замене. Подмена частного IPv4 переставляется в том же диапазоне (6.2) и может совпасть с
-    настоящим адресом другого узла, появившимся после её выдачи: отличить его от вставленной замены нельзя, и уведомление
-    об этом — отдельное (surrogate_private_ip); шлюз агентов держит такой блок (7.4 спецификации шлюза)."""
+    """Код уведомления о выданной замене. Подмена частного IPv4 переставляется в том же диапазоне (6.2), подмена локального
+    адреса канала IPv6 — номер в fe80::/10 (6.3); обе могут совпасть с настоящим адресом другого узла, появившимся после
+    их выдачи: отличить его от вставленной замены нельзя, и уведомление об этом — отдельное (surrogate_private_ip; имя
+    кода уже в API и сохранённых текстах); шлюз агентов держит такой блок (7.4 спецификации шлюза)."""
     surrogate = state.surrogates.get(key)
-    if surrogate is not None and surrogate.kind == "ip" and netmap.private_bits(netmap.parse(key)[0]) is not None:
+    if surrogate is not None and surrogate.kind in ("ip", "ip6") and netmap.shares_range(netmap.parse(key)[0]):
         return "surrogate_private_ip"
     return "surrogate_in_input"
 

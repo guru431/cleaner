@@ -693,7 +693,7 @@ class AgentService:
                     type_.value for notice in found.blocked_surrogates for type_ in notice.held
                     if settings.policies.get(type_) is Policy.BLOCK
                 )
-                # Подмена частного адреса в блоке агента: агент получает восстановленные адреса, и такая «подмена» —
+                # Подмена частного или локального адреса канала в блоке агента: агент получает восстановленные адреса, и такая «подмена» —
                 # скорее настоящий адрес другого узла, совпавший с ней (6.2): ушёл бы открытым, а ответ о нём
                 # восстановился бы в чужой узел. Блок держится (7.4).
                 collided = collided or any(notice.code == "surrogate_private_ip" for notice in found.notices)

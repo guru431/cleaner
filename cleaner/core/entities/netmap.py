@@ -97,6 +97,13 @@ def private_bits(ip: Address) -> int | None:
     return None
 
 
+def shares_range(ip: Address) -> bool:
+    """Выдаётся ли подмена адреса из того же диапазона, где живут настоящие адреса: частный IPv4 переставляется в своём
+    диапазоне (6.2), локальный адрес канала IPv6 получает номер в fe80::/10 (6.3). Такая подмена может совпасть с
+    настоящим адресом другого узла; подмены публичных адресов и остальных IPv6 — из документационных диапазонов."""
+    return private_bits(ip) is not None or ip in _LINK_LOCAL_V6
+
+
 def _flip(key: bytes, position: int, prefix: int) -> int:
     message = bytes([position]) + prefix.to_bytes(4, "big")
     return hmac.new(key, message, hashlib.sha256).digest()[0] & 1
