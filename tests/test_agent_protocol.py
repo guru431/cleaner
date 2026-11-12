@@ -61,6 +61,21 @@ def test_anthropic_protocol_keeps_the_stage_5b_wire_details():
     assert [proto.is_model_block(u) for u in units] == [False, True, False, False]
 
 
+def test_withheld_tool_description_keeps_only_its_service_keys():
+    """Наблюдение 12.11.2026 (как у Responses): пометка удержанного описания сохраняла прочие ключи, и удержанное значение
+    под лишним ключом уходило в ней — проверка утечек отказывала на каждом ходе."""
+    text = "[Cleaner: блок не передан — причина]"
+    anthropic = PROTOCOLS["anthropic"].units({"tools": [
+        {"name": "dial", "description": "d", "input_schema": {}, "server_description": "+7 916 123-45-67"}], "messages": []})
+    assert PROTOCOLS["anthropic"].placeholder(anthropic[0], "причина") == {
+        "name": "dial", "description": text, "input_schema": {"type": "object"}}
+    chat = PROTOCOLS["chat"].units({"tools": [{"type": "function", "note": "+7 916 123-45-67", "function": {
+        "name": "dial", "strict": True, "description": "d", "parameters": {}, "server_description": "+7 916 123-45-67"}}],
+        "messages": []})
+    assert PROTOCOLS["chat"].placeholder(chat[0], "причина") == {"type": "function", "function": {
+        "name": "dial", "strict": True, "description": text, "parameters": {"type": "object"}}}
+
+
 def test_headers_are_kept_by_list_and_prefix(state, settings):
     headers = {
         "Session-Id": "s-1", "X-Codex-Window-Id": "w-1", "x-codex-turn-metadata": "{}", "x-stainless-os": "Windows",

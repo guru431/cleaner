@@ -345,8 +345,9 @@ def placeholder(unit: Unit, reason: str) -> object:
         return dict(known_fields(unit.kind, unit.node), content=text)
     if unit.kind == "tool_use":     # вызов остаётся вызовом: на его id ссылается результат
         return dict(known_fields(unit.kind, unit.node), input={"cleaner": text})
-    if unit.kind == "tool_def":
-        return dict(unit.node, description=text, input_schema={"type": "object"})
+    if unit.kind == "tool_def":     # удерживается целиком: прочие ключи описания уходили бы с удержанным значением
+        return {**{key: value for key, value in unit.node.items() if key in ("name", "type")}, "description": text,
+                "input_schema": {"type": "object"}}
     return {"type": "text", "text": text}
 
 

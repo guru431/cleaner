@@ -108,11 +108,14 @@ def _result_part(part: object, clean: Callable[[str], str]) -> object:
     return strings(part, clean, OTHER_KEYS)
 
 
+_TOOL_SERVICE = ("type", "name", "strict")
+
+
 def _tool_def(node: dict, clean: Callable[[str], str]) -> dict:
     """Описание инструмента: имя, вид и strict — служебные; схема parameters — без служебных ключей схемы."""
     out = {}
     for key, value in node.items():
-        if key in ("type", "name", "strict"):
+        if key in _TOOL_SERVICE:
             out[key] = value
         elif key == "function" and isinstance(value, dict):
             out[key] = _tool_def(value, clean)
@@ -170,7 +173,11 @@ def placeholder(unit: Unit, reason: str) -> object:
         function = dict(known_fields(unit.kind, node["function"]), arguments=json.dumps({"cleaner": text}, ensure_ascii=False))
         return dict(known_fields(unit.kind, node), function=function)
     if unit.kind == "tool_def" and isinstance(node.get("function"), dict):
-        return dict(node, function=dict(node["function"], description=text, parameters={"type": "object"}))
+        # Удерживается целиком: прочие ключи описания уходили бы с удержанным значением.
+        def service(part: dict) -> dict:
+            return {key: value for key, value in part.items() if key in _TOOL_SERVICE}
+
+        return dict(service(node), function=dict(service(node["function"]), description=text, parameters={"type": "object"}))
     return text_block(text)
 
 
