@@ -293,6 +293,20 @@ def test_installer_stops_the_service_before_it_replaces_the_code_and_rollback_st
     assert "$STOPPED -eq 1" in rollback
 
 
+def test_failed_first_install_leaves_the_next_run_a_first_install():
+    """Ревью 12.11.2026: откат первой установки снимал сценарий таблицы, но оставлял код и юнит — следующий прогон
+    считался обновлением, и его откат перезапускал по кругу службу без сценария из ExecStartPre."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    assert '[[ -d "$APP/cleaner" || -f "$UNIT" ]] && FIRST_INSTALL=0' in text.splitlines()
+    rollback = text[text.index("rollback() {"):text.index("trap 'rollback")]
+    first = rollback[rollback.index("if [[ $FIRST_INSTALL -eq 1 ]]; then"):rollback.index("elif [[ $swapped -eq 1")]
+    disable = first.index("systemctl disable --now cleaner.service")
+    assert disable < first.index('rm -rf "$APP/cleaner"') and disable < first.index('rm -f "$UNIT"')
+    assert first.index('rm -f "$UNIT"') < first.index("systemctl daemon-reload")
+    # База и ключ остаются: ветка «оба есть» следующего прогона обходится без init.
+    assert "$ENVF" not in first and "cleaner.db" not in first
+
+
 def test_installer_rollback_returns_the_egress_files_with_the_code_and_keeps_the_checked_profile():
     """Находка 12.11.2026: откат возвращал код, окружение и юнит, а новые сценарий таблицы и юниты оставались;
     сломанный новый сценарий не дал бы стартовать и прежней службе. Копия снимается до первой записи этих файлов.

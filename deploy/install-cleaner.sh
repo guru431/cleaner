@@ -244,7 +244,12 @@ rollback() {
     fi
     if [[ $FIRST_INSTALL -eq 1 ]]; then
         systemctl disable --now cleaner.service >/dev/null 2>&1 || true
-        log "первая установка не удалась: служба остановлена, ключ и база не тронуты"
+        # Код и юнит снимаются, чтобы следующий прогон снова был первой установкой: иначе он считался бы обновлением,
+        # и его откат перезапускал бы службу, чей ExecStartPre ссылается на уже снятый сценарий таблицы.
+        rm -rf "$APP/cleaner"
+        rm -f "$UNIT"
+        systemctl daemon-reload || true
+        log "первая установка не удалась: служба остановлена, код и юнит сняты, ключ и база не тронуты"
     elif [[ $swapped -eq 1 || $STOPPED -eq 1 ]]; then
         systemctl restart cleaner.service || true
         log "прежняя версия возвращена"
