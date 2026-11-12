@@ -56,13 +56,14 @@ systemd при старте, а интерфейс показывает его �
 обёртки ключей чатов и общий ключ одной транзакцией и усекает журнал WAL; содержимое чатов не трогается.
 Служба держит прежний ключ в памяти, поэтому на время смены её останавливают. Работающая служба держит замок
 `cleaner.db.lock` рядом с базой: при нём `key rotate` отказывает, ничего не меняя, а служба не стартует, пока идёт
-смена. `chown` после смены возвращает службе и этот файл, если его создала команда от root:
+смена. `chown` после смены возвращает службе и этот файл, если его создала команда от root. Маски в командах раскрывает
+`bash` от root: каталог `/var/lib/cleaner` закрыт (0700), и оболочка оператора его не прочитает:
 
 ```bash
 sudo systemctl stop cleaner.service
 sudo bash -c 'set -a; . /etc/cleaner/cleaner.env; set +a; cd /opt/cleaner &&
   CLEANER_CONFIG=/etc/cleaner/cleaner.toml .venv/bin/python -m cleaner key rotate --env-file /etc/cleaner/cleaner.env.new'
-sudo chown cleaner:cleaner /var/lib/cleaner/cleaner.db*
+sudo bash -c 'chown cleaner:cleaner /var/lib/cleaner/cleaner.db*'
 sudo bash -c 'grep -v "^CLEANER_MASTER_KEY=" /etc/cleaner/cleaner.env >> /etc/cleaner/cleaner.env.new &&
   mv /etc/cleaner/cleaner.env.new /etc/cleaner/cleaner.env'
 sudo systemctl start cleaner.service

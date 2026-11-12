@@ -317,6 +317,17 @@ def test_check_looks_for_the_gateway_key_in_the_running_service_not_only_in_the_
     assert "systemctl restart cleaner.service" in steps[steps.index("4. Передайте"):steps.index("5. ")]
 
 
+def test_deployment_commands_expand_masks_of_the_closed_data_directory_as_root():
+    """Находка 12.11.2026: каталог данных закрыт (0700), и маску `sudo chown … cleaner.db*` раскрывала оболочка
+    оператора без root — chown получал строку как есть. Маски под /var/lib/cleaner — только внутри `sudo bash -c`."""
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    block = text[text.index("## Смена главного ключа"):]
+    block = block[block.index("```bash"):block.index("```", block.index("```bash") + 3)]
+    for line in block.splitlines():
+        if "/var/lib/cleaner/" in line and "*" in line:
+            assert line.startswith("sudo bash -c '"), line
+
+
 def test_installer_removes_database_copies_once_the_service_answers():
     """Аудит 09.11.2026: копия базы хранит удалённые чаты вместе с обёрнутыми ключами, а главный ключ тот же (FR-1.4,
     AC-1.10). Копия нужна только откату этого прогона: после ответа службы она и копии прежних прогонов стираются."""
