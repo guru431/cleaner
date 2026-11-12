@@ -236,7 +236,8 @@ def cmd_user(args: argparse.Namespace) -> int:
                 raise ValueError(f"{args.login} — последний активный администратор: сначала назначьте другого")
             repo.audit("user_role_changed", target=user.id, role=args.role, by="cli")
         elif args.action == "disable":
-            repo.set_disabled(user.id, True)
+            if not repo.set_disabled(user.id, True):
+                raise ValueError(f"{args.login} — последний активный администратор: сначала назначьте другого")
             repo.audit("user_disabled", target=user.id, by="cli")
         else:
             repo.set_password(user.id, auth.hash_password(_secret(args.password_file, f"Новый пароль {args.login}: ")))

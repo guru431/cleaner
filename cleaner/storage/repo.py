@@ -347,11 +347,19 @@ class Repository:
             role, user_id, role, user_id,
         ) == 1
 
-    def set_disabled(self, user_id: str, disabled: bool) -> None:
+    def set_disabled(self, user_id: str, disabled: bool) -> bool:
+        """Отключить последнего активного администратора нельзя — по тому же правилу и тем же одним UPDATE, что
+        set_role: два администратора, отключающие друг друга разом, или команда cleaner user disable не оставят службу
+        без администратора. False — записи нет или она последний активный администратор."""
         with self.lock, transaction(self.conn):
-            self.conn.execute("UPDATE users SET disabled = ? WHERE id = ?", (int(disabled), user_id))
-            if disabled:
+            changed = self.conn.execute(
+                "UPDATE users SET disabled = ? WHERE id = ? AND (? = 0 OR role != 'admin' OR disabled = 1 "
+                "OR EXISTS (SELECT 1 FROM users WHERE role = 'admin' AND disabled = 0 AND id != ?))",
+                (int(disabled), user_id, int(disabled), user_id),
+            ).rowcount == 1
+            if disabled and changed:
                 self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        return changed
 
     def chat_ids(self, user_id: str) -> list[str]:
         """Чаты пользователя без расшифровки названий."""

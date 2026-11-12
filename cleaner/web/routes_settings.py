@@ -769,7 +769,8 @@ def disable_user(request: Request, user_id: str, form: dict[str, str] = Depends(
     if disabled and user_id == viewer.user.id:
         raise HTTPException(400, "Нельзя отключить собственную учётную запись")
     repo = repo_of(request)
-    repo.set_disabled(user_id, disabled)
+    if not repo.set_disabled(user_id, disabled):
+        raise HTTPException(400, "Нельзя отключить последнего активного администратора")
     repo.audit("user_disabled" if disabled else "user_enabled", viewer.user.id, target=user_id)
     return _redirect("/settings/users")
 

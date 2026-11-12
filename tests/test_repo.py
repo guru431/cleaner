@@ -192,6 +192,20 @@ def test_role_of_the_last_active_admin_stays(repo):
     assert not repo.set_role("нет", "admin")
 
 
+def test_the_last_active_admin_cannot_be_disabled(repo):
+    """Находка 12.11.2026: запрет снимать роль с последнего администратора обходился отключением — командой
+    cleaner user disable или двумя администраторами, отключающими друг друга разом."""
+    boss = repo.create_user("boss", "hash", "admin")
+    anna = repo.create_user("anna", "hash", "admin")
+    ivan = repo.create_user("ivan", "hash", "user")
+    assert repo.create_session("t-anna", anna, "csrf", "hash")
+    assert repo.set_disabled(anna, True) and repo.session("t-anna") is None
+    assert not repo.set_disabled(boss, True) and not repo.user(boss).disabled
+    assert repo.set_disabled(ivan, True) and repo.set_disabled(anna, True)     # обычный и уже отключённый — можно
+    assert repo.set_disabled(anna, False) and repo.set_disabled(boss, True) and not repo.set_disabled(anna, True)
+    assert not repo.set_disabled("нет", False)
+
+
 def test_backup_opens_with_the_same_key(tmp_path, repo, clock):
     user, chat = new_chat(repo, "Копия")
     repo.backup(tmp_path / "copy.db")
