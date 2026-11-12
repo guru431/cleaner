@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import anyio
+import httpx
 import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
@@ -273,6 +274,72 @@ def test_spraying_random_logins_after_the_pause_keeps_the_account_count(clock):
     throttle.failed("ivan")
     assert throttle.wait("ivan") == 4.0
     assert len(throttle.failures) <= auth.Throttle._KEEP
+
+
+async def _burst(app, path: str, form: dict[str, str], cookies: dict[str, str], count: int) -> tuple[list[int], int]:
+    """count одинаковых POST разом; проверки пароля ждут, пока каждый запрос не дойдёт до проверки или ответа.
+    Итог — коды ответов и число проверок пароля."""
+    gate, checks = asyncio.Event(), []
+    real = auth.check_password
+
+    async def held(password_hash, password):
+        checks.append(password)
+        await gate.wait()
+        return await real(password_hash, password)
+
+    auth.check_password = held
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies=cookies) as client:
+            posts = [asyncio.create_task(client.post(path, data=form)) for _ in range(count)]
+
+            async def all_arrived():
+                while len(checks) + sum(post.done() for post in posts) < count:
+                    await asyncio.sleep(0.001)
+
+            await asyncio.wait_for(all_arrived(), 10)
+            gate.set()
+            return [(await post).status_code for post in posts], len(checks)
+    finally:
+        auth.check_password = real
+
+
+def test_parallel_wrong_passwords_get_no_more_checks_than_the_free_attempts(browser):
+    """Находка «Пауза входа обходится параллельными попытками»: пауза читалась до Argon2, неудача писалась после,
+    и сорок одновременных неверных паролей давали сорок проверок. Теперь попытка идёт в счёт до проверки."""
+    b = browser()
+    b.user("ivan")
+    b.client.get("/login")
+    token = b.client.cookies["cleaner_login"]
+    statuses, checks = asyncio.run(_burst(
+        b.client.app, "/login", {"login": "ivan", "password": "неверно", "csrf": token}, {"cleaner_login": token}, 40,
+    ))
+    assert checks == auth.Throttle.FREE
+    assert sorted(statuses) == [401] * auth.Throttle.FREE + [429] * (40 - auth.Throttle.FREE)
+    assert b.login("ivan").status_code == 429            # верный пароль — тоже в паузе
+
+
+def test_parallel_wrong_current_passwords_get_no_more_checks_than_the_free_attempts(ivan):
+    """Та же находка для смены своего пароля: неверный текущий пароль — неудача входа этого логина."""
+    form = {"csrf": ivan.csrf, "current": "неверно", "password": "новый-пароль-123", "repeat": "новый-пароль-123"}
+    statuses, checks = asyncio.run(_burst(
+        ivan.client.app, "/account/password", form, {"cleaner_session": ivan.client.cookies["cleaner_session"]}, 40,
+    ))
+    assert checks == auth.Throttle.FREE
+    assert sorted(statuses) == [400] * auth.Throttle.FREE + [429] * (40 - auth.Throttle.FREE)
+
+
+def test_password_check_that_never_ran_is_not_a_failure(clock):
+    """Попытка идёт в счёт до проверки; не дождалась места для Argon2 — счёт возвращается."""
+    throttle = auth.Throttle(clock)
+    for _ in range(auth.Throttle.FREE - 1):
+        assert throttle.attempt("ivan") == 0.0
+    assert throttle.attempt("Ivan") == 0.0
+    assert throttle.wait("ivan") == 1.0
+    throttle.cancel("ivan")
+    assert throttle.wait("ivan") == 0.0 and throttle.failures["ivan"][0] == auth.Throttle.FREE - 1
+    throttle.succeeded("ivan")
+    throttle.cancel("ivan")                              # успех уже снял счёт: отрицательным он не становится
+    assert "ivan" not in throttle.failures
 
 
 def test_password_checks_over_the_limit_get_try_later_and_are_not_failures(browser, repo, monkeypatch):
