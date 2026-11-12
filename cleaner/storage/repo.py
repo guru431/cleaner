@@ -937,6 +937,10 @@ class Repository:
         """Отзыв насовсем: включить отозванный ключ нельзя, выпускается новый."""
         return self._run("UPDATE api_keys SET disabled = 1 WHERE id = ?", key_id) == 1
 
+    def disable_api_keys(self, user_id: str) -> int:
+        """Отзыв всех действующих ключей пользователя; число отозванных."""
+        return self._run("UPDATE api_keys SET disabled = 1 WHERE user_id = ? AND disabled = 0", user_id)
+
     def touch_api_key(self, key_id: str) -> None:
         self._run("UPDATE api_keys SET last_used_at = ? WHERE id = ?", self._now(), key_id)
 

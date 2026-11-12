@@ -1,0 +1,13 @@
+<section class="panel">
+  <div class="panel-body">
+    <p>{% if active_keys %}Действующих ключей доступа: {{ active_keys }}{% else %}Действующих ключей доступа нет{% endif %}
+    (<a href="/keys">Ключи</a>). Смена пароля и выход на всех устройствах ключи не отзывают.</p>
+    {% if active_keys %}
+    <form method="post" action="/keys/revoke-all">
+      {% include "_csrf.html" %}
+      <button class="danger">Отозвать все ключи</button>
+      <small class="hint">Программы и агенты с этими ключами перестанут работать; новые ключи выпускаются на странице «Ключи».</small>
+    </form>
+    {% endif %}
+  </div>
+</section>

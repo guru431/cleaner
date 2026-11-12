@@ -56,6 +56,25 @@ def test_users_see_and_revoke_only_their_keys_admin_sees_all(browser, ivan, boss
     assert len(repo.audit_events("key_created")) == 2
 
 
+def test_account_pages_show_active_keys_and_revoke_all_of_them(ivan, api, repo):
+    """Идея «Показывать действующие ключи…»: смена пароля и «Выйти везде» ключи не отзывают (6.1) — страницы
+    сессий и пароля показывают их число, и свои ключи отзываются одной кнопкой; чужие не трогаются."""
+    first, second, revoked, petr = api("ivan"), api("ivan"), api("ivan"), api("petr")
+    repo.disable_api_key(revoked.key_id)
+    for path in ("/account/password", "/account/sessions"):
+        page = ivan.get(path).text
+        assert "Действующих ключей доступа: 2" in page and 'href="/keys"' in page and 'action="/keys/revoke-all"' in page
+    response = ivan.post("/keys/revoke-all")
+    assert (response.status_code, response.headers["location"]) == (303, "/keys")
+    assert first.get("/api/v1/chats").status_code == second.get("/api/v1/chats").status_code == 401
+    assert petr.get("/api/v1/chats").status_code == 200
+    [event] = repo.audit_events("api_keys_revoked_all")
+    assert (event.user_id, event.details) == (first.user_id, {"keys": 2})
+    page = ivan.get("/account/sessions").text
+    assert "Действующих ключей доступа нет" in page and 'action="/keys/revoke-all"' not in page
+    assert ivan.client.post("/keys/revoke-all", data={"csrf": "чужой"}).status_code == 403
+
+
 def test_key_name_is_required_and_limited(ivan, repo):
     for name in ("", "   ", "я" * 101):
         assert ivan.post("/keys", name=name).status_code == 400, len(name)

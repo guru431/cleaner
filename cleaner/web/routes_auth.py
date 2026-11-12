@@ -133,7 +133,12 @@ def sessions(request: Request, viewer: Viewer = Depends(get_viewer)) -> Response
         for session in repo_of(request).sessions(viewer.user.id)
     ]
     return page(request, "account_sessions.html", viewer, rows=rows, idle_hours=IDLE // timedelta(hours=1),
-                max_age_hours=MAX_AGE // timedelta(hours=1))
+                max_age_hours=MAX_AGE // timedelta(hours=1), active_keys=_active_keys(request, viewer))
+
+
+def _active_keys(request: Request, viewer: Viewer) -> int:
+    """Действующие ключи доступа: «Выйти везде» и смена пароля их не отзывают (спецификация 2026-10-28, 6.1)."""
+    return sum(not key.disabled for key in repo_of(request).api_keys(viewer.user.id))
 
 
 @router.post("/account/sessions/logout-all")
@@ -146,7 +151,8 @@ def logout_all(request: Request, form: dict[str, str] = Depends(get_form), viewe
 
 
 def _password_page(request: Request, viewer: Viewer, status_code: int = 200, error: str = "") -> Response:
-    return page(request, "account_password.html", viewer, status_code=status_code, error=error, min_password=auth.MIN_PASSWORD)
+    return page(request, "account_password.html", viewer, status_code=status_code, error=error, min_password=auth.MIN_PASSWORD,
+                active_keys=_active_keys(request, viewer))
 
 
 @router.get("/account/password")
@@ -162,18 +168,21 @@ async def change_own_password(
 ) -> Response:
     login, throttle = viewer.user.login, request.app.state.throttle
     new = str(form.get("password", ""))
+    # Страница читает базу (число ключей) — в пуле потоков, как и таблица неудач.
     if new != str(form.get("repeat", "")):
-        return _password_page(request, viewer, 400, "Новый пароль и повтор не совпадают")
+        return await run_in_threadpool(_password_page, request, viewer, 400, "Новый пароль и повтор не совпадают")
     if len(new) < auth.MIN_PASSWORD:
-        return _password_page(request, viewer, 400, f"Новый пароль короче {auth.MIN_PASSWORD} знаков")
+        return await run_in_threadpool(_password_page, request, viewer, 400, f"Новый пароль короче {auth.MIN_PASSWORD} знаков")
     wait = await run_in_threadpool(throttle.attempt, login)          # в счёт паузы до проверки, как у входа
     if wait:
-        return _password_page(request, viewer, 429, f"Слишком много попыток. Повторите через {math.ceil(wait)} с")
+        return await run_in_threadpool(
+            _password_page, request, viewer, 429, f"Слишком много попыток. Повторите через {math.ceil(wait)} с",
+        )
     try:
         password_ok = await auth.check_password(viewer.user.password_hash, str(form.get("current", "")))
     except auth.Busy:
         await run_in_threadpool(throttle.cancel, login)
-        return _password_page(request, viewer, 503, "Сервер занят проверкой паролей — попробуйте позже")
+        return await run_in_threadpool(_password_page, request, viewer, 503, "Сервер занят проверкой паролей — попробуйте позже")
     return await run_in_threadpool(_change_own_password, request, viewer, password_ok, new)
 
 
