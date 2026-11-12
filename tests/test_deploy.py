@@ -293,15 +293,23 @@ def test_installer_stops_the_service_before_it_replaces_the_code_and_rollback_st
     assert "$STOPPED -eq 1" in rollback
 
 
-def test_installer_rollback_returns_the_profile_and_the_egress_files_with_the_code():
-    """Находка 12.11.2026: откат возвращал код, окружение и юнит, а новые host.env, сценарий таблицы и юниты оставались;
-    сломанный новый сценарий не дал бы стартовать и прежней службе. Копия снимается до первой записи host.env."""
+def test_installer_rollback_returns_the_egress_files_with_the_code_and_keeps_the_checked_profile():
+    """Находка 12.11.2026: откат возвращал код, окружение и юнит, а новые сценарий таблицы и юниты оставались;
+    сломанный новый сценарий не дал бы стартовать и прежней службе. Копия снимается до первой записи этих файлов.
+    Ревью 12.11.2026: host.env не возвращается — он сверен с host в cleaner.toml, а прежний разошёлся бы с ним."""
     text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
     aux = text[text.index("AUX_FILES=("):text.index("AUX_PREV=")]
-    for name in ("$HOST_ENV", "$CHECK", "cleaner-check-ipv6.py", "$EGRESS", "$EGRESS_UNIT", "$EGRESS_WATCH.service",
+    for name in ("$CHECK", "cleaner-check-ipv6.py", "$EGRESS", "$EGRESS_UNIT", "$EGRESS_WATCH.service",
                  "$EGRESS_WATCH.timer"):
         assert name in aux, name
-    assert text.index("AUX_PREV=$(mktemp -d)") < text.index('install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"')
+    assert "$HOST_ENV" not in aux
+    targets = {'"$CHECK"', "/usr/local/sbin/cleaner-check-ipv6.py", '"$EGRESS"', '"$EGRESS_UNIT"',
+               '"$EGRESS_WATCH.service"', '"$EGRESS_WATCH.timer"'}
+    writes = [line for line in text.splitlines() if line.startswith("install ") and line.split()[-1] in targets]
+    assert len(writes) == len(targets)
+    assert all(text.index("AUX_PREV=$(mktemp -d)") < text.index(line) for line in writes)
+    docs = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    assert "`host.env` остаётся новым" in docs
     rollback = text[text.index("rollback() {"):text.index("trap 'rollback")]
     assert "if restore_aux; then" in rollback
     assert rollback.index("restore_aux") < rollback.index("systemctl daemon-reload") < rollback.index(

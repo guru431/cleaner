@@ -15,8 +15,8 @@
 # с клавиатуры (ssh -t).
 #
 # Откат: если после выкатки самопроверка не прошла или служба не ответила по HTTPS,
-# возвращаются прежние код, окружение, юнит, профиль host.env, сценарии проверки и границ выхода наружу
-# с их юнитами. Копия базы живёт только до ответа службы.
+# возвращаются прежние код, окружение, юнит, сценарии проверки и границ выхода наружу с их юнитами.
+# Профиль host.env остаётся новым: он сверен с host в cleaner.toml и с сертификатом. Копия базы живёт только до ответа службы.
 # Правило ufw ставится под отложенным откатом ufw-failsafe, который установщик взводит сам;
 # снять страховку — после проверки НОВЫМ SSH-подключением.
 set -euo pipefail
@@ -108,9 +108,11 @@ if [[ "${CLEANER_REISSUE_CERT:-0}" != "1" && -s "$TLS/cert.pem" ]]; then
 fi
 
 # --- вспомогательные файлы: откат возвращает их вместе с кодом ----------------------
-# Иначе после отката при прежнем коде остались бы новые host.env и сценарий таблицы, а сломанный новый сценарий
-# не дал бы стартовать и прежней службе (ExecStartPre её юнита). Копия — до первой записи (host.env ниже).
-AUX_FILES=("$HOST_ENV" "$CHECK" /usr/local/sbin/cleaner-check-ipv6.py "$EGRESS" "$EGRESS_UNIT"
+# Иначе после отката при прежнем коде остался бы новый сценарий таблицы, а сломанный новый сценарий
+# не дал бы стартовать и прежней службе (ExecStartPre её юнита). Копия — до первой записи (после ловушки отката).
+# host.env не возвращается: сверка выше гарантирует, что он совпадает с host в cleaner.toml, а прежний
+# профиль разошёлся бы с адресом, который слушает служба, и check-cleaner.sh проверял бы не тот адрес.
+AUX_FILES=("$CHECK" /usr/local/sbin/cleaner-check-ipv6.py "$EGRESS" "$EGRESS_UNIT"
            "$EGRESS_WATCH.service" "$EGRESS_WATCH.timer")
 AUX_PREV=$(mktemp -d)
 trap 'rm -rf "$AUX_PREV"' EXIT
@@ -226,7 +228,7 @@ rollback() {
     if [[ -n "$PREV_CODE" ]]; then rm -rf "$APP/cleaner"; mv "$PREV_CODE" "$APP/cleaner"; swapped=1; fi
     if [[ -n "$PREV_VENV" ]]; then rm -rf "$APP/.venv"; mv "$PREV_VENV" "$APP/.venv"; swapped=1; fi
     if [[ -n "$PREV_UNIT" ]]; then cp -a "$PREV_UNIT" "$UNIT"; swapped=1; fi
-    if restore_aux; then aux=1; log "профиль, сценарии и юниты границ выхода наружу возвращены"; fi
+    if restore_aux; then aux=1; log "сценарии и юниты границ выхода наружу возвращены"; fi
     rm -rf "$APP/.venv.new" "$APP/cleaner.new"
     # Новая версия могла успеть поднять схему базы при старте: прежний код такую базу не откроет.
     if [[ -n "$DB_BACKUP" && "$(schema_version 2>/dev/null || echo '?')" != "$SCHEMA_BEFORE" ]]; then
