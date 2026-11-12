@@ -155,7 +155,10 @@ def test_leak_blocks_the_request_before_any_connection(ctx, state, settings):
     assert recorder.requests == []
 
 
-@pytest.mark.parametrize("url", ["http://llm.example/v1", "http://10.20.0.10:30000/v1", "ftp://llm.example", "llm.example"])
+@pytest.mark.parametrize("url", [
+    "http://llm.example/v1", "http://10.20.0.10:30000/v1", "ftp://llm.example", "llm.example",
+    "https://user:invented-pass@llm.example/v1",            # httpx заменил бы ими заголовок с ключом на Basic
+])
 def test_plain_http_is_refused_beyond_loopback(url):
     with pytest.raises(ValueError):
         check_url(url)

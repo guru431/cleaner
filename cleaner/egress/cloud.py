@@ -70,11 +70,14 @@ class Connection:
 
 
 def check_url(url: str) -> None:
-    """SEC-13: HTTPS для любого узла, HTTP — только для петли. ValueError с причиной."""
+    """SEC-13: HTTPS для любого узла, HTTP — только для петли. ValueError с причиной.
+    Логин и пароль в адресе — тоже отказ: httpx по ним заменил бы заголовок Authorization с ключом на Basic."""
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
     if not host or parts.scheme not in ("https", "http"):
         raise ValueError("нужен адрес вида https://узел/путь")
+    if "@" in parts.netloc:
+        raise ValueError("логин и пароль в адресе не указываются: ключ — в поле «Ключ»")
     if parts.scheme == "https":
         return
     try:

@@ -27,6 +27,7 @@ def test_loopback_private_and_trusted_addresses_are_accepted(url):
 
 @pytest.mark.parametrize("url", [
     "https://api.example.com/v1", "http://8.8.8.8:30000/v1", "ftp://127.0.0.1/v1", "127.0.0.1:30000",
+    "http://admin:invented-pass@127.0.0.1:30000/v1", "http://admin@10.20.0.10:30000/v1",
 ])
 def test_public_unknown_or_malformed_addresses_are_refused(url):
     """SEC-12: облачный сервис нельзя по ошибке указать вместо локальной модели."""
