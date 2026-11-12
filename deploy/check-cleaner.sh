@@ -304,7 +304,7 @@ if ! grep -q '^CLEANER_GATEWAY_KEY=..*' "$ETC/cleaner.env"; then
     bad "в $ETC/cleaner.env нет CLEANER_GATEWAY_KEY"
 elif [[ -z "$pid" || "$pid" == "0" || ! -r "/proc/$pid/environ" ]]; then
     skip "ключ шлюза есть в $ETC/cleaner.env; служба не работает — её окружение не проверено"
-elif tr '\0' '\n' < "/proc/$pid/environ" | grep -q '^CLEANER_GATEWAY_KEY=..*'; then
+elif grep -qz '^CLEANER_GATEWAY_KEY=.' "/proc/$pid/environ"; then    # без конвейера: tr ловил SIGPIPE под pipefail
     ok "ключ шлюза задан и действует в работающей службе"
 else
     bad "ключ шлюза есть в $ETC/cleaner.env, но служба запущена без него — перезапустите службу: systemctl restart $UNIT"

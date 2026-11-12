@@ -417,7 +417,9 @@ def test_check_looks_for_the_gateway_key_in_the_running_service_not_only_in_the_
     службу. Проверка смотрит окружение процесса, не печатая значения; установщик и инструкция велят перезапустить."""
     text = (DEPLOY / "check-cleaner.sh").read_text(encoding="utf-8")
     section = text[text.index('echo "8. '):text.index("models verify")]
-    assert 'tr \'\\0\' \'\\n\' < "/proc/$pid/environ" | grep -q \'^CLEANER_GATEWAY_KEY=..*\'' in section
+    # Ревью 12.11.2026: «tr … | grep -q» под pipefail ложно проваливался на окружении больше 64 КБ (SIGPIPE у tr).
+    assert 'grep -qz \'^CLEANER_GATEWAY_KEY=.\' "/proc/$pid/environ"' in section
+    assert "| grep" not in section[section.index("/proc/$pid/environ"):section.index("перезапустите службу")]
     assert "перезапустите службу" in section
     assert not re.search(r"echo[^\n]*environ|cat [^\n]*environ", section)
     hint = next(line for line in (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8").splitlines()
