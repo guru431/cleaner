@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import uuid
 import weakref
+import zlib
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
@@ -1075,13 +1076,23 @@ class Repository:
         return [(self._ledger_entry(row, key), row["first_seen"]) for row in rows]
 
     def add_agent_receipt(self, chat_id: str, conversation: str, receipt: dict) -> str:
+        """Квитанция перечисляет отпечатки всех блоков запроса, и повторённых, — объём разговора растёт как квадрат числа
+        ходов; JSON сжимается zlib перед шифрованием (спецификация 2026-10-28, 10.4)."""
         request_id = uuid.uuid4().hex
+        data = zlib.compress(json.dumps(receipt, ensure_ascii=False).encode("utf-8"))
         self._run(
             "INSERT INTO agent_receipts(id, conversation, created_at, content_enc) VALUES (?, ?, ?, ?)",
             request_id, conversation, self._now(),
-            self._enc(self._dek(chat_id), json.dumps(receipt, ensure_ascii=False), f"agent_receipts.content:{request_id}"),
+            crypto.seal(self._dek(chat_id), data, f"agent_receipts.content:{request_id}"),
         )
         return request_id
+
+    @staticmethod
+    def _agent_receipt(key: bytes, row: sqlite3.Row) -> dict:
+        data = crypto.unseal(key, row["content_enc"], f"agent_receipts.content:{row['id']}")
+        # До 12.11.2026 квитанция — JSON без сжатия: он начинается с «{», поток zlib — с байта 0x78.
+        text = data if data.startswith(b"{") else zlib.decompress(data)
+        return dict(json.loads(text), id=row["id"], conversation=row["conversation"], time=row["created_at"])
 
     def agent_receipts(self, chat_id: str, offset: int = 0, limit: int = 20) -> list[dict]:
         key = self._dek(chat_id)
@@ -1089,18 +1100,14 @@ class Repository:
             "SELECT r.* FROM agent_receipts r JOIN agent_conversations c ON c.id = r.conversation WHERE c.chat_id = ? "
             "ORDER BY r.created_at DESC, r.rowid DESC LIMIT ? OFFSET ?", chat_id, limit, offset,
         )
-        return [dict(json.loads(self._dec(key, row["content_enc"], f"agent_receipts.content:{row['id']}")),
-                     id=row["id"], conversation=row["conversation"], time=row["created_at"]) for row in rows]
+        return [self._agent_receipt(key, row) for row in rows]
 
     def agent_receipt(self, chat_id: str, request_id: str) -> dict | None:
         row = self._one(
             "SELECT r.* FROM agent_receipts r JOIN agent_conversations c ON c.id = r.conversation "
             "WHERE c.chat_id = ? AND r.id = ?", chat_id, request_id,
         )
-        if row is None:
-            return None
-        return dict(json.loads(self._dec(self._dek(chat_id), row["content_enc"], f"agent_receipts.content:{row['id']}")),
-                    id=row["id"], conversation=row["conversation"], time=row["created_at"])
+        return None if row is None else self._agent_receipt(self._dek(chat_id), row)
 
     def prune_agent(self, before: str) -> int:
         """Разговоры без запросов с before удаляются с журналом (каскадом, 7.3); чаты шлюза без разговоров, которые не

@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from cleaner.core.agent import ledger
 from cleaner.core.agent.stream import DeltaRestorer, RestorationBudget, map_strings, usage_numbers
 from cleaner.core.agent.walk import (
-    OTHER_KEYS, SCHEMA_KEYS, Unit, bare, parameter_strings, parsed_arguments, strings, text_block,
+    OTHER_KEYS, SCHEMA_KEYS, Unit, bare, extra_fields, known_fields, parameter_strings, parsed_arguments, strings,
+    text_block,
 )
 from cleaner.core.types import ChatState, Settings
 
@@ -123,6 +124,9 @@ def _tool_def(node: dict, clean: Callable[[str], str]) -> dict:
 def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
     """Новый узел с очищенным текстом в виде запроса: аргументы вызова — снова строкой JSON."""
     node = unit.node
+    call = unit.kind == "tool_use" and isinstance(node, dict) and isinstance(node.get("function"), dict)
+    if unit.kind in ("text", "tool_result") or call:
+        node = extra_fields(unit.kind, node, clean, OTHER_KEYS)
     if unit.kind == "text":
         return dict(node, text=clean(node["text"]))
     if unit.kind == "tool_result":
@@ -131,14 +135,15 @@ def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
             return dict(node, content=clean(content))
         if isinstance(content, list):
             return dict(node, content=[_result_part(part, clean) for part in content])
-        return dict(node)
-    if unit.kind == "tool_use" and isinstance(node, dict) and isinstance(node.get("function"), dict):
-        arguments = node["function"].get("arguments")
+        return dict(node, content=strings(content, clean, OTHER_KEYS)) if "content" in node else node
+    if call:
+        function = extra_fields("tool_use", node["function"], clean, OTHER_KEYS)
+        arguments = function.get("arguments")
         if isinstance(arguments, str):
             arguments = clean(arguments)
         elif arguments is not None:
             arguments = json.dumps(strings(arguments, clean, frozenset()), ensure_ascii=False)
-        return dict(node, function=dict(node["function"], arguments=arguments))
+        return dict(node, function=dict(function, arguments=arguments))
     if unit.kind == "tool_def" and isinstance(node, dict):
         return _tool_def(node, clean)
     if unit.kind in ("other", "tool_use", "reasoning"):
@@ -160,9 +165,10 @@ def placeholder(unit: Unit, reason: str) -> object:
     if unit.kind == "reasoning":
         return text
     if unit.kind == "tool_result":
-        return dict(node, content=text)
+        return dict(known_fields(unit.kind, node), content=text)
     if unit.kind == "tool_use" and isinstance(node.get("function"), dict):
-        return dict(node, function=dict(node["function"], arguments=json.dumps({"cleaner": text}, ensure_ascii=False)))
+        function = dict(known_fields(unit.kind, node["function"]), arguments=json.dumps({"cleaner": text}, ensure_ascii=False))
+        return dict(known_fields(unit.kind, node), function=function)
     if unit.kind == "tool_def" and isinstance(node.get("function"), dict):
         return dict(node, function=dict(node["function"], description=text, parameters={"type": "object"}))
     return text_block(text)

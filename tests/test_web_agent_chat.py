@@ -51,6 +51,17 @@ def test_agent_chat_shows_the_ledger_side_by_side(ivan, gateway, stub):
     assert "в 0 блоках" in page
 
 
+def test_agent_chat_shows_the_blocks_of_a_selected_request(ivan, gateway, repo):
+    """Выбор запроса — блоки из его квитанции (10.4; квитанция сжата) и только они."""
+    chat = gateway()
+    gateway("Второй разговор: узел srv-db02.corp.contoso.ru")
+    second, first = repo.agent_receipts(chat)                     # свежие первыми
+    page = ivan.get(f"/chats/{chat}?request={first['id']}").text.split("Журнал отправленного", 1)[1]
+    assert "srv-dc01.corp.contoso.ru" in page and "srv-db02" not in page
+    page = ivan.get(f"/chats/{chat}?request={second['id']}").text.split("Журнал отправленного", 1)[1]
+    assert "srv-db02.corp.contoso.ru" in page and "srv-dc01" not in page
+
+
 def test_agent_chat_warns_about_new_request_shapes(ivan, repo, stub):
     """Риск 7: незнакомые поля и блоки (пути и type, без данных) и блоки модели вне журнала — в квитанции и на странице."""
     provider_id = repo.add_provider(Provider("", "Заглушка", "anthropic", stub.url, "x-api-key", "sk-1", ("m-1",)))

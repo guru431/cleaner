@@ -180,7 +180,7 @@ _SCHEMA_FIELDS = frozenset({
     "maxProperties", "dependentRequired", "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "readOnly", "writeOnly",
 })
 _UNIT_FIELDS = {
-    "text": frozenset({"type", "text", "annotations", "cache_control"}),
+    "text": frozenset({"type", "text", "annotations", "logprobs", "cache_control"}),
     "tool_use": frozenset({"type", "id", "call_id", "status", "name", "input", "function", "arguments", "action"}),
     "tool_result": frozenset({"type", "id", "call_id", "tool_use_id", "tool_call_id", "status", "role", "content", "output", "is_error"}),
     "reasoning": frozenset({"type", "id", "status", "text", "summary", "content"}),
@@ -264,6 +264,33 @@ def strings(value: object, clean: Callable[[str], str], skip: frozenset[str]) ->
     return value
 
 
+def extra_fields(kind: str, node: dict, clean: Callable[[str], str], skip: frozenset[str]) -> dict:
+    """Блок, в котором значения ключей вне известных полей вида очищены как текст (8.3, риск 7): строка под незнакомым
+    ключом — текст. Служебные значения skip (type, id…) не трогаются; без незнакомых ключей — тот же блок копией."""
+    fields = _UNIT_FIELDS[kind]
+    return {**node, **strings({key: value for key, value in node.items() if key not in fields}, clean, skip)}
+
+
+def known_fields(kind: str, node: dict) -> dict:
+    """Блок без ключей вне известных полей вида — основа пометки удержания: значение под незнакомым ключом не уходит."""
+    return {key: value for key, value in node.items() if key in _UNIT_FIELDS[kind]}
+
+
+def extra_paths(unit: Unit) -> list[Path]:
+    """Пути незнакомых полей блока известного вида (относительно блока) — для квитанции: ключи вне известных полей,
+    у вызова Chat Completions — и в function, содержимое результата инструмента не строкой и не списком."""
+    node = unit.node
+    if unit.kind not in ("text", "tool_result", "tool_use") or not isinstance(node, dict):
+        return []
+    fields = _UNIT_FIELDS[unit.kind]
+    out: list[Path] = [(key,) for key in node if key not in fields]
+    if unit.kind == "tool_use" and isinstance(node.get("function"), dict):
+        out += [("function", key) for key in node["function"] if key not in fields]
+    if unit.kind == "tool_result":
+        out += [(key,) for key in ("content", "output") if node.get(key) is not None and not isinstance(node[key], (str, list))]
+    return out
+
+
 def _result_part(part: object, clean: Callable[[str], str]) -> object:
     if is_media(part):
         return text_block(ledger.placeholder(ledger.REASONS["media"]))       # снимок экрана в результате инструмента (7.4)
@@ -283,6 +310,8 @@ def contains_media(unit: Unit) -> bool:
 def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
     """Новый узел с очищенным текстом; строение блока не меняется."""
     node = unit.node
+    if unit.kind in ("text", "tool_result", "tool_use"):
+        node = extra_fields(unit.kind, node, clean, OTHER_KEYS)
     if unit.kind == "text":
         return dict(node, text=clean(node["text"]))
     if unit.kind == "tool_result":
@@ -291,9 +320,9 @@ def sanitize_unit(unit: Unit, clean: Callable[[str], str]) -> object:
             return dict(node, content=clean(content))
         if isinstance(content, list):
             return dict(node, content=[_result_part(part, clean) for part in content])
-        return dict(node)
+        return dict(node, content=strings(content, clean, OTHER_KEYS)) if "content" in node else node
     if unit.kind == "tool_use":
-        return dict(node, input=strings(node["input"], clean, frozenset())) if "input" in node else dict(node)
+        return dict(node, input=strings(node["input"], clean, frozenset())) if "input" in node else node
     if unit.kind == "tool_def":
         return {
             key: value if key in ("name", "type") else strings(value, clean, SCHEMA_KEYS if key == "input_schema" else OTHER_KEYS)
@@ -313,9 +342,9 @@ def placeholder(unit: Unit, reason: str) -> object:
     """Пометка удержанного блока того же вида (7.4): у результата инструмента — его содержимым."""
     text = ledger.placeholder(reason)
     if unit.kind == "tool_result":
-        return dict(unit.node, content=text)
-    if unit.kind == "tool_use":
-        return dict(unit.node, input={"cleaner": text})      # вызов остаётся вызовом: на его id ссылается результат
+        return dict(known_fields(unit.kind, unit.node), content=text)
+    if unit.kind == "tool_use":     # вызов остаётся вызовом: на его id ссылается результат
+        return dict(known_fields(unit.kind, unit.node), input={"cleaner": text})
     if unit.kind == "tool_def":
         return dict(unit.node, description=text, input_schema={"type": "object"})
     return {"type": "text", "text": text}

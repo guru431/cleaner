@@ -2,6 +2,7 @@
 
 Only invented control strings and an in-process HTTP transport are used.
 """
+import hashlib
 import json
 from dataclasses import replace
 from functools import partial
@@ -19,6 +20,7 @@ from cleaner.core.agent import ledger
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import RestoreLimit, originals
 from cleaner.core.types import EntityType as T
+from cleaner.core.types import Policy
 from cleaner.egress import forward as egress
 from cleaner.storage.repo import Provider
 
@@ -82,6 +84,60 @@ def test_schema_property_names_remain_protocol_names(gateway, protocol):
     service, call = make(protocol, tools=[tool])
     assert service.handle(call).status == 200
     assert EMAIL in json.loads(sent[0].content)["tools"][0].__str__()
+
+
+FRESH = "olga.smirnova@fabrikam.ru"       # новое значение: до запроса чат его не знает
+
+
+def _extra_fields(protocol: str, value: str) -> tuple[dict, list[str]]:
+    """Тело с лишними ключами внутри text, tool_use и tool_result и результатом-объектом; формы для квитанции."""
+    if protocol == "anthropic":
+        return {"messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Проверь", "note": value}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "run", "input": {}, "note": value}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": {"found": value}, "note": value}]},
+        ]}, ["messages[].content[].content type=tool_result", "messages[].content[].note type=text",
+             "messages[].content[].note type=tool_result", "messages[].content[].note type=tool_use"]
+    if protocol == "chat":
+        call = {"id": "call_1", "type": "function", "note": value, "function": {"name": "run", "arguments": "{}", "note": value}}
+        return {"messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Проверь", "note": value}]},
+            {"role": "assistant", "content": None, "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "call_1", "content": {"found": value}, "note": value},
+        ]}, ["messages[].content", "messages[].content[].note type=text", "messages[].note",
+             "messages[].tool_calls[].function.note type=function", "messages[].tool_calls[].note type=function"]
+    return {"input": [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Проверь", "note": value}]},
+        {"type": "function_call", "call_id": "call_1", "name": "run", "arguments": "{}", "note": value},
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok", "note": value},
+    ]}, ["input[].content[].note type=input_text", "input[].note type=function_call", "input[].note type=function_call_output"]
+
+
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+def test_extra_fields_inside_known_blocks_are_cleaned_and_shown(gateway, repo, protocol):
+    """8.3, риск 7: строка под лишним ключом блока text, tool_use, tool_result и результат-объект очищаются как текст,
+    а не уходят как есть; служебные id не меняются; квитанция показывает такие поля."""
+    make, sent = gateway
+    extra, shapes = _extra_fields(protocol, FRESH)
+    service, call = make(protocol, **extra)
+    assert service.handle(call).status == 200
+    wire = sent[0].content.decode()
+    assert FRESH not in wire and wire.count("call_1" if protocol != "anthropic" else "toolu_1") == 2
+    receipt = repo.agent_receipts(repo.api_key(call.key.id).chat_id)[0]
+    assert receipt["unfamiliar"] == shapes
+
+
+@pytest.mark.parametrize("protocol", PROTOCOLS)
+def test_blocked_value_under_an_extra_key_is_withheld_whole(gateway, repo, protocol):
+    """Значение типа с «блокировать» под лишним ключом удерживает блок (7.4), и пометка не несёт лишних ключей: иначе
+    оригинал ушёл бы в пометке, а проверка утечек отказывала бы запросу на каждом ходе."""
+    repo.set_policy(T.PHONE, Policy.BLOCK)
+    make, sent = gateway
+    extra, _ = _extra_fields(protocol, "+7 (916) 123-45-67")
+    service, call = make(protocol, **extra)
+    assert service.handle(call).status == 200
+    wire = json.dumps(json.loads(sent[0].content), ensure_ascii=False)
+    assert "123-45-67" not in wire and "содержит значение типа PHONE" in wire
 
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
@@ -286,6 +342,29 @@ def test_receipts_link_reused_blocks_and_store_no_credentials(gateway, repo):
     assert b'"protocol"' not in raw and b'"layers"' not in raw
     foreign = repo.create_chat(call.user.id, "other", kind="agent")
     assert repo.agent_receipt(foreign, receipts[0]["id"]) is None
+
+
+def test_receipts_are_compressed_and_old_ones_still_read(gateway, repo):
+    """10.4: квитанция с отпечатками всей истории сжимается перед шифрованием; квитанции до сжатия читаются как прежде."""
+    make, _ = gateway
+    service, call = make()
+    service.handle(call)
+    chat_id = repo.api_key(call.key.id).chat_id
+    receipt = repo.agent_receipts(chat_id)[0]
+    content = {key: value for key, value in receipt.items() if key not in ("id", "conversation", "time")}
+    blocks = [{"direction": "in", "digest": hashlib.sha256(b"%d" % n).hexdigest(), "kind": "text", "status": "повторён"}
+              for n in range(1000)]
+    big = repo.add_agent_receipt(chat_id, receipt["conversation"], dict(content, blocks=blocks))
+    raw = repo.conn.execute("SELECT content_enc FROM agent_receipts WHERE id = ?", (big,)).fetchone()[0]
+    assert len(raw) * 3 < len(json.dumps(dict(content, blocks=blocks), ensure_ascii=False).encode())      # замер: 3,8 раза
+    assert repo.agent_receipt(chat_id, big)["blocks"] == blocks
+    old = json.dumps(content, ensure_ascii=False)              # запись до 12.11.2026: JSON без сжатия
+    repo.conn.execute(
+        "INSERT INTO agent_receipts(id, conversation, created_at, content_enc) VALUES (?, ?, ?, ?)",
+        ("old", receipt["conversation"], receipt["time"], repo._enc(repo._dek(chat_id), old, "agent_receipts.content:old")),
+    )
+    assert repo.agent_receipt(chat_id, "old") == dict(content, id="old", conversation=receipt["conversation"], time=receipt["time"])
+    assert {r["id"] for r in repo.agent_receipts(chat_id)} == {receipt["id"], big, "old"}
 
 
 @pytest.mark.parametrize("spaces", [255, 256, 257, 300, 1024])
