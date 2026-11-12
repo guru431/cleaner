@@ -64,10 +64,14 @@ class LocalLLMConfig:
 
 
 def check_address(url: str, trusted: frozenset[str]) -> None:
-    """SEC-12: только петлевой, частный или доверенный адрес. ValueError с причиной, если нет."""
+    """SEC-12: только петлевой, частный или доверенный адрес. ValueError с причиной, если нет.
+    Логин и пароль в адресе — тоже отказ: адрес уходит владельцам ключей в /api/v1, а httpx по ним заменил бы
+    Bearer с ключом шлюза на Basic, и шлюз ответил бы 401."""
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise ValueError("нужен адрес вида http://узел:порт/v1")
+    if "@" in parts.netloc:
+        raise ValueError("логин и пароль в адресе не указываются: ключ шлюза задаётся окружением службы")
     host = parts.hostname.lower()
     if host == "localhost" or host in trusted:
         return

@@ -52,6 +52,19 @@ def test_local_preview_shows_originals_and_needs_no_cloud_provider(local, repo):
     assert program.post(f"/api/v1/chats/{cid}/answers/{item_id}/stop").status_code == 204
 
 
+def test_address_with_credentials_is_neither_saved_nor_shown_to_key_owners(local, repo, browser):
+    """Логин и пароль в адресе локальной модели: форма отказывает, а уже сохранённый адрес не уходит в destination."""
+    admin = browser()
+    admin.user("root", role="admin")
+    admin.login("root")
+    form = {"url": "http://admin:invented-pass@127.0.0.1:30000/v1", "model": "qwen-27b-fast", "csrf": admin.csrf}
+    refused = admin.client.post("/settings/local-llm", data=form)
+    assert refused.status_code == 400 and "логин и пароль" in refused.text
+    repo.set_setting("local_llm.url", form["url"])               # записан до проверки
+    shown = prepare(local)
+    assert shown.status_code != 200 and "invented-pass" not in shown.text and local[2] == []
+
+
 class Deferred(Executor):
     """Очередь, которую тест запускает сам: задание можно снять до начала."""
 
