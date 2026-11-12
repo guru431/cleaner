@@ -42,7 +42,11 @@
   <section class="panel">
     <header class="panel-head"><h2 class="title">Журнал отправленного</h2></header>
     <div class="panel-body">
-      <p class="{{ 'flash warn' if opened else 'sub' }}">В показанных записях известные значения открыты в {{ opened }} {{ "блоке" if opened == 1 else "блоках" }}{% if opened %}: значение ушло открытым до правила, а разговор повторяет блок дословно{% endif %}.</p>
+      {% if every %}
+      <p class="{{ 'flash warn' if opened else 'sub' }}">Во всём журнале чата известные значения открыты в {{ opened }} {{ "блоке" if opened == 1 else "блоках" }}{% if opened %}: значение ушло открытым до правила, а разговор повторяет блок дословно. Ниже — только эти блоки{% endif %}. <a href="/chats/{{ chat.id }}">Показать весь журнал</a></p>
+      {% else %}
+      <p class="{{ 'flash warn' if opened else 'sub' }}">В показанных записях известные значения открыты в {{ opened }} {{ "блоке" if opened == 1 else "блоках" }}{% if opened %}: значение ушло открытым до правила, а разговор повторяет блок дословно{% endif %}. Начало разговоров — на дальних страницах: <a href="?open=1">проверить весь журнал</a> (долго для большого журнала).</p>
+      {% endif %}
       <table class="grid">
         <thead><tr><th>Время</th><th>Разговор</th><th>Направление</th><th>Блок</th><th>Знаков</th><th>Замены</th><th></th></tr></thead>
         <tbody>

@@ -326,11 +326,15 @@ def _opened(nodes: list[object], state: ChatState, settings: Settings) -> list[b
 
 def _agent_chat(request: Request, chat: Chat, viewer: Viewer, q: str) -> Response:
     """Чат шлюза: журнал отправленного по LEDGER_PAGE записей, новые первыми; запись — блок у агента и у провайдера
-    рядом, только для чтения (спецификация 2026-10-28, раздел 16)."""
+    рядом, только для чтения (спецификация 2026-10-28, раздел 16).
+    open=1 — проверка всего журнала чата (7.3): число замороженных блоков с открытым значением и только эти блоки.
+    По запросу, а не при каждом открытии: проверка утечек стоит около 1,6 с на миллион знаков (замер 12.11.2026),
+    а журнал хранит все разговоры за 30 дней."""
     repo = repo_of(request)
     raw = request.query_params.get("offset", "0")
     offset = int(raw) if raw.isdigit() and len(raw) < 9 else 0
-    shown = repo.ledger_page(chat.id, offset, LEDGER_PAGE)
+    every = request.query_params.get("open") == "1" and not request.query_params.get("request")
+    shown = repo.ledger_page(chat.id, 0, -1) if every else repo.ledger_page(chat.id, offset, LEDGER_PAGE)
     receipts = repo.agent_receipts(chat.id, offset, LEDGER_PAGE)
     selected = repo.agent_receipt(chat.id, request.query_params.get("request", ""))
     if selected:
@@ -344,6 +348,10 @@ def _agent_chat(request: Request, chat: Chat, viewer: Viewer, q: str) -> Respons
     state, _ = repo.load_state(chat.id)
     nodes = [(json.loads(entry.local), json.loads(entry.wire)) for entry, _ in shown]
     opened = _opened([wire if not entry.withheld else {} for (entry, _), (_, wire) in zip(shown, nodes)], state, repo.settings())
+    if every:
+        kept = [number for number, open_here in enumerate(opened) if open_here]
+        shown, nodes, opened = [shown[n] for n in kept], [nodes[n] for n in kept], [True] * len(kept)
+        offset = 0
     rows = []
     for (entry, first_seen), (local, wire), open_here in zip(shown, nodes, opened):
         conversation = conversations.get(entry.conversation)
@@ -359,7 +367,7 @@ def _agent_chat(request: Request, chat: Chat, viewer: Viewer, q: str) -> Respons
         request, "agent_chat.html", viewer, chat=chat, chats=chat_list(request, viewer, q), q=q, rows=rows,
         opened=sum(opened), keys=", ".join(key.name for key in keys if key), conversations=len(conversations),
         receipts=receipts, selected_request=selected,
-        offset=offset, more=len(shown) == LEDGER_PAGE, step=LEDGER_PAGE,
+        offset=offset, more=not every and len(shown) == LEDGER_PAGE, step=LEDGER_PAGE, every=every,
     )
 
 

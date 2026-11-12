@@ -1057,7 +1057,7 @@ class Repository:
                 )
 
     def ledger_page(self, chat_id: str, offset: int, limit: int) -> list[tuple[LedgerEntry, str]]:
-        """Записи журнала чата шлюза — новые первыми — и время первой записи каждой."""
+        """Записи журнала чата шлюза — новые первыми — и время первой записи каждой; limit -1 — все."""
         key = self._dek(chat_id)
         rows = self._all(
             "SELECT l.* FROM agent_ledger l JOIN agent_conversations c ON c.id = l.conversation WHERE c.chat_id = ? "
