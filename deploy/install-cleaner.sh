@@ -81,6 +81,23 @@ log "профиль хоста: $HOST_NAME ($HOST_IP, клиенты: $CLIENTS)"
 FIRST_INSTALL=1
 [[ -d "$APP/cleaner" || -f "$UNIT" ]] && FIRST_INSTALL=0
 
+# --- адрес и имя: настройки и сертификат создаются один раз и должны совпадать с профилем ---------
+# Иначе проверка HTTPS по новому адресу получила бы «код 000» и откатила код, а новый host.env остался бы.
+# Сверка — до любых изменений, host.env записывается после неё.
+REISSUE_HINT="sudo CLEANER_REISSUE_CERT=1 bash $SRC/deploy/install-cleaner.sh $SRC (переменная — после sudo: sudo сбрасывает окружение)"
+if [[ -f "$CONF" ]]; then
+    conf_host=$(sed -n 's/^host *= *"\([^"]*\)".*/\1/p' "$CONF" | head -n 1)
+    [[ "$conf_host" == "$HOST_IP" ]] || fail "в $CONF host = \"${conf_host}\", а в профиле HOST_IP=${HOST_IP}. \
+Смена адреса: поправьте host через sudoedit $CONF и выпустите сертификат заново: ${REISSUE_HINT}; \
+адрес не менялся — верните HOST_IP в профиле"
+fi
+if [[ "${CLEANER_REISSUE_CERT:-0}" != "1" && -s "$TLS/cert.pem" ]]; then
+    san=$(openssl x509 -in "$TLS/cert.pem" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d ' ')
+    [[ ",${san}," == *",IPAddress:${HOST_IP},"* && ",${san}," == *",DNS:${CERT_NAME},"* ]] \
+        || fail "сертификат $TLS/cert.pem выпущен для ${san:-неизвестно}, а в профиле HOST_IP=${HOST_IP}, CERT_NAME=${CERT_NAME}. \
+Выпустите его заново: ${REISSUE_HINT}"
+fi
+
 # --- учётная запись и каталоги --------------------------------------------------
 # Своя учётная запись, не aiservice: цепочка наблюдения сервера пишет исходящие
 # попытки aiservice как происшествия. /opt/cleaner, а не /opt/ai: туда cleaner не войдёт.

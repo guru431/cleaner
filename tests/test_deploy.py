@@ -222,6 +222,22 @@ def test_installer_renders_the_service_address_from_the_profile():
     assert 'grep -q "^host = \\"${HOST_IP}\\"" "$CONF"' in text
 
 
+def test_installer_refuses_a_profile_address_the_config_and_certificate_do_not_carry():
+    """Находка 12.11.2026: адрес в cleaner.toml и SAN сертификата ставятся один раз. После смены HOST_IP проверка
+    HTTPS по новому адресу откатывала код, а новый host.env оставался. Сверка — до любых изменений, с подсказкой."""
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    checks = text.index('conf_host=$(sed -n')
+    assert text.index('FIRST_INSTALL=1') < checks < text.index("useradd --system")
+    assert checks < text.index('install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"') < text.index("trap 'rollback")
+    san = text[text.index("-ext subjectAltName"):text.index("# --- учётная запись")]
+    assert '*",IPAddress:${HOST_IP},"*' in san and '*",DNS:${CERT_NAME},"*' in san
+    assert text.index("-ext subjectAltName") < text.index('mv "$TLS/cert.pem" "$TLS/cert.pem.prev-$STAMP"')
+    assert 'REISSUE_HINT="sudo CLEANER_REISSUE_CERT=1 bash ' in text
+    docs = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    section = docs[docs.index("## Смена адреса или имени"):docs.index("## Проверки локального периметра")]
+    assert "sudo CLEANER_REISSUE_CERT=1 bash" in section and "sudoedit /etc/cleaner/cleaner.toml" in section
+
+
 def test_server_dependencies_take_torch_without_cuda():
     """Сборка torch с PyPI тянет на Linux пакеты NVIDIA; видеокарта сервера занята языковой моделью."""
     text = (ROOT / "requirements-linux.txt").read_text(encoding="utf-8")
