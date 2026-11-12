@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterator
 from functools import lru_cache
 
-from cleaner.core.detect.base import DetectContext
+from cleaner.core.detect.base import DetectContext, load_builtin
 from cleaner.core.entities import hostmap, netmap
 from cleaner.core.entities.labels import SHAPE as _LABEL
 from cleaner.core.types import EntityType, Span
@@ -227,12 +227,14 @@ def _tenant_list(listed: frozenset[str]) -> tuple[tuple[tuple[str, ...], ...], f
 _TENANT_DEPTH = 8
 
 
-def _tenant(name: str, domain: str, listed: frozenset[str]) -> bool:
-    """Перед общеизвестным доменом domain стоит метка арендатора — часть прямо слева от суффикса частного раздела списка
-    публичных суффиксов, который длиннее domain («romashka.blob.core.windows.net»; сам «googleapis.com» в разделе, и
-    «www.googleapis.com» — не арендатор), или от суффикса встроенного списка («romashka.visualstudio.com»). «!имя» списка
-    — суффикс или служба с частью перед суффиксом, которые арендатора не выделяют («lambda.us-east-1.amazonaws.com»,
-    «code.visualstudio.com»). Проверяются последние _TENANT_DEPTH частей: длина имени на время не влияет."""
+def _tenant(name: str, domain: str, listed: frozenset[str], generic: frozenset[str]) -> int:
+    """Число частей суффикса арендатора перед общеизвестным доменом domain (0 — метки арендатора нет). Метка арендатора —
+    часть прямо слева от суффикса частного раздела списка публичных суффиксов, который длиннее domain
+    («romashka.blob.core.windows.net»; сам «googleapis.com» в разделе, и «www.googleapis.com» — не арендатор), или от
+    суффикса встроенного списка («romashka.visualstudio.com»); из подходящих берётся самый длинный суффикс — он точнее.
+    «!имя» списка — суффикс или служба с частью перед суффиксом, которые арендатора не выделяют
+    («lambda.us-east-1.amazonaws.com», «code.visualstudio.com»). Служебная часть (generic: «api.openai.azure.com») — не
+    метка арендатора. Проверяются последние _TENANT_DEPTH частей: длина имени на время не влияет."""
     start = len(name)
     for _ in range(_TENANT_DEPTH):
         start = name.rfind(".", 0, start)
@@ -240,15 +242,33 @@ def _tenant(name: str, domain: str, listed: frozenset[str]) -> bool:
             break
     labels = name[start + 1:].split(".")
     suffixes, exceptions = _tenant_list(listed)
+    found = 0
     left, suffix = hostmap.private_suffix(".".join(labels))
     if left and len(suffix) > len(domain) and suffix not in exceptions and f"{left}.{suffix}" not in exceptions:
-        return True
+        found = suffix.count(".") + 1
     for entry in suffixes:
         size = len(entry)
-        if len(labels) > size and all(part in ("*", label) for part, label in zip(entry, labels[-size:])):
+        if size <= found or len(labels) <= size:
+            continue
+        if all(part in ("*", label) for part, label in zip(entry, labels[-size:])):
             if ".".join(labels[-size:]) not in exceptions and ".".join(labels[-size - 1:]) not in exceptions:
-                return True
-    return False
+                found = size
+    return 0 if found and labels[-found - 1] in generic else found
+
+
+def tenant_suffix(value: str) -> int:
+    """Число частей суффикса арендатора у имени под общеизвестным доменом (_tenant; 0 — имя не арендатора). У такого
+    имени подменяются только части слева от суффикса, а сам он остаётся открытым (resolve.name_parts): облачный домен
+    вендора — не сущность, и его служебные имена в других текстах чата не скрываются."""
+    builtin = load_builtin()
+    name = hostmap.dotted(value.lower()).strip(".")
+    known, longest = builtin.well_known_domains, _longest(builtin.well_known_domains)
+    end = len(name)
+    while (dot := name.rfind(".", 0, end)) >= 0 and len(name) - dot - 1 <= longest:
+        if name[dot + 1:] in known:
+            return _tenant(name, name[dot + 1:], builtin.tenant_suffixes, builtin.generic_labels)
+        end = dot
+    return 0
 
 
 def well_known(value: str, ctx: DetectContext) -> bool:
@@ -271,7 +291,7 @@ def well_known(value: str, ctx: DetectContext) -> bool:
         if suffix in never:
             return True
         if suffix in known and not tenant:
-            tenant = _tenant(name, suffix, ctx.builtin.tenant_suffixes)
+            tenant = _tenant(name, suffix, ctx.builtin.tenant_suffixes, ctx.builtin.generic_labels) > 0
             if not tenant:
                 return True
         end = dot

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 from uuid import uuid4
 
+from cleaner.core.detect import infra
 from cleaner.core.detect.merge import NAME_WORDS, MergedSpan
 from cleaner.core.entities import hostmap, labels, macsid, names, netmap, ops
 from cleaner.core.match import has_invisible, normalize
@@ -96,8 +97,13 @@ def _ip_text(value: str) -> str:
 
 def name_parts(value: str, precedes: bool) -> tuple[list[str], str]:
     """Части имени через точку слева от домена и домен (5.10): в части имени перед заменой и в части без точки домена нет.
-    По ним выдаёт подмены _name, и по ним же конвейер судит о типах частей адреса (pipeline._types)."""
-    return (value.split("."), "") if precedes or "." not in value else hostmap.parts(value)
+    По ним выдаёт подмены _name, и по ним же конвейер судит о типах частей адреса (pipeline._types). У имени арендатора
+    (infra.tenant_suffix: «romashka-sql.database.windows.net») домена тоже нет: части — слева от суффикса арендатора, а
+    сам суффикс остаётся в подмене как есть."""
+    if precedes or "." not in value:
+        return value.split("."), ""
+    kept = infra.tenant_suffix(value)
+    return (value.split(".")[:-kept], "") if kept else hostmap.parts(value)
 
 
 def _fake_forms(fake: str) -> set[str]:
@@ -578,6 +584,8 @@ class Resolver:
         # Часть имени рядом с заменой — не имя целиком (5.10): в частях перед заменой домена нет, одиночная часть после
         # неё — тоже часть. Первой часть после замены не бывает, и отдельным написанием никакая из них не становится.
         left, registrable = name_parts(value, precedes)
+        # Суффикс арендатора («database.windows.net») подмены не получает: облачный домен вендора — не сущность (5.4).
+        kept = [] if registrable else value.split(".")[len(left):]
         retyped = self._manual(registrable, T.DOMAIN) if registrable else None
         domain = retyped or (self._dns(registrable, origin) if registrable else None)
         fakes, owners, leading = [], [], not follows
@@ -593,6 +601,7 @@ class Resolver:
         if domain:
             owners.append((domain[0], retyped is not None))
             fakes.append(domain[1])
+        fakes += kept
         # Сущность имени целиком — часть с самой строгой политикой: по ней «блокировать» проверяют очистка и экран
         # чата (FR-4.2). При равных — часть, которой пользователь дал другой тип: блокировка её типа, заданная позже,
         # тоже видна на экране; затем — первая слева, как прежде. Восстановление проверяет политики всех частей.

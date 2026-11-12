@@ -8,7 +8,7 @@ from cleaner.core.detect.base import DetectContext
 from cleaner.core.entities import hostmap
 from cleaner.core.pipeline import sanitize
 from cleaner.core.restore import restore
-from cleaner.core.types import ChatState, DictEntry, Settings
+from cleaner.core.types import ChatState, DictEntry, Policy, Settings, default_policies
 from cleaner.core.types import EntityType as T
 
 CTX = DetectContext(Settings())
@@ -337,6 +337,71 @@ def test_azure_sql_connection_string_hides_the_server_and_restores():
     sanitized = sanitize(state, text, Settings()).sanitized
     assert "romashka" not in sanitized and "login.microsoftonline.com" in sanitized
     assert restore(state, sanitized, Settings()).text == text
+
+
+@pytest.mark.parametrize("tenant, services", [
+    (
+        "Бакет romashka-bucket.s3.amazonaws.com",
+        "Токен из https://sts.amazonaws.com, роли iam.amazonaws.com, узлы ec2.eu-west-1.amazonaws.com",
+    ),
+    (
+        "Модель romashka-oai.openai.azure.com, вход login.windows.net, EndpointSuffix=core.windows.net",
+        "Откройте portal.azure.com, management.azure.com и dev.azure.com/org; вход login.windows.net",
+    ),
+])
+def test_vendor_service_names_stay_after_a_tenant_name(tenant, services):
+    """Находка 12.11: подмена имени арендатора делала облачный домен вендора («amazonaws.com», «windows.net») сущностью
+    DOMAIN, и его служебные имена скрывались во всём чате, а при DOMAIN «блокировать» блокировали выдачу. Теперь у имени
+    арендатора подменяются только его части, облачный суффикс остаётся как есть и сущностью не становится."""
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    settings = Settings(policies=default_policies() | {T.DOMAIN: Policy.BLOCK})
+    first = sanitize(state, tenant, settings)
+    assert "romashka" not in first.sanitized and first.deliverable
+    assert "login.windows.net" not in tenant or "login.windows.net" in first.sanitized
+    assert "core.windows.net" not in tenant or "EndpointSuffix=core.windows.net" in first.sanitized
+    assert not [entity for entity in state.entities.values() if entity.type is T.DOMAIN]
+    second = sanitize(state, services, settings)
+    assert second.sanitized == services and second.deliverable
+
+
+@pytest.mark.parametrize("value, fake", [
+    ("romashka-sql.database.windows.net", "host-1.database.windows.net"),
+    ("romashka-backup.blob.core.windows.net", "host-1.blob.core.windows.net"),
+    ("romashka-kv.vault.azure.net", "host-1.vault.azure.net"),
+    ("romashka-bucket.s3.amazonaws.com", "host-1.s3.amazonaws.com"),
+    ("123456789012.dkr.ecr.eu-west-1.amazonaws.com", "host-1.dkr.ecr.eu-west-1.amazonaws.com"),
+    ("app.romashka.visualstudio.com", "host-1.sub-2.visualstudio.com"),
+    ("www.romashka.visualstudio.com", "www.host-1.visualstudio.com"),
+])
+def test_tenant_name_keeps_the_cloud_suffix(value, fake):
+    """У имени арендатора подменяются метки арендатора и части слева от неё, суффикс арендатора остаётся: модель видит,
+    что это Azure SQL, хранилище, Key Vault или бакет."""
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    assert sanitize(state, f"Ресурс {value} недоступен", Settings()).sanitized == f"Ресурс {fake} недоступен"
+
+
+def test_tenant_names_round_trip_in_any_writing():
+    """Восстановление подмены имени арендатора — по выданной строке, как у прочих имён: заглавными, с точкой в конце, в
+    адресе ссылки."""
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    text = (
+        "Server=tcp:romashka-sql.database.windows.net,1433;Initial Catalog=crm;\n"
+        "Файл https://romashka-backup.blob.core.windows.net/backups/db.bak"
+    )
+    sanitized = sanitize(state, text, Settings()).sanitized
+    assert sanitized == (
+        "Server=tcp:host-1.database.windows.net,1433;Initial Catalog=crm;\n"
+        "Файл https://host-2.blob.core.windows.net/backups/db.bak"
+    )
+    assert restore(state, sanitized, Settings()).text == text
+    answer = (
+        "Проверьте HOST-1.DATABASE.WINDOWS.NET и host-1.database.windows.net. "
+        "Скачайте [копию](https://host-2.blob.core.windows.net/backups/db.bak), сервер host-1."
+    )
+    assert restore(state, answer, Settings()).text == (
+        "Проверьте ROMASHKA-SQL.DATABASE.WINDOWS.NET и romashka-sql.database.windows.net. "
+        "Скачайте [копию](https://romashka-backup.blob.core.windows.net/backups/db.bak), сервер romashka-sql."
+    )
 
 
 def test_machine_account_and_share_names():
