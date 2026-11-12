@@ -278,6 +278,62 @@ def test_well_known_and_never_listed_names_stay():
     assert values(text, ctx) == {"contoso.ru"}
 
 
+TENANT_NAMES = (
+    "romashka-backup.blob.core.windows.net",
+    "romashka-sql.database.windows.net",
+    "romashka-kv.vault.azure.net",
+    "romashka-bucket.s3.amazonaws.com",
+    "romashka.visualstudio.com",
+    "123456789012.dkr.ecr.eu-west-1.amazonaws.com",
+    "romashka.storage.googleapis.com",
+    "romashka.github.io",
+    "romashka.sharepoint.com",
+)
+SERVICE_NAMES = (
+    "login.microsoftonline.com", "update.microsoft.com", "management.azure.com", "s3.amazonaws.com",
+    "storage.googleapis.com", "dev.azure.com", "www.googleapis.com", "fonts.googleapis.com",
+    "raw.githubusercontent.com", "login.live.com", "graph.microsoft.com", "api.github.com", "pypi.org", "docker.io",
+    "registry-1.docker.io", "lambda.us-east-1.amazonaws.com", "s3.eu-west-1.amazonaws.com",
+    "dkr.ecr.eu-west-1.amazonaws.com", "code.visualstudio.com", "app.vssps.visualstudio.com", "login.windows.net",
+    "blob.core.windows.net", "database.windows.net", "vault.azure.net",
+)
+
+
+@pytest.mark.parametrize("value", TENANT_NAMES)
+def test_tenant_resource_under_a_well_known_domain_is_hidden(value):
+    """Находка 12.11: левую часть имени под многоарендным облачным доменом выбирает организация — учётная запись
+    хранилища, сервер Azure SQL, бакет, номер учётной записи AWS. Суффикс арендатора — из частного раздела списка
+    публичных суффиксов или встроенного списка (data/tenant_suffixes.txt)."""
+    assert not infra.well_known(value, CTX)
+    assert values(f"Ресурс {value} недоступен") == {value}
+
+
+@pytest.mark.parametrize("value", SERVICE_NAMES)
+def test_vendor_service_names_stay(value):
+    """Служебные имена вендора без метки арендатора общеизвестны: «googleapis.com» и «githubusercontent.com» сами стоят в
+    частном разделе списка, но «www» и «raw» перед ними — не арендаторы."""
+    assert infra.well_known(value, CTX)
+    assert values(f"Ресурс {value} недоступен") == set()
+
+
+def test_never_listed_tenant_resource_stays():
+    ctx = DetectContext(Settings(never=frozenset({"romashka-sql.database.windows.net"})))
+    assert values("Сервер romashka-sql.database.windows.net и romashka-kv.vault.azure.net", ctx) == {
+        "romashka-kv.vault.azure.net"
+    }
+
+
+def test_azure_sql_connection_string_hides_the_server_and_restores():
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    text = (
+        "Server=tcp:romashka-sql.database.windows.net,1433;Initial Catalog=crm;Encrypt=True;"
+        "Connection Timeout=30; вход через login.microsoftonline.com"
+    )
+    sanitized = sanitize(state, text, Settings()).sanitized
+    assert "romashka" not in sanitized and "login.microsoftonline.com" in sanitized
+    assert restore(state, sanitized, Settings()).text == text
+
+
 def test_machine_account_and_share_names():
     result = found(r"Учётная запись SRV-APP01$ заблокирована, шара \\FS01\ADMIN$ и цена 100$")
     assert (T.HOST, "SRV-APP01") in result

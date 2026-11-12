@@ -21,6 +21,7 @@ class Builtin:
     generic_labels: frozenset[str]
     builtin_accounts: frozenset[str]
     ambiguous_suffixes: frozenset[str]
+    tenant_suffixes: frozenset[str]
 
 
 def _read(name: str) -> frozenset[str]:
@@ -37,6 +38,7 @@ def load_builtin() -> Builtin:
         generic_labels=_read("generic_labels.txt"),
         builtin_accounts=_read("builtin_accounts.txt"),
         ambiguous_suffixes=_read("ambiguous_suffixes.txt"),
+        tenant_suffixes=_read("tenant_suffixes.txt"),
     )
 
 
