@@ -70,6 +70,35 @@ def test_address_outside_the_settings_is_refused_and_logged_once(guard, event, a
     assert guard.lookups == []                                              # имя не ушло и в DNS сторожа
 
 
+def test_name_and_reverse_lookups_of_allowed_hosts_pass(guard):
+    """FINDINGS «Сторож выхода в сеть не перехватывает gethostbyname, gethostbyaddr и getnameinfo»: имя из настроек
+    разрешается и gethostbyname — сторож узнаёт его адреса; обратный запрос — для петли и адреса из списка."""
+    guard.watch.hook("socket.gethostbyname", (PROVIDER,))
+    guard.connect("192.0.2.44")                                             # адрес, узнанный при gethostbyname
+    for host in ("192.0.2.44", "10.20.0.5", "127.0.0.1", "localhost", PROVIDER):
+        guard.watch.hook("socket.gethostbyaddr", (host,))
+    guard.watch.hook("socket.getnameinfo", (("2001:db8::44", 443, 0, 0),))
+    guard.watch.hook("socket.getnameinfo", (("::1", 8080),))
+    assert guard.lookups == [PROVIDER] and guard.reports == []
+
+
+@pytest.mark.parametrize("event, args, kind, port", [
+    ("socket.gethostbyname", ("huggingface.co",), "name", None),
+    ("socket.gethostbyaddr", ("1.1.1.1",), "public", None),
+    ("socket.gethostbyaddr", ("10.20.0.6",), "private", None),
+    ("socket.gethostbyaddr", ("cdn.example",), "name", None),
+    ("socket.getnameinfo", (("2606:4700::1111", 443, 0, 0),), "public", 443),
+], ids=["gethostbyname", "gethostbyaddr_public", "gethostbyaddr_private", "gethostbyaddr_name", "getnameinfo"])
+def test_lookups_in_c_code_outside_the_settings_are_refused(guard, event, args, kind, port):
+    """gethostbyname(_ex), gethostbyaddr и getnameinfo разрешают в коде C мимо обёртки getaddrinfo: имя не из списка —
+    отказ до запроса DNS, обратный запрос адреса не из списка — тоже."""
+    with pytest.raises(EgressRefused):
+        guard.watch.hook(event, args)
+    [(logged_kind, logged_port, origin)] = guard.reports
+    assert (logged_kind, logged_port, origin) == (kind, port, __name__)
+    assert guard.lookups == []
+
+
 def test_allowed_list_follows_the_settings(guard):
     guard.lookup(PROVIDER)
     guard.targets.remove(PROVIDER)                                          # подключение удалили
@@ -147,7 +176,11 @@ with socket.create_server(("127.0.0.1", 0)) as server:
         writer.close()
 
     asyncio.run(loop_connect())
-for call in (lambda: socket.getaddrinfo("files.example", 443), lambda: socket.create_connection(("192.0.2.1", 443), timeout=5)):
+for call in (
+    lambda: socket.getaddrinfo("files.example", 443), lambda: socket.create_connection(("192.0.2.1", 443), timeout=5),
+    lambda: socket.gethostbyname_ex("files.example"), lambda: socket.gethostbyaddr("192.0.2.1"),
+    lambda: socket.getnameinfo(("192.0.2.1", 443), 0),
+):
     try:
         call()
     except watch.EgressRefused:
@@ -165,4 +198,4 @@ def test_audit_hook_refuses_in_a_real_process():
         [sys.executable, "-c", _PROCESS], cwd=Path(__file__).resolve().parents[1], capture_output=True, timeout=20,
     )
     assert done.returncode == 0, done.stderr.decode(errors="replace")[-2000:]
-    assert done.stdout.decode().split() == ["['name',", "'private']"]
+    assert done.stdout.decode().split() == ["['name',", "'name',", "'private',", "'private']"]
