@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from cleaner.agent_service import AgentCall, AgentService
+from cleaner.core.agent.protocol import PROTOCOLS
 from cleaner.egress import forward as egress
 from cleaner.storage.repo import Provider
 
@@ -108,3 +109,25 @@ def test_responses_assistant_string_is_found_in_the_ledger(gateway):
     assert DERIVED not in json.dumps(sent[-1], ensure_ascii=False)
     assistant = next(item for item in history if item.get("role") == "assistant")
     assert assistant["content"] == replies[0]           # строкой, дословно как прислала модель
+
+
+def test_responses_answer_recorded_before_ledger_node_is_found(gateway, repo, monkeypatch):
+    """Разговор, начатый до сведения узлов (ledger_node, 09.11.2026): ответ записан в журнал под прежним отпечатком —
+    части output_text с annotations: []. Следующий ход находит его по прежнему отпечатку и шлёт дословно."""
+    make, sent, replies = gateway
+    service, call = make("responses")
+    first = {"model": "m", "stream": False, "input": [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": TASK}]},
+    ]}
+    with monkeypatch.context() as patch:
+        patch.setitem(PROTOCOLS, "responses", replace(PROTOCOLS["responses"], ledger_node=lambda role, kind, node: node))
+        reply = service.handle(call(first))
+    part = json.loads(reply.body)["output"][0]["content"][0]
+    assert part["annotations"] == [] and DERIVED in part["text"]
+    second = dict(first, input=[*first["input"], {"type": "message", "role": "assistant", "content": [part]},
+                                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Дальше"}]}])
+    service.handle(call(second))
+    details = repo.audit_events("agent_send")[0].details           # свежие первыми
+    assert (details["blocks_repeated"], details["blocks_new"]) == (2, 1)    # задача и ответ — из журнала, «Дальше» — новое
+    assistant = next(item for item in sent[-1]["input"] if item.get("role") == "assistant")
+    assert assistant["content"] == [{"type": "output_text", "text": replies[0], "annotations": []}]
