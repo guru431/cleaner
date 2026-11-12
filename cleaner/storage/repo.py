@@ -1340,6 +1340,20 @@ class Repository:
         where, args = self._audit_where(event, user_id, since, before, kind)
         return self._one("SELECT COUNT(*) FROM audit" + where, *args)[0]
 
+    def audit_sums(
+        self, event: str, fields: tuple[str, ...], counters: tuple[str, ...], since: str | None = None,
+        before: str | None = None,
+    ) -> list[dict]:
+        """Суммы счётчиков событий отбора по значениям полей подробностей — агрегатом SQLite по индексу, без загрузки
+        и разбора каждой строки (отчёт «Сохранность меток» за 30 дней — это все ответы шлюза). Строка: поля (None, если
+        поля нет), events — число событий, счётчики — суммы. Имена полей и счётчиков — из кода, не из запроса."""
+        where, args = self._audit_where(event, None, since, before, None)
+        columns = [f"json_extract(details, '$.{name}') AS {name}" for name in fields]
+        sums = [f"SUM(COALESCE(json_extract(details, '$.{name}'), 0)) AS {name}" for name in counters]
+        sql = (f"SELECT {', '.join(columns)}, COUNT(*) AS events, {', '.join(sums)} FROM audit{where} "
+               f"GROUP BY {', '.join(map(str, range(1, len(fields) + 1)))}")
+        return [dict(row) for row in self._all(sql, *args)]
+
     def audit_events(
         self, event: str | None = None, user_id: str | None = None,
         since: str | None = None, before: str | None = None, limit: int | None = 200,
@@ -1347,9 +1361,11 @@ class Repository:
     ) -> list[AuditRow]:
         """Свежие первыми. since и before — начало строки ISO: «2026-10-14» отбирает с начала суток (UTC).
         limit None — без предела (выгрузка CSV); kind — поле kind в подробностях (вид ошибки);
-        offset — сколько свежих пропустить (страницы журнала)."""
+        offset — сколько свежих пропустить (страницы журнала). Порядок — по времени, затем по номеру: его дают сами
+        индексы audit_by_event и audit_by_ts (номер строки — их последний столбец); «ORDER BY id» при отборе по событию
+        сортировал бы все его строки во временном B-дереве."""
         where, args = self._audit_where(event, user_id, since, before, kind)
-        sql = "SELECT * FROM audit" + where + " ORDER BY id DESC"
+        sql = "SELECT * FROM audit" + where + " ORDER BY ts DESC, id DESC"
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             args += [limit, offset]

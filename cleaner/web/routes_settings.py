@@ -925,21 +925,20 @@ def _label_report(repo, since: str | None, before: str | None, source: str = "")
     откуда ответы строки, source — отбор одного источника ("chat" | "agent", "" — все)."""
     names = {provider.id: provider.name for provider in repo.providers()} | SUBSCRIPTION_NAMES
     groups: dict[tuple, dict] = {}
-    for row in repo.audit_events("restore", since=since, before=before, limit=None):
-        details = row.details
-        origin = details.get("source") or "chat"
+    for sums in repo.audit_sums("restore", ("source", "provider", "model", "label_style"), _LABEL_COUNTERS, since, before):
+        origin = sums["source"] or "chat"
         if source and origin != source:
             continue
-        provider, model = details.get("provider") or "", details.get("model") or ""
-        style = details.get("label_style") or ""
+        provider, model = sums["provider"] or "", sums["model"] or ""
+        style = sums["label_style"] or ""
         group = groups.setdefault((provider, model, style), {
             "connection": names.get(provider, provider) if provider else "",
             "model": model, "style": LABEL_STYLES.get(style, style), "answers": 0, "sources": set(),
         } | dict.fromkeys(_LABEL_COUNTERS, 0))
-        group["answers"] += 1
+        group["answers"] += sums["events"]
         group["sources"].add(origin)
         for counter in _LABEL_COUNTERS:
-            group[counter] += int(details.get(counter) or 0)
+            group[counter] += int(sums[counter] or 0)
     for group in groups.values():
         group["sources"] = ", ".join(LABEL_SOURCES[name] for name in LABEL_SOURCES if name in group["sources"])
         group["labels"] = group["restored"] + group["altered"] + group["derived"] + group["unknown"]
