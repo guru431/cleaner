@@ -219,9 +219,13 @@ _COPULAS = frozenset({"это", "is", "was"})
 _NEXT_VALUE = re.compile(r"[ \t]+" + _VALUE)
 # Знаки в конце — не часть слова прозы: «Password - here!», «Пароль — какой?», «это:».
 _TRAILING = "?!:;,.…"
+# Слово сразу после «пароль» (password, password is, password was) — пароль, если похоже на пароль (_looks_like_password)
+# или это не меньше шести цифр: «пароль 482913», «Wi-Fi пароль 12345678». Число скрывается только на своём месте, как
+# после тире (_after_dash); четыре цифры — скорее год («пароль 2024 года»).
 _PROSE = re.compile(
-    r"[пp](?<!\w[пp])(?:(?<=п)ароль|(?<=p)assword)(?:\s+is)?\s+(?P<bare>(?!-)[^\s,;:=]+)", re.IGNORECASE
+    r"[пp](?<!\w[пp])(?:(?<=п)ароль|(?<=p)assword)(?:\s+(?:is|was))?\s+(?P<bare>(?!-)[^\s,;:=]+)", re.IGNORECASE
 )
+_DIGIT_PASSWORD = re.compile(r"[0-9]{6,}")
 # Токен или код в тексте без ключа присваивания: «пришёл код восстановления 3f8e…», «Подтвердите действие токеном 8c7b…»,
 # «API-ключ для доступа к эндпоинту api_3f…», «смс с кодом 847593». После слова «токен», «код», «ключ», «пароль» (token,
 # code, key, password) в любом падеже — до четырёх слов без знаков препинания, «:» или пробел и ближайшее значение вида
@@ -775,6 +779,8 @@ def detect(text: str, ctx: DetectContext) -> list[Span]:
         bounds = _value(m)
         if bounds and _looks_like_password(text[bounds[0]:bounds[1]]) and not _HYPHENATED_WORD.fullmatch(text, *bounds):
             spans.append(Span(*bounds, EntityType.SECRET, name))
+        elif bounds and _DIGIT_PASSWORD.fullmatch(text, *bounds):
+            spans.append(Span(*bounds, EntityType.SECRET, name, searchable=False))
     for m in _TOKEN_PHRASE.finditer(text):
         value = m.group("bare")
         # Код ошибки — не секрет; имя из слов — не токен, но после «пароль» это пароль из слов.
