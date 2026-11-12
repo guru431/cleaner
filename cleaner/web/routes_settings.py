@@ -813,17 +813,33 @@ def _day_start(request: Request, value: str, shift: int = 0) -> str | None:
     return start.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+AUDIT_PAGE = 500
+
+
 @router.get("/audit")
 def audit(
     request: Request, event: str = "", user: str = "", since: str = "", until: str = "",
     viewer: Viewer = Depends(get_admin),
 ) -> Response:
+    """Страница — AUDIT_PAGE событий отбора, свежие первыми; число всех событий отбора и кнопки «Новее/Старше»:
+    шлюз пишет события на каждый ход, и отбор за день не помещается на одну страницу."""
     repo = repo_of(request)
-    rows = repo.audit_events(event or None, user or None, _day_start(request, since), _day_start(request, until, 1), limit=500)
+    raw = request.query_params.get("offset", "0")
+    offset = int(raw) if raw.isdigit() and len(raw) < 9 else 0
+    selection = (event or None, user or None, _day_start(request, since), _day_start(request, until, 1))
+    rows = repo.audit_events(*selection, limit=AUDIT_PAGE, offset=offset)
+    total = repo.audit_count(*selection)
+    filters = {key: value for key, value in (("event", event), ("user", user), ("since", since), ("until", until)) if value}
+
+    def link(start: int) -> str:
+        return "/settings/audit?" + urlencode(filters | ({"offset": start} if start else {}))
+
     accounts = repo.users()
     return page(
         request, "audit.html", viewer, rows=rows, logins={u.id: u.login for u in accounts}, users=accounts,
-        events=EVENTS, event=event, user=user, since=since, until=until,
+        events=EVENTS, event=event, user=user, since=since, until=until, total=total, offset=offset,
+        newer=link(max(offset - AUDIT_PAGE, 0)) if offset else "",
+        older=link(offset + AUDIT_PAGE) if offset + len(rows) < total else "",
     )
 
 

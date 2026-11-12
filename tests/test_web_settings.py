@@ -294,6 +294,33 @@ def test_audit_is_filtered_by_event_user_and_day(browser, repo, clock):
     assert admin.get("/settings/audit", since="вчера").status_code == 400
 
 
+def test_audit_page_shows_the_total_and_pages_through_older_events(browser, repo, clock, monkeypatch):
+    """FR-11.3: отбор больше страницы не обрезается молча — число всех событий и кнопки «Старше/Новее» с тем же отбором."""
+    from cleaner.web import routes_settings
+
+    monkeypatch.setattr(routes_settings, "AUDIT_PAGE", 2)
+    for number in range(5):
+        repo.audit("restore", restored=number)
+    repo.audit("leak")
+    admin = browser()
+    admin.user("boss", "admin")
+    admin.login("boss")
+
+    def shown(text: str) -> list[str]:
+        return re.findall(r"<td>restored: (\d)</td>", text)
+
+    first = admin.get("/settings/audit", event="restore").text
+    assert "Событий по отбору — 5; показаны 1–2, свежие первыми." in first
+    assert shown(first) == ["4", "3"] and "Новее</a>" not in first
+    [older] = re.findall(r'href="(/settings/audit\?[^"]+)">Старше', first)
+    assert older == "/settings/audit?event=restore&amp;offset=2"
+    last = admin.get("/settings/audit", event="restore", offset="4").text
+    assert shown(last) == ["0"] and "Старше</a>" not in last
+    assert 'href="/settings/audit?event=restore&amp;offset=2">Новее' in last
+    whole = admin.get("/settings/audit", event="leak").text
+    assert "Событий по отбору — 1." in whole and "Старше</a>" not in whole
+
+
 def test_audit_is_exported_as_csv_with_the_current_filter(browser, repo, clock):
     """Идея «Выгрузка журнала в CSV за период»: тот же отбор, что на странице, без предела в 500 строк; ячейки,
     которые таблица сочла бы формулой, обезврежены; сама выгрузка — событие журнала."""

@@ -1305,15 +1305,16 @@ class Repository:
     def audit_events(
         self, event: str | None = None, user_id: str | None = None,
         since: str | None = None, before: str | None = None, limit: int | None = 200,
-        kind: str | None = None,
+        kind: str | None = None, offset: int = 0,
     ) -> list[AuditRow]:
         """Свежие первыми. since и before — начало строки ISO: «2026-10-14» отбирает с начала суток (UTC).
-        limit None — без предела (выгрузка CSV); kind — поле kind в подробностях (вид ошибки)."""
+        limit None — без предела (выгрузка CSV); kind — поле kind в подробностях (вид ошибки);
+        offset — сколько свежих пропустить (страницы журнала)."""
         where, args = self._audit_where(event, user_id, since, before, kind)
         sql = "SELECT * FROM audit" + where + " ORDER BY id DESC"
         if limit is not None:
-            sql += " LIMIT ?"
-            args.append(limit)
+            sql += " LIMIT ? OFFSET ?"
+            args += [limit, offset]
         return [
             AuditRow(row["id"], row["ts"], row["user_id"], row["chat_id"], row["event"], json.loads(row["details"]))
             for row in self._all(sql, *args)
