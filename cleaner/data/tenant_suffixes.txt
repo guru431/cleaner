@@ -29,6 +29,30 @@ managedhsm.azure.net
 *.cloudapp.azure.com
 mail.protection.outlook.com
 visualstudio.com
+# Зоны Azure Private Link: имя ресурса в CNAME и nslookup («romashkasql.privatelink.database.windows.net»); «privatelink»
+# — служебное слово, а не арендатор, и голая зона («privatelink.blob.core.windows.net») открыта
+privatelink.database.windows.net
+privatelink.blob.core.windows.net
+privatelink.file.core.windows.net
+privatelink.queue.core.windows.net
+privatelink.table.core.windows.net
+privatelink.dfs.core.windows.net
+privatelink.web.core.windows.net
+privatelink.search.windows.net
+privatelink.redis.cache.windows.net
+privatelink.servicebus.windows.net
+privatelink.managedhsm.azure.net
+privatelink.documents.azure.com
+privatelink.openai.azure.com
+privatelink.cognitiveservices.azure.com
+privatelink.postgres.database.azure.com
+privatelink.mysql.database.azure.com
+privatelink.mariadb.database.azure.com
+privatelink.mongo.cosmos.azure.com
+privatelink.table.cosmos.azure.com
+privatelink.cassandra.cosmos.azure.com
+privatelink.gremlin.cosmos.azure.com
+privatelink.services.ai.azure.com
 # AWS: реестр ECR и вход в консоль — по номеру учётной записи; регион слева от суффикса арендатором не считается
 dkr.ecr.*.amazonaws.com
 *.rds.amazonaws.com
@@ -37,6 +61,10 @@ dkr.ecr.*.amazonaws.com
 *.redshift.amazonaws.com
 *.docdb.amazonaws.com
 *.cache.amazonaws.com
+# ElastiCache: бессерверный кэш и конечная точка настройки кластера — служебное слово перед регионом
+serverless.*.cache.amazonaws.com
+clustercfg.*.cache.amazonaws.com
+cfg.*.cache.amazonaws.com
 *.vpce.amazonaws.com
 # Балансировщик NLB, Amazon MSK, EFS, MemoryDB: служба перед регионом (в частном разделе только «*.elb.amazonaws.com»)
 elb.*.amazonaws.com
@@ -56,6 +84,8 @@ gitlab.io
 sharepoint.com
 atlassian.net
 slack.com
+# Рабочее пространство Slack Enterprise Grid («romashka.enterprise.slack.com»)
+enterprise.slack.com
 okta.com
 # «!имя» — не арендатор: суффикс частного раздела, слева от которого стоит служба
 # («lambda.us-east-1.amazonaws.com»), или служба под суффиксом арендатора с частью перед ней.

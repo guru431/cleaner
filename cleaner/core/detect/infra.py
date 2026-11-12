@@ -244,7 +244,8 @@ def _tenant(name: str, domain: str, listed: frozenset[str], generic: frozenset[s
     суффикса встроенного списка («romashka.visualstudio.com»); из подходящих берётся самый длинный суффикс — он точнее.
     «!имя» списка — суффикс или служба с частью перед суффиксом, которые арендатора не выделяют
     («lambda.us-east-1.amazonaws.com», «code.visualstudio.com»). Служебная часть (generic: «api.openai.azure.com») и
-    регион AWS (_REGION) — не метка арендатора. Проверяются последние _TENANT_DEPTH частей: длина имени на время не влияет."""
+    регион AWS (_REGION) — не метка арендатора, как и служебное слово, с которым суффикс сам стоит в списке (голая зона
+    «privatelink.blob.core.windows.net»). Проверяются последние _TENANT_DEPTH частей: длина имени на время не влияет."""
     start = len(name)
     for _ in range(_TENANT_DEPTH):
         start = name.rfind(".", 0, start)
@@ -266,6 +267,14 @@ def _tenant(name: str, domain: str, listed: frozenset[str], generic: frozenset[s
     if found and (labels[-found - 1] in generic or (_REGION.fullmatch(labels[-found - 1]) and (
         ".".join(labels[-2:]) in _AWS or ".".join(labels[-3:]) in _AWS
     ))):
+        return 0
+    # Метка вместе с суффиксом — сама суффикс списка, который начинается служебным словом: «privatelink» в
+    # «privatelink.database.windows.net» (зона Private Link) или «serverless» — не арендатор.
+    bare = labels[-found - 1:]
+    if found and any(
+        len(entry) == len(bare) and entry[0] != "*" and all(part in ("*", label) for part, label in zip(entry, bare))
+        for entry in suffixes
+    ):
         return 0
     return found
 

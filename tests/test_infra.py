@@ -319,6 +319,12 @@ TENANT_NAMES = (
     "db-crm-1.database.windows.net",
     "my-team-1.atlassian.net",
     "hr-portal-2.sharepoint.com",
+    # Служебное слово вендора между учётной записью и суффиксом — часть суффикса, а не метка арендатора.
+    "romashkasql.privatelink.database.windows.net",
+    "romashkabackup.privatelink.blob.core.windows.net",
+    "romashka-redis-abc123.serverless.euw1.cache.amazonaws.com",
+    "romashka.abc123.clustercfg.euw1.cache.amazonaws.com",
+    "romashka.enterprise.slack.com",
 )
 SERVICE_NAMES = (
     "admin.atlassian.com", "id.atlassian.com", "login.microsoftonline.com", "update.microsoft.com", "management.azure.com", "s3.amazonaws.com",
@@ -335,6 +341,9 @@ SERVICE_NAMES = (
     # Многоарендные SaaS: сам домен вендора, служебная часть перед ним и служба из «!имя» встроенного списка.
     "github.io", "www.github.io", "sharepoint.com", "www.sharepoint.com", "atlassian.net", "api.slack.com",
     "app.slack.com", "hooks.slack.com", "login.okta.com",
+    # Голые зоны Private Link и служебные суффиксы без метки арендатора.
+    "privatelink.blob.core.windows.net", "privatelink.database.windows.net", "privatelink.openai.azure.com",
+    "serverless.euw1.cache.amazonaws.com", "clustercfg.euw1.cache.amazonaws.com", "enterprise.slack.com",
 )
 
 
@@ -414,6 +423,9 @@ def test_vendor_service_names_stay_after_a_tenant_name(tenant, services):
     ("romashka.github.io", "host-1.github.io"),
     ("romashka-my.sharepoint.com", "host-1.sharepoint.com"),
     ("romashka.slack.com", "host-1.slack.com"),
+    ("romashkasql.privatelink.database.windows.net", "host-1.privatelink.database.windows.net"),
+    ("romashka.abc123.clustercfg.euw1.cache.amazonaws.com", "host-1.sub-2.clustercfg.euw1.cache.amazonaws.com"),
+    ("romashka.enterprise.slack.com", "host-1.enterprise.slack.com"),
 ])
 def test_tenant_name_keeps_the_cloud_suffix(value, fake):
     """У имени арендатора подменяются метки арендатора и части слева от неё, суффикс арендатора остаётся: модель видит,
@@ -491,6 +503,24 @@ def test_tenant_label_without_digits_is_searched(text):
     assert "romashka" not in sanitized
     assert "EndpointSuffix=core.windows.net" in sanitized or "EndpointSuffix" not in text
     assert restore(state, sanitized, Settings()).text == text
+
+
+@pytest.mark.parametrize("name, fake", [
+    ("romashkasql.privatelink.database.windows.net", "host-1.privatelink.database.windows.net"),
+    ("romashka-redis.serverless.euw1.cache.amazonaws.com", "host-1.serverless.euw1.cache.amazonaws.com"),
+])
+def test_vendor_word_before_the_suffix_is_not_the_tenant(name, fake):
+    """Регрессия f899ed3: «privatelink» и «serverless» между учётной записью и суффиксом становились меткой арендатора —
+    искомой, — а имя сервера оставалось открытым рядом («sqlcmd -S romashkasql»), и обычное слово «privatelink» в
+    следующем тексте чата скрывалось. Теперь они — часть суффикса из встроенного списка."""
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    account = name.split(".")[0]
+    text = f"Сервер {name}; sqlcmd -S {account}"
+    sanitized = sanitize(state, text, Settings()).sanitized
+    assert sanitized == f"Сервер {fake}; sqlcmd -S host-1"
+    assert restore(state, sanitized, Settings()).text == text
+    words = "Создайте privatelink для SQL и serverless-кэш"
+    assert sanitize(state, words, Settings()).sanitized == words
 
 
 def test_short_tenant_label_is_not_searched():
