@@ -351,6 +351,8 @@ SERVICE_NAMES = (
     "privatelink.blob.core.windows.net", "privatelink.database.windows.net", "privatelink.openai.azure.com",
     "serverless.euw1.cache.amazonaws.com", "clustercfg.euw1.cache.amazonaws.com", "enterprise.slack.com",
     "privatelink.vaultcore.azure.net", "purview.azure.com", "mq.eu-west-1.amazonaws.com",
+    # Служебные узлы Slack (API и веб-сокеты клиента).
+    "edgeapi.slack.com", "wss-primary.slack.com", "wss-backup.slack.com", "wss-mobile.slack.com",
 )
 
 
@@ -370,6 +372,13 @@ def test_vendor_service_names_stay(value):
     частном разделе списка, но «www» и «raw» перед ними — не арендаторы."""
     assert infra.well_known(value, CTX)
     assert values(f"Ресурс {value} недоступен") == set()
+
+
+def test_slack_service_node_is_not_searched():
+    """«edgeapi» в «edgeapi.slack.com» был меткой арендатора и становился искомым: слово скрывалось во всём чате."""
+    state = ChatState(chat_id="tenant", net_key=bytes(32))
+    text = "Клиент ходит на edgeapi.slack.com и wss-primary.slack.com; edgeapi отвечает 429"
+    assert sanitize(state, text, Settings()).sanitized == text
 
 
 def test_never_listed_tenant_resource_stays():

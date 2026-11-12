@@ -110,6 +110,10 @@ okta.com
 !files.slack.com
 !status.slack.com
 !join.slack.com
+!edgeapi.slack.com
+!wss-primary.slack.com
+!wss-backup.slack.com
+!wss-mobile.slack.com
 !login.okta.com
 !developer.okta.com
 !help.okta.com
