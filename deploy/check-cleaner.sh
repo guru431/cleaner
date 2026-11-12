@@ -293,11 +293,16 @@ PY
 fi
 
 echo "8. Этапы 2 и 4: ключ шлюза и модели"
-# Значение ключа не выводится: проверяется только, что строка есть и не пустая.
-if grep -q '^CLEANER_GATEWAY_KEY=..*' "$ETC/cleaner.env"; then
-    ok "ключ шлюза задан"
-else
+# Значение ключа не выводится: проверяется только, что строка есть и не пустая — в файле и в окружении работающего
+# процесса. systemd читает cleaner.env только при старте службы: ключ, дописанный без перезапуска, не действует.
+if ! grep -q '^CLEANER_GATEWAY_KEY=..*' "$ETC/cleaner.env"; then
     bad "в $ETC/cleaner.env нет CLEANER_GATEWAY_KEY"
+elif [[ -z "$pid" || "$pid" == "0" || ! -r "/proc/$pid/environ" ]]; then
+    skip "ключ шлюза есть в $ETC/cleaner.env; служба не работает — её окружение не проверено"
+elif tr '\0' '\n' < "/proc/$pid/environ" | grep -q '^CLEANER_GATEWAY_KEY=..*'; then
+    ok "ключ шлюза задан и действует в работающей службе"
+else
+    bad "ключ шлюза есть в $ETC/cleaner.env, но служба запущена без него — перезапустите службу: systemctl restart $UNIT"
 fi
 if (cd "$APP" && runuser -u cleaner -- env HOME="$DATA" "$APP/.venv/bin/python" -m cleaner --config "$ETC/cleaner.toml" models verify) >"$WORK/models.txt" 2>&1; then
     ok "модели совпадают с манифестом"

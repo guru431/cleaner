@@ -259,7 +259,7 @@ elif [[ ! -f "$ENVF" || ! -f "$DATA/cleaner.db" ]]; then
     rollback "есть только одно из двух — $ENVF или $DATA/cleaner.db; верните второе (key import или копия базы)"
 fi
 if ! grep -q '^CLEANER_GATEWAY_KEY=..*' "$ENVF"; then
-    log "Ключа шлюза нет: ${GATEWAY_KEY_HINT:-выпустите его в шлюзе сервера}; допишите строку CLEANER_GATEWAY_KEY=… в $ENVF через sudoedit"
+    log "Ключа шлюза нет: ${GATEWAY_KEY_HINT:-выпустите его в шлюзе сервера}; допишите строку CLEANER_GATEWAY_KEY=… в $ENVF через sudoedit и перезапустите службу: sudo systemctl restart cleaner.service"
 fi
 
 # --- копия базы: новая версия мигрирует схему при старте, а прежний код базу новой версии не откроет ----

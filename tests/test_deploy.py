@@ -292,6 +292,21 @@ def test_check_compares_the_code_on_disk_with_the_code_the_service_started_with(
     assert "cp -r --preserve=timestamps \"$SRC/cleaner\"" in (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
 
 
+def test_check_looks_for_the_gateway_key_in_the_running_service_not_only_in_the_file():
+    """Находка 12.11.2026: systemd читает cleaner.env только при старте, а ключ шлюза дописывают в уже работающую
+    службу. Проверка смотрит окружение процесса, не печатая значения; установщик и инструкция велят перезапустить."""
+    text = (DEPLOY / "check-cleaner.sh").read_text(encoding="utf-8")
+    section = text[text.index('echo "8. '):text.index("models verify")]
+    assert 'tr \'\\0\' \'\\n\' < "/proc/$pid/environ" | grep -q \'^CLEANER_GATEWAY_KEY=..*\'' in section
+    assert "перезапустите службу" in section
+    assert not re.search(r"echo[^\n]*environ|cat [^\n]*environ", section)
+    hint = next(line for line in (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8").splitlines()
+                if "Ключа шлюза нет" in line)
+    assert "systemctl restart cleaner.service" in hint
+    steps = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    assert "systemctl restart cleaner.service" in steps[steps.index("4. Передайте"):steps.index("5. ")]
+
+
 def test_installer_removes_database_copies_once_the_service_answers():
     """Аудит 09.11.2026: копия базы хранит удалённые чаты вместе с обёрнутыми ключами, а главный ключ тот же (FR-1.4,
     AC-1.10). Копия нужна только откату этого прогона: после ответа службы она и копии прежних прогонов стираются."""
