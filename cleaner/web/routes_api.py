@@ -111,7 +111,6 @@ def integration_models(request: Request, caller: ApiCaller = Depends(get_api_cal
 @router.post("/chats/{chat_id}/requests")
 def prepare_request(request: Request, chat_id: str, body: RequestIn,
                     caller: ApiCaller = Depends(_request_caller)) -> Response:
-    api_writable_chat(request, chat_id, caller)
     if body.messages[-1].role != "user":
         raise HTTPException(422, "Последним в запросе должен быть вопрос")
     try:
@@ -131,7 +130,6 @@ def prepare_request(request: Request, chat_id: str, body: RequestIn,
 @router.post("/chats/{chat_id}/requests/send", status_code=202)
 def send_request(request: Request, chat_id: str, body: SendRequestIn,
                  caller: ApiCaller = Depends(_request_caller)) -> Response:
-    api_writable_chat(request, chat_id, caller)
     try:
         item = IntegrationService.from_service(service_of(request)).send_request(
             chat_id, caller.user.id, caller.key, body.receipt,
@@ -151,16 +149,19 @@ def answer_events(request: Request, chat_id: str, item_id: str,
         raise HTTPException(404, "Ответ не найден")
     state, _ = repo.load_state(chat_id)
     settings = repo.settings()
-    restorer, live = StreamRestorer(state, settings), service.live.get(item_id)
+    restorer = StreamRestorer(state, settings)
 
     def event(kind, data):
         return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     async def events():
         seen = 0
+        live = None
         while True:
             if await request.is_disconnected():
                 return
+            if live is None:
+                live = service.live.get(item_id)
             if live is not None:
                 text = live.text()
                 if len(text) > seen:
@@ -173,10 +174,11 @@ def answer_events(request: Request, chat_id: str, item_id: str,
                 if final is None:
                     yield event("done", {"status": "failed", "error": "Ответ удалён"})
                     return
-                result = None if item.source == "local" else await run_in_threadpool(restore_text, state, final.original, settings)
-                yield event("done", {"status": final.status, "text": result.text if result else final.original, "raw": final.original,
-                                     "counters": result.counters if result else {}, "error": final.meta.get("error", "")})
-                return
+                if final.status not in _WORKING:
+                    result = None if item.source == "local" else await run_in_threadpool(restore_text, state, final.original, settings)
+                    yield event("done", {"status": final.status, "text": result.text if result else final.original, "raw": final.original,
+                                         "counters": result.counters if result else {}, "error": final.meta.get("error", "")})
+                    return
             yield ": keepalive\n\n"
             await asyncio.sleep(0.25)
 

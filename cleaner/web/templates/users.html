@@ -27,7 +27,8 @@
           {% include "_csrf.html" %}
           {# Чей это пароль — для менеджера паролей браузера: без логина он записал бы его к учётной записи вошедшего. Без name: на сервер не уходит. #}
           <input hidden autocomplete="username" value="{{ u.login }}">
-          <input name="password" type="password" minlength="12" autocomplete="new-password" required aria-label="Новый пароль для {{ u.login }}">
+          <input name="password" type="password" minlength="{{ min_password }}" autocomplete="new-password" required aria-label="Новый пароль для {{ u.login }}">
+          <small class="hint">Не короче {{ min_password }} знаков</small>
           <button>Сменить</button>
         </form>
       </td>
@@ -64,8 +65,8 @@
       {% include "_csrf.html" %}
       <label class="field"><span>Логин</span><input name="login" autocomplete="username" required></label>
       <label class="field"><span>Пароль</span><span class="control">
-        <input name="password" type="password" minlength="12" autocomplete="new-password" required>
-        <small class="hint">Не короче 12 знаков</small>
+        <input name="password" type="password" minlength="{{ min_password }}" autocomplete="new-password" required>
+        <small class="hint">Не короче {{ min_password }} знаков</small>
       </span></label>
       <label class="field"><span>Роль</span><select name="role"><option value="user">пользователь</option><option value="admin">администратор</option></select></label>
       <div class="buttons"><button class="primary">Создать</button></div>

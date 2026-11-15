@@ -69,6 +69,13 @@ def test_utf8_cut_inside_a_character_keeps_the_text_readable():
     assert textfiles.decode(cut) == cut[:-1].decode("utf-8", "ignore")
 
 
+def test_incomplete_utf8_in_the_middle_does_not_discard_later_log_lines():
+    data = LOG.encode("utf-8") + b"interrupted: \xd0\n" + LOG.encode("utf-8")
+    decoded = textfiles.decode(data)
+    assert decoded.startswith(LOG) and decoded.endswith(LOG)
+    assert decoded.count("Пользователь Петров Иван") == 100
+
+
 def test_one_line_in_another_encoding_does_not_garble_the_rest():
     """Обзор плана 2+4, I-1: строка в Windows-1251 посреди журнала в UTF-8."""
     data = LOG.encode("utf-8") + "ошибка службы Сидоров\n".encode("cp1251") + LOG.encode("utf-8")

@@ -16,6 +16,7 @@ def table():
         rule("cleaner", [match({"payload": {"protocol": "ip", "field": "daddr"}}, {"set": ["127.0.0.0/8"]}), {"return": None}]),
         rule("cleaner", [match({"payload": {"protocol": "ip6", "field": "daddr"}}, "::1"), {"return": None}]),
         rule("cleaner", [match({"meta": {"key": "nfproto"}}, "ipv4"), match({"payload": {"protocol": "tcp", "field": "dport"}}, 443), {"return": None}]),
+        rule("cleaner", [match({"meta": {"key": "l4proto"}}, "tcp"), {"reject": {"type": "tcp reset"}}]),
         rule("cleaner", [{"reject": None}]),
         rule("input", [match({"meta": {"key": "nfproto"}}, "ipv6"), {"drop": None}]),
     ]}
@@ -28,5 +29,14 @@ def test_generated_rules_pass_and_external_ipv6_return_or_missing_reject_fails()
     changed["nftables"][3]["rule"]["expr"][0]["match"]["right"] = "ipv6"
     assert not ipv6_closed(changed)
     changed = copy.deepcopy(original)
-    changed["nftables"][4]["rule"]["expr"] = [{"return": None}]
+    changed["nftables"][5]["rule"]["expr"] = [{"return": None}]
+    assert not ipv6_closed(changed)
+
+
+def test_missing_or_incorrect_tcp_reset_is_refused():
+    changed = table()
+    del changed["nftables"][4]
+    assert not ipv6_closed(changed)
+    changed = table()
+    changed["nftables"][4]["rule"]["expr"][1] = {"reject": None}
     assert not ipv6_closed(changed)

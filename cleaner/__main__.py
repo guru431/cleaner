@@ -33,7 +33,8 @@ def _config(args: argparse.Namespace) -> Config:
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    """Новый файл с правами 0600; существующий не перезаписывается (FileExistsError)."""
+    """Новый файл: POSIX 0600, Windows — ACL каталога (docs/deployment.md).
+    Существующий не перезаписывается (FileExistsError)."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)

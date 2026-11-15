@@ -215,23 +215,27 @@ document.querySelectorAll("[data-upload-batch]").forEach((field) => {
 // Снимок экрана из буфера (Ctrl+V на странице чата без текста в буфере) — в поле «Файлы» к уже выбранным: тот же путь
 // загрузки, тот же предел пакета (проверка выше по change) и то же распознавание PNG и JPEG; ничего не отправляется и не
 // хранится, пока не нажата кнопка формы. Вставка текста не перехватывается.
-document.querySelectorAll("[data-upload-batch]").forEach((field) => {
+document.addEventListener("paste", (event) => {
+  const fields = [...document.querySelectorAll("[data-upload-batch]")];
+  const targetForm = event.target.closest?.("form");
+  const targetComposer = event.target.closest?.(".composer");
+  const targets = fields.filter((field) => field.form === targetForm || (targetComposer && targetComposer.contains(field)));
+  const field = targets.length === 1 ? targets[0] : fields.length === 1 ? fields[0] : null;
+  if (!field) return;
   const types = { "image/png": "png", "image/jpeg": "jpg" };
-  document.addEventListener("paste", (event) => {
-    const data = event.clipboardData;
-    if (!data || data.types.includes("text/plain") || typeof DataTransfer !== "function") return;
-    const images = [...data.files].filter((file) => file.type in types);
-    if (!images.length) return;
-    event.preventDefault();
-    const files = new DataTransfer();
-    [...field.files].forEach((file) => files.items.add(file));
-    images.forEach((file) => {
-      files.items.add(new File([file], `screenshot-${files.items.length + 1}.${types[file.type]}`, { type: file.type }));
-    });
-    field.files = files.files;
-    field.dispatchEvent(new Event("change", { bubbles: true }));
-    document.querySelector('.composer [data-tab="file"]')?.click();
+  const data = event.clipboardData;
+  if (!data || data.types.includes("text/plain") || typeof DataTransfer !== "function") return;
+  const images = [...data.files].filter((file) => file.type in types);
+  if (!images.length) return;
+  event.preventDefault();
+  const files = new DataTransfer();
+  [...field.files].forEach((file) => files.items.add(file));
+  images.forEach((file) => {
+    files.items.add(new File([file], `screenshot-${files.items.length + 1}.${types[file.type]}`, { type: file.type }));
   });
+  field.files = files.files;
+  field.dispatchEvent(new Event("change", { bubbles: true }));
+  field.closest(".composer")?.querySelector('[data-tab="file"]')?.click();
 });
 
 // Выбор облачной модели — одним действием: список отправляет свою форму (кнопка «Выбрать» видна только без JS).
@@ -281,11 +285,22 @@ function finishedName(element) {
 // моменту текст; по «done» страница перезагружается и показывает полное восстановление с выделением.
 document.querySelectorAll("[data-stream]").forEach((element) => {
   const source = new EventSource(element.dataset.stream);
+  let failures = 0;
+  source.onopen = () => { failures = 0; };
   source.onmessage = (event) => {
     element.classList.remove("muted");
     element.textContent = JSON.parse(event.data).text;
   };
   source.addEventListener("done", () => { source.close(); reload(finishedName(element)); });
+  source.onerror = () => {
+    if (source.readyState !== EventSource.CLOSED && ++failures < 3) return;
+    source.close();
+    const message = document.createElement("p");
+    message.className = "muted";
+    message.setAttribute("role", "status");
+    message.textContent = "Поток ответа прерван. Обновите страницу, чтобы проверить результат.";
+    element.after(message);
+  };
 });
 
 // Опрос фоновой обработки (раздел 14): пока задание в очереди или в работе — раз в секунду, потом перезагрузка.
@@ -701,7 +716,7 @@ document.querySelectorAll("[data-filter-table]").forEach((bar) => {
 // Поиск в таблице замен (entities.html) — по замене и оригиналу строк этой страницы, без запросов: значение не уходит
 // в адрес. Строки только скрываются; без учёта регистра.
 document.querySelectorAll("#entities-find").forEach((field) => {
-  const rows = [...document.querySelectorAll("#entities-table tbody tr")].filter((row) => row.cells.length > 1);
+  const rows = [...document.querySelectorAll("#entities-table tbody tr")].filter((row) => row.cells.length > 2);
   const texts = rows.map((row) => `${row.cells[0].textContent} ${row.cells[2].textContent}`.toLowerCase());
   const found = document.querySelector("[data-entities-found]");
   field.addEventListener("input", () => {

@@ -11,6 +11,7 @@ import re
 import zipfile
 import zlib
 from collections.abc import Callable, Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Protocol
@@ -442,33 +443,35 @@ def _layer_inside(textpage, boxes: list[_Box]) -> int:
     return inside
 
 
-def _page_kinds(data: bytes) -> list[tuple[str, bool, int]]:
+def _page_kinds(data: bytes, pdf=None) -> list[tuple[str, bool, int]]:
     """Вид страницы, есть ли на ней изображения и непробельных знаков в её слое текста. scan — в слое текста почти нет
     знаков, а изображение есть: только распознавание; mixed — слой текста есть, но изображения покрывают заметную долю
     страницы, а слой их не покрывает (_LAYER_AREA): и слой, и распознавание; text — только слой текста."""
-    pdf = _open_pdf(data)
+    owned = pdf is None
+    if owned:
+        pdf = _open_pdf(data)
     try:
         result = []
         for index in range(len(pdf)):
-            page = pdf[index]
-            textpage = page.get_textpage()
-            chars = len("".join(textpage.get_text_range().split()))
-            found, boxes = _images(page)
-            left, bottom, right, top = page.get_cropbox()
-            area = (right - left) * (top - bottom)
-            # Перекрытия не вычитаются — доля оценивается сверху; но площадь изображений не больше страницы: сжатие
-            # MRC кладёт под слой распознавания два растра на всю страницу (фон и маску букв).
-            covered = min(sum((box[2] - box[0]) * (box[3] - box[1]) for box in boxes), max(area, 0))
-            if chars < _SCANNED_BELOW:
-                kind = "scan" if found else "text"
-            elif area <= 0 or covered < _IMAGE_SHARE * area:
-                kind = "text"
-            else:
-                kind = "text" if _layer_inside(textpage, boxes) * _LAYER_AREA >= covered else "mixed"
-            result.append((kind, bool(found), chars))
+            with closing(pdf[index]) as page, closing(page.get_textpage()) as textpage:
+                chars = len("".join(textpage.get_text_range().split()))
+                found, boxes = _images(page)
+                left, bottom, right, top = page.get_cropbox()
+                area = (right - left) * (top - bottom)
+                # Перекрытия не вычитаются — доля оценивается сверху; но площадь изображений не больше страницы: сжатие
+                # MRC кладёт под слой распознавания два растра на всю страницу (фон и маску букв).
+                covered = min(sum((box[2] - box[0]) * (box[3] - box[1]) for box in boxes), max(area, 0))
+                if chars < _SCANNED_BELOW:
+                    kind = "scan" if found else "text"
+                elif area <= 0 or covered < _IMAGE_SHARE * area:
+                    kind = "text"
+                else:
+                    kind = "text" if _layer_inside(textpage, boxes) * _LAYER_AREA >= covered else "mixed"
+                result.append((kind, bool(found), chars))
         return result
     finally:
-        pdf.close()
+        if owned:
+            pdf.close()
 
 
 @dataclass(frozen=True)
@@ -522,17 +525,12 @@ def _scale(width: float, height: float) -> float:
     return min(OCR_DPI / 72, _OCR_SIDE / max(width, height, 1))
 
 
-def _render(data: bytes, number: int) -> bytes:
+def _render(pdf, number: int) -> bytes:
     """Страница скана — PNG для ocr-ru."""
-    pdf = _open_pdf(data)
-    try:
-        page = pdf[number - 1]
-        image = page.render(scale=_scale(*page.get_size())).to_pil()
+    with closing(pdf[number - 1]) as page, closing(page.render(scale=_scale(*page.get_size()))) as bitmap, bitmap.to_pil() as image:
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         return buffer.getvalue()
-    finally:
-        pdf.close()
 
 
 class Extractor:
@@ -580,10 +578,10 @@ class Extractor:
         progress(1, 1)
         return Extracted(text, "image", 1, (1,), unread)
 
-    def _over_layer(self, data: bytes, number: int) -> tuple[str | None, bool]:
+    def _over_layer(self, pdf, number: int) -> tuple[str | None, bool]:
         """Распознавание страницы, у которой есть и слой текста. Отказ не прерывает разбор: слой остаётся, страница —
         сомнительной полноты. Ответ — текст (None — не распознано) и признак, что распознавание недоступно целиком."""
-        image = _render(data, number)
+        image = _render(pdf, number)
         if len(image) > _OCR_LIMIT:
             return None, False
         try:
@@ -599,7 +597,11 @@ class Extractor:
             raise ExtractError(_PDF_TOO_LONG.format(self.max_chars))
 
     def _pdf(self, data: bytes, progress: Progress, ocr_all: bool = False) -> Extracted:
-        found = _page_kinds(data)
+        with _open_pdf(data) as pdf:
+            return self._pdf_open(pdf, data, progress, ocr_all)
+
+    def _pdf_open(self, pdf, data: bytes, progress: Progress, ocr_all: bool) -> Extracted:
+        found = _page_kinds(data, pdf)
         _estimate(found, ocr_all).check(self.max_chars)
         kinds = [kind for kind, _, _ in found]
         if ocr_all:
@@ -621,7 +623,7 @@ class Extractor:
                 # Отказ одной страницы (ответ обрезан, изображение не принято) не теряет распознанные: страница — в
                 # failed_pages (решение владельца 25.10.2026). Недоступное целиком распознавание файл по-прежнему отклоняет.
                 try:
-                    texts[number], missed = self._page(_render(data, number), "image/png", number)
+                    texts[number], missed = self._page(_render(pdf, number), "image/png", number)
                 except _PageRefused as exc:
                     failed.append(number)
                     blank.append(number)
@@ -630,7 +632,7 @@ class Extractor:
                 unread += missed
                 self._too_long(texts)
                 continue
-            recognised, down = (None, True) if down else self._over_layer(data, number)
+            recognised, down = (None, True) if down else self._over_layer(pdf, number)
             if recognised is None or not recognised.strip():
                 # Сомнительна только страница с изображением: без него (отметка «на всех страницах») пустой итог —
                 # пустая страница, а отказ оставляет слой, как и без отметки.

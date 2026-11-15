@@ -11,6 +11,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+/.tmp/
+/output/
 
 # local data: development database and master key
 /data/

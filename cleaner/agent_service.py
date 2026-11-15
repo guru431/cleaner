@@ -243,7 +243,7 @@ class AgentService:
         try:
             removed = self.repo.prune_agent((now - timedelta(days=LEDGER_DAYS)).isoformat(timespec="seconds"))
         except CheckpointBusy:
-            removed = -1
+            return
         if removed:
             self.repo.audit("agent_pruned", chats=removed)
 

@@ -65,6 +65,8 @@ def main() -> int:
             if filled is None:
                 fill_state(state, repo.settings(), 20_000)
                 filled = state
+            # commit_chat сериализует снимок в отдельную шифрованную запись и не кэширует объект.
+            # Служба загрузит каждый чат из БД независимо; общим остаётся только шаблон заполнения замера.
             repo.commit_chat(chat_id, replace(filled, chat_id=chat_id), version)
         print(f"после заполнения: RSS {status('VmRSS'):.0f} МиБ, сущностей в чате {len(filled.entities)}")
         try:

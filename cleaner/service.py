@@ -594,7 +594,7 @@ class ChatService:
         if self.engines is None:
             raise ExtractError("Разбор файлов не подключён")
         if detect_kind(filename, data) == "text" and len(data) > 4 * self.max_text_chars:
-            self._check_length(" " * (self.max_text_chars + 1))    # знак UTF-8 — не больше 4 байт: заведомо длиннее
+            raise TextTooLong(f"текст длиннее {self.max_text_chars} знаков")
         extracted = self.engines.extractor().extract(
             filename, data, lambda done, total: self.repo.set_item_progress(chat_id, item.id, f"{done}/{total}"),
             ocr_all=ocr_all,
@@ -785,7 +785,7 @@ class ChatService:
         # точная запись любых полей, и новых тоже (repr, например, обрезает длинное выражение re.Pattern).
         inputs = hashlib.sha256(state_to_json(state)).digest() + hashlib.sha256(pickle.dumps(settings)).digest()
         views: list[InputView | AnswerView] = []
-        restore_answer = restore_answers(state, settings)
+        restore_answer = None
         items = self.repo.items(chat_id)
         for item, in_request in zip(items, _in_request(items)):
             if item_id is not None and item.id != item_id:
@@ -809,6 +809,8 @@ class ChatService:
                 # настоящий адрес в выданной подсети иначе приняли бы за выведенный (FR-7.6).
                 views.append(AnswerView(item, RestoreResult(item.original, [], {})))
             else:
+                if restore_answer is None:
+                    restore_answer = restore_answers(state, settings)
                 result = restore_answer(item.original)
                 result.counters["in_request"] = item.meta.get("in_request", in_request)    # у ответа облака — с отправки
                 views.append(AnswerView(item, result))

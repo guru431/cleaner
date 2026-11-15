@@ -283,7 +283,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--script", type=Path)
     parser.add_argument("--headers-only", action="store_true", help="не писать тело, у authorization — схема и длина")
     args = parser.parse_args(argv)
-    steps = json.loads(args.script.read_text(encoding="utf-8")) if args.script else []
+    try:
+        steps = json.loads(args.script.read_text(encoding="utf-8")) if args.script else []
+    except (OSError, ValueError) as exc:
+        parser.error(f"Не удалось прочитать сценарий: {type(exc).__name__}")
+    if not isinstance(steps, list) or any(
+        not isinstance(step, list) or any(not isinstance(event, dict) for event in step) for step in steps
+    ):
+        parser.error("Сценарий должен быть списком шагов, каждый шаг — список объектов событий")
     args.out.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port), make_handler(args.out, steps, headers_only=args.headers_only),

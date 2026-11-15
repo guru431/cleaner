@@ -295,8 +295,15 @@ def create_chat(request: Request, form: dict[str, str] = Depends(get_form), view
 LEDGER_PAGE = 50
 BLOCK_NAMES = {
     "text": "текст", "tool_result": "результат инструмента", "tool_use": "вызов инструмента", "image": "изображение",
-    "document": "документ",
+    "document": "документ", "unreadable": "повреждённая запись",
 }
+
+
+def _ledger_node(raw: str) -> object:
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeError):
+        return {"type": "unreadable", "text": "Запись журнала повреждена: содержимое недоступно"}
 
 
 def _block_name(node: object) -> str:
@@ -350,7 +357,7 @@ def _agent_chat(request: Request, chat: Chat, viewer: Viewer, q: str) -> Respons
     conversations = {c.id: c for c in repo.chat_conversations(chat.id)}
     keys = [repo.api_key(key_id) for key_id in dict.fromkeys(c.key_id for c in conversations.values())]
     state, _ = repo.load_state(chat.id)
-    nodes = [(json.loads(entry.local), json.loads(entry.wire)) for entry, _ in shown]
+    nodes = [(_ledger_node(entry.local), _ledger_node(entry.wire)) for entry, _ in shown]
     opened = _opened([wire if not entry.withheld else {} for (entry, _), (_, wire) in zip(shown, nodes)], state, repo.settings())
     if every:
         kept = [number for number, open_here in enumerate(opened) if open_here]

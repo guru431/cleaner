@@ -29,7 +29,7 @@ def ocr(gateway: str, key: str, image: bytes) -> dict:
             if exc.code != 503:
                 return {"error": exc.code, "body": exc.read().decode("utf-8", "replace")[:200]}
             retry_after = exc.headers.get("Retry-After") or ""
-            time.sleep(min(60, int(retry_after) if retry_after.isdigit() else 10))     # или дата HTTP — тогда 10 с
+            time.sleep(max(1, min(60, int(retry_after) if retry_after.isdigit() else 10)))  # или дата HTTP — тогда 10 с
     return {"error": 503}
 
 

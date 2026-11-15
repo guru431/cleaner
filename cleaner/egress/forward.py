@@ -108,19 +108,30 @@ class Upstream:
         """Тело до limit байт — ответ без потока или ошибка провайдера; ключ подключения и вход агента по подписке, если
         провайдер их повторил, — прочь."""
         raw = b""
+        read_limit = limit + max(map(len, self._secrets), default=0)
         try:
             for chunk in self._response.iter_bytes():
-                raw += chunk
-                if len(raw) >= limit:
+                raw += chunk[:max(0, read_limit - len(raw))]
+                if len(raw) >= read_limit:
                     break
         except httpx.TimeoutException:
             raise ProviderTimeout() from None
         except (httpx.HTTPError, httpx.StreamError):
             raise ProviderError("соединение с провайдером оборвалось") from None
-        raw = raw[:limit]
-        for secret in self._secrets:
-            raw = raw.replace(secret, b"***")
-        return raw
+        if not self._secrets:
+            return raw[:limit]
+        # Запас нужен только для распознавания секрета, пересекающего исходную границу.
+        # После сокращения заменой он не должен подтянуть в вывод хвост следующего секрета.
+        parts, copied = [], 0
+        positions = [raw.find(secret) for secret in self._secrets]
+        while any(0 <= start < limit for start in positions):
+            start, index = min((start, index) for index, start in enumerate(positions) if start >= 0)
+            if start >= copied:
+                parts.extend((raw[copied:start], b"***"))
+            copied = max(copied, start + len(self._secrets[index]))
+            positions[index] = raw.find(self._secrets[index], start + 1)
+        parts.append(raw[copied:limit])
+        return b"".join(parts)[:limit]
 
     def abort(self) -> None:
         """Агент ушёл: оборвать ответ из другого потока. Поток, который ждёт молчащего провайдера, получает обрыв сразу, а

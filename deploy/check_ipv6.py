@@ -19,6 +19,12 @@ def ipv6_closed(document: dict) -> bool:
     cleaner = rules["cleaner"]
     if not cleaner or len(cleaner[-1]) != 1 or "reject" not in cleaner[-1][0]:
         return False
+    tcp_reset = [
+        {"match": {"op": "==", "left": {"meta": {"key": "l4proto"}}, "right": "tcp"}},
+        {"reject": {"type": "tcp reset"}},
+    ]
+    if len(cleaner) < 2 or cleaner[-2] != tcp_reset:
+        return False
     loopback = False
     for expressions in cleaner:
         if any(set(expr) - {"match", "return", "reject", "drop", "log", "limit", "counter"} for expr in expressions):

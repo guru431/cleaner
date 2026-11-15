@@ -52,6 +52,15 @@ def open_repo(path, key: str, clock) -> Repository:
     return Repository(db.connect(path), crypto.master_key_from_env({crypto.MASTER_KEY_ENV: key}), clock)
 
 
+@pytest.mark.parametrize("password", ["", "\n", "short\n"])
+def test_init_rejects_an_empty_or_short_password_file(home, capsys, password):
+    (home / "secret.txt").write_text(password, encoding="utf-8")
+    assert main(["init", "--admin", "boss", "--env-file", str(home / "cleaner.env"),
+                 "--password-file", str(home / "secret.txt")]) == 1
+    assert "пароль короче" in capsys.readouterr().err
+    assert not (home / "cleaner.env").exists()
+
+
 def test_init_creates_the_database_the_key_and_the_admin(home, clock):
     key = init(home)
     repo = open_repo(home / "data" / "cleaner.db", key, clock)

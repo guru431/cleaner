@@ -93,6 +93,23 @@ def test_agent_chat_warns_about_new_request_shapes(ivan, repo, stub):
     assert "data-agent-fresh" in page and "секретная заметка" not in page.split("Журнал отправленного")[0]
 
 
+def test_agent_chat_survives_one_corrupted_ledger_block(ivan, gateway, repo, monkeypatch):
+    from dataclasses import replace
+
+    chat = gateway()
+    original = repo.ledger_page
+
+    def damaged(*args):
+        rows = original(*args)
+        entry, time = rows[0]
+        return [(replace(entry, local="{broken", wire="[broken"), time), *rows[1:]]
+
+    monkeypatch.setattr(repo, "ledger_page", damaged)
+    page = ivan.get(f"/chats/{chat}")
+    assert page.status_code == 200
+    assert "Запись журнала повреждена" in page.text and "Проверь узел" in page.text
+
+
 def test_agent_chat_counts_values_left_open_in_frozen_blocks(ivan, gateway, repo):
     chat = gateway()
     state, version = repo.load_state(chat)

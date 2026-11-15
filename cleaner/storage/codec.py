@@ -39,7 +39,23 @@ def state_to_json(state: ChatState) -> bytes:
 
 
 def state_from_json(raw: bytes) -> ChatState:
+    try:
+        return _state_from_json(raw)
+    except (ValueError, KeyError, TypeError, AttributeError, IndexError):
+        raise ValueError("Повреждено состояние чата: неверный формат данных") from None
+
+
+def _state_from_json(raw: bytes) -> ChatState:
     data = json.loads(raw.decode("utf-8"))
+    rules = []
+    for row in data["rules"]:
+        if not isinstance(row, list) or len(row) not in (3, 4):
+            raise ValueError("invalid rule")
+        action, value, type_ = row[:3]
+        bounds = row[3] if len(row) == 4 else "none"
+        if action not in ("mask", "unmask") or not isinstance(value, str) or bounds not in ("none", "letters", "strict"):
+            raise ValueError("invalid rule")
+        rules.append(ChatRule(action, value, EntityType(type_) if type_ else None, bounds))
     entities = {
         e["id"]: Entity(
             e["id"], EntityType(e["type"]), e["number"], e["key"], e["restore_value"], e["origin"], list(e["forms"]),
@@ -49,16 +65,13 @@ def state_from_json(raw: bytes) -> ChatState:
     }
     return ChatState(
         chat_id=data["chat_id"],
-        net_key=base64.b64decode(data["net_key"]),
+        net_key=base64.b64decode(data["net_key"], validate=True),
         label_style=data["label_style"],
         entities=entities,
         surrogates={text: Surrogate(v[0], v[1], v[2]) for text, v in data["surrogates"].items()},
         issued=dict(data["issued"]),
         # Правило до 15.10.2026 — тройка без границ: оно ищется где угодно, как и искалось.
-        rules=[
-            ChatRule(action, value, EntityType(type_) if type_ else None, *bounds)
-            for action, value, type_, *bounds in data["rules"]
-        ],
+        rules=rules,
         key_alias=dict(data["key_alias"]),
         foreign_labels=set(data["foreign_labels"]),
         counters={key: int(value) for key, value in data["counters"].items()},

@@ -219,14 +219,16 @@ def test_builtin_lists_are_shown_and_extended_through_the_never_list(boss, repo)
 def test_internal_suffixes_are_shown_extended_and_reduced(boss, repo):
     """IDEAS P3 «список суффиксов на странице встроенных списков»: встроенные видны, свои добавляются и удаляются и действуют
     на распознавание сразу."""
-    from cleaner.core.entities import hostmap
+    from cleaner.core.entities import hostmap, labels
     from cleaner.web.routes_settings import apply_suffixes
 
     page = boss.get("/settings/builtin").text
     assert "localdomain" in page and "loc" in page
     try:
+        assert not labels._domain_name("srv01.romashka.lcl")
         assert boss.post("/settings/builtin/suffixes", value=".LCL").headers["location"] == "/settings/builtin"
         assert hostmap.has_known_suffix("srv01.romashka.lcl")
+        assert labels._domain_name("srv01.romashka.lcl")
         assert "lcl" in boss.get("/settings/builtin").text
         for value in ("lcl", "loc", "ru", "a b", ""):
             assert boss.post("/settings/builtin/suffixes", value=value).status_code == 400, value
@@ -235,9 +237,19 @@ def test_internal_suffixes_are_shown_extended_and_reduced(boss, repo):
         assert [e.details for e in repo.audit_events("settings_changed")][-1] == {"section": "internal_suffixes", "action": "add"}
         boss.post("/settings/builtin/suffixes/lcl/delete")
         assert not hostmap.has_known_suffix("srv01.romashka.lcl")
+        assert not labels._domain_name("srv01.romashka.lcl")
         assert boss.post("/settings/builtin/suffixes/lcl/delete").status_code == 404
     finally:
         hostmap.set_extra_suffixes(())
+
+
+def test_user_forms_follow_the_server_password_minimum(boss, monkeypatch):
+    from cleaner.web import auth
+
+    monkeypatch.setattr(auth, "MIN_PASSWORD", 15)
+    page = boss.get("/settings/users").text
+    assert 'minlength="15"' in page and 'minlength="12"' not in page
+    assert "Не короче 15 знаков" in page
 
 
 def test_users_are_created_given_new_passwords_and_disabled(boss, browser, repo):

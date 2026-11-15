@@ -742,7 +742,7 @@ def _hash(form: dict[str, str]) -> str:
 
 @router.get("/users")
 def users(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
-    return page(request, "users.html", viewer, rows=repo_of(request).users())
+    return page(request, "users.html", viewer, rows=repo_of(request).users(), min_password=auth.MIN_PASSWORD)
 
 
 @router.post("/users")
