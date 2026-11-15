@@ -12,12 +12,15 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from http.client import HTTPException
 from pathlib import Path
 
 
 def ocr(gateway: str, key: str, image: bytes) -> dict:
     body = json.dumps({"model": "ocr-ru", "image": base64.b64encode(image).decode("ascii")}).encode("utf-8")
-    for _ in range(10):
+    error: int | str = 503
+    for attempt in range(10):
+        delay = 10
         request = urllib.request.Request(
             f"{gateway.rstrip('/')}/pages/ocr", data=body, method="POST",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -28,16 +31,23 @@ def ocr(gateway: str, key: str, image: bytes) -> dict:
         except urllib.error.HTTPError as exc:
             if exc.code != 503:
                 return {"error": exc.code, "body": exc.read().decode("utf-8", "replace")[:200]}
+            error = 503
             retry_after = exc.headers.get("Retry-After") or ""
-            time.sleep(max(1, min(60, int(retry_after) if retry_after.isdigit() else 10)))  # или дата HTTP — тогда 10 с
-    return {"error": 503}
+            delay = max(1, min(60, int(retry_after) if retry_after.isdigit() else 10))  # или дата HTTP — тогда 10 с
+        except (urllib.error.URLError, OSError, HTTPException):
+            error = "network"
+        if attempt < 9:
+            time.sleep(delay)
+    return {"error": error}
 
 
 def main() -> None:
     if len(sys.argv) < 4:
         sys.exit(__doc__)
     gateway, out, files = sys.argv[1], Path(sys.argv[2]), [Path(p) for p in sys.argv[3:]]
-    key = os.environ["CLEANER_GATEWAY_KEY"]
+    key = os.environ.get("CLEANER_GATEWAY_KEY")
+    if not key:
+        sys.exit("CLEANER_GATEWAY_KEY не задан")
     out.mkdir(parents=True, exist_ok=True)
     for path in files:
         started = time.perf_counter()

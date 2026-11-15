@@ -1,7 +1,16 @@
 """The generated output path blocks external IPv6 regardless of the input rules."""
 import copy
 
+import pytest
+
 from deploy.check_ipv6 import ipv6_closed
+
+
+@pytest.mark.parametrize("left", [None, "ip", 1, {"payload": "ip"}])
+def test_malformed_match_is_refused_by_the_library(left):
+    changed = table()
+    changed["nftables"][1]["rule"]["expr"][0]["match"]["left"] = left
+    assert not ipv6_closed(changed)
 
 
 def match(left, right):

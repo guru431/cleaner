@@ -209,13 +209,8 @@ def make_handler(out: Path, steps: list[list[dict]], *, headers_only: bool = Fal
         def log_message(self, fmt: str, *args: object) -> None:
             print(f"{self.command} {self.path} -> {args[1] if len(args) > 1 else ''}")
 
-        def _record(self, body: bytes, step: int | None) -> None:
-            encoding = self.headers.get("content-encoding", "").lower()
-            raw = body
-            if encoding == "gzip":
-                raw = gzip.decompress(body)
-            elif encoding == "deflate":
-                raw = zlib.decompress(body)
+        def _record(self, body: bytes, step: int | None, raw: bytes | None = None) -> None:
+            raw = body if raw is None else raw
             try:
                 parsed: object = json.loads(raw) if raw else None
             except ValueError:
@@ -250,27 +245,30 @@ def make_handler(out: Path, steps: list[list[dict]], *, headers_only: bool = Fal
         def do_POST(self) -> None:
             body = self.rfile.read(int(self.headers.get("content-length", "0") or 0))
             protocol = _protocol(self.path.split("?")[0])
-            if protocol is None:
-                self._record(body, None)
-                self._send(404, "application/json",
-                           b'{"type":"error","error":{"type":"not_found_error","message":"capture"}}')
-                return
             encoding = self.headers.get("content-encoding", "").lower()
+            raw = body
             try:
                 raw = gzip.decompress(body) if encoding == "gzip" else zlib.decompress(body) if encoding == "deflate" else body
                 request = json.loads(raw)
-            except (ValueError, OSError, zlib.error):          # другое сжатие (zstd) — запись и отказ
-                self._record(body, None)
-                self._send(400, "application/json", b'{"error":{"message":"capture: body is not JSON"}}')
+                if not isinstance(request, dict):
+                    raise ValueError("request is not an object")
+            except (ValueError, OSError, EOFError, zlib.error):
+                self._record(body, None, raw)
+                self._send(400 if protocol else 404, "application/json", b'{"error":{"message":"capture: body is not JSON"}}')
+                return
+            if protocol is None:
+                self._record(body, None, raw)
+                self._send(404, "application/json",
+                           b'{"type":"error","error":{"type":"not_found_error","message":"capture"}}')
                 return
             stream = bool(request.get("stream"))
             if not _has_tools(request) or not stream or not steps:
-                self._record(body, None)
+                self._record(body, None, raw)
                 self._send(200, *_plain("ok", stream, protocol))
                 return
             with lock:
                 step = next(cycle)
-            self._record(body, step)
+            self._record(body, step, raw)
             self._send(200, "text/event-stream", sse(render(steps[step], request), protocol))
 
     return Handler

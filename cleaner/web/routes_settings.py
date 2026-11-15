@@ -99,7 +99,7 @@ def preview_undo(request: Request, form: dict[str, str] = Depends(get_form), vie
     return _impact(request, viewer, {"kind": "undo"})
 
 
-def _cards(request: Request) -> dict[str, tuple[str, str, str]]:
+def _cards(request: Request, gold: dict) -> dict[str, tuple[str, str, str]]:
     """Главная настроек (идея аудита 09.11.2026): по разделу — состояние good / warn / bad, одно число словами и строка
     подробностей. Только из базы и памяти службы, без сетевых запросов."""
     repo, engines = repo_of(request), request.app.state.engines
@@ -117,7 +117,6 @@ def _cards(request: Request) -> dict[str, tuple[str, str, str]]:
     since = (request.app.state.clock.now() - timedelta(days=1)).isoformat(timespec="seconds")
     events = repo.audit_count(since=since)
     errors = repo.audit_count("error", since=since)
-    gold = _gold_state(request)
     if engines is None:
         local = ("bad", "не подключена", "слои 4 и 5 и сканы недоступны")
     elif not engines.status()["key"]:
@@ -194,7 +193,7 @@ def _busy(share: float) -> str:
     return "bad" if share >= 1 else "warn" if share >= 0.8 else "good"
 
 
-def _service(request: Request) -> dict:
+def _service(request: Request, gold: dict | None = None) -> dict:
     """Блок «Служба» на главной настроек (идея аудита 09.11.2026): занятость входного бюджета, пулов и шлюза агентов,
     очередь со сроками, отказы контрольной точки, размер базы, модели и внешние службы. Внешние службы здесь не
     опрашиваются (страница обновляется опросом): итога их проверки служба не хранит — «не проверялось».
@@ -232,7 +231,7 @@ def _service(request: Request) -> dict:
                   "model": local.model},
         "ocr": local.ocr_model or "служба ocr-ru",
         "providers": {"enabled": sum(p.enabled for p in providers), "total": len(providers)},
-        "gold": _gold_state(request),
+        "gold": _gold_state(request) if gold is None else gold,
         "measure": app.state.measure["status"],
         "not_checked": NOT_CHECKED,
     }
@@ -240,7 +239,8 @@ def _service(request: Request) -> dict:
 
 @router.get("")
 def index(request: Request, viewer: Viewer = Depends(get_admin)) -> Response:
-    return page(request, "settings.html", viewer, cards=_cards(request), service=_service(request))
+    gold = _gold_state(request)
+    return page(request, "settings.html", viewer, cards=_cards(request, gold), service=_service(request, gold))
 
 
 @router.get("/service")
@@ -553,11 +553,12 @@ def add_suffix(request: Request, form: dict[str, str] = Depends(get_form), viewe
     if not _SUFFIX.fullmatch(value):
         raise HTTPException(400, "Суффикс — части из латинских букв, цифр и дефиса через точку: «loc», «corp.example»")
     repo = repo_of(request)
-    current = stored_suffixes(repo)
-    if value in current or value in hostmap.INTERNAL_SUFFIXES or hostmap.has_known_suffix(f"name.{value}"):
-        raise HTTPException(400, "Этот суффикс уже известен")
-    repo.set_setting(SUFFIXES_KEY, json.dumps([*current, value]))
-    apply_suffixes(repo)
+    with repo.lock:
+        current = stored_suffixes(repo)
+        if value in current or value in hostmap.INTERNAL_SUFFIXES or hostmap.has_known_suffix(f"name.{value}"):
+            raise HTTPException(400, "Этот суффикс уже известен")
+        repo.set_setting(SUFFIXES_KEY, json.dumps([*current, value]))
+        apply_suffixes(repo)
     repo.audit("settings_changed", viewer.user.id, section="internal_suffixes", action="add")
     return _redirect("/settings/builtin")
 
@@ -567,11 +568,12 @@ def delete_suffix(
     request: Request, value: str, form: dict[str, str] = Depends(get_form), viewer: Viewer = Depends(get_admin),
 ) -> Response:
     repo = repo_of(request)
-    current = stored_suffixes(repo)
-    if value not in current:
-        raise HTTPException(404, "Суффикс не найден")
-    repo.set_setting(SUFFIXES_KEY, json.dumps([suffix for suffix in current if suffix != value]))
-    apply_suffixes(repo)
+    with repo.lock:
+        current = stored_suffixes(repo)
+        if value not in current:
+            raise HTTPException(404, "Суффикс не найден")
+        repo.set_setting(SUFFIXES_KEY, json.dumps([suffix for suffix in current if suffix != value]))
+        apply_suffixes(repo)
     repo.audit("settings_changed", viewer.user.id, section="internal_suffixes", action="delete")
     return _redirect("/settings/builtin")
 

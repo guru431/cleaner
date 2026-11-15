@@ -76,6 +76,56 @@ def answer(request: dict) -> list[dict]:
     return model_turn(f"Проверяю {host} и пишу {mail}", ("toolu_1", "Bash", {"command": f"ping {host}"}), thinking=f"узел {host}")
 
 
+def test_prune_failure_does_not_postpone_the_retry(gw, monkeypatch):
+    calls = []
+
+    def prune(before):
+        calls.append(before)
+        if len(calls) == 1:
+            raise RuntimeError("synthetic storage failure")
+        return 0
+
+    monkeypatch.setattr(gw.repo, "prune_agent", prune)
+    with pytest.raises(RuntimeError):
+        gw.service._prune()
+    gw.service._prune()
+    assert len(calls) == 2
+
+
+def test_trusted_text_keeps_an_instruction_supplied_by_the_user(gw, monkeypatch):
+    instruction, seen, guard = system_prompt("angle"), [], agent_service.SecretGuard
+    gw.repo._run("UPDATE api_keys SET hold_secrets = 1 WHERE id = ?", gw.key_id)
+
+    def capture_guard(text):
+        seen.append(text)
+        return guard(text)
+
+    monkeypatch.setattr(agent_service, "SecretGuard", capture_guard)
+    gw.stub.script.append(model_turn("Готово"))
+    gw.send(body(instruction))
+    assert instruction in seen[0]
+
+
+def test_bad_nonstream_provider_shape_is_a_502(gw):
+    gw.stub.script.append({"message": {"content": 42}})
+    with pytest.raises(AgentRefused) as error:
+        gw.call(dict(body(TASK), stream=False))
+    assert error.value.status == 502
+
+
+def test_stream_finalization_failure_is_logged_without_breaking_delivery(gw, monkeypatch, caplog):
+    gw.stub.script.append(model_turn("Готово"))
+    def failed_record(*args):
+        raise RuntimeError("private body must not enter logs")
+
+    monkeypatch.setattr(gw.service, "_record", failed_record)
+    assert "Готово" in gw.send(body(TASK)).decode()
+    assert "RuntimeError" in caplog.text
+    assert "private body" not in caplog.text
+    receipts = gw.repo.agent_receipts(gw.chat_of(body(TASK)), 0, 50)
+    assert receipts[0]["status"] == 502
+
+
 def two_turns(gw: Gateway, final: str = "Готово") -> tuple[dict, dict, list[dict]]:
     """Ход 1 — вызов команды; ход 2 — результат команды с контрольным текстом (TEXT). Тела и блоки ответа хода 1."""
     gw.stub.script += [answer, model_turn(final)]

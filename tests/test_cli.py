@@ -164,6 +164,53 @@ def test_key_rotate_rewraps_the_keys_and_the_old_key_no_longer_opens_the_base(ho
     assert old_wrap not in raw and old_global.encode("ascii") not in raw
 
 
+def test_rotation_audit_failure_reports_the_committed_key(home, monkeypatch, clock, capsys):
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, init(home))
+
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic audit failure")
+
+    monkeypatch.setattr(Repository, "audit", unavailable)
+    assert main(["key", "rotate", "--env-file", str(home / "new.env")]) == 1
+    captured = capsys.readouterr()
+    assert "Главный ключ сменён" in captured.out
+    assert "аудит" in captured.err
+    new_key = (home / "new.env").read_text(encoding="ascii").strip().split("=", 1)[1]
+    fresh = open_repo(home / "data" / "cleaner.db", new_key, clock)
+    fresh.conn.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL")
+def test_private_write_refuses_before_writing_if_acl_setup_fails(tmp_path, monkeypatch):
+    target = tmp_path / "synthetic.env"
+
+    def denied(path):
+        assert path.read_bytes() == b""
+        raise PermissionError("synthetic ACL failure")
+
+    monkeypatch.setattr(cli, "_windows_private", denied)
+    with pytest.raises(PermissionError):
+        cli._write_private(target, b"synthetic key")
+    assert not target.exists()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "nt", reason="Windows DACL")
+def test_private_write_protects_the_acl_and_grants_only_owner_rights(tmp_path):
+    target = tmp_path / "synthetic.env"
+    cli._write_private(target, b"synthetic key")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+         "(Get-Acl -LiteralPath $env:CLEANER_ACL_TEST_PATH).Sddl"],
+        env={**os.environ, "CLEANER_ACL_TEST_PATH": str(target)}, capture_output=True, text=True, check=True, timeout=10,
+    )
+    assert "D:P(A;;FA;;;OW)" in result.stdout
+    assert target.read_bytes() == b"synthetic key"
+    with pytest.raises(FileExistsError):
+        cli._write_private(target, b"replacement")
+    assert target.read_bytes() == b"synthetic key"
+
+
 def test_key_rotate_with_the_wal_held_by_another_connection_asks_to_repeat(home, monkeypatch, capsys, clock):
     """Смена необратима: если базу держит другое соединение (копия, eval), прежние обёртки ключей остаются в
     cleaner.db-wal — команда сохраняет новый ключ, но возвращает 1 и просит повторить rotate."""

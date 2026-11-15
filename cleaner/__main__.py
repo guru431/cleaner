@@ -32,12 +32,44 @@ def _config(args: argparse.Namespace) -> Config:
     return config.load(Path(path)) if path else Config()
 
 
+def _windows_private(path: Path) -> None:
+    """Protected DACL: only the file owner; apply before writing any key bytes."""
+    import ctypes
+    from ctypes import wintypes
+
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    convert = security.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+    convert.restype = wintypes.BOOL
+    set_security = security.SetFileSecurityW
+    set_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+    set_security.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    descriptor = ctypes.c_void_p()
+    if not convert("D:P(A;;FA;;;OW)", 1, ctypes.byref(descriptor), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not set_security(str(path), 0x80000004, descriptor):  # protected DACL_SECURITY_INFORMATION
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.LocalFree(descriptor)
+
+
 def _write_private(path: Path, data: bytes) -> None:
-    """Новый файл: POSIX 0600, Windows — ACL каталога (docs/deployment.md).
+    """Новый файл: POSIX 0600, Windows — защищённая ACL владельца до записи данных.
     Существующий не перезаписывается (FileExistsError)."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            if os.name == "nt":
+                _windows_private(path)
+            handle.write(data)
+    except BaseException:
+        with suppress(OSError):
+            path.unlink()
+        raise
 
 
 def _secret(path: str | None, prompt: str) -> str:
@@ -294,12 +326,20 @@ def _rotate_key(args: argparse.Namespace) -> int:
         env_file, key = Path(args.env_file), crypto.new_key()
         _write_private(env_file, f"{crypto.key_line(key)}\n".encode("ascii"))
         committed = False
+        audit_failed = False
+        wal = "busy"
         try:
             with _repository(cfg) as repo:
                 chats = repo.rotate_master(key)
                 committed = True
-                wal = repo.truncate_wal()
-                repo.audit("master_key_rotated", chats=chats, wal=wal, by="cli")
+                try:
+                    wal = repo.truncate_wal()
+                except sqlite3.Error:
+                    wal = "busy"
+                try:
+                    repo.audit("master_key_rotated", chats=chats, wal=wal, by="cli")
+                except sqlite3.Error:
+                    audit_failed = True
         except BaseException:
             if not committed:                   # база под прежним ключом: новый ключ ничего не открывает
                 with suppress(OSError):
@@ -308,6 +348,8 @@ def _rotate_key(args: argparse.Namespace) -> int:
     truncated = wal == "truncated"
     print(f"Главный ключ сменён: новый — в {env_file}, прежний базу больше не открывает. Ключей чатов: {chats}.")
     print("Подставьте его в окружение службы и выгрузите заново: python -m cleaner key export <файл>")
+    if audit_failed:
+        print("ошибка: ключ уже сменён, но аудит смены записать не удалось", file=sys.stderr)
     if not truncated:
         print(
             "ошибка: журнал WAL не усечён — базу держит другое соединение (backup, eval), и прежние обёртки "
@@ -315,7 +357,7 @@ def _rotate_key(args: argparse.Namespace) -> int:
             "с новым ключом в окружении.", file=sys.stderr,
         )
         return 1
-    return 0
+    return 1 if audit_failed else 0
 
 
 def cmd_key(args: argparse.Namespace) -> int:

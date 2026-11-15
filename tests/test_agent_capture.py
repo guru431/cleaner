@@ -1,13 +1,41 @@
 """Заглушка записи запросов агента (scripts/agent_capture.py): подстановки в шаги сценария из запроса — так сценарий
 «прочитать файл → правка» берёт строку файла в том виде, в каком её увидела модель за шлюзом (приёмка AC-5.1)."""
 import json
+import gzip
 import threading
 import urllib.request
+import urllib.error
 from http.server import ThreadingHTTPServer
 
 import pytest
 
 from scripts import agent_capture
+
+
+@pytest.mark.parametrize("payload", [b"not gzip", b"\x1f\x8b\x08"])
+def test_bad_compression_is_recorded_and_returns_400(capture, tmp_path, payload):
+    request = urllib.request.Request(f"{capture([])}/v1/messages", payload, {"Content-Encoding": "gzip"})
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=5)
+    assert error.value.code == 400
+    record = json.loads((tmp_path / "001.json").read_text(encoding="utf-8"))
+    assert record["body_bytes"] == len(payload)
+
+
+def test_capture_decompresses_once(capture, monkeypatch, tmp_path):
+    payload = gzip.compress(json.dumps({"messages": []}).encode())
+    decompress, calls = gzip.decompress, []
+
+    def counted(raw):
+        calls.append(raw)
+        return decompress(raw)
+
+    monkeypatch.setattr(gzip, "decompress", counted)
+    request = urllib.request.Request(f"{capture([])}/v1/messages", payload, {"Content-Encoding": "gzip"})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+    assert calls == [payload]
+    assert json.loads((tmp_path / "001.json").read_text(encoding="utf-8"))["body"] == {"messages": []}
 
 REQUEST = {"messages": [
     {"role": "user", "content": "Прочитай notes.txt"},

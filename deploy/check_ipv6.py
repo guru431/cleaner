@@ -4,6 +4,14 @@ import sys
 
 
 def ipv6_closed(document: dict) -> bool:
+    """Malformed nft output fails closed for library callers as well as the CLI."""
+    try:
+        return _ipv6_closed(document)
+    except (ValueError, TypeError, AttributeError, KeyError, IndexError):
+        return False
+
+
+def _ipv6_closed(document: dict) -> bool:
     rules = {"output": [], "cleaner": []}
     for item in document.get("nftables", []):
         rule = item.get("rule", {})

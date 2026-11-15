@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -126,15 +127,13 @@ class _Prepared:
 _TRUSTED_ROLES = frozenset({"user", "system", "developer"})
 
 
-def _trusted_text(proto: GatewayProtocol, body: dict, instruction: str = "") -> str:
-    """Текстовые блоки этих ролей в очищенном теле — как их увидела модель. Служебная инструкция Cleaner (instruction,
-    отдельным блоком или в конце строки system) не в счёт: метки-примеры в ней — не узлы пользователя."""
-    text = "\n".join(
+def _trusted_text(proto: GatewayProtocol, body: dict) -> str:
+    """Текст пользователя и оператора в очищенном теле, до добавления служебной инструкции Cleaner."""
+    return "\n".join(
         unit.node["text"] for unit in proto.units(body)
         if unit.kind == "text" and unit.role in _TRUSTED_ROLES and isinstance(unit.node, dict)
         and isinstance(unit.node.get("text"), str)
     )
-    return text.replace(instruction, "") if instruction else text
 
 
 # Имя поля или значение type, которое можно показать в квитанции: имя протокола, а не данные пользователя.
@@ -220,6 +219,7 @@ class AgentService:
         self._states: OrderedDict[str, tuple[int, ChatState]] = OrderedDict()
         repo.on_chat_deleted(self.forget_chat)
         self._pruned: datetime | None = None
+        self._pruning = False
 
     # --- служебное ---------------------------------------------------------------
 
@@ -237,13 +237,18 @@ class AgentService:
         """Раз в час — разговоры без запросов LEDGER_DAYS дней и осиротевшие чаты шлюза (7.3)."""
         now = self._now()
         with self._guard:
-            if self._pruned is not None and now - self._pruned < PRUNE_EVERY:
+            if self._pruning or self._pruned is not None and now - self._pruned < PRUNE_EVERY:
                 return
-            self._pruned = now
+            self._pruning = True
         try:
             removed = self.repo.prune_agent((now - timedelta(days=LEDGER_DAYS)).isoformat(timespec="seconds"))
+            with self._guard:
+                self._pruned = now
         except CheckpointBusy:
             return
+        finally:
+            with self._guard:
+                self._pruning = False
         if removed:
             self.repo.audit("agent_pruned", chats=removed)
 
@@ -611,6 +616,8 @@ class AgentService:
                 if withheld:
                     result.withheld[withheld] += 1
             body = proto.rebuild(call.body, replaced)
+            if call.key.hold_secrets:
+                result.trusted = _trusted_text(proto, body)
             frozen = [coverage.identity(unit) for unit in proto.units(body) if unit.path in repeated]
             instruction = pipeline.system_prompt(state.label_style)
             body = proto.add_instruction(body, instruction)
@@ -643,8 +650,6 @@ class AgentService:
             refused.reason = "leak_structural" if in_service else "leak"
             raise refused
         result.out, result.state = out, _snapshot(state)
-        if call.key.hold_secrets:
-            result.trusted = _trusted_text(proto, body, instruction)
         result.unfamiliar = sorted({_shape(unit) for unit in units if unit.kind == "other"} | {
             _shape(replace(unit, path=(*unit.path, *extra))) for unit in units for extra in walk.extra_paths(unit)
         })
@@ -766,7 +771,7 @@ class AgentService:
             except RestoreLimit:
                 raise self._refuse(call, 502, "api_error", "Cleaner: превышен предел размера восстановленного ответа",
                                    "response_limit", chat_id=chat_id) from None
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, TypeError, KeyError):
                 self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=502)
                 raise AgentRefused(502, "api_error", "Cleaner: провайдер прислал не JSON") from None
             self._record(proto, chat_id, conv_id, prepared, stream)
@@ -781,13 +786,29 @@ class AgentService:
             nonlocal upstream, prepared, stream, call
             if not once.acquire(blocking=False):
                 return
+
+            def attempt(stage: str, action: Callable[[], None]) -> bool:
+                try:
+                    action()
+                    return True
+                except Exception as exc:
+                    # Exception messages/tracebacks may contain provider or request data (SEC-11).
+                    logging.getLogger(__name__).error("Agent finalization failed: stage=%s kind=%s", stage, type(exc).__name__)
+                    return False
+
             try:
-                upstream.close()
-                self._record(proto, chat_id, conv_id, prepared, stream)
-                self.repo.audit("agent_send", call.user.id, chat_id, **audit, status=200, finished=finished, usage=usage)
-                self._receipt(call, proto, chat_id, conv_id, access, prepared, started, 200 if finished else 502,
-                              "" if finished else getattr(stream, "failure_reason", "stream_interrupted"))
-                self._restored(call, chat_id, audit["model"], access, prepared, stream)
+                attempt("close", upstream.close)
+                recorded = attempt("ledger", lambda: self._record(proto, chat_id, conv_id, prepared, stream))
+                audited = attempt("audit", lambda: self.repo.audit(
+                    "agent_send", call.user.id, chat_id, **audit, status=200 if recorded else 502,
+                    finished=finished and recorded, usage=usage,
+                ))
+                reason = ("stream_record_failed" if not recorded or not audited else
+                          "" if finished else getattr(stream, "failure_reason", "stream_interrupted"))
+                attempt("receipt", lambda: self._receipt(
+                    call, proto, chat_id, conv_id, access, prepared, started, 502 if reason else 200, reason,
+                ))
+                attempt("restore", lambda: self._restored(call, chat_id, audit["model"], access, prepared, stream))
             finally:
                 # close живёт до уничтожения HTTP-ответа: после записи он не должен держать тело запроса и снимок
                 # из 20 000 сущностей (и заставлять GC обходить их на следующих запросах).

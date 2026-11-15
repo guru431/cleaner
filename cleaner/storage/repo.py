@@ -190,7 +190,7 @@ class Provider:
     @property
     def key_tail(self) -> str:
         """FR-8.10: видны только последние четыре знака."""
-        return self.api_key[-4:]
+        return self.api_key[-4:] if len(self.api_key) > 4 else ""
 
     def __repr__(self) -> str:
         return f"Provider(id={self.id!r}, name={self.name!r}, protocol={self.protocol!r}, base_url={self.base_url!r})"
@@ -1024,7 +1024,7 @@ class Repository:
     def add_conversation(self, conv_id: str, chat_id: str, key_id: str, session: str) -> Conversation:
         """Новый разговор в чате; уже записанный (параллельный запрос успел первым) остаётся в своём чате."""
         now = self._now()
-        with self.lock:
+        with self.lock, transaction(self.conn):
             self.conn.execute(
                 "INSERT OR IGNORE INTO agent_conversations(id, chat_id, key_id, session, first_seen, last_seen) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -1158,8 +1158,12 @@ class Repository:
                 "AND NOT EXISTS (SELECT 1 FROM agent_conversations c WHERE c.chat_id = chats.id) "
                 "AND NOT EXISTS (SELECT 1 FROM api_keys k WHERE k.chat_id = chats.id)"
             ).fetchall()]
+            self.conn.executemany("DELETE FROM chats WHERE id = ?", ((chat_id,) for chat_id in orphans))
         for chat_id in orphans:
-            self.delete_chat(chat_id)
+            self._forget_chat(chat_id)
+        if orphans and self.truncate_wal() == "busy":
+            self.audit("error", kind=CheckpointBusy.__name__, stage="agent_prune", chats=len(orphans))
+            raise CheckpointBusy(orphans[0])
         return len(orphans)
 
     # --- настройки в базе ---------------------------------------------------------
@@ -1182,9 +1186,12 @@ class Repository:
         metadata = metadata or {}
         with self.lock, transaction(self.conn):
             if metadata.get("purpose"):
-                for row in self.gold():
-                    same_source = metadata.get("source") == row.metadata.get("source") or text == row.text
-                    if same_source and row.metadata.get("purpose") and row.metadata["purpose"] != metadata["purpose"]:
+                for row in self.conn.execute("SELECT id, text_enc, metadata_enc FROM gold WHERE metadata_enc IS NOT NULL"):
+                    previous = json.loads(self._dec(key, row["metadata_enc"], f"gold.metadata:{row['id']}"))
+                    if not previous.get("purpose") or previous["purpose"] == metadata["purpose"]:
+                        continue
+                    same_source = metadata.get("source") == previous.get("source")
+                    if same_source or text == self._dec(key, row["text_enc"], f"gold.text:{row['id']}"):
                         raise ValueError("Примеры одного источника нельзя разделять между настройкой и контролем")
             self.conn.execute(
                 "INSERT INTO gold(id, user_id, text_enc, spans_enc, created_at, metadata_enc) VALUES (?, ?, ?, ?, ?, ?)",

@@ -566,6 +566,8 @@ class Extractor:
             raise _PageRefused("Изображение больше 20 МБ: распознавание его не примет")
         try:
             return self.ocr(image, mime), ()
+        except DetectorError as exc:
+            raise ExtractError(f"Распознавание текста не выполнено: {exc}") from None
         except CompletionError as exc:
             if exc.code == "ocr_empty":
                 return "", (number,)

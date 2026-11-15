@@ -355,7 +355,8 @@ def _agent_chat(request: Request, chat: Chat, viewer: Viewer, q: str) -> Respons
             entries = repo.ledger_get(chat.id, selected["conversation"], direction, digests)
             shown += [(entries[digest], selected["time"]) for digest in digests if digest in entries]
     conversations = {c.id: c for c in repo.chat_conversations(chat.id)}
-    keys = [repo.api_key(key_id) for key_id in dict.fromkeys(c.key_id for c in conversations.values())]
+    key_ids = {c.key_id for c in conversations.values()}
+    keys = [key for key in repo.api_keys(chat.user_id) if key.id in key_ids]
     state, _ = repo.load_state(chat.id)
     nodes = [(_ledger_node(entry.local), _ledger_node(entry.wire)) for entry, _ in shown]
     opened = _opened([wire if not entry.withheld else {} for (entry, _), (_, wire) in zip(shown, nodes)], state, repo.settings())
