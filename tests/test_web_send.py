@@ -304,6 +304,29 @@ def test_manual_transfer_shows_the_whole_cleaned_dialogue_with_roles(ivan, provi
     assert f'href="/chats/{chat_id}/manual"' in chat and 'data-tab="answer"' in chat
 
 
+def test_manual_answer_keeps_the_replacement_count_of_the_transferred_dialogue(ivan, repo):
+    chat_id = ivan.chat()
+    base = f"/chats/{chat_id}"
+    ivan.post(f"{base}/input", text="Почта a@x.example")
+    ivan.post(f"{base}/input", text="Почта b@x.example")
+    ivan.post(f"{base}/request", shown="1,2", back="manual", **{"in-1": "yes"})
+    manual = ivan.get(f"{base}/manual").text
+    receipt = re.search(r'name="manual_receipt" value="([^"]+)"', manual).group(1)
+    assert f'data-manual-receipt="{receipt}"' in manual
+    assert f'data-manual-csrf="{ivan.csrf}"' in manual
+    assert ivan.post(f"{base}/manual/copied", receipt="invalid").status_code == 409
+    assert ivan.post(f"{base}/manual/copied", receipt=receipt).status_code == 204
+    # Отметки в другой вкладке изменились после переноса, но ответ относится к показанному раньше запросу.
+    ivan.post(f"{base}/request", shown="1,2", **{"in-1": "yes", "in-2": "yes"})
+    pasted = ivan.post(f"{base}/answer", answer="Ответ <EMAIL_1>")
+    assert pasted.status_code == 303
+    assert "Замен в запросе: 1" in ivan.get(base).text
+    assert repo.items(chat_id)[-1].meta["in_request"] == repo.audit_events("restore")[0].details["in_request"] == 1
+    assert ivan.post(f"{base}/answer", answer="Повтор", manual_receipt=receipt).status_code == 409
+    other = ivan.chat()
+    assert ivan.post(f"/chats/{other}/answer", answer="Ответ", manual_receipt=receipt).status_code == 409
+
+
 def test_manual_transfer_offers_no_copy_when_a_fragment_is_blocked(ivan, repo, provider):
     chat_id = chat_with_question(ivan, provider)
     repo.set_policy(T.EMAIL, Policy.BLOCK)

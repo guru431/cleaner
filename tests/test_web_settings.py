@@ -225,10 +225,10 @@ def test_internal_suffixes_are_shown_extended_and_reduced(boss, repo):
     page = boss.get("/settings/builtin").text
     assert "localdomain" in page and "loc" in page
     try:
-        assert not labels._domain_name("srv01.romashka.lcl")
+        assert not labels._domain_name("srv01.romashka.lcl", hostmap.active_suffixes())
         assert boss.post("/settings/builtin/suffixes", value=".LCL").headers["location"] == "/settings/builtin"
         assert hostmap.has_known_suffix("srv01.romashka.lcl")
-        assert labels._domain_name("srv01.romashka.lcl")
+        assert labels._domain_name("srv01.romashka.lcl", hostmap.active_suffixes())
         assert "lcl" in boss.get("/settings/builtin").text
         for value in ("lcl", "loc", "ru", "a b", ""):
             assert boss.post("/settings/builtin/suffixes", value=value).status_code == 400, value
@@ -237,7 +237,7 @@ def test_internal_suffixes_are_shown_extended_and_reduced(boss, repo):
         assert [e.details for e in repo.audit_events("settings_changed")][-1] == {"section": "internal_suffixes", "action": "add"}
         boss.post("/settings/builtin/suffixes/lcl/delete")
         assert not hostmap.has_known_suffix("srv01.romashka.lcl")
-        assert not labels._domain_name("srv01.romashka.lcl")
+        assert not labels._domain_name("srv01.romashka.lcl", hostmap.active_suffixes())
         assert boss.post("/settings/builtin/suffixes/lcl/delete").status_code == 404
     finally:
         hostmap.set_extra_suffixes(())
@@ -613,6 +613,14 @@ def test_open_set_passport_is_shown_apart_from_the_own_set(boss, repo):
     assert "hivetrace/pii-bench @ 0123456789ab, ревизия на момент загрузки" in page
     assert "Единица подсчёта: сущности после преобразования открытого набора" in page
     assert "Собственный набор пуст" in page
+    assert "В прежнем замере SHA-256 прочитанного файла не записан" in page
+
+    source |= {"manifest_status": "mismatch", "warnings": ["Файл не совпадает с манифестом"], "sha256": "a" * 64}
+    runner.measure(repo, "open:hivetrace", [record], ["1-3"], None, None, runner.UNIT_FILE, source)
+    section = boss.get("/settings/gold").text.split("Открытый набор «hivetrace»", 1)[1]
+    assert "Файл не совпадает с манифестом" in section
+    assert "SHA-256 прочитанного файла" in section and "a" * 32 + "<wbr>" + "a" * 32 in section
+    assert "Класс QA-3" not in section and ">Цель<" not in section and "1.000 (1/1); 95%" in section
 
 
 def test_admin_sets_the_layer_defaults(boss, repo, ivan):

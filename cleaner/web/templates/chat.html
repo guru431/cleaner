@@ -141,7 +141,7 @@
         {% if e.source == "local" %}
         <p class="counters">Локальная модель видела оригиналы: ответ показан как получен, восстанавливать в нём нечего.</p>
         {% else %}
-        <p class="counters">Замен в текстах после прошлого ответа: {{ e.counters.in_request }}, восстановлено: {{ e.counters.restored }}, из искажённой записи: {{ e.counters.altered }}, выведено: {{ e.counters.derived }}, неизвестных меток: {{ e.counters.unknown }}, оставлено по политике: {{ e.counters.kept }}, посторонних ссылок: {{ e.counters.foreign_links }}.</p>
+        <p class="counters">Замен в запросе: {{ e.counters.in_request }}, восстановлено: {{ e.counters.restored }}, из искажённой записи: {{ e.counters.altered }}, выведено: {{ e.counters.derived }}, неизвестных меток: {{ e.counters.unknown }}, оставлено по политике: {{ e.counters.kept }}, посторонних ссылок: {{ e.counters.foreign_links }}.</p>
         <details class="raw"><summary>Как получено</summary><pre class="text">
 {{ e.raw }}</pre></details>
         {% endif %}

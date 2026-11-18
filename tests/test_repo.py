@@ -588,6 +588,47 @@ def test_prune_removes_old_conversations_and_orphan_agent_chats(repo, clock):
     assert repo.conversation("c-fresh") is not None
 
 
+def test_service_prunes_a_sleeping_key_without_gateway_traffic(app, repo, clock, monkeypatch):
+    from threading import Event
+
+    from fastapi.testclient import TestClient
+
+    from cleaner import agent_service
+    from cleaner.web import app as app_module
+
+    user, key_id, idle = gateway(repo)
+    other_key = repo.add_api_key(user, "other", "h2", "bbbb", upstream="provider:p1")
+    active = repo.create_chat(user, "Агент, действующий", kind="agent")
+    repo.set_key_chat(key_id, idle)
+    repo.set_key_chat(other_key, active)
+    repo.add_conversation("idle-conversation", idle, key_id, "")
+    repo.add_ledger(idle, [entry("idle-data", conversation="idle-conversation")])
+    repo.add_agent_receipt(idle, "idle-conversation", {"status": 200})
+    repo.add_conversation("active-conversation", active, other_key, "")
+    started, expired = Event(), Event()
+    prune = repo.prune_agent
+
+    def watch(before):
+        removed = prune(before)
+        started.set()
+        if repo.chat(idle) is None:
+            expired.set()
+        return removed
+
+    monkeypatch.setattr(repo, "prune_agent", watch)
+    interval = timedelta(milliseconds=10)
+    monkeypatch.setattr(agent_service, "PRUNE_EVERY", interval)
+    monkeypatch.setattr(app_module, "PRUNE_EVERY", interval)
+    with TestClient(app):
+        assert started.wait(0.8) and repo.chat(idle) is not None
+        clock.advance(days=29)
+        repo.touch_conversation("active-conversation", "")
+        clock.advance(days=1)
+        assert expired.wait(0.8)
+    assert repo.api_key(key_id).chat_id is None and repo.conversation("idle-conversation") is None
+    assert repo.api_key(other_key).chat_id == active and repo.conversation("active-conversation") is not None
+
+
 def test_finish_answer_writes_text_status_and_meta(repo):
     user, chat = new_chat(repo)
     item = repo.add_item(chat, Item(uuid.uuid4().hex, 0, "answer", "", None, source="api", status="running"))

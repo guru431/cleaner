@@ -21,10 +21,10 @@ def format_label(style: str, type_: EntityType, number: int) -> str:
 
 
 @lru_cache(maxsize=65536)
-def _domain_name(value: str) -> bool:
+def _domain_name(value: str, suffixes: tuple[str, ...]) -> bool:
     """Значение метки — доменное имя (domain_labels). Ответ для значения не меняется, а спрашивают его при каждой сборке
     восстановления, и поток ответа собирает её на каждом куске (hostmap.has_known_suffix)."""
-    return bool(_DOMAIN_NAME.fullmatch(value)) and hostmap.has_known_suffix(value) and not hostmap.code_like(
+    return bool(_DOMAIN_NAME.fullmatch(value)) and hostmap._known_suffix(value, suffixes) and not hostmap.code_like(
         value, load_builtin().ambiguous_suffixes
     )
 
@@ -37,9 +37,10 @@ def domain_labels(state: ChatState) -> set[str]:
     ссылки). Доменом их считают и конвейер — имя рядом с меткой и адрес e-mail (5.4, 5.10), — и восстановление — хост
     ссылки (7)."""
     domains = set()
+    suffixes = hostmap.active_suffixes()
     for fake, surrogate in state.surrogates.items():
         if surrogate.kind == "label":
-            if _domain_name(state.entities[surrogate.entity_id].restore_value):
+            if _domain_name(state.entities[surrogate.entity_id].restore_value, suffixes):
                 domains.add(fake)
         elif surrogate.kind == "host":
             last = fake.rsplit(".", 1)[-1]

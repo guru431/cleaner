@@ -10,6 +10,7 @@ from cleaner import settings_impact
 from cleaner.core.types import EntityType as T, Policy, default_policies
 from cleaner.service import ChatService
 from cleaner.storage import crypto
+from cleaner.storage.repo import SUFFIXES_KEY
 from cleaner.web import routes_settings
 
 
@@ -49,6 +50,62 @@ def test_changed_settings_invalidate_confirmation_but_chat_activity_does_not(rep
     with pytest.raises(ValueError, match="изменились"):
         settings_impact.apply(repo, owner, shown["receipt"])
     assert repo.policies()[T.EMAIL] is Policy.OFF
+
+
+def test_preview_uses_only_tuning_examples(repo, monkeypatch):
+    admin = repo.create_user("admin", "hash", "admin")
+    spans = [{"start": 0, "end": 13, "type": "EMAIL", "entity": 0}]
+    repo.add_gold(None, "one@x.example", spans, {"purpose": "control", "source": "held-back"})
+    operation = {"kind": "policies", "policies": {"EMAIL": "off"}}
+    assert settings_impact.preview(repo, admin, operation)["quality"] == []
+    repo.add_gold(None, "two@x.example", spans, {"purpose": "tuning", "source": "calibration"})
+    observed = []
+    run = settings_impact.runner.run
+
+    def checked(examples, *args):
+        observed.append([example.text for example in examples])
+        return run(examples, *args)
+
+    monkeypatch.setattr(settings_impact.runner, "run", checked)
+    assert settings_impact.preview(repo, admin, operation)["quality"]
+    assert observed == [["two@x.example"], ["two@x.example"]]
+
+
+def test_suffix_changes_invalidate_confirmation(repo):
+    admin = repo.create_user("admin", "hash", "admin")
+    operation = {"kind": "policies", "policies": {"EMAIL": "off"}}
+    for suffixes in (["previewtest"], []):
+        shown = settings_impact.preview(repo, admin, operation)
+        repo.set_setting(SUFFIXES_KEY, json.dumps(suffixes))
+        with pytest.raises(ValueError, match="изменились"):
+            settings_impact.apply(repo, admin, shown["receipt"])
+    assert repo.policies()[T.EMAIL] is Policy.MASK
+
+
+def test_pending_confirmation_is_bound_to_its_owner_and_expires(repo, clock):
+    admin = repo.create_user("admin", "hash", "admin")
+    other = repo.create_user("other", "hash", "admin")
+    operation = {"kind": "policies", "policies": {"EMAIL": "off"}}
+    receipt = settings_impact.preview(repo, admin, operation)["receipt"]
+    with pytest.raises(ValueError, match="недействителен"):
+        settings_impact.apply(repo, other, receipt)
+    assert receipt in repo.settings_previews
+    clock.advance(minutes=10)
+    with pytest.raises(ValueError, match="истекло"):
+        settings_impact.apply(repo, admin, receipt)
+    assert receipt not in repo.settings_previews and repo.policies()[T.EMAIL] is Policy.MASK
+
+
+@pytest.mark.integration
+def test_small_policy_change_can_be_confirmed_with_large_dictionary(boss, repo):
+    values = [str(i) + "x" * 47000 for i in range(140)]
+    repo.add_dictionary_many("never", values)
+    shown = boss.post("/settings/policies", action="impact", **{"policy-EMAIL": "off"})
+    assert shown.status_code == 200
+    receipt = re.search(r'name="receipt" value="([^"]+)"', shown.text)[1]
+    assert len(receipt) < 1024
+    assert boss.post("/settings/impact/apply", receipt=receipt).status_code == 303
+    assert len(repo.dictionary()) == len(values) and repo.policies()[T.EMAIL] is Policy.OFF
 
 
 def test_preview_does_not_hold_the_service_lock_while_recounting(repo, monkeypatch):

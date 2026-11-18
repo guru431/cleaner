@@ -16,17 +16,19 @@
   {% for line in p.warnings %}<p class="flash warn">Полезность: {{ line }}</p>{% endfor %}
   <p class="sub">Лишнее скрытие и ложные срабатывания сравниваются с базовым замером как предупреждения. QA-6 по-прежнему запрещает падение полноты. Задержка и расход контекста измеряются отдельно.</p>
   <p class="sub">{% for name, value in p.versions %}{{ name }}: <span class="mono">{{ value }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</p>
+  {% if p.source_digest %}<p class="sub">SHA-256 прочитанного файла <code>{{ p.source_digest[:32] }}<wbr>{{ p.source_digest[32:] }}</code>{% if p.manifest_checked %}. Совпадает с манифестом.{% endif %}</p>{% endif %}
+  {% for warning in p.source_warnings %}<p class="flash warn">{{ warning }}</p>{% endfor %}
 </div>
 <table class="grid">
-  <thead><tr><th>Класс QA-3</th><th class="num">Сущностей</th>{% for name in p.layers %}<th class="num">Слои {{ name }}</th>{% endfor %}<th class="num">Цель</th></tr></thead>
+  <thead><tr><th>{{ "Класс QA-3" if p.own else "Класс" }}</th><th class="num">Сущностей</th>{% for name in p.layers %}<th class="num">Слои {{ name }}</th>{% endfor %}{% if p.own %}<th class="num">Цель</th>{% endif %}</tr></thead>
   <tbody>
   {% for row in p.classes %}
-  <tr><td>{{ row.title }}</td><td class="num">{{ row.total }}</td>{% for value in row.recalls %}<td class="num mono">{{ value }}</td>{% endfor %}<td class="num">{{ row.target }}</td></tr>
+  <tr><td>{{ row.title }}</td><td class="num">{{ row.total }}</td>{% for value in row.recalls %}<td class="num mono">{{ value }}</td>{% endfor %}{% if p.own %}<td class="num">{{ row.target }}</td>{% endif %}</tr>
   {% else %}
-  <tr><td colspan="{{ p.layers | length + 3 }}" class="empty">В разметке нет сущностей классов QA-3</td></tr>
+  <tr><td colspan="{{ p.layers | length + 2 + p.own }}" class="empty">В разметке нет сущностей измеряемых классов</td></tr>
   {% endfor %}
   {% for label, values in p.quality %}
-  <tr><td colspan="2">{{ label }}</td>{% for value in values %}<td class="num mono">{{ value }}</td>{% endfor %}<td></td></tr>
+  <tr><td colspan="2">{{ label }}</td>{% for value in values %}<td class="num mono">{{ value }}</td>{% endfor %}{% if p.own %}<td></td>{% endif %}</tr>
   {% endfor %}
   </tbody>
 </table>

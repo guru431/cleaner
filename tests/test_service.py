@@ -52,6 +52,38 @@ def test_deleting_a_chat_evicts_originals_from_process_caches(repo, chat):
     assert "cache-original@contoso.ru" not in match._NEEDLES
 
 
+@pytest.mark.parametrize("save_first", [False, True])
+def test_saving_gold_and_deleting_its_chat_have_no_orphan_outcome(repo, chat, monkeypatch, save_first):
+    user, chat_id = chat
+    service = ChatService(repo)
+    item = service.add_input(chat_id, user, "почта synthetic@contoso.ru")
+    if save_first:
+        service.save_gold(chat_id, user, item.id)
+        service.delete_chat(chat_id, user)
+    else:
+        add_gold = repo.add_gold
+
+        def delete_then_save(*args, **kwargs):
+            service.delete_chat(chat_id, user)
+            return add_gold(*args, **kwargs)
+
+        monkeypatch.setattr(repo, "add_gold", delete_then_save)
+        with pytest.raises(KeyError):
+            service.save_gold(chat_id, user, item.id)
+    assert repo.chat(chat_id) is None and repo.gold() == []
+
+
+def test_saving_the_same_chat_item_updates_one_gold_example(repo, chat):
+    user, chat_id = chat
+    service = ChatService(repo)
+    item = service.add_input(chat_id, user, "почта synthetic@contoso.ru")
+    first = service.save_gold(chat_id, user, item.id, purpose="tuning")
+    assert service.save_gold(chat_id, user, item.id, purpose="tuning") == first
+    assert service.save_gold(chat_id, user, item.id, purpose="tuning", source="synthetic source") == first
+    [stored] = repo.gold()
+    assert stored.id == first and stored.metadata["source"] == "synthetic source"
+
+
 def test_deleted_chat_is_not_put_back_by_an_index_being_built(state, settings, monkeypatch):
     from cleaner.core import cache, match
     from cleaner.core.pipeline import sanitize

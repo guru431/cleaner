@@ -62,3 +62,19 @@ def test_check_finds_wrong_model_protocol_and_unreachable_provider(agent):
     response = client.get("/agent/openai/v1/cleaner/check", headers={"authorization": f"Bearer {down}"})
     assert checks(response)["provider"] is False and response.json()["ok"] is False
     assert "/agent/openai/v1/responses" in response.text
+
+
+def test_check_distinguishes_an_empty_provider_intersection_from_an_open_subscription(agent, repo, boss):
+    client, key, _ = agent
+    value = key()
+    stored = repo.api_key_by_hash(auth.token_hash(value))
+    repo._run("UPDATE providers SET models = ? WHERE id = ?", '["m-2"]', stored.upstream.removeprefix("provider:"))
+    for query in ("", "?model=m-1"):
+        response = client.get(f"/agent/anthropic/v1/cleaner/check{query}", headers={"x-api-key": value})
+        assert checks(response)["model"] is False and response.json()["ok"] is False
+
+    login = auth.new_api_key()
+    user_id = repo.user_by_login("boss").id
+    repo.add_api_key(user_id, "subscription", auth.token_hash(login), login[-4:], upstream="claude-subscription")
+    response = boss.client.get("/agent/anthropic/v1/cleaner/check?model=another", headers={"x-api-key": login})
+    assert checks(response)["model"] is True

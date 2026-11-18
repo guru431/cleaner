@@ -35,6 +35,10 @@ class CheckpointBusy(Exception):
     """Чат удалён, но журнал WAL не усечён: копии его страниц, с ключом, остаются там до следующей
     контрольной точки. Её не пускает другое соединение с базой — копия, eval."""
 
+    def __init__(self, target: str = "", *, gold_count: int = 0):
+        super().__init__(target)
+        self.gold_count = gold_count
+
 
 _CHECKPOINT_ATTEMPTS = 3            # каждая попытка сама ждёт читателей до busy_timeout (5 с)
 AUDIT_DAYS = 365                    # срок хранения журнала (решение владельца 12.11.2026); для долгого — выгрузка CSV
@@ -226,6 +230,7 @@ class Repository:
         self._readers = 0                         # открытые снимки reading()
         self._wal_due = False                     # усечение WAL отложено до закрытия снимков
         self._audit_purged = ""                   # день последней очистки журнала (_purge_audit)
+        self.settings_previews: dict[str, tuple[float, bytes]] = {}  # краткоживущие шифротексты для settings_impact
 
     # --- служебное ---------------------------------------------------------
 
@@ -513,13 +518,20 @@ class Repository:
         Возвращает truncated или deferred — усечение отложено до закрытия снимка оценки этого процесса.
         Не вышло — CheckpointBusy: чат удалён, а молчать о копиях в журнале нельзя.
         """
-        with self.lock:
+        return self.delete_chat_with_gold(chat_id, gold=None)[0]
+
+    def delete_chat_with_gold(self, chat_id: str, *, gold: bool | None) -> tuple[str, int]:
+        """Под одним замком SQLite учитывает примеры, а при gold=True удаляет их вместе с чатом."""
+        with self.lock, transaction(self.conn):
+            examples = self.chat_gold(chat_id) if gold is not None else []
+            if gold:
+                self.conn.executemany("DELETE FROM gold WHERE id = ?", ((example,) for example in examples))
             self.conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
         self._forget_chat(chat_id)
         wal = self.truncate_wal()
         if wal == "busy":
-            raise CheckpointBusy(chat_id)
-        return wal
+            raise CheckpointBusy(chat_id, gold_count=len(examples))
+        return wal, len(examples)
 
     def chat_version(self, chat_id: str) -> int:
         """Версия состояния без расшифровки: по ней шлюз узнаёт, годится ли состояние, которое он держит в памяти."""
@@ -602,6 +614,13 @@ class Repository:
         row = self._one("SELECT status FROM items WHERE id = ? AND chat_id = ?", item_id, chat_id)
         return None if row is None else row["status"]
 
+    def accepted_request(self, chat_id: str, receipt_hash: str) -> tuple[str, str] | None:
+        row = self._one(
+            "SELECT id, status FROM items WHERE chat_id = ? AND source = 'api' AND kind = 'answer' "
+            "AND json_extract(meta, '$.receipt_hash') = ?", chat_id, receipt_hash,
+        )
+        return None if row is None else (row["id"], row["status"])
+
     def _insert_item(self, key: bytes, chat_id: str, item: Item, seq: int, now: str) -> None:
         self.conn.execute(
             "INSERT INTO items(id, chat_id, seq, kind, original_enc, sanitized_enc, spans, notices, exposed, created_at, "
@@ -630,6 +649,7 @@ class Repository:
     def commit_chat(
         self, chat_id: str, state: ChatState, version: int,
         new_items: Iterable[Item] = (), updated_items: Iterable[Item] = (), ledger: Iterable[LedgerEntry] = (),
+        *, validate: Callable[[], None] | None = None,
     ) -> None:
         """Состояние, элементы и записи журнала отправленного — одной транзакцией. StaleState, если чат успели изменить.
 
@@ -641,6 +661,8 @@ class Repository:
         key = self._dek(chat_id)
         now = self._now()
         with self.lock, transaction(self.conn):
+            if validate is not None:
+                validate()
             cursor = self.conn.execute(
                 "UPDATE chats SET state_enc = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
                 (crypto.seal(key, state_to_json(state), f"chats.state:{chat_id}"), now, chat_id, version),
@@ -1149,21 +1171,23 @@ class Repository:
         return None if row is None else self._agent_receipt(self._dek(chat_id), row)
 
     def prune_agent(self, before: str) -> int:
-        """Разговоры без запросов с before удаляются с журналом (каскадом, 7.3); чаты шлюза без разговоров, которые не
-        текущие ни у одного ключа, — как удаление чата (контрольная точка WAL). Число удалённых чатов."""
+        """Удаляет просроченные разговоры и осиротевшие чаты, включая просроченные текущие чаты ключей."""
         with self.lock, transaction(self.conn):
-            self.conn.execute("DELETE FROM agent_conversations WHERE last_seen < ?", (before,))
+            expired = self.conn.execute("DELETE FROM agent_conversations WHERE last_seen <= ?", (before,)).rowcount
             orphans = [row["id"] for row in self.conn.execute(
                 "SELECT id FROM chats WHERE kind = 'agent' "
                 "AND NOT EXISTS (SELECT 1 FROM agent_conversations c WHERE c.chat_id = chats.id) "
-                "AND NOT EXISTS (SELECT 1 FROM api_keys k WHERE k.chat_id = chats.id)"
+                "AND (created_at <= ? OR NOT EXISTS (SELECT 1 FROM api_keys k WHERE k.chat_id = chats.id))", (before,),
             ).fetchall()]
             self.conn.executemany("DELETE FROM chats WHERE id = ?", ((chat_id,) for chat_id in orphans))
         for chat_id in orphans:
             self._forget_chat(chat_id)
-        if orphans and self.truncate_wal() == "busy":
+        if expired or orphans:
+            with self.lock:
+                self._wal_due = True
+        if self._wal_due and self.truncate_wal() == "busy":
             self.audit("error", kind=CheckpointBusy.__name__, stage="agent_prune", chats=len(orphans))
-            raise CheckpointBusy(orphans[0])
+            raise CheckpointBusy(orphans[0] if orphans else "")
         return len(orphans)
 
     # --- настройки в базе ---------------------------------------------------------
@@ -1180,25 +1204,60 @@ class Repository:
 
     # --- эталонный набор (FR-6.10, QA-1) -----------------------------------------------
 
-    def add_gold(self, user_id: str | None, text: str, spans: list[dict], metadata: dict | None = None) -> str:
-        gold_id = uuid.uuid4().hex
+    def add_gold(self, user_id: str | None, text: str, spans: list[dict], metadata: dict | None = None,
+                 *, source_item: tuple[str, str, int] | None = None) -> str:
         key = self.global_key
         metadata = metadata or {}
         with self.lock, transaction(self.conn):
-            if metadata.get("purpose"):
-                for row in self.conn.execute("SELECT id, text_enc, metadata_enc FROM gold WHERE metadata_enc IS NOT NULL"):
+            existing = legacy = None
+            if source_item is not None:
+                chat_id, item_id, version = source_item
+                item = self.conn.execute(
+                    "SELECT c.version FROM items i JOIN chats c ON c.id = i.chat_id "
+                    "WHERE i.id = ? AND i.chat_id = ? AND i.kind = 'input' AND i.status = 'done'", (item_id, chat_id),
+                ).fetchone()
+                if item is None:
+                    raise KeyError(item_id)
+                if item["version"] != version:
+                    raise StaleState(chat_id)
+                metadata = metadata | {"chat": chat_id, "item": item_id}
+            if source_item is not None or metadata.get("purpose"):
+                for row in self.conn.execute("SELECT id, text_enc, spans_enc, metadata_enc FROM gold WHERE metadata_enc IS NOT NULL"):
                     previous = json.loads(self._dec(key, row["metadata_enc"], f"gold.metadata:{row['id']}"))
-                    if not previous.get("purpose") or previous["purpose"] == metadata["purpose"]:
+                    purpose = previous.get("purpose") or ""
+                    if purpose == (metadata.get("purpose") or ""):
+                        if source_item is not None:
+                            if existing is None and previous.get("item") == item_id and previous.get("chat") == chat_id:
+                                existing = row
+                            elif legacy is None and not previous.get("item") and (
+                                previous.get("chat") == chat_id or previous.get("source") == f"chat:{chat_id}"
+                            ) and text == self._dec(key, row["text_enc"], f"gold.text:{row['id']}"):
+                                legacy = row
+                        continue
+                    if not purpose or not metadata.get("purpose"):
                         continue
                     same_source = metadata.get("source") == previous.get("source")
                     if same_source or text == self._dec(key, row["text_enc"], f"gold.text:{row['id']}"):
                         raise ValueError("Примеры одного источника нельзя разделять между настройкой и контролем")
-            self.conn.execute(
-                "INSERT INTO gold(id, user_id, text_enc, spans_enc, created_at, metadata_enc) VALUES (?, ?, ?, ?, ?, ?)",
-                (gold_id, user_id, self._enc(key, text, f"gold.text:{gold_id}"),
-                 self._enc(key, json.dumps(spans), f"gold.spans:{gold_id}"), self._now(),
-                 self._enc(key, json.dumps(metadata), f"gold.metadata:{gold_id}")),
-            )
+            existing = existing if existing is not None else legacy
+            gold_id = existing["id"] if existing is not None else uuid.uuid4().hex
+            spans_json, metadata_json = json.dumps(spans), json.dumps(metadata)
+            if existing is not None:
+                if (spans_json, metadata_json) != (
+                    self._dec(key, existing["spans_enc"], f"gold.spans:{gold_id}"),
+                    self._dec(key, existing["metadata_enc"], f"gold.metadata:{gold_id}"),
+                ):
+                    self.conn.execute("UPDATE gold SET spans_enc = ?, metadata_enc = ? WHERE id = ?", (
+                        self._enc(key, spans_json, f"gold.spans:{gold_id}"),
+                        self._enc(key, metadata_json, f"gold.metadata:{gold_id}"), gold_id,
+                    ))
+            else:
+                self.conn.execute(
+                    "INSERT INTO gold(id, user_id, text_enc, spans_enc, created_at, metadata_enc) VALUES (?, ?, ?, ?, ?, ?)",
+                    (gold_id, user_id, self._enc(key, text, f"gold.text:{gold_id}"),
+                     self._enc(key, spans_json, f"gold.spans:{gold_id}"), self._now(),
+                     self._enc(key, metadata_json, f"gold.metadata:{gold_id}")),
+                )
         return gold_id
 
     def gold(self) -> list[GoldRow]:
@@ -1321,26 +1380,23 @@ class Repository:
     def set_policy(self, type_: EntityType, policy: Policy) -> None:
         self._run("INSERT OR REPLACE INTO policies(type, policy) VALUES (?, ?)", type_.value, policy.value)
 
-    def settings(self) -> Settings:
+    def internal_suffixes(self) -> tuple[str, ...]:
+        raw = self.setting(SUFFIXES_KEY)
+        return hostmap.normalize_suffixes(tuple(json.loads(raw))) if raw else ()
+
+    def settings(self, *, apply_suffixes: bool = True) -> Settings:
         """Настройки ядра. Значения «никогда не скрывать» приводятся к нижнему регистру здесь, на границе. Здесь же
-        применяются внутренние суффиксы, добавленные администратором (_apply_suffixes): их читает любой путь, который берёт
-        настройки из базы, — веб-служба, шлюз и команды (eval, verify)."""
-        self._apply_suffixes()
+        читаются внутренние суффиксы администратора. Оценки с согласованным снимком применяют его локально."""
+        suffixes = self.internal_suffixes()
+        if apply_suffixes and hostmap.set_extra_suffixes(suffixes):
+            cache.clear_strings()
         rows = self.dictionary()
         always = tuple(
             dictionary.entry(r.type, r.value, r.aliases, r.inflect) for r in rows if r.list == "always" and r.type is not None
         )
         never = frozenset(v.strip().lower() for r in rows if r.list == "never" for v in (r.value, *r.aliases) if v.strip())
         patterns = tuple(CustomPattern(p.name, p.regex, p.type) for p in self.patterns() if p.enabled)
-        return Settings(always=always, never=never, patterns=patterns, policies=self.policies())
-
-    def _apply_suffixes(self) -> None:
-        """Внутренние суффиксы из базы (ключ SUFFIXES_KEY, его же пишет страница встроенных списков) — для всей службы,
-        как встроенный список.
-        Строковые кэши сбрасываются, только если список изменился: ответы о доменных именах меток зависят от него."""
-        raw = self.setting(SUFFIXES_KEY)
-        if hostmap.set_extra_suffixes(tuple(json.loads(raw)) if raw else ()):
-            cache.clear_strings()
+        return Settings(always=always, never=never, patterns=patterns, policies=self.policies(), internal_suffixes=suffixes)
 
     # --- журнал и копия --------------------------------------------------------
 

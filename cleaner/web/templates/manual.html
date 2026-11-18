@@ -26,11 +26,23 @@
   <header class="panel-head">
     <h2 class="title">Очищенный диалог</h2>
     {% if sendable %}
-    <span class="actions"><button type="button" data-copy="manual-text">{{ icon("copy") }}<span>Скопировать диалог</span></button></span>
+    <span class="actions"><button type="button" data-copy="manual-text" data-manual-receipt="{{ manual_receipt }}"
+      data-manual-copied="/chats/{{ chat.id }}/manual/copied" data-manual-csrf="{{ csrf }}">{{ icon("copy") }}<span>Скопировать диалог</span></button></span>
     {% endif %}
   </header>
   <pre class="text" id="manual-text">
 {{ text }}</pre>
 </section>
+{% if manual_receipt %}
+<details class="panel">
+  <summary>Вставить ответ на этот запрос</summary>
+  <form method="post" action="/chats/{{ chat.id }}/answer" class="compose">
+    {% include "_csrf.html" %}
+    <input type="hidden" name="manual_receipt" value="{{ manual_receipt }}">
+    <textarea name="answer" rows="4" required aria-label="Ответ модели, полученный вручную"></textarea>
+    <button class="primary">Восстановить</button>
+  </form>
+</details>
+{% endif %}
 {% endif %}
 {% endblock %}

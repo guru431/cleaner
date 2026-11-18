@@ -436,6 +436,28 @@ def test_limit_during_final_stream_event_is_an_error_and_has_a_receipt(gateway, 
     assert receipt["status"] == 502 and receipt["reason"] == "response_limit"
 
 
+@pytest.mark.parametrize(("protocol", "events"), [
+    ("responses", b'data: {"type":"response.failed","response":{"error":{"message":"failure"}}}\n\n'),
+    ("chat", b'data: {"error":{"message":"failure"}}\n\ndata: [DONE]\n\n'),
+])
+def test_provider_stream_failure_marks_receipt_and_audit(gateway, repo, protocol, events):
+    make, _ = gateway
+    service, call = make(protocol)
+
+    def forward(out, connection, state, settings, **kwargs):
+        return egress.forward(out, connection, state, settings, **kwargs, transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, content=events)))
+
+    service.forward = forward
+    reply = service.handle(replace(call, body={**call.body, "stream": True}))
+    assert b"failure" in b"".join(reply.events)
+    [receipt] = repo.agent_receipts(repo.api_key(call.key.id).chat_id)
+    assert (receipt["status"], receipt["reason"]) == (502, "provider_stream_error")
+    [event] = repo.audit_events("agent_send")
+    assert event.details["status"] == 502 and event.details["finished"] is False
+    assert event.details["reason"] == "provider_stream_error"
+
+
 @pytest.mark.parametrize("limit", ["event", "response"])
 def test_sse_limits_apply_before_an_unterminated_line_is_buffered(state, settings, monkeypatch, limit):
     monkeypatch.setattr(egress, "EVENT_BYTES", 50 if limit == "event" else 1000)

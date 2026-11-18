@@ -113,10 +113,10 @@ def _headers(connection: Connection) -> dict[str, str]:
 
 
 def _scrub(error: ProviderError, key: str) -> ProviderError:
-    """Ключ из сообщения провайдера — прочь: некоторые повторяют его в тексте ошибки."""
-    if key and key in error.detail:
-        error.detail = error.detail.replace(key, "***")
-    return error
+    """Скрывает ключ до сокращения сообщения и форматирования сохраняемого объяснения."""
+    detail = error.detail.replace(key, "***") if key else error.detail
+    kind = "" if key and key in error.kind else error.kind
+    return ProviderError(status=error.status, kind=kind, detail=detail[:300])
 
 
 def _error(response: httpx.Response, key: str) -> ProviderError:
@@ -124,19 +124,33 @@ def _error(response: httpx.Response, key: str) -> ProviderError:
         return ProviderError("провайдер ответил переадресацией — она не выполняется", status=response.status_code)
     raw = b""
     for chunk in response.iter_bytes():
+        if len(raw) + len(chunk) > _ERROR_BYTES:
+            return ProviderError(status=response.status_code)
         raw += chunk
-        if len(raw) >= _ERROR_BYTES:
-            break
     try:
-        body = json.loads(raw[:_ERROR_BYTES])
+        body = json.loads(raw)
     except ValueError:
-        body = raw[:300].decode("utf-8", "replace").strip()
+        body = raw.decode("utf-8", "replace").strip()
     if isinstance(body, dict):
         body = body.get("error") or body
     return _scrub(provider_error(body, response.status_code), key)
 
 
 _DONE: dict = {}          # «data: [DONE]» — конец ответа OpenAI-совместимого провайдера
+
+
+def _redact_piece(text: str, key: str) -> tuple[str, str]:
+    if not key:
+        return text, ""
+    head, match, tail = text.rpartition(key)
+    visible = head.replace(key, "***") + "***" if match else ""
+    # A key can straddle two deltas. Hold back only a possible prefix at the end.
+    start = tail.find(key[0], max(0, len(tail) - len(key) + 1))
+    while start >= 0:
+        if key.startswith(tail[start:]):
+            return visible + tail[:start], tail[start:]
+        start = tail.find(key[0], start + 1)
+    return visible + tail, ""
 
 
 def _lines(chunks: Iterator[bytes]) -> Iterator[str]:
@@ -194,6 +208,7 @@ def send(
                 if response.status_code >= 300:
                     raise _error(response, key)
                 ended = False
+                pending = ""
                 for event in _events(_lines(response.iter_bytes())):
                     if cancel is not None and cancel.is_set():
                         return
@@ -204,14 +219,20 @@ def send(
                     try:
                         piece = protocol.text(event) if event is not _DONE else None
                     except StreamEnd:
+                        if pending:
+                            yield pending
                         return
                     except ProviderError as exc:
                         raise _scrub(exc, key) from None
                     if piece:
-                        yield piece
+                        visible, pending = _redact_piece(pending + piece, key)
+                        if visible:
+                            yield visible
                 if not ended:
                     # Соединение закрылось без признака конца: это обрыв, а не весь ответ (раздел 16).
                     raise ProviderError("поток ответа оборвался до конца")
+                if pending:
+                    yield pending
         except httpx.TimeoutException:
             if cancel is not None and cancel.is_set():
                 return

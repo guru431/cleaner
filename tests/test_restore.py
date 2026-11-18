@@ -1725,10 +1725,10 @@ def test_restorer_setup_asks_the_suffix_list_once_per_dotted_label(settings, mon
     не спрашивает. Счёт вызовов, а не секунды: порог в секундах краснел от нагрузки машины без ошибки в коде (аудит
     21.10.2026); скорость сборки на 20 000 метках сторожит tests/test_long_input.py."""
     asked = []
-    extract = hostmap._extract
-    monkeypatch.setattr(hostmap, "_extract", lambda name: asked.append(name) or extract(name))
+    extract_for = hostmap._extract_for
+    monkeypatch.setattr(hostmap, "_extract_for", lambda values: lambda name: asked.append(name) or extract_for(values)(name))
     # Ответы, запомненные другими тестами, скрыли бы вызовы: tests/test_long_input.py собирает те же значения.
-    hostmap.has_known_suffix.cache_clear()
+    hostmap._known_suffix.cache_clear()
     labels._domain_name.cache_clear()
     state = ChatState(chat_id="many", net_key=bytes(32))
     for n in range(1, 301):

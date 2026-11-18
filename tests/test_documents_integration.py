@@ -73,6 +73,20 @@ def test_office_mail_and_web_documents_convert_offline(docling, kind, no_network
     assert CANARY in docling.convert(office_files()[kind], kind)
 
 
+def test_email_body_is_extracted_without_attachment_names_or_payloads(docling, no_network):
+    mail = EmailMessage()
+    mail["From"] = CANARY
+    mail.set_content(LINE)
+    mail.add_attachment(b"attachment-payload", maintype="application", subtype="octet-stream", filename="attachment-name.txt")
+    attached = EmailMessage()
+    attached.set_content("attached-email-body")
+    mail.add_attachment(attached)
+    result = Extractor(docling, lambda image, mime: "").extract("letter.eml", mail.as_bytes())
+    assert CANARY in result.text and result.omitted_attachments == 2
+    assert "attachment-payload" not in result.text and "attachment-name.txt" not in result.text
+    assert "attached-email-body" not in result.text
+
+
 @pytest.mark.parametrize("kind", ["docx", "xlsx", "pptx"])
 def test_size_check_lets_ordinary_office_files_through_to_docling(docling, kind, no_network):
     """Проверка размера до Docling не отклоняет обычный файл, сохранённый python-docx, openpyxl и python-pptx."""

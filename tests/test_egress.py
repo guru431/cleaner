@@ -186,6 +186,27 @@ def test_key_is_scrubbed_from_provider_errors():
     assert error.value.detail == "Incorrect API key provided: ***"
 
 
+@pytest.mark.parametrize("status", [200, 401, 502])
+def test_error_fields_are_redacted_before_truncation(ctx, status):
+    error = {"type": KEY, "message": "X" * 293 + ": " + KEY}
+    if status == 200:
+        body = sse({"error": error})
+    elif status == 401:
+        body = json.dumps({"error": error}).encode()
+    else:
+        body = error["message"].encode()
+    with pytest.raises(ProviderError) as caught:
+        run(ctx, connection(), Recorder(body, status=status))
+    assert caught.value.detail == "X" * 293 + ": ***"
+    assert caught.value.kind == "" and KEY not in str(caught.value)
+
+
+def test_key_reflected_in_successive_text_deltas_is_masked(ctx):
+    body = sse(*({"choices": [{"delta": {"content": part}}]}
+                 for part in ("returned " + KEY[:8], KEY[8:] + " end")))
+    assert "".join(run(ctx, connection(), Recorder(body))) == "returned *** end"
+
+
 def test_provider_message_stays_out_of_the_stored_reason():
     """Сообщение провайдера может повторять текст запроса: в постоянное объяснение (meta, журнал) оно не входит."""
     body = json.dumps({"error": {"type": "invalid_request_error", "message": "в запросе «<PERSON_1> из бухгалтерии»"}}).encode()

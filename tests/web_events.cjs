@@ -20,7 +20,7 @@ class Element {
   closest(selector) { return selector === "form" ? this.form : null; }
 }
 
-function load() {
+function load({ manualCopy, manualSource, selection, fetch } = {}) {
   const fields = [new Element(), new Element()];
   for (const field of fields) {
     field.form = new Element();
@@ -40,8 +40,11 @@ function load() {
   doc.body = new Element();
   doc.documentElement = new Element();
   doc.createElement = () => new Element();
-  doc.getElementById = () => null;
-  doc.querySelector = (selector) => selector === "[data-entities-found]" ? found : null;
+  doc.getElementById = (id) => id === "manual-text" ? manualSource : null;
+  doc.getSelection = () => selection;
+  doc.querySelector = (selector) => ({
+    "[data-entities-found]": found, "[data-manual-receipt]": manualCopy,
+  })[selector] || null;
   doc.querySelectorAll = (selector) => ({
     "[data-upload-batch]": fields, "[data-stream]": [stream],
     "#entities-find": [find], "#entities-table tbody tr": rows,
@@ -60,6 +63,7 @@ function load() {
   const context = {
     document: doc, window: new Element(), EventSource: Source, DataTransfer: Transfer, File,
     history: { state: {} },
+    URLSearchParams, fetch,
     Event: class { constructor(type) { this.type = type; } },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../cleaner/web/static/app.js"), "utf8"), context);
@@ -96,4 +100,16 @@ page.find.value = "needle";
 page.find.dispatchEvent({ type: "input" });
 assert.equal(page.rows[1].hidden, false);
 assert.match(page.found.textContent, /1 из 1/);
+
+const manualCopy = new Element();
+manualCopy.dataset = { copy: "manual-text", manualCopied: "/chats/chat/manual/copied", manualCsrf: "csrf", manualReceipt: "sealed" };
+const manualSource = new Element();
+manualSource.textContent = "Cleaned dialogue";
+manualSource.contains = () => true;
+const calls = [];
+const manualPage = load({ manualCopy, manualSource, selection: { toString: () => "Cleaned dialogue" },
+  fetch: async (url, options) => { calls.push([url, options.method, options.body.toString()]); return { ok: true }; } });
+manualPage.doc.dispatchEvent({ type: "copy" });
+assert.deepEqual(calls, [["/chats/chat/manual/copied", "POST", "csrf=csrf&receipt=sealed"]]);
+
 console.log("Browser event regressions passed");

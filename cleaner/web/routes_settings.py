@@ -520,8 +520,7 @@ _SUFFIX =regex.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-
 
 def stored_suffixes(repo) -> tuple[str, ...]:
     """Внутренние суффиксы, которые добавил администратор."""
-    raw = repo.setting(SUFFIXES_KEY)
-    return tuple(json.loads(raw)) if raw else ()
+    return repo.internal_suffixes()
 
 
 def apply_suffixes(repo) -> None:
@@ -1004,6 +1003,7 @@ def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
     layers = entry["layers"]
     names = list(layers)
     first = layers[names[0]] if names else {"classes": {}, "types": {}}
+    own = not dataset.startswith(runner.OPEN_PREFIX)
     classes = [
         {
             "title": title, "total": first["classes"][title][1],
@@ -1042,19 +1042,25 @@ def _passport_view(dataset: str, entry: dict, current: str | None) -> dict:
     if "local_model" in versions:
         shown.append(("Локальная модель слоя 5", versions["local_model"]))
     source = entry.get("source") or {}
-    if source:
+    manifest_status = source.get("manifest_status")
+    source_digest = source.get("sha256", "") if manifest_status else ""
+    source_warnings = source.get("warnings", [])
+    if source.get("source"):
         pinned = "" if source.get("pinned") else ", ревизия на момент загрузки"
         shown.append((
             "Снимок",
-            f"{source.get('source')} @ {str(source.get('revision') or '—')[:12]}{pinned}; sha256 "
-            f"{str(source.get('sha256'))[:12]}; конвертер {source.get('converter')}",
+            f"{source['source']} @ {str(source.get('revision') or '—')[:12]}{pinned}; конвертер {source.get('converter')}",
         ))
+    if not own and not manifest_status:
+        source_warnings = ["В прежнем замере SHA-256 прочитанного файла не записан. Для сверки повторите замер."]
     return {
         "title": ("Собственный набор" if dataset == runner.GOLD else
                   runner.PARTITIONS.get(dataset.removeprefix("gold:"), f"Открытый набор «{dataset.removeprefix(runner.OPEN_PREFIX)}»")),
         "measured_at": entry["measured_at"], "examples": entry["examples"], "unit": entry["unit"],
         "fingerprint": entry["fingerprint"][:12], "changed": current is not None and current != entry["fingerprint"],
         "versions": shown, "layers": names, "classes": classes, "quality": quality, "types": by_type,
+        "own": own, "source_digest": source_digest, "source_warnings": source_warnings,
+        "manifest_checked": manifest_status == "match",
         "drops": entry["drops"], "unchecked": entry["unchecked"], "warnings": entry.get("warnings", []),
         "scenarios": [(dict(coverage.SCENARIOS).get(scenario, "Не указан"), title,
                        [runner.confidence(*layers[n].get("scenarios", {}).get(scenario, {}).get(title, (0, 0))) for n in names])

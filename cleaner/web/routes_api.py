@@ -11,7 +11,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from cleaner.core.types import ChatState, EntityType
 from cleaner.core.detect.base import DetectorError
@@ -68,28 +68,32 @@ class RuleIn(Body):
     type: str = ""              # mask: код типа (EntityType)
 
 
-class RequestMessage(Body):
+class StudioBody(Body):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RequestMessage(StudioBody):
     role: Literal["system", "user", "assistant"]
     content: str
 
 
-class RequestRule(Body):
+class RequestRule(StudioBody):
     action: Literal["mask", "unmask"]
     value: str = Field(min_length=1, max_length=2000)
     type: EntityType | None = None
 
 
-class RequestIn(Body):
+class RequestIn(StudioBody):
     model: str = Field(min_length=1, max_length=200)
     messages: list[RequestMessage] = Field(min_length=1, max_length=1000)
     rules: list[RequestRule] = Field(default_factory=list, max_length=100)
 
 
-class SendRequestIn(Body):
+class SendRequestIn(StudioBody):
     receipt: str = Field(min_length=1, max_length=24_000_000)
 
 
-class LocalRequestIn(Body):
+class LocalRequestIn(StudioBody):
     messages: list[RequestMessage] = Field(min_length=1, max_length=1000)
 
 
@@ -131,12 +135,12 @@ def prepare_request(request: Request, chat_id: str, body: RequestIn,
 def send_request(request: Request, chat_id: str, body: SendRequestIn,
                  caller: ApiCaller = Depends(_request_caller)) -> Response:
     try:
-        item = IntegrationService.from_service(service_of(request)).send_request(
+        item_id, status = IntegrationService.from_service(service_of(request)).send_request(
             chat_id, caller.user.id, caller.key, body.receipt,
         )
     except (SendRefused, EditRefused) as exc:
         raise HTTPException(409, str(exc)) from None
-    return JSONResponse({"item_id": item.id}, status_code=202)
+    return JSONResponse({"item_id": item_id, "status": status}, status_code=202)
 
 
 @router.get("/chats/{chat_id}/answers/{item_id}/events")
@@ -235,6 +239,8 @@ def _text_result(view: InputView, state: ChatState) -> dict:
     result: dict[str, object] = {"item_id": item.id, "status": "done", "deliverable": view.deliverable}
     if view.deliverable:
         result["sanitized"] = item.sanitized
+    if count := item.meta.get("omitted_attachments"):
+        result["omitted_attachments"] = count
     return result | {
         "replacements": [
             {"start": s["start"], "end": s["end"], "type": state.entities[s["entity_id"]].type.value, "replacement": s["surrogate"]}

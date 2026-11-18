@@ -10,9 +10,12 @@ import math
 import re
 import zipfile
 import zlib
+from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import closing
 from dataclasses import dataclass
+from email import message_from_bytes
+from email.message import Message
 from pathlib import PurePath
 from typing import Protocol
 from xml.parsers import expat
@@ -27,6 +30,7 @@ _SCANNED_BELOW = 20                 # меньше стольких знаков
 # заголовком, частичный слой распознавания сканера. Такая страница распознаётся и при слое текста. Логотип, подпись,
 # печать и фото в тексте занимают заметно меньше; лишнее распознавание дороже по времени, но не теряет текст.
 _IMAGE_SHARE = 0.3
+_PDF_FORM_DEPTH = 8                 # при достижении предела страницу проверяет OCR
 # Не больше стольких пт² площади изображений на один непробельный знак слоя, лежащий в них, — слой покрывает
 # изображения, страница уже распознана (сканер или ПО сканирования: невидимый слой поверх растра) или это бланк
 # с подложкой, и распознавать её заново не нужно (ocr-ru — 72 с на страницу). Машинописная страница A4 (500 000 пт²)
@@ -40,6 +44,8 @@ OCR_PAGE_SECONDS = 72
 # (их Docling не выводит) занимают меньше, чем пробелы основного текста.
 _PDF_TOO_LONG = "Документ слишком большой: его текст заведомо длиннее {} знаков. Разделите его на части"
 _WORDS = re.compile(r"\w+")
+_MARKDOWN_PREFIX = re.compile(r"^\s*(?:#{1,6}\s+|>\s*|[-+*]\s+)")
+_MARKDOWN_INLINE = re.compile(r"(?<!\w)(\*\*|`|\*)([^\s*`][^*`]*?)(?<!\s)\1(?!\w)")
 _OCR_DOWN = frozenset({"unavailable", "auth"})   # распознавание недоступно целиком, а не отказало на одной странице
 _OCR_LIMIT = 20 * 1024 * 1024       # предел ocr-ru на одно изображение
 _OCR_SIDE = 12_000                  # предел ocr-ru по стороне изображения, точек
@@ -101,6 +107,7 @@ class Extracted:
     hidden_sheets: int = 0                 # скрытые листы книги: Docling кладёт их в невидимый слой, их текста нет
     doubtful_pages: tuple[int, ...] = ()   # крупное изображение не распознано: взят только слой текста страницы
     images: int = 0                        # встроенные изображения DOCX, XLSX и PPTX: их текст не распознаётся
+    omitted_attachments: int = 0          # вложения письма: имена и содержимое не хранятся
 
 
 class Documents(Protocol):
@@ -402,15 +409,20 @@ def _open_pdf(data: bytes):
 _Box = tuple[float, float, float, float]       # лево, низ, право, верх в координатах страницы
 
 
-def _images(page) -> tuple[bool, list[_Box]]:
+def _images(page) -> tuple[bool, list[_Box], bool]:
     """Есть ли на странице изображения и их прямоугольники, обрезанные по CropBox. Границы объекта внутри
     Form XObject pdfium даёт в координатах формы — они переводятся в координаты страницы матрицами форм-родителей."""
     import pypdfium2 as pdfium
     import pypdfium2.raw as pdfium_c
 
     left, bottom, right, top = page.get_cropbox()
-    found, boxes = False, []
-    for image in page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE], max_depth=2):
+    found, boxes, truncated = False, [], False
+    kinds = [pdfium_c.FPDF_PAGEOBJ_IMAGE, pdfium_c.FPDF_PAGEOBJ_FORM]
+    for image in page.get_objects(filter=kinds, max_depth=_PDF_FORM_DEPTH):
+        if image.type == pdfium_c.FPDF_PAGEOBJ_FORM:
+            if image.level == _PDF_FORM_DEPTH - 1:
+                truncated = True
+            continue
         found = True
         try:
             box = image.get_bounds()
@@ -423,7 +435,7 @@ def _images(page) -> tuple[bool, list[_Box]]:
         box = (max(box[0], left), max(box[1], bottom), min(box[2], right), min(box[3], top))
         if box[2] > box[0] and box[3] > box[1]:
             boxes.append(box)
-    return found, boxes
+    return found, boxes, truncated
 
 
 def _layer_inside(textpage, boxes: list[_Box]) -> int:
@@ -455,19 +467,21 @@ def _page_kinds(data: bytes, pdf=None) -> list[tuple[str, bool, int]]:
         for index in range(len(pdf)):
             with closing(pdf[index]) as page, closing(page.get_textpage()) as textpage:
                 chars = len("".join(textpage.get_text_range().split()))
-                found, boxes = _images(page)
+                found, boxes, truncated = _images(page)
                 left, bottom, right, top = page.get_cropbox()
                 area = (right - left) * (top - bottom)
                 # Перекрытия не вычитаются — доля оценивается сверху; но площадь изображений не больше страницы: сжатие
                 # MRC кладёт под слой распознавания два растра на всю страницу (фон и маску букв).
                 covered = min(sum((box[2] - box[0]) * (box[3] - box[1]) for box in boxes), max(area, 0))
-                if chars < _SCANNED_BELOW:
+                if truncated:
+                    kind = "mixed" if chars else "scan"
+                elif chars < _SCANNED_BELOW:
                     kind = "scan" if found else "text"
                 elif area <= 0 or covered < _IMAGE_SHARE * area:
                     kind = "text"
                 else:
                     kind = "text" if _layer_inside(textpage, boxes) * _LAYER_AREA >= covered else "mixed"
-                result.append((kind, bool(found), chars))
+                result.append((kind, found or truncated, chars))
         return result
     finally:
         if owned:
@@ -507,16 +521,40 @@ def estimate_pdf(data: bytes, ocr_all: bool = False) -> PdfEstimate:
 
 
 def _key(text: str) -> str:
-    return "".join(_WORDS.findall(text.casefold()))
+    return " ".join(_MARKDOWN_INLINE.sub(r"\2", _MARKDOWN_PREFIX.sub("", text)).casefold().split())
+
+
+def _alnum(text: str) -> str:
+    return "".join(_WORDS.findall(text))
 
 
 def _merge(recognised: str, layer: str) -> str:
-    """Распознанный текст страницы и строки слоя, которых в нём нет. Распознавание видит всю страницу, слой — только
-    цифровой текст: строка слоя, уже найденная распознаванием (буквы и цифры без регистра — разметка Markdown и
-    пробелы не мешают), не повторяется; остальные идут после распознанного — ошибка распознавания не стоит знаков слоя."""
-    seen = _key(recognised)
-    extra = [line for line in layer.splitlines() if (key := _key(line)) and key not in seen]
-    return "\n\n".join(part for part in (recognised.strip(), "\n".join(extra).strip()) if part)
+    """При единственном совпадении букв и цифр в строке с числом берём её из цифрового слоя: OCR ошибается в разделителях."""
+    if not layer.strip():
+        return recognised.strip()
+    ocr_lines = recognised.splitlines()
+    ocr_keys = [_key(line) for line in ocr_lines]
+    seen, seen_text = set(ocr_keys), " ".join(filter(None, ocr_keys))
+    layer_lines = [(line, _key(line)) for line in layer.splitlines()]
+    numeric = {key: _alnum(key) for _, key in layer_lines if any(ch.isdecimal() for ch in key)}
+    counts = Counter(numeric[key] for _, key in layer_lines if key in numeric)
+    by_alnum: dict[str, list[int]] = {}
+    for index, key in enumerate(ocr_keys):
+        by_alnum.setdefault(_alnum(key), []).append(index)
+    extra = []
+    for line, key in layer_lines:
+        if not _WORDS.search(key) or key in seen:
+            continue
+        if key in numeric:
+            plain = numeric[key]
+            matching = by_alnum.get(plain, [])
+            if len(matching) == 1 and counts[plain] == 1:
+                ocr_lines[matching[0]] = line
+                continue
+        elif key in seen_text:
+            continue
+        extra.append(line)
+    return "\n\n".join(part for lines in (ocr_lines, extra) if (part := "\n".join(lines).strip()))
 
 
 def _scale(width: float, height: float) -> float:
@@ -531,6 +569,58 @@ def _render(pdf, number: int) -> bytes:
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         return buffer.getvalue()
+
+
+def _is_email_attachment(part: Message) -> bool:
+    content_type = part.get_content_type()
+    disposition = part.get_content_disposition()
+    return bool(
+        disposition == "attachment" or part.get_filename()
+        or content_type in ("message/rfc822", "text/rtf")
+        or ((disposition == "inline" or part.get("Content-ID")) and content_type not in ("text/plain", "text/html"))
+    )
+
+
+def _empty_email_body(message: Message) -> None:
+    for key in ("Content-Type", "Content-Disposition", "Content-Transfer-Encoding", "Content-ID"):
+        del message[key]
+    message.set_payload("")
+
+
+def _eml_without_attachments(data: bytes) -> tuple[bytes, int]:
+    """Считаем и убираем вложения до Docling: mailparser иначе читает и тело вложенного письма."""
+    message = message_from_bytes(data)
+    if _is_email_attachment(message):
+        _empty_email_body(message)
+        return message.as_bytes(), 1
+    count = 0
+    pending = [message]
+    while pending:
+        part = pending.pop()
+        if not part.is_multipart():
+            continue
+        children = part.get_payload()
+        kept = [child for child in children if not _is_email_attachment(child)]
+        pending.extend(kept)
+        if len(kept) == len(children):
+            continue
+        count += len(children) - len(kept)
+        if kept:
+            part.set_payload(kept)
+        else:
+            _empty_email_body(part)
+    return (message.as_bytes() if count else data), count
+
+
+def _msg_attachment_count(data: bytes) -> int:
+    from olefile import OleFileIO
+
+    # Тот же корневой каталог хранилищ вложений, что у oxmsg, без второго чтения всех потоков документа.
+    with io.BytesIO(data) as stream, OleFileIO(stream) as container:
+        return sum(
+            len(path) == 1 and path[0].startswith("__attach_version1.0_#")
+            for path in container.listdir(streams=False, storages=True)
+        )
 
 
 class Extractor:
@@ -555,7 +645,13 @@ class Extractor:
                 raise ExtractError(f"Формат файла не поддерживается: {exc}") from None
         else:
             hidden, images = _check_package(data, kind, self.max_chars) if kind in _OFFICE else (0, 0)
-            result = Extracted(self.documents.convert(data, kind), kind, hidden_sheets=hidden, images=images)
+            attachments = 0
+            if kind == "eml":
+                data, attachments = _eml_without_attachments(data)
+            text = self.documents.convert(data, kind)
+            if kind == "msg":
+                attachments = _msg_attachment_count(data)
+            result = Extracted(text, kind, hidden_sheets=hidden, images=images, omitted_attachments=attachments)
         if not result.text.strip():
             raise ExtractError("В файле не найден текст" + (_HIDDEN_ONLY if result.hidden_sheets else ""))
         return result

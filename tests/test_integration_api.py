@@ -1,5 +1,7 @@
 """Application preview/send boundary; synthetic documents and an in-process cloud only."""
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -53,7 +55,40 @@ def test_preview_has_no_cloud_side_effect_and_send_restores_browser_safely(integ
     assert done["status"] == "done" and "Ответ ivan@contoso.ru" in done["text"]
     assert "https://external.example/?v=ivan@contoso.ru" not in done["text"]
     assert done["raw"].startswith("Ответ <EMAIL_1>")
-    assert send(integration, body["receipt"]).status_code == 409
+    retry = send(integration, body["receipt"])
+    assert retry.status_code == 202 and retry.json() == {"item_id": sent.json()["item_id"], "status": "done"}
+    assert len(calls) == 1
+
+
+def test_concurrent_acceptance_of_one_receipt_dispatches_once(integration, monkeypatch):
+    from cleaner.integration import IntegrationService
+
+    receipt = preview(integration).json()["receipt"]
+    rendezvous = threading.Barrier(2, timeout=3)
+    build = IntegrationService._build_request
+
+    def overlap(self, *args, **kwargs):
+        result = build(self, *args, **kwargs)
+        rendezvous.wait()
+        return result
+
+    monkeypatch.setattr(IntegrationService, "_build_request", overlap)
+    with ThreadPoolExecutor(2) as pool:
+        first, second = pool.map(lambda _: send(integration, receipt), range(2))
+    assert first.status_code == second.status_code == 202
+    assert first.json()["item_id"] == second.json()["item_id"]
+    assert len(integration[2]) == 1
+
+
+def test_accepted_receipt_is_bound_to_the_original_key_and_expiry(integration, api, clock):
+    _, cid, calls = integration
+    receipt = preview(integration).json()["receipt"]
+    assert send(integration, receipt).status_code == 202
+    other_key = api()
+    assert other_key.post(f"/api/v1/chats/{cid}/requests/send", json={"receipt": receipt}).status_code == 409
+    clock.advance(seconds=601)
+    assert send(integration, receipt).status_code == 409
+    assert len(calls) == 1
 
 
 def test_new_preview_expires_previous_one_and_tampering_never_sends(integration):
@@ -98,6 +133,40 @@ def test_model_list_obeys_key_scope_and_binary_content_is_rejected(integration, 
     assert integration[0].get("/api/v1/models").json() == {"data": [{"id": "test-model"}]}
     assert api().get("/api/v1/models").status_code == 403
     assert preview(integration, messages=[{"role": "user", "content": [{"type": "image_url"}]}]).status_code == 422
+
+
+@pytest.mark.parametrize("fields", [
+    {"tools": [{"type": "function", "function": {"name": "lookup"}}]},
+    {"messages": [{"role": "user", "content": "Проверка", "tool_calls": []}]},
+])
+def test_unsupported_request_fields_are_rejected(integration, fields):
+    assert preview(integration, **fields).status_code == 422
+    assert integration[2] == []
+
+
+def test_layer_enabled_during_preview_requires_a_new_preview(integration, repo, engines, monkeypatch):
+    from cleaner.integration import IntegrationService
+
+    client, _, calls = integration
+    cid = client.post("/api/v1/chats", json={}).json()["id"]
+    integration = client, cid, calls
+    repo.set_layer_defaults({"ner": False, "llm": False})
+    engines.ner_layer.marks["Synthetic Orchard"] = EntityType.PERSON
+    build = IntegrationService._build_request
+
+    def toggle(self, *args, **kwargs):
+        result = build(self, *args, **kwargs)
+        repo.set_layer_defaults({"ner": True, "llm": False})
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(IntegrationService, "_build_request", toggle)
+        old = preview(integration, "Synthetic Orchard").json()
+    assert old["counts"] == {} and engines.ner_layer.calls == 0
+    assert send(integration, old["receipt"]).status_code == 409 and calls == []
+    new = preview(integration, "Synthetic Orchard").json()
+    assert new["counts"] == {"PERSON": 1}
+    assert send(integration, new["receipt"]).status_code == 202
 
 
 def test_manual_rules_are_context_scoped_and_old_receipt_is_invalid(integration, repo):

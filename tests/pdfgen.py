@@ -43,12 +43,13 @@ def _scan(body: str, side: int) -> bytes:
 
 def make_pdf(
     pages: list[str | None | tuple[str, int] | tuple[str, int, str]], form_scale: int = 0, invisible: bool = False,
+    form_depth: int = 1,
 ) -> bytes:
     """Строка — страница с этим текстом; None — страница, на которой только картинка; (текст, сторона) — текст
     вверху страницы и квадратная картинка с такой стороной в пунктах под ним (страница — 612×792); (текст, сторона,
     тело) — ещё и строки тела поверх картинки; при invisible они невидимы, а картинка — их растр (текст вверху может
     быть пустым).
-    form_scale — картинка рисуется внутри Form XObject, а страница увеличивает форму во столько раз."""
+    form_scale — картинка рисуется внутри form_depth вложенных Form XObject, а страница увеличивает форму."""
     bodies: dict[int, bytes] = {3: _FONT, 4: _IMAGE}
     kids: list[int] = []
     number = 5
@@ -60,9 +61,12 @@ def make_pdf(
             text, side, body = page if len(page) == 3 else (*page, "")
             if form_scale:
                 drawn = b"q %d 0 0 %d 0 0 cm /Im1 Do Q" % (side // form_scale, side // form_scale)
-                bodies[number + 2] = _stream(drawn, b" /Type /XObject /Subtype /Form /BBox [0 0 612 792] "
-                                                    b"/Resources << /XObject << /Im1 4 0 R >> >>")
-                resources = b"/Font << /F1 3 0 R >> /XObject << /Im1 4 0 R /Fm1 %d 0 R >>" % (number + 2)
+                child = 4
+                for form in range(number + 2, number + 2 + form_depth):
+                    bodies[form] = _stream(drawn, b" /Type /XObject /Subtype /Form /BBox [0 0 612 792] "
+                                                  b"/Resources << /XObject << /Im1 %d 0 R >> >>" % child)
+                    child, drawn = form, b"/Im1 Do"
+                resources = b"/Font << /F1 3 0 R >> /XObject << /Im1 4 0 R /Fm1 %d 0 R >>" % child
                 stream = _text(text) + b" q %d 0 0 %d 50 50 cm /Fm1 Do Q" % (form_scale, form_scale)
             else:
                 stream = _text(text) + b" q %d 0 0 %d 50 50 cm /Im1 Do Q" % (side, side)

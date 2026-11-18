@@ -26,6 +26,13 @@ MAX_DEPTH = 64                      # обходы очистки рекурси
 _END = object()
 
 
+def _close_after_read(reading: Future, close: Callable[[], None]) -> None:
+    try:
+        reading.result()
+    finally:
+        close()
+
+
 def _refused(status: int, message: str) -> AgentRefused:
     return AgentRefused(status, "request_too_large" if status == 413 else "invalid_request_error", f"Cleaner: {message}")
 
@@ -110,8 +117,8 @@ class _Stream(StreamingResponse):
         out и событие agent_send записываются.
 
         Агент ушёл, пока next ждёт провайдера: stop() рвёт соединение с провайдером, и поток пула свободен сразу, а не
-        через 300 с. Поток закрывает тот же поток пула, когда начатый next вернётся (done-callback), — два потока в
-        генераторе не бывают («generator already executing»). Next отменён, не начавшись (пул занят), — закрытие сразу.
+        через 300 с. Закрытие ставится в очередь того же пула после next и ждёт его окончания — одновременно
+        выполнять next и закрывать генератор нельзя. Очередь учитывает закрытие при подготовке обновления.
         Ждать в finally нельзя: Starlette отменяет чтение областью anyio, и любой await там отменяется сразу."""
         self._taken = True
         pool, events, close = self._pool, self._events, self._close
@@ -124,7 +131,7 @@ class _Stream(StreamingResponse):
             if reading is not None and not reading.done():
                 if self._stop is not None:
                     self._stop()
-                reading.add_done_callback(lambda _: close())
+                pool.submit(_close_after_read, reading, close)
             elif reading is not None:
                 pool.submit(close)
 

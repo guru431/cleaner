@@ -15,10 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from cleaner import models
+from cleaner.core.entities import hostmap
 from cleaner.core.pipeline import Layers, sanitize
 from cleaner.core.types import ChatState, EntityType, Settings
 from cleaner.engines import local_settings
 from cleaner.eval.metrics import CLASSES, Example, GoldSpan, Predict, Report, evaluate, interval, recall_by_class
+from cleaner.storage.db import transaction
 
 LAYER_SETS = ("1-3", "1-4", "1-5")
 BASELINE_KEY = "eval.baseline"
@@ -31,7 +33,7 @@ UNIT_OPEN = (
     "сущности после преобразования открытого набора: одно значение одного типа в примере — одна сущность, "
     "разные формы имени — разные"
 )
-UNIT_FILE = "номера сущностей из файла: снимок без манифеста или прежнего конвертера, у открытых наборов это упоминания"
+UNIT_FILE = "номера сущностей из файла: единица зависит от разметки снимка"
 _CODE = ("core", "data", "eval")     # каталоги пакета, от которых зависит замер
 
 
@@ -55,9 +57,9 @@ def gold_examples(repo, purpose: str = "") -> list[Example]:
     return [example_from(row.text, row.spans, row.metadata) for row in rows if not purpose or row.metadata.get("purpose") == purpose]
 
 
-def jsonl_examples(path: Path) -> list[Example]:
+def jsonl_examples(path: Path, *, data: bytes | None = None) -> list[Example]:
     examples = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in (path.read_bytes() if data is None else data).decode("utf-8").splitlines():
         if line.strip():
             record = json.loads(line)
             examples.append(example_from(record["text"], record["spans"]))
@@ -83,7 +85,8 @@ def predictor(settings: Settings, layers: Layers) -> Predict:
 
 
 def run(examples: Sequence[Example], settings: Settings, layer_sets: Sequence[str], engines: Any) -> dict[str, Report]:
-    return {name: evaluate(examples, predictor(settings, layers_for(name, engines))) for name in layer_sets}
+    with hostmap.using_suffixes(settings.internal_suffixes):
+        return {name: evaluate(examples, predictor(settings, layers_for(name, engines))) for name in layer_sets}
 
 
 def share(part: int, whole: int) -> str:
@@ -96,7 +99,8 @@ def confidence(part: int, whole: int) -> str:
     return share(part, whole) + (f"; 95% [{bounds[0]:.3f}, {bounds[1]:.3f}]" if bounds else "")
 
 
-def format_results(results: dict[str, Report], count: int) -> str:
+def format_results(results: dict[str, Report], count: int, *, dataset: str = GOLD) -> str:
+    own = not dataset.startswith(OPEN_PREFIX)
     lines = [
         f"Примеров: {count}",
         "Полнота — по сущностям (QA-2: скрыты все упоминания) и по упоминаниям. Точность — по пересечению: найденный "
@@ -115,14 +119,18 @@ def format_results(results: dict[str, Report], count: int) -> str:
                 share(report.mentions_hidden[type_], report.mentions[type_]),
                 share(report.correct[type_], report.found[type_]), share(report.typed[type_], report.correct[type_]),
             )))
-        lines.append("Класс QA-3 | полнота (скрыто/всего) | цель")
+        lines.append("Класс QA-3 | полнота (скрыто/всего) | цель" if own else "Класс | полнота (скрыто/всего)")
         recalls = recall_by_class(report)
         for title, _, target in CLASSES:
             if title in recalls:
+                line = f"{title} | {confidence(*report.classes[title])}"
+                if not own:
+                    lines.append(line)
+                    continue
                 verdict = "цель не задана" if target is None else (
                     f"{target:.2f} — достигнута" if recalls[title] >= target else f"{target:.2f} — не достигнута"
                 )
-                lines.append(f"{title} | {confidence(*report.classes[title])} | {verdict}")
+                lines.append(f"{line} | {verdict}")
         lines.append("95% Wilson — описательный интервал по сущностям, зависимость внутри документа ограничивает перенос. "
                      f"Источников: {len(report.sources)}; объём и разнообразие контрольного набора не заменяются точечной долей.")
         lines.append(
@@ -159,12 +167,13 @@ def fingerprint(examples: Sequence[Example], key: bytes) -> str:
 
 
 def settings_fingerprint(settings: Settings, key: bytes) -> str:
-    """Словарь организации, шаблоны и политики — отпечатком, без значений."""
+    """Словарь, шаблоны, политики и дополнения внутренних суффиксов — отпечатком, без значений."""
     canonical = {
         "always": sorted([entry.type.value, entry.value, sorted(entry.aliases)] for entry in settings.always),
         "never": sorted(settings.never),
         "patterns": sorted([pattern.name, pattern.regex, pattern.type.value] for pattern in settings.patterns),
         "policies": {type_.value: policy.value for type_, policy in settings.policies.items()},
+        "internal_suffixes": list(settings.internal_suffixes),
     }
     return _keyed(key, json.dumps(canonical, ensure_ascii=False, sort_keys=True).encode("utf-8"))
 
@@ -252,14 +261,15 @@ def baselines(repo) -> dict[str, dict[str, dict]]:
 
 def save_baseline(repo, dataset: str, results: dict[str, Report], fp: str, examples: int) -> None:
     """Заменяет базовый замер только измеренных слоёв этого набора; записи прежнего формата отбрасываются."""
-    stored = baselines(repo)
-    layers = {name: entry for name, entry in stored.get(dataset, {}).items() if entry}
-    layers.update({
+    update = {
         name: {"fingerprint": fp, "examples": examples, **summary(report)}
         for name, report in results.items()
-    })
-    stored[dataset] = layers
-    repo.set_setting(BASELINE_KEY, json.dumps({"version": 2, "datasets": stored}, ensure_ascii=False))
+    }
+    with repo.lock, transaction(repo.conn):
+        stored = baselines(repo)
+        layers = {name: entry for name, entry in stored.get(dataset, {}).items() if entry}
+        stored[dataset] = layers | update
+        repo.set_setting(BASELINE_KEY, json.dumps({"version": 2, "datasets": stored}, ensure_ascii=False))
 
 
 def compare(results: dict[str, Report], baseline: dict[str, dict], fp: str, examples: int) -> Comparison:
@@ -333,22 +343,23 @@ def measure(
     unit: str = UNIT_GOLD, source: dict | None = None,
 ) -> Measurement:
     """Замер, сравнение с базовым и запись в паспорт как последнего замера этого набора."""
-    settings = repo.settings()
+    settings = repo.settings(apply_suffixes=False)
     results = run(examples, settings, layer_sets, engines)
     fp = fingerprint(examples, repo.global_key)
-    comparison = compare(results, baselines(repo).get(dataset, {}), fp, len(examples))
     versions = {
         "code": code_fingerprint(), "settings": settings_fingerprint(settings, repo.global_key),
         "models": model_revisions(models_dir) if any(name != "1-3" for name in layer_sets) else {},
     }
     if "1-5" in layer_sets:
         versions["local_model"] = local_settings(repo).model
-    stored = passport(repo)
-    stored[dataset] = {
+    entry = {
         "measured_at": repo.clock.now().isoformat(timespec="seconds"), "examples": len(examples), "fingerprint": fp,
         "unit": unit, "versions": versions, "source": source or {},
         "layers": {name: summary(report) for name, report in results.items()},
-        "drops": comparison.drops, "unchecked": comparison.unchecked, "warnings": comparison.warnings,
     }
-    repo.set_setting(PASSPORT_KEY, json.dumps(stored, ensure_ascii=False))
+    with repo.lock, transaction(repo.conn):
+        comparison = compare(results, baselines(repo).get(dataset, {}), fp, len(examples))
+        stored = passport(repo)
+        stored[dataset] = entry | {"drops": comparison.drops, "unchecked": comparison.unchecked, "warnings": comparison.warnings}
+        repo.set_setting(PASSPORT_KEY, json.dumps(stored, ensure_ascii=False))
     return Measurement(results, comparison, fp, len(examples))

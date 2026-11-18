@@ -20,6 +20,30 @@ function copyState(button, text, state, ms) {
   copyTimers.set(button, setTimeout(() => { label.textContent = button.dataset.label; delete button.dataset.state; }, ms));
 }
 
+async function rememberManualRequest(button) {
+  const { manualCopied, manualCsrf, manualReceipt } = button.dataset;
+  if (!manualReceipt) return;
+  const body = new URLSearchParams({ csrf: manualCsrf, receipt: manualReceipt });
+  const response = await fetch(manualCopied, { method: "POST", body, credentials: "same-origin", keepalive: true });
+  if (!response.ok) throw new Error("Не удалось сохранить состав запроса");
+}
+
+function showManualCopyError(button) {
+  copyState(button, "Скопировано. Вставьте ответ на этой странице", "failed", 8000);
+}
+
+const manualCopy = document.querySelector("[data-manual-receipt]");
+if (manualCopy) {
+  document.addEventListener("copy", () => {
+    const selection = document.getSelection();
+    const source = document.getElementById(manualCopy.dataset.copy);
+    if (selection && !selection.isCollapsed && source.contains(selection.anchorNode) &&
+        source.contains(selection.focusNode) && selection.toString().trim() === source.textContent.trim()) {
+      rememberManualRequest(manualCopy).catch(() => showManualCopyError(manualCopy));
+    }
+  });
+}
+
 document.addEventListener("click", (event) => {
   const button = event.target.closest("[data-copy]");
   if (button) {
@@ -35,7 +59,12 @@ document.addEventListener("click", (event) => {
       copyState(button, "Не удалось скопировать — текст выделен, нажмите Ctrl+C", "failed", 8000);
     };
     if (!navigator.clipboard) { failed(); return; }
-    navigator.clipboard.writeText(source.textContent).then(() => copyState(button, "Скопировано", "done", 2000), failed);
+    navigator.clipboard.writeText(source.textContent).then(() => {
+      rememberManualRequest(button).then(
+        () => copyState(button, "Скопировано", "done", 2000),
+        () => showManualCopyError(button),
+      );
+    }, failed);
     return;
   }
   // Кнопки рабочего места проверки и карточка «Почему скрыто» выбор не снимают (select — ниже).

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from cleaner.agent_service import AgentRefused, AgentService
+from cleaner.agent_service import PRUNE_EVERY, AgentRefused, AgentService
 from cleaner.clock import Clock
 from cleaner.egress import cloud, forward
 from cleaner.queueing import QueueFull
@@ -28,6 +29,7 @@ from cleaner.web import (
     auth, routes_agent, routes_api, routes_auth, routes_chats, routes_keys, routes_review, routes_send, routes_settings,
 )
 from cleaner.web.deps import AGENT_BODY_BYTES, MAX_BODY_BYTES, LoginRequired, Viewer, get_viewer, page
+from cleaner.web.drain import AgentExecutor, UpdateDrain
 from cleaner.web.jobs import FILE_INTERRUPTED, INTERRUPTED, Jobs, shutdown
 
 log = logging.getLogger("cleaner.web")
@@ -298,6 +300,40 @@ def _queue_error(request: Request, exc: QueueFull) -> Response:
     return response
 
 
+class UpdateAdmission:
+    """Считает весь HTTP-запрос до отдачи последней части ответа, включая SSE."""
+
+    def __init__(self, app: ASGIApp, drain: UpdateDrain, secure: bool):
+        self.app, self.drain, self.secure = app, drain, secure
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["path"].startswith("/static/"):
+            await self.app(scope, receive, send)
+            return
+        if self.drain.client is not None:
+            request = Request(scope)
+            message = "Служба готовится к обновлению. Повторите запрос позже."
+            if _for_openai_agent(request):
+                response = _openai_error(503, message)
+            elif _for_agent(request):
+                response = _agent_error(503, message)
+            elif _for_program(request):
+                response = _json_error(503, message)
+            else:
+                response = page(request, "error.html", None, status_code=503, code=503, message=message, back=None)
+            response.headers.update(SECURITY_HEADERS)
+            response.headers["Retry-After"] = "5"
+            if self.secure:
+                response.headers["Strict-Transport-Security"] = HSTS
+            await response(scope, receive, send)
+            return
+        self.drain.requests += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.drain.requests -= 1
+
+
 def _interrupt(repo: Repository) -> None:
     """Всё, что осталось в очереди или в работе, — отказ «прервано» с кнопкой повтора (NFR-6)."""
     interrupted = repo.fail_interrupted(INTERRUPTED, FILE_INTERRUPTED)
@@ -325,11 +361,31 @@ def create_app(
         repo, max_text_chars, engines, submit=jobs.submit, send_submit=sends.submit, cloud_send=cloud_send or cloud.send,
         file_submit=files.submit, budget=jobs.budget,
     )
-    agent_pool = ThreadPoolExecutor(max_workers=AGENT_WORKERS, thread_name_prefix="cleaner-agent")
+    agent_pool = AgentExecutor(AGENT_WORKERS)
+    update = UpdateDrain(jobs.budget, agent_pool, os.environ.get("CLEANER_DRAIN_SOCKET", ""))
+    agent = AgentService(repo, engines, clock)
+
+    async def prune_agent_until(stopping: asyncio.Event) -> None:
+        while not stopping.is_set():
+            try:
+                await asyncio.to_thread(agent._prune)
+            except Exception as exc:
+                log.error("Agent retention cleanup failed: kind=%s", type(exc).__name__)
+            try:
+                await asyncio.wait_for(stopping.wait(), timeout=PRUNE_EVERY.total_seconds())
+            except TimeoutError:
+                continue
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
+        async with update.listen():
+            stopping = asyncio.Event()
+            retention = asyncio.create_task(prune_agent_until(stopping))
+            try:
+                yield
+            finally:
+                stopping.set()
+                await retention
         agent_pool.shutdown(wait=False, cancel_futures=True)       # ответы агентам рвутся с остановкой; агент повторит
         forward.close_clients()                                     # соединения с провайдерами
         # Остановка: соединение с базой закрывается после этого (__main__). Недождавшиеся задания помечаются
@@ -343,6 +399,7 @@ def create_app(
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.repo = repo
     app.state.issued_keys = routes_keys.IssuedKeys(clock, repo.global_key)
+    app.state.manual_copies = routes_send.ManualCopies(clock)
     app.state.clock = clock
     app.state.engines = engines                      # cleaner.engines.Engines; в тестах — заглушка
     app.state.jobs = jobs
@@ -353,7 +410,7 @@ def create_app(
     app.state.unfinished_jobs = 0                    # сколько заданий остановка не дождалась (lifespan)
     app.state.max_file_bytes = max_file_mb * 1024 * 1024
     app.state.service = service
-    app.state.agent = AgentService(repo, engines, clock)
+    app.state.agent = agent
     app.state.agent_pool = agent_pool
     app.state.agent_slots = AgentSlots(AGENT_WORKERS)
     app.state.throttle = auth.Throttle(clock)
@@ -456,4 +513,5 @@ def create_app(
             response.headers["Strict-Transport-Security"] = HSTS
         return response
 
+    app.add_middleware(UpdateAdmission, drain=update, secure=secure_cookies)
     return app

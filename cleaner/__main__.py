@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import timedelta, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 
 from cleaner import config, version
@@ -169,15 +170,26 @@ def cmd_init(args: argparse.Namespace) -> int:
     password_hash = auth.hash_password(_secret(args.password_file, f"Пароль администратора {args.admin}: "))
     cfg.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     key = crypto.new_key()
-    _write_private(env_file, f"{crypto.key_line(key)}\n".encode("ascii"))     # ключ — раньше базы: потерять его хуже
+    _write_private(cfg.db_path, b"")     # резервирует общий путь даже при разных --env-file
+    sidecars = (Path(f"{cfg.db_path}-wal"), Path(f"{cfg.db_path}-shm"))
+    opened_database = False
+    wrote_key = False
     try:
+        if any(path.exists() or path.is_symlink() for path in sidecars):
+            raise ValueError(f"рядом с {cfg.db_path} уже есть журнал SQLite; проверьте его перед init")
+        _write_private(env_file, f"{crypto.key_line(key)}\n".encode("ascii"))  # ключ — до записи данных SQLite
+        wrote_key = True
+        opened_database = True
         with _repository(cfg, key, create=True) as repo:
             user_id = repo.create_user(args.admin, password_hash, "admin")
             repo.audit("user_created", target=user_id, role="admin", by="init")
     except BaseException:
         # База не создана — не остаётся ни её, ни ключа (оба файла создал этот вызов, данных в базе нет): иначе повторный
         # init упирался бы в «файл ключа уже есть».
-        for path in (cfg.db_path, Path(f"{cfg.db_path}-wal"), Path(f"{cfg.db_path}-shm"), env_file):
+        paths = (cfg.db_path, *sidecars) if opened_database else (cfg.db_path,)
+        if wrote_key:
+            paths += (env_file,)
+        for path in paths:
             with suppress(OSError):
                 path.unlink(missing_ok=True)
         raise
@@ -380,9 +392,17 @@ def cmd_key(args: argparse.Namespace) -> int:
 
 def cmd_backup(args: argparse.Namespace) -> int:
     target = Path(args.target)
-    with _repository(_config(args)) as repo:
-        _write_private(target, b"")         # права 0600 — до того, как в файл попадут данные
-        repo.backup(target)
+    if target.exists() or target.is_symlink():
+        raise FileExistsError(f"файл уже есть: {target}")
+    with TemporaryDirectory(prefix=".cleaner-backup-", dir=target.parent) as directory:
+        staged = Path(directory) / "backup.db"
+        _write_private(staged, b"")         # права 0600 — до того, как в файл попадут данные
+        with _repository(_config(args)) as repo:
+            repo.backup(staged)
+        if os.name == "nt":
+            staged.rename(target)          # на Windows rename отклоняет существующее назначение
+        else:
+            os.link(staged, target)        # атомарная публикация без замены чужого файла
     print(f"Копия: {target}. Главный ключ в копию не входит.")
     return 0
 
@@ -422,12 +442,13 @@ def cmd_eval(args: argparse.Namespace) -> int:
         unit, source = runner.UNIT_GOLD, None
         if args.jsonl:
             path = Path(args.jsonl)
-            name, source, problems = datasets.check_snapshot(path)
-            for problem in problems:
+            name, data, source = datasets.read_snapshot(path)
+            for problem in source["warnings"]:
                 print(f"НАБОР: {problem}")
             dataset = runner.OPEN_PREFIX + name
-            unit = runner.UNIT_OPEN if source and source.get("converter") == datasets.CONVERTER else runner.UNIT_FILE
-            examples = runner.jsonl_examples(path)
+            verified = source["manifest_status"] == "match" and source.get("converter") == datasets.CONVERTER
+            unit = runner.UNIT_OPEN if verified else runner.UNIT_FILE
+            examples = runner.jsonl_examples(path, data=data)
         else:
             purpose = args.partition
             dataset = f"gold:{purpose}" if purpose else runner.GOLD
@@ -437,8 +458,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
         done = runner.measure(repo, dataset, examples, args.layers, Engines(repo, cfg.models_dir), cfg.models_dir, unit, source)
         print(f"Набор: {dataset}; единица подсчёта — {unit}")
         if source:
-            print(f"Снимок: {source.get('source')} @ {source.get('revision') or '—'}, sha256 {str(source.get('sha256'))[:12]}")
-        print(runner.format_results(done.results, done.examples))
+            print(f"Снимок: {source.get('source') or 'файл JSONL'} @ {source.get('revision') or '—'}, sha256 {source['sha256']}")
+        print(runner.format_results(done.results, done.examples, dataset=dataset))
         print()
         comparison = done.comparison
         for line in comparison.lines():

@@ -126,13 +126,16 @@ def test_stream_redacts_connection_and_subscription_credentials(state, settings)
     out = replace(out, headers=(*out.headers, ("authorization", agent)))
     error = {"type": "error", "message": f"{KEY} / {agent} / {agent.partition(' ')[2]}"}
     raw = ("data: " + json.dumps(error) + "\n\n").encode()
-    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=raw))
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, content=raw, headers={"request-id": f"id {KEY} / {agent}"},
+    ))
     upstream = egress.forward(out, connection("http://127.0.0.1:1"), state, settings, transport=transport)
     try:
         lines = list(upstream.lines())
     finally:
         upstream.close()
     assert json.loads(lines[0][6:]) == {"type": "error", "message": "*** / *** / ***"}
+    assert upstream.headers["request-id"] == "id *** / ***"
 
 
 def test_plain_http_is_refused_beyond_loopback(state, settings):

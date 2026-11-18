@@ -1,13 +1,14 @@
 import io
 import struct
 import zipfile
+from contextlib import contextmanager
 
 import pytest
 from pdfgen import make_pdf
 
 from cleaner.core.detect.base import DetectorError
 from cleaner.core.detect.llm import CompletionError
-from cleaner.ingest.extract import ExtractError, Extractor, detect_kind, estimate_pdf
+from cleaner.ingest.extract import ExtractError, Extractor, _merge, detect_kind, estimate_pdf
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16
@@ -86,10 +87,29 @@ def test_kinds_and_refusals(name, data, reason):
         detect_kind(name, data)
 
 
-def test_office_mail_and_html_go_to_the_converter():
+def test_msg_goes_to_the_converter_and_counts_attachments(monkeypatch):
+    import olefile
+
+    class Container:
+        def listdir(self, *, streams, storages):
+            assert not streams and storages
+            return [
+                ["__attach_version1.0_#00000000"],
+                ["__attach_version1.0_#00000001"],
+                ["__attach_version1.0_#00000001", "__attach_version1.0_#00000000"],
+                ["__recip_version1.0_#00000000"],
+            ]
+
+    @contextmanager
+    def parse(stream):
+        assert stream.getvalue() == OLE
+        yield Container()
+
+    monkeypatch.setattr(olefile, "OleFileIO", parse)
     documents, ocr = Documents(), Ocr()
     result = Extractor(documents, ocr).extract("letter.msg", OLE)
     assert (result.kind, result.text, documents.calls, ocr.calls) == ("msg", "# msg\n\nпочта doc@x.example", ["msg"], [])
+    assert result.omitted_attachments == 2
 
 
 def test_text_file_is_decoded():
@@ -153,12 +173,34 @@ def test_header_found_by_recognition_is_not_repeated():
     assert result.text == f"# {HEADER.upper()}\n\nBalance: petrov@x.example"
 
 
+@pytest.mark.parametrize(("ocr", "digital"), [
+    ("Сумма 1250", "Сумма 12,50"),
+    ("Счёт 12/50", "Счёт 12-50"),
+    ("Сумма 1234", "Сумма 1 234"),
+])
+def test_digital_layer_preserves_significant_separators_in_numbers(ocr, digital):
+    assert _merge(f"# {HEADER}\n\n{ocr}\nДругая строка", f"## {HEADER}\n{digital}") == (
+        f"# {HEADER}\n\n{digital}\nДругая строка"
+    )
+
+
 def test_image_inside_a_form_counts_at_its_size_on_the_page():
     """pdfium даёт границы изображения внутри Form XObject в координатах формы: форма, увеличенная вдвое, иначе
     показала бы 18 % страницы вместо 74 %."""
     ocr = Ocr()
     Extractor(LayerDocuments(), ocr).extract("report.pdf", make_pdf([(HEADER, 600)], form_scale=2))
     assert len(ocr.calls) == 1
+
+
+@pytest.mark.parametrize("form_depth", [2, 8])
+def test_pdf_scans_inside_nested_forms_are_not_silently_skipped(form_depth):
+    pdf = make_pdf([TEXT_PAGE, ("", 600)], form_scale=2, form_depth=form_depth)
+    assert estimate_pdf(pdf).ocr_pages == 1
+    documents, ocr = Documents(), Ocr()
+    result = Extractor(documents, ocr).extract("nested.pdf", pdf)
+    assert documents.calls == [("pdf", [1])]
+    assert result.ocr_pages == (2,)
+    assert result.text.endswith(ocr.text)
 
 
 def test_logo_on_a_text_page_is_not_recognised():

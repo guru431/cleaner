@@ -45,7 +45,7 @@ def clear_strings() -> None:
     """В том числе записи, которые успели нормализовать во время удаления, но уже не будут сохранять таблицей."""
     match._NEEDLES.clear()
     netmap._KEYS.clear()
-    hostmap.has_known_suffix.cache_clear()
+    hostmap._known_suffix.cache_clear()
     labels._domain_name.cache_clear()
     for function in (names._word, names._kind, names.part_of_speech, names.animate):
         function.cache_clear()

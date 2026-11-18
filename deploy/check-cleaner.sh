@@ -266,37 +266,73 @@ fi
 # Отпечаток кода на диске (первая строка verify) и тот, с которым служба запущена (её строка в журнале при старте):
 # разные — файлы заменили, а службу не перезапустили.
 installed=$(sed -n 's/^Код: \([0-9a-f]\{12\}\) от \([0-9-]*\) .*/\1 от \2/p' "$WORK/verify.txt")
-running=$(journalctl -u "$UNIT" -o cat --no-pager 2>/dev/null \
-    | sed -n 's/^Cleaner: служба запущена\. Код: \([0-9a-f]\{12\}\) от \([0-9-]*\) .*/\1 от \2/p' | tail -n 1)
 if [[ -z "$installed" ]]; then
     bad "cleaner verify не напечатал отпечаток кода"
-elif [[ -z "$running" ]]; then
-    skip "в журнале службы нет строки запуска с отпечатком (журнал повёрнут или служба старше 09.11.2026)"
-elif [[ "$running" == "$installed" ]]; then
-    ok "служба работает с установленным кодом: $installed"
 else
-    bad "служба запущена с кодом $running, а на диске $installed — перезапустите службу"
+    invocation=$(systemctl show "$UNIT" -p InvocationID --value 2>/dev/null) || invocation=""
+    if [[ ! "$invocation" =~ ^[0-9a-f]{32}$ || "$invocation" == "00000000000000000000000000000000" ]] ||
+        ! running=$(journalctl -u "$UNIT" "_SYSTEMD_INVOCATION_ID=$invocation" -o cat --no-pager 2>/dev/null \
+            | sed -n 's/^Cleaner: служба запущена\. Код: \([0-9a-f]\{12\}\) от \([0-9-]*\) .*/\1 от \2/p' | tail -n 1) ||
+        [[ -z "$running" || "$invocation" != "$(systemctl show "$UNIT" -p InvocationID --value 2>/dev/null)" ]]; then
+        miss "отпечаток кода текущего запуска службы недоступен"
+    elif [[ "$running" == "$installed" ]]; then
+        ok "служба работает с установленным кодом: $installed"
+    else
+        bad "служба запущена с кодом $running, а на диске $installed — перезапустите службу"
+    fi
 fi
 
 echo "7. Канарейка в базе и журнале (AC-1.8)"
 if [[ -z "$CANARY" ]]; then
     skip "канарейка не задана: sudo bash $0 <строка, вставленная в чат>"
 else
-    if python3 - "$CANARY" "$DATA" <<'PY'
+    CLEANER_CHECK_CANARY="$CANARY" python3 - "$DATA" <<'PY'
+import os
 import sys
 from pathlib import Path
 
-canary, data = sys.argv[1], Path(sys.argv[2])
-raw = b"".join(path.read_bytes() for path in data.glob("cleaner.db*"))
-sys.exit(1 if canary.encode("utf-8") in raw or canary.encode("utf-16-le") in raw else 0)
+canary, directory = os.environ["CLEANER_CHECK_CANARY"], Path(sys.argv[1])
+database = directory / "cleaner.db"
+patterns = canary.encode("utf-8"), canary.encode("utf-16-le")
+overlap = max(map(len, patterns)) - 1
+
+try:
+    paths = [database, *(path for path in directory.iterdir()
+                         if path != database and path.name.startswith("cleaner.db")
+                         and path.name != "cleaner.db.lock")]
+except OSError:
+    sys.exit(2)
+
+incomplete = False
+for path in paths:
+    try:
+        with path.open("rb") as source:
+            tail = b""
+            while chunk := source.read(1024 * 1024):
+                data = tail + chunk
+                if any(pattern in data for pattern in patterns):
+                    sys.exit(10)
+                tail = data[-overlap:] if overlap else b""
+    except OSError:
+        incomplete = True
+sys.exit(2 if incomplete else 0)
 PY
-    then
-        ok "канарейки нет в файлах базы"
+    case $? in
+        0) ok "канарейки нет в файлах базы" ;;
+        10) bad "канарейка найдена в файлах базы" ;;
+        *) miss "не удалось прочитать базу или один из её файлов для проверки канарейки" ;;
+    esac
+    # grep читает поток до конца даже при совпадении: код ошибки journalctl нужен отдельно.
+    journalctl -u "$UNIT" --no-pager 2>/dev/null \
+        | grep -aF -f <(printf '%s\n' "$CANARY") >/dev/null 2>&1
+    journal_status=("${PIPESTATUS[@]}")
+    if [[ "${journal_status[1]}" == "0" ]]; then
+        bad "канарейка в журнале службы"
+    elif [[ "${journal_status[0]}" == "0" && "${journal_status[1]}" == "1" ]]; then
+        ok "канарейки нет в журнале службы"
     else
-        bad "канарейка найдена в файлах базы"
+        miss "не удалось прочитать журнал службы для проверки канарейки"
     fi
-    journal=$(journalctl -u "$UNIT" --no-pager 2>/dev/null || true)
-    if grep -qF -- "$CANARY" <<< "$journal"; then bad "канарейка в журнале службы"; else ok "канарейки нет в журнале службы"; fi
 fi
 
 echo "8. Этапы 2 и 4: ключ шлюза и модели"

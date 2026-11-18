@@ -385,7 +385,7 @@ JSON, ключ — `X-Cleaner-Key` (любой ключ, `upstream` не нуж�
 | `DELETE /api/v1/chats/{id}` | удалить (FR-1.4, без подтверждения — вызов и есть подтверждение) | 204 |
 | `POST /api/v1/chats/{id}/texts` `{text, wait?}` | очистить текст | 200 `{item_id, status, deliverable, sanitized, replacements[{start,end,type,replacement}], notices[{code,start,end}], leaks, blocked}` (позиции — в исходном тексте; `sanitized` — только при `deliverable`) или 202 `{item_id, status}`, если не уложилось в `wait` (0–60 с, по умолчанию 30) |
 | `POST /api/v1/chats/{id}/files` (multipart) | очистить файл (FR-2.2…2.9) | 202 `{item_id, status}`; у PDF ещё `estimate {pages, ocr_pages, minutes}` (09.11.2026); PDF, текст которого по оценке заведомо длиннее `max_text_chars`, в очередь не встаёт: элемент сразу `failed` с причиной |
-| `GET /api/v1/chats/{id}/items/{item_id}` | состояние и результат | как у `texts` |
+| `GET /api/v1/chats/{id}/items/{item_id}` | состояние и результат | как у `texts`; для обработанного письма с вложениями — также `omitted_attachments` (число файлов вне извлечённого текста) |
 | `POST /api/v1/chats/{id}/restore` `{text}` | восстановить ответ модели (FR-7) и сохранить его элементом чата | `{item_id, restored, counters, unknown[]}` |
 | `GET /api/v1/chats/{id}/entities` | таблица соответствий (FR-1.6) | `[{id, type, replacements[], original, forms[], count}]` |
 | `POST /api/v1/chats/{id}/rules` `{action: mask, item_id, value, type}` или `{action: unmask, value}` | правка распознавания (FR-6.2, 6.3); назначить замену можно только фрагменту, который есть в тексте `item_id` — как выделение на экране проверки | `{changed}` — сколько текстов изменилось |

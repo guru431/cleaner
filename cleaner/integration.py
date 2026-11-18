@@ -16,9 +16,9 @@ from dataclasses import asdict
 from cleaner.core.pipeline import Layers, Turn, build_outgoing, local_context, sanitize
 from cleaner.core.entities import ops
 from cleaner.core.types import EntityType, Span
-from cleaner.service import ChatService, SendRefused, _stricter, admitted, link
+from cleaner.service import LAYERS, ChatService, EditRefused, SendRefused, _stricter, admitted, link
 from cleaner.storage import crypto
-from cleaner.storage.repo import Item
+from cleaner.storage.repo import Item, StaleState
 
 RECEIPT_SECONDS = 600
 
@@ -154,7 +154,8 @@ class IntegrationService(ChatService):
         payload = {
             "key": key.id, "version": version[0], "expires": self.repo.clock.now().timestamp() + RECEIPT_SECONDS,
             "provider": _binding(provider), "model": model, "messages": messages,
-            "cached": prepared["cached"], "digest": outgoing.context.digest(), "layers": self.layers(chat_id),
+            "cached": prepared["cached"], "digest": outgoing.context.digest(),
+            "layer_snapshot": {name: name in ran for name in LAYERS},
         }
         receipt = base64.urlsafe_b64encode(crypto.seal(
             self.repo.chat_secret(chat_id), json.dumps(payload, ensure_ascii=False).encode(), f"request:{chat_id}",
@@ -170,12 +171,11 @@ class IntegrationService(ChatService):
             "leaks": len(outgoing.leaks), "blocked": outgoing.blocked,
         }
 
-    @admitted("send")
-    def send_request(self, chat_id: str, user_id: str, key, receipt: str):
+    def send_request(self, chat_id: str, user_id: str, key, receipt: str) -> tuple[str, str]:
         try:
+            sealed = base64.b64decode(receipt, altchars=b"-_", validate=True)
             payload = json.loads(crypto.unseal(
-                self.repo.chat_secret(chat_id), base64.b64decode(receipt, altchars=b"-_", validate=True),
-                f"request:{chat_id}",
+                self.repo.chat_secret(chat_id), sealed, f"request:{chat_id}",
             ))
         except (ValueError, crypto.CryptoError):
             raise SendRefused("Предпросмотр недействителен: проверьте запрос ещё раз") from None
@@ -183,10 +183,33 @@ class IntegrationService(ChatService):
             raise SendRefused("Предпросмотр истёк: проверьте запрос ещё раз")
         if payload.get("mode") == "local":
             raise SendRefused("Локальный предпросмотр нельзя отправить в облако")
+        fingerprint = hashlib.sha256(sealed).hexdigest()
+        accepted = self.repo.accepted_request(chat_id, fingerprint)
+        if accepted is not None:
+            return accepted
+        try:
+            item = self._send_prepared(chat_id, user_id, key, payload, fingerprint)
+        except (EditRefused, SendRefused, StaleState):
+            # Другой запрос мог принять эту же квитанцию между чтением и транзакцией.
+            accepted = self.repo.accepted_request(chat_id, fingerprint)
+            if accepted is None:
+                raise
+            return accepted
+        return item.id, self.repo.item_status(chat_id, item.id) or item.status
+
+    @admitted("send")
+    def _send_prepared(self, chat_id: str, user_id: str, key, payload: dict, fingerprint: str) -> Item:
         provider, _ = provider_for(self.repo, key, payload["model"])
-        if payload["provider"] != _binding(provider) or payload["layers"] != self.layers(chat_id):
+        if payload["provider"] != _binding(provider):
             raise SendRefused("Подключение или слои изменились: проверьте запрос ещё раз")
         built = {}
+        item_id = uuid.uuid4().hex
+
+        def validate_layers() -> None:
+            if payload.get("layer_snapshot") != self._enabled(chat_id):
+                raise SendRefused("Подключение или слои изменились: проверьте запрос ещё раз")
+
+        validate_layers()
 
         def work(state, items, settings):
             if any(item.kind == "answer" and item.status in ("running", "queued") for item in items):
@@ -197,11 +220,17 @@ class IntegrationService(ChatService):
             if outgoing.context.digest() != payload["digest"] or not outgoing.sendable:
                 raise SendRefused("Запрос изменился или заблокирован: проверьте его ещё раз")
             built.update(context=outgoing.context, count=len(replacements))
-            return [Item(uuid.uuid4().hex, 0, "answer", "", None, source="api", status="running",
-                         meta={"provider": provider.name, "model": payload["model"], "in_request": len(replacements)})], []
+            return [Item(item_id, 0, "answer", "", None, source="api", status="running",
+                         meta={"provider": provider.name, "model": payload["model"], "in_request": len(replacements),
+                               "receipt_hash": fingerprint})], []
 
-        [item] = self._apply(chat_id, work, expected=payload["version"])
-        self.live.start(item.id)
+        # Как только элемент виден после COMMIT, повтор запроса уже может получить ID и остановить ответ.
+        self.live.start(item_id)
+        try:
+            [item] = self._apply(chat_id, work, expected=payload["version"], validate=validate_layers)
+        except BaseException:
+            self.live.finish(item_id)
+            raise
         sent = {"provider": provider.id, "model": payload["model"], "messages": len(built["context"].messages)}
         self._submit(self.send_submit, self.run_send, chat_id, item.id, user_id,
                      built["context"], link(provider), built["count"], None, sent)

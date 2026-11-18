@@ -4,6 +4,7 @@
   <label>Назначение <select name="purpose"><option value="tuning">Для настройки</option><option value="control">Независимый контрольный</option></select></label>
   <label>Источник документа <input name="source" maxlength="256" placeholder="Один источник для всех частей документа; по умолчанию — этот чат"></label>
   <p class="sub">Части одного документа и его повторные копии сохраняйте с одним источником и назначением. Контрольные примеры не используйте для настройки правил.</p>
+  <p class="sub">Повторное сохранение этого текста с тем же назначением обновит пример.</p>
   {% for id, label in gold_secrets | default([]) %}
   <label>{{ label }} — вид секрета <select name="secret-{{ id }}"><option value="">Не классифицирован</option><option value="format_key">Известный формат или значение при парольном ключе</option><option value="free">Свободный контекст без ключевого слова</option></select></label>
   {% endfor %}

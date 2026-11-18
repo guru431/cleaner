@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 
@@ -29,33 +31,57 @@ def separator(value: str) -> str:
     """Разделитель частей, которым записано имя или адрес: «\\\\.», «\\.» или точка. Подмену пишут им же."""
     return "\\\\." if "\\\\." in value else "\\." if "\\." in value else "."
 
-# Только встроенная копия списка публичных суффиксов: в сеть библиотека не ходит.
-_extract = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, extra_suffixes=INTERNAL_SUFFIXES)
 extra_suffixes: tuple[str, ...] = ()
+_suffix_snapshot: ContextVar[tuple[str, ...] | None] = ContextVar("suffix_snapshot", default=None)
 # Список вместе с частным разделом — суффиксы, под которыми имена выбирают арендаторы («blob.core.windows.net»).
 _private = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
+
+
+def normalize_suffixes(values: tuple[str, ...]) -> tuple[str, ...]:
+    if not values:
+        return ()
+    cleaned = {value.strip().lower() for value in values}
+    return tuple(sorted(cleaned.difference(INTERNAL_SUFFIXES, {""})))
+
+
+def active_suffixes() -> tuple[str, ...]:
+    snapshot = _suffix_snapshot.get()
+    return extra_suffixes if snapshot is None else snapshot
+
+
+@contextmanager
+def using_suffixes(snapshot: tuple[str, ...]):
+    """Замер и оценка правок распознают домены по тому же снимку, который попадает в отпечаток."""
+    token = _suffix_snapshot.set(snapshot)
+    try:
+        yield
+    finally:
+        _suffix_snapshot.reset(token)
+
+
+@lru_cache(maxsize=8)
+def _extract_for(values: tuple[str, ...]) -> tldextract.TLDExtract:
+    # Только встроенная копия списка публичных суффиксов: библиотека не ходит в сеть.
+    return tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, extra_suffixes=INTERNAL_SUFFIXES + values)
 
 
 def set_extra_suffixes(values: tuple[str, ...]) -> bool:
     """Дополнения администратора к внутренним суффиксам (страница встроенных списков). Список один на службу, как и
     встроенный; ответы has_known_suffix сбрасываются, остальные строковые кэши — cache.clear_strings. True — список
     изменился."""
-    global _extract, extra_suffixes
-    values = tuple(dict.fromkeys(value for value in values if value not in INTERNAL_SUFFIXES))
+    global extra_suffixes
+    values = normalize_suffixes(values)
     if values == extra_suffixes:
         return False
-    _extract = tldextract.TLDExtract(
-        suffix_list_urls=(), cache_dir=None, extra_suffixes=INTERNAL_SUFFIXES + values
-    )
     extra_suffixes = values
-    has_known_suffix.cache_clear()
+    _known_suffix.cache_clear()
     return True
 
 
 def split_name(name: str) -> tuple[list[str], str]:
     """Части слева от регистрируемого домена и сам домен. Для неизвестного суффикса домен — ''."""
     labels = name.strip(".").split(".")
-    result = _extract(name.lower())
+    result = _extract_for(active_suffixes())(name.lower())
     if not result.suffix:
         return labels, ""
     tail = len(result.suffix.split(".")) + (1 if result.domain else 0)
@@ -78,12 +104,16 @@ def parts(name: str) -> tuple[list[str], str]:
     return left, registrable
 
 
-@lru_cache(maxsize=65536)
 def has_known_suffix(name: str) -> bool:
     """Ответ для имени не меняется, а спрашивают его часто: метки с именем в значении проверяются при каждой сборке
     восстановления (labels.domain_labels), и поток ответа собирает её на каждом куске — tldextract на 20 000 меток
     стоил 55 мс на сборку."""
-    return bool(_extract(name.lower()).suffix)
+    return _known_suffix(name, active_suffixes())
+
+
+@lru_cache(maxsize=65536)
+def _known_suffix(name: str, values: tuple[str, ...]) -> bool:
+    return bool(_extract_for(values)(name.lower()).suffix)
 
 
 def code_like(name: str, ambiguous: frozenset[str]) -> bool:

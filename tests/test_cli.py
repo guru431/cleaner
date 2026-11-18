@@ -7,6 +7,8 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 import uvicorn
@@ -88,6 +90,34 @@ def test_init_that_failed_to_create_the_database_leaves_nothing_behind(home, mon
     repo.conn.close()
 
 
+def test_parallel_init_reserves_the_database_across_distinct_key_paths(home, monkeypatch, clock):
+    ready = Barrier(2, timeout=3)
+    hash_password = auth.hash_password
+
+    def overlap(password):
+        ready.wait()
+        return hash_password(password)
+
+    def initialize(name):
+        return main(["init", "--admin", name, "--env-file", str(home / f"{name}.env"),
+                     "--password-file", str(home / "secret.txt")])
+
+    monkeypatch.setattr(auth, "hash_password", overlap)
+    names = ("first", "second")
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(initialize, names))
+    assert sorted(results) == [0, 1]
+    winner = names[results.index(0)]
+    [keyfile] = home.glob("*.env")
+    assert keyfile.stem == winner
+    key = keyfile.read_text(encoding="ascii").strip().split("=", 1)[1]
+    repo = open_repo(home / "data" / "cleaner.db", key, clock)
+    try:
+        assert [user.login for user in repo.users()] == [winner]
+    finally:
+        repo.conn.close()
+
+
 def test_users_key_export_import_and_backup(home, monkeypatch, clock):
     key = init(home)
     secret = str(home / "secret.txt")
@@ -106,6 +136,36 @@ def test_users_key_export_import_and_backup(home, monkeypatch, clock):
     assert {(u.login, u.disabled) for u in copy.users()} == {("boss", False), ("ivan", True)}
     copy.conn.close()
     assert main(["backup", str(home / "copy.db")]) == 1                           # существующий файл не трогается
+
+
+def test_backup_failure_leaves_no_final_name_or_staging_files(home, monkeypatch):
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, init(home))
+    target = home / "backup.db"
+
+    def interrupted(self, staged):
+        staged.write_bytes(b"synthetic partial backup")
+        assert not target.exists()
+        raise OSError("simulated backup write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Repository, "backup", interrupted)
+        assert main(["backup", str(target)]) == 1
+    assert not target.exists() and not list(home.glob(".cleaner-backup-*"))
+    assert main(["backup", str(target)]) == 0
+
+
+def test_backup_publishes_without_replacing_a_concurrent_target(home, monkeypatch):
+    monkeypatch.setenv(crypto.MASTER_KEY_ENV, init(home))
+    target = home / "backup.db"
+    backup = Repository.backup
+
+    def race(self, staged):
+        backup(self, staged)
+        target.write_bytes(b"another owner")
+
+    monkeypatch.setattr(Repository, "backup", race)
+    assert main(["backup", str(target)]) == 1
+    assert target.read_bytes() == b"another owner" and not list(home.glob(".cleaner-backup-*"))
 
 
 def test_user_role_keeps_the_last_active_admin(home, monkeypatch, clock):
@@ -521,7 +581,7 @@ def test_eval_measures_the_gold_set_and_guards_against_a_drop(home, monkeypatch,
 
 def test_eval_of_an_open_set_checks_its_manifest_and_keeps_its_own_baseline(home, monkeypatch, capsys, clock, offline_env):
     """Идея аудита 21.10.2026: снимок сверяется с манифестом, а его базовый замер — отдельно от собственного набора."""
-    from cleaner.eval.datasets import write_snapshot
+    from cleaner.eval.datasets import file_sha256, write_snapshot
 
     key = init(home)
     monkeypatch.setenv(crypto.MASTER_KEY_ENV, key)
@@ -531,9 +591,15 @@ def test_eval_of_an_open_set_checks_its_manifest_and_keeps_its_own_baseline(home
     out = capsys.readouterr().out
     assert "Набор: open:set; единица подсчёта — сущности после преобразования" in out and "НАБОР:" not in out
     assert "Снимок: org/set @ abc123" in out
+    assert "Жёсткий формат и контрольная сумма | 1.000 (1/1); 95%" in out
+    assert "Класс QA-3" not in out and "достигнута" not in out
+    original = file_sha256(path)
     path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     assert main(["eval", "--jsonl", str(path), "--layers", "1-3"]) == 0
     assert "НАБОР: файл не совпадает с манифестом" in capsys.readouterr().out
     repo = open_repo(home / "data" / "cleaner.db", key, clock)
     assert set(json.loads(repo.setting("eval.baseline"))["datasets"]) == {"open:set"}
+    source = json.loads(repo.setting("eval.passport"))["open:set"]["source"]
+    assert source["sha256"] == file_sha256(path) != original
+    assert source["manifest_status"] == "mismatch"
     repo.conn.close()

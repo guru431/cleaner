@@ -1,8 +1,10 @@
 """Действия пользователя над чатами: ядро очистки плюс хранилище."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import inspect
+import json
 import logging
 import pickle
 import re
@@ -27,6 +29,7 @@ from cleaner.core.restore import RestoreResult, restore, restore_answers
 from cleaner.core.types import STRICTNESS, ChatState, EntityType, Policy, Settings, Span
 from cleaner.egress import ProviderError, cloud
 from cleaner.queueing import Budget, Reservation
+from cleaner.storage import crypto
 from cleaner.storage.codec import state_to_json
 from cleaner.storage.repo import CheckpointBusy, Item, Provider, Repository, StaleState
 
@@ -223,6 +226,11 @@ def _in_request(items: list[Item], exclude: frozenset[int] = frozenset()) -> lis
     return [*counts, count]
 
 
+def manual_turn(items: Iterable[Item]) -> str:
+    """Последний ответ отделяет переносы, сделанные до него, от следующего ручного запроса."""
+    return next((item.id for item in reversed(list(items)) if item.kind == "answer"), "")
+
+
 LOCAL_PENDING = "Предыдущий ответ локальной модели ещё идёт: дождитесь его"
 
 
@@ -260,6 +268,7 @@ class Preview:
     # Перенос вручную: сборка выдала бы значениям новые замены (словарь или правила изменились после очистки) —
     # копировать нечего, пока тексты чата не очищены заново (ChatService.manual).
     stale: bool = False
+    manual_receipt: str = ""
 
 
 @dataclass
@@ -479,6 +488,7 @@ class ChatService:
 
     def _apply(
         self, chat_id: str, work: Work, expected: int | None = None, after: Callable[[int], None] | None = None,
+        *, validate: Callable[[], None] | None = None,
     ) -> list[Item]:
         """Работа над загруженным состоянием и запись одной транзакцией.
 
@@ -493,7 +503,10 @@ class ChatService:
                 raise EditRefused(_CHANGED)
             new_items, updated = work(state, self.repo.items(chat_id), self.repo.settings())
             try:
-                self.repo.commit_chat(chat_id, state, version, new_items, updated)
+                if validate is None:
+                    self.repo.commit_chat(chat_id, state, version, new_items, updated)
+                else:
+                    self.repo.commit_chat(chat_id, state, version, new_items, updated, validate=validate)
             except StaleState:
                 continue
             if after is not None:
@@ -618,6 +631,8 @@ class ChatService:
             meta["doubtful_pages"] = list(extracted.doubtful_pages)
         if extracted.images:
             meta["images"] = extracted.images
+        if extracted.omitted_attachments:
+            meta["omitted_attachments"] = extracted.omitted_attachments
         if ocr_all:
             meta["ocr_all"] = True
         self.repo.set_item_original(chat_id, item.id, extracted.text, meta)
@@ -737,17 +752,37 @@ class ChatService:
 
     # --- ответы модели и вид чата ----------------------------------------------------
 
+    def manual_snapshot(self, chat_id: str, receipt: str) -> tuple[str, int]:
+        try:
+            if not receipt or len(receipt) > 192:
+                raise ValueError
+            blob = base64.b64decode(receipt, altchars=b"-_", validate=True)
+            turn, count = json.loads(crypto.unseal(self.repo.chat_secret(chat_id), blob, f"manual:{chat_id}"))
+            return turn, count
+        except (ValueError, crypto.CryptoError):
+            raise EditRefused("Не удалось определить состав ручного запроса: откройте перенос заново") from None
+
     @admitted("restore")
-    def add_answer(self, chat_id: str, user_id: str, text: str) -> Item:
+    def add_answer(self, chat_id: str, user_id: str, text: str, manual_receipt: str = "", *,
+                   remembered_receipt: str = "") -> Item:
         self._check_length(text)
         counters: dict[str, int | str] = {}
+        receipt = manual_receipt or remembered_receipt
+        snapshot = self.manual_snapshot(chat_id, receipt) if receipt else None
 
         def work(state: ChatState, items: list[Item], settings: Settings) -> tuple[list[Item], list[Item]]:
             # Модель вставленного ответа неизвестна: в отчёте «Сохранность меток» — строка «модель не указана».
+            if snapshot is not None and snapshot[0] == manual_turn(items):
+                in_request = snapshot[1]
+            elif manual_receipt:
+                raise EditRefused("В чат уже добавлен ответ после этого переноса: откройте перенос заново")
+            else:
+                in_request = _in_request(items, frozenset(item.seq for item in items if item.excluded))[-1]
             counters.update(
-                restore(state, text, settings).counters, in_request=_in_request(items)[-1], label_style=state.label_style,
+                restore(state, text, settings).counters, in_request=in_request, label_style=state.label_style,
             )
-            return [Item(uuid.uuid4().hex, 0, "answer", text, None, source="pasted_answer")], []
+            return [Item(uuid.uuid4().hex, 0, "answer", text, None, source="pasted_answer",
+                         meta={"in_request": in_request})], []
 
         [item] = self._apply(chat_id, work)
         self.repo.audit("restore", user_id, chat_id, **counters)
@@ -812,7 +847,7 @@ class ChatService:
                 if restore_answer is None:
                     restore_answer = restore_answers(state, settings)
                 result = restore_answer(item.original)
-                result.counters["in_request"] = item.meta.get("in_request", in_request)    # у ответа облака — с отправки
+                result.counters["in_request"] = item.meta.get("in_request", in_request)
                 views.append(AnswerView(item, result))
         return ChatView(state, settings, views)
 
@@ -910,8 +945,15 @@ class ChatService:
         ли текст, серверу неизвестно."""
         state, _ = self.repo.load_state(chat_id)
         before = state_to_json(state)
-        preview = self._build(chat_id, state, self.repo.items(chat_id), self.repo.settings(), None, "", exclude)
+        items = self.repo.items(chat_id)
+        preview = self._build(chat_id, state, items, self.repo.settings(), None, "", exclude)
         preview.stale = state_to_json(state) != before
+        if preview.outgoing and preview.outgoing.sendable and not preview.stale:
+            included = frozenset(seq for seq, _, _ in preview.candidates) - set(preview.excluded)
+            omitted = frozenset(item.seq for item in items if item.seq not in included)
+            payload = json.dumps([manual_turn(items), _in_request(items, omitted)[-1]]).encode()
+            blob = crypto.seal(self.repo.chat_secret(chat_id), payload, f"manual:{chat_id}")
+            preview.manual_receipt = base64.urlsafe_b64encode(blob).decode("ascii")
         return preview
 
     @admitted("send")
@@ -1038,25 +1080,21 @@ class ChatService:
     def delete_chat(self, chat_id: str, user_id: str, via: str | None = None, gold: bool = True) -> None:
         """FR-1.4: идущие ответы облака прерываются, чтобы поток провайдера не читался впустую, затем чат удаляется.
         via — откуда удалён (api), для журнала. gold — удалить и примеры эталона из этого чата (по умолчанию): без него
-        они остаются в наборе под общим ключом, и удаляет их администратор. Примеры удаляются до чата, чтобы
-        контрольная точка удаления чата усекла журнал WAL и с ними."""
+        они остаются в наборе под общим ключом, и удаляет их администратор."""
         self.stop_chat(chat_id)
         for submit in (self.submit, self.file_submit, self.send_submit):
             pool = getattr(submit, "__self__", None)
             if hasattr(pool, "cancel_chat"):
                 pool.cancel_chat(chat_id)
-        examples = self.repo.chat_gold(chat_id)
-        if gold:
-            for gold_id in examples:
-                self.repo.delete_gold(gold_id)
         wal = "truncated"
         try:
-            wal = self.repo.delete_chat(chat_id)
+            wal, count = self.repo.delete_chat_with_gold(chat_id, gold=gold)
         except CheckpointBusy as exc:
+            count = exc.gold_count
             # Удаление состоялось; копии страниц в журнале WAL сотрёт следующая контрольная точка — администратору в журнал.
             log.error("удаление чата: %s", type(exc).__name__)
             self.repo.audit("error", user_id, chat_id, kind=type(exc).__name__, stage="delete")
-        details = ({"via": via} if via else {}) | ({"gold" if gold else "gold_kept": len(examples)} if examples else {})
+        details = ({"via": via} if via else {}) | ({"gold" if gold else "gold_kept": count} if count else {})
         if wal == "deferred":               # журнал WAL усечётся, когда закроется идущая оценка влияния настроек
             details["wal"] = wal
         self.repo.audit("chat_deleted", user_id, chat_id, **details)
@@ -1344,8 +1382,7 @@ class ChatService:
             reviewed = metadata(scenario, checks, purpose, source or f"chat:{chat_id}")
         except ValueError as exc:
             raise EditRefused(str(exc)) from None
-        reviewed["chat"] = chat_id          # и при своём источнике документа: удаление чата находит примеры (FR-1.4)
-        state, _ = self.repo.load_state(chat_id)
+        state, version = self.repo.load_state(chat_id)
         item = self.repo.item(chat_id, item_id)
         if item is None or item.kind != "input":
             raise KeyError(item_id)
@@ -1367,7 +1404,9 @@ class ChatService:
             if entity.type is EntityType.SECRET:
                 spans[-1]["secret_context"] = secret_contexts.get(entity.id, "")
         try:
-            gold_id = self.repo.add_gold(user_id, item.original, spans, reviewed)
+            gold_id = self.repo.add_gold(user_id, item.original, spans, reviewed, source_item=(chat_id, item_id, version))
+        except StaleState:
+            raise EditRefused(_CHANGED) from None
         except ValueError as exc:
             raise EditRefused(str(exc)) from None
         self.repo.audit("gold_added", user_id, chat_id, spans=len(spans))

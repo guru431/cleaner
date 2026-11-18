@@ -145,3 +145,4 @@ class Settings:
     never: frozenset[str] = frozenset()
     patterns: tuple[CustomPattern, ...] = ()
     policies: Mapping[EntityType, Policy] = field(default_factory=default_policies)
+    internal_suffixes: tuple[str, ...] = ()

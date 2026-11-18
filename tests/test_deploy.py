@@ -1,10 +1,14 @@
 """Файлы установки: договорённости между юнитом, настройками, файлами зависимостей и кодом.
 
-Сами сценарии deploy/ проверяются на сервере (check-cleaner.sh) и в быстрый набор не входят.
+Исполняемые ветки сценариев проверяются отдельно под Bash с подставными командами системы.
 """
 import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+from tempfile import TemporaryFile
 
 import pytest
 
@@ -254,7 +258,8 @@ def test_installer_refuses_a_profile_address_the_config_and_certificate_do_not_c
     text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
     checks = text.index('conf_host=$(sed -n')
     assert text.index('FIRST_INSTALL=1') < checks < text.index("useradd --system")
-    assert checks < text.index('install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"') < text.index("trap 'rollback")
+    write_profile = text.index('install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"')
+    assert checks < write_profile < text.index("\nsystemctl restart cleaner-egress.service\n")
     san = text[text.index("-ext subjectAltName"):text.index("# --- учётная запись")]
     # Ревью 12.11.2026: проверка HTTPS идёт по адресу; отказ — только при чужом IP, другое имя — предупреждение,
     # иначе обновление требовало бы перевыпуска (новый отпечаток у всех клиентов шлюза).
@@ -286,7 +291,7 @@ def test_installer_stops_the_service_before_it_replaces_the_code_and_rollback_st
     """Ревью 26.10.2026: служба, работающая над подменённым каталогом, лениво импортировала бы новые модули вперемешку
     со старыми — до перезапуска шли ещё копия базы и самопроверка."""
     text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
-    for swap in ('mv "$APP/.venv" "$APP/.venv.prev"', 'mv "$APP/cleaner" "$PREV_CODE"'):
+    for swap in ('mv "$APP/.venv" "$APP/.venv.prev"', 'mv -T -- "$APP/cleaner" "$APP/cleaner.bak-$STAMP"'):
         preceding = text[:text.index(swap)].splitlines()[-3:]
         assert "stop_service" in [line.strip() for line in preceding], swap
     rollback = text[text.index("rollback() {"):text.index("trap 'rollback")]
@@ -461,3 +466,168 @@ def test_installer_removes_database_copies_once_the_service_answers():
     # Копий прежних прогонов больше не накапливается: нет «трёх последних» у базы.
     copy = text[text.index("# --- копия базы"):text.index("# --- самопроверка")]
     assert "cleaner.db.bak-*" not in copy
+
+
+def _run_bash(script, tmp_path, **environment):
+    bash = Path("C:/Program Files/Git/bin/bash.exe") if sys.platform == "win32" else shutil.which("bash")
+    if not bash or not Path(bash).is_file():
+        pytest.skip("Bash недоступен")
+    with TemporaryFile(dir=tmp_path) as stdout, TemporaryFile(dir=tmp_path) as stderr:
+        result = subprocess.run(
+            [str(bash), "-c", script], cwd=tmp_path, stdout=stdout, stderr=stderr, timeout=15,
+            env={**os.environ, **environment, "PYTHON_EXEC": Path(sys.executable).as_posix(), "PYTHONUTF8": "1",
+                 "TEST_DIR": tmp_path.as_posix()},
+        )
+        stdout.seek(0)
+        stderr.seek(0)
+        return subprocess.CompletedProcess(
+            result.args, result.returncode, stdout.read().decode("utf-8"), stderr.read().decode("utf-8"),
+        )
+
+
+@pytest.mark.integration
+def test_failed_first_code_rename_keeps_installed_code(tmp_path):
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    rollback = text[text.index("rollback() {"):text.index("trap 'rollback")]
+    code_swap = text[text.index("# --- код: каталог"):text.index("# --- юнит и проверка")]
+    app = tmp_path / "app"
+    (app / "cleaner").mkdir(parents=True)
+    (app / "cleaner" / "working.py").write_text("working", encoding="utf-8")
+    (app / "cleaner.new").mkdir()
+    result = _run_bash(
+        r'''
+set -euo pipefail
+APP="$TEST_DIR/app"
+PREV_CODE="" PREV_VENV="" PREV_UNIT="" DB_BACKUP="" STOPPED=0 FIRST_INSTALL=0
+STAMP=test
+log() { :; }
+restore_aux() { return 1; }
+stop_service() { STOPPED=1; }
+mv() { return 1; }
+systemctl() { printf '%s\n' "$*"; }
+journalctl() { :; }
+''' + rollback + "trap 'rollback failed' ERR\n" + code_swap,
+        tmp_path,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "restart cleaner.service" in result.stdout
+    assert (app / "cleaner" / "working.py").read_text(encoding="utf-8") == "working"
+    assert not (app / "cleaner.new").exists()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("clients", "internal", "valid"), [
+    ("192.0.2.0/24", "192.0.2.0/25 192.0.2.128/25", True),
+    ("192.0.2.0/24", "192.0.2.0/25", False),
+    ("192.0.2.7/24", "192.0.2.0/24", False),
+    ("192.0.2.7", "192.0.2.0/24 nonsense", False),
+])
+def test_installer_validates_networks_of_the_selected_profile(tmp_path, clients, internal, valid):
+    text = (DEPLOY / "install-cleaner.sh").read_text(encoding="utf-8")
+    preflight = text[text.index("HOST_NAME=${"):text.index('log "профиль хоста:')]
+    profiles = tmp_path / "deploy" / "hosts"
+    profiles.mkdir(parents=True)
+    (profiles / "selected.conf").write_text(
+        f'HOST_IP=127.0.0.1\nCLIENTS="{clients}"\nINTERNAL="{internal}"\n'
+        'GATEWAY=127.0.0.1:30000\nCERT_NAME=example\n', encoding="utf-8",
+    )
+    result = _run_bash(
+        'set -eu\nSRC="$TEST_DIR"\nfail() { printf "%s\\n" "$1" >&2; exit 1; }\n'
+        'python3.12() { "$PYTHON_EXEC" "$@"; }\n' + preflight,
+        tmp_path, CLEANER_HOST="selected",
+    )
+    assert result.returncode == (0 if valid else 1), result.stderr
+    if not valid:
+        assert "selected.conf" in result.stderr
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("extras", ["", "CLEANER_GATEWAY_KEY=synthetic\n", None])
+def test_documented_key_rotation_preserves_optional_environment(tmp_path, extras):
+    text = (ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    start = text.index("set -e; cd /etc/cleaner")
+    end = text.index("' &&", start)
+    command = text[start:end].replace("cd /etc/cleaner", 'cd "$TEST_DIR"')
+    current, new = tmp_path / "cleaner.env", tmp_path / "cleaner.env.new"
+    if extras is not None:
+        current.write_text(f"CLEANER_MASTER_KEY=old\n{extras}", encoding="utf-8")
+    new.write_text("CLEANER_MASTER_KEY=new\n", encoding="utf-8")
+    result = _run_bash(command, tmp_path)
+    if extras is None:
+        assert result.returncode != 0 and not current.exists()
+        assert new.read_text(encoding="utf-8") == "CLEANER_MASTER_KEY=new\n"
+    else:
+        assert result.returncode == 0, result.stderr
+        assert current.read_text(encoding="utf-8") == f"CLEANER_MASTER_KEY=new\n{extras}"
+        assert not new.exists()
+    assert not list(tmp_path.glob(".cleaner.env.*"))
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("scenario", "status"), [("old", 2), ("empty", 2), ("unreadable", 2), ("different", 1), ("same", 0)])
+def test_version_check_uses_only_the_current_invocation(tmp_path, scenario, status):
+    text = (DEPLOY / "check-cleaner.sh").read_text(encoding="utf-8")
+    section = text[text.index("installed=$(sed"):text.index('echo "7.')]
+    (tmp_path / "verify.txt").write_text("Код: aaaaaaaaaaaa от 2026-11-18 test\n", encoding="utf-8")
+    result = _run_bash(
+        r'''
+set -uo pipefail
+WORK="$TEST_DIR" UNIT=cleaner.service RET=0
+ok() { RET=0; }
+bad() { RET=1; }
+miss() { RET=2; }
+skip() { :; }
+systemctl() { printf '%s\n' 11111111111111111111111111111111; }
+journalctl() {
+    if [[ "$*" != *"_SYSTEMD_INVOCATION_ID=11111111111111111111111111111111"* ]]; then
+        printf '%s\n' 'Cleaner: служба запущена. Код: aaaaaaaaaaaa от 2026-11-18 test'
+        return
+    fi
+    case "$SCENARIO" in
+        old|empty) : ;;
+        unreadable) return 1 ;;
+        different) printf '%s\n' 'Cleaner: служба запущена. Код: bbbbbbbbbbbb от 2026-11-18 test' ;;
+        same) printf '%s\n' 'Cleaner: служба запущена. Код: aaaaaaaaaaaa от 2026-11-18 test' ;;
+    esac
+}
+''' + section + 'exit "$RET"',
+        tmp_path, SCENARIO=scenario,
+    )
+    assert result.returncode == status, result.stderr
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("database", "journal", "status"), [
+    ("missing", "clean", 2), ("unreadable", "clean", 2), ("clean", "unreadable", 2),
+    ("utf-8", "unreadable", 1), ("utf-16-le", "clean", 1), ("clean", "hit", 1), ("clean", "clean", 0),
+])
+def test_canary_check_distinguishes_a_hit_from_unreadable_sources(tmp_path, database, journal, status):
+    text = (DEPLOY / "check-cleaner.sh").read_text(encoding="utf-8")
+    section = text[text.index('echo "7.'):text.index('echo "8.')]
+    db = tmp_path / "cleaner.db"
+    canary = "Синтетическая-канарейка"
+    if database == "unreadable":
+        db.mkdir()
+    elif database != "missing":
+        db.write_bytes(b"safe")
+        if database != "clean":
+            (tmp_path / "cleaner.db-wal").write_bytes(b"x" * (1024 * 1024 - 2) + canary.encode(database))
+    result = _run_bash(
+        r'''
+set -uo pipefail
+WORK="$TEST_DIR" DATA="$TEST_DIR" UNIT=cleaner.service BAD=0 INCOMPLETE=0
+ok() { :; }
+bad() { BAD=1; }
+miss() { INCOMPLETE=2; }
+python3() { "$PYTHON_EXEC" "$@"; }
+journalctl() {
+    case "$JOURNAL" in
+        unreadable) return 1 ;;
+        hit) printf '%s\n' "$CANARY" ;;
+        *) printf '%s\n' safe ;;
+    esac
+}
+''' + section + 'exit "$((BAD ? BAD : INCOMPLETE))"',
+        tmp_path, CANARY=canary, JOURNAL=journal,
+    )
+    assert result.returncode == status, result.stderr

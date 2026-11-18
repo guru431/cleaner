@@ -17,7 +17,11 @@
 
 Нужны Python 3.12, systemd, nftables, ufw и openssl. Страховку экрана `ufw-failsafe` установщик взводит сам
 (`systemd-run --on-active=10m`), когда добавляет правила ufw: через 10 минут она выключает ufw, если её не снять.
-Перед обновлением дождитесь завершения активных заданий: установщик останавливает службу при замене кода.
+Перед остановкой работающей службы установщик закрывает приём новых запросов и ждёт окончания уже принятых,
+включая очередь файлов, замеры и потоки ответов. Если операции остаются через 900 секунд, установщик сообщает
+их число, а служба снова принимает запросы. Лимит можно изменить через `sudo CLEANER_DRAIN_TIMEOUT=<секунды> bash …`.
+При первом обновлении со старой версии без этого режима согласуйте окно, дождитесь окончания работ и остановите
+её командой `sudo systemctl stop cleaner.service` перед запуском установщика.
 
 1. Распакуйте `git archive HEAD` в принадлежащий root каталог с правами 0700.
 2. Отдельно добавьте туда рабочий `deploy/hosts/<hostname -s>.conf`: Git его не включает.
@@ -50,7 +54,9 @@
 `cleaner verify` первой строкой печатает отпечаток кода — sha256 исходников пакета и дату самого нового файла
 (время коммита из `git archive`). Тот же отпечаток служба пишет в журнал событий (`service_started`) и в журнал
 systemd при старте, а интерфейс показывает его в подвале. `check-cleaner.sh` сверяет код на диске с кодом
-запущенной службы: расхождение значит, что файлы заменили без перезапуска.
+текущего запуска службы. Расхождение считается провалом, отсутствие записи текущего запуска даёт код 2
+за неполную проверку. С явной канарейкой код 1 означает обнаружение значения или другой провал проверки,
+а код 2 возвращается при недоступном источнике, если провалов нет.
 
 Служба сама не выходит в сеть дальше локального шлюза, настроенных подключений (включённых и выключенных: «Проверить»
 работает и для выключенного) и подписок действующих ключей шлюза: остальные соединения и запросы DNS отклоняются,
@@ -77,17 +83,21 @@ systemd при старте, а интерфейс показывает его �
 `bash` от root: каталог `/var/lib/cleaner` закрыт (0700), и оболочка оператора его не прочитает:
 
 ```bash
-sudo systemctl stop cleaner.service
+sudo systemctl stop cleaner.service &&
 sudo bash -c 'set -a; . /etc/cleaner/cleaner.env; set +a; cd /opt/cleaner &&
-  CLEANER_CONFIG=/etc/cleaner/cleaner.toml .venv/bin/python -m cleaner key rotate --env-file /etc/cleaner/cleaner.env.new'
-sudo bash -c 'chown cleaner:cleaner /var/lib/cleaner/cleaner.db*'
-sudo bash -c 'grep -v "^CLEANER_MASTER_KEY=" /etc/cleaner/cleaner.env >> /etc/cleaner/cleaner.env.new &&
-  mv /etc/cleaner/cleaner.env.new /etc/cleaner/cleaner.env'
+  CLEANER_CONFIG=/etc/cleaner/cleaner.toml .venv/bin/python -m cleaner key rotate --env-file /etc/cleaner/cleaner.env.new' &&
+sudo bash -c 'chown cleaner:cleaner /var/lib/cleaner/cleaner.db*' &&
+sudo bash -c 'set -e; cd /etc/cleaner
+  combined=$(mktemp .cleaner.env.XXXXXX)
+  trap "rm -f -- \"$combined\"" EXIT
+  { cat cleaner.env.new && sed "/^CLEANER_MASTER_KEY=/d" cleaner.env; } > "$combined"
+  mv -T -- "$combined" cleaner.env
+  rm -- cleaner.env.new' &&
 sudo systemctl start cleaner.service
 ```
 
 Новый файл создаётся с правами 0600 до изменения базы; если перешифровка не удалась, база остаётся под прежним
-ключом, а новый файл удаляется. Вторая команда `bash` переносит остальные строки окружения, например
+ключом, а новый файл удаляется. Последняя команда `bash` переносит остальные строки окружения, например
 `CLEANER_GATEWAY_KEY`, не выводя значений. Затем выполните `sudo bash /usr/local/sbin/check-cleaner.sh`,
 выгрузите новый ключ командой `key export` и уничтожьте прежние выгрузки. Копии, снятые командой `backup`
 до смены, открываются только прежним ключом.

@@ -1,10 +1,17 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from threading import Event
+
+import pytest
 
 from cleaner import models
 from cleaner.core.types import EntityType as T
 from cleaner.core.types import Settings
 from cleaner.eval import runner
 from cleaner.eval.metrics import Example, GoldSpan, Report, covered, evaluate, recall_by_class
+from cleaner.storage import db
+from cleaner.storage.repo import SUFFIXES_KEY, Repository
 
 
 def example(text, *spans):
@@ -180,6 +187,68 @@ def test_measurement_goes_to_the_passport_without_texts(repo):
     assert entry["layers"]["1-3"]["types"]["PERSON"]["entities"] == [0, 1]
     assert entry["versions"]["models"] == {} and len(entry["versions"]["code"]) == 64
     assert entry["unchecked"] == ["слои 1-3: базового замера нет"] and entry["measured_at"] == "2026-10-14T09:00:00+00:00"
+
+
+def test_measurement_records_the_suffixes_used_during_the_run(repo, monkeypatch):
+    text = "Подключение srv01.branch.evaltest"
+    value = text.split()[-1]
+    examples = [example(text, (len(text) - len(value), len(text), T.HOST, 0, ""))]
+    baseline = runner.measure(repo, runner.GOLD, examples, ["1-3"], None, None)
+    old = runner.passport(repo)[runner.GOLD]["versions"]["settings"]
+    repo.set_setting(SUFFIXES_KEY, json.dumps(["evaltest"]))
+    run = runner.run
+
+    def change_suffixes_during_run(*args):
+        repo.set_setting(SUFFIXES_KEY, "[]")
+        repo.settings()
+        return run(*args)
+
+    monkeypatch.setattr(runner, "run", change_suffixes_during_run)
+    changed = runner.measure(repo, runner.GOLD, examples, ["1-3"], None, None)
+    new = runner.passport(repo)[runner.GOLD]["versions"]["settings"]
+    assert old != new
+    assert baseline.results["1-3"].protected[T.HOST] == 0
+    assert changed.results["1-3"].protected[T.HOST] == 1
+    assert runner.measure(repo, runner.GOLD, examples, ["1-3"], None, None).results["1-3"].protected[T.HOST] == 0
+    assert runner.passport(repo)[runner.GOLD]["versions"]["settings"] == old
+
+
+@pytest.mark.parametrize("key", [runner.BASELINE_KEY, runner.PASSPORT_KEY])
+def test_concurrent_measurement_writes_merge_independent_datasets(repo, tmp_path, monkeypatch, key):
+    read, writing, written = Event(), Event(), Event()
+    first_read = repo.setting
+
+    def synchronized(setting):
+        result = first_read(setting)
+        if setting == key:
+            read.set()
+            assert writing.wait(1)
+            if not repo.conn.in_transaction:
+                assert written.wait(1)  # expose a lost update when the first read fails to reserve the SQLite writer
+        return result
+
+    def save(target, dataset):
+        if key == runner.BASELINE_KEY:
+            runner.save_baseline(target, dataset, {"1-3": classes(fio=(1, 1))}, "fp", 1)
+        else:
+            runner.measure(target, dataset, [example("mail a@x.example")], ["1-3"], None, None)
+
+    with closing(db.connect(tmp_path / "cleaner.db")) as connection:
+        second = Repository(connection, repo.master, repo.clock)
+
+        def concurrent_save():
+            assert read.wait(1)
+            writing.set()
+            save(second, "open:set")
+            written.set()
+
+        monkeypatch.setattr(repo, "setting", synchronized)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(concurrent_save)
+            save(repo, runner.GOLD)
+            future.result(timeout=2)
+        stored = runner.baselines(second) if key == runner.BASELINE_KEY else runner.passport(second)
+    assert set(stored) == {runner.GOLD, "open:set"}
 
 
 def test_utility_warning_preserves_the_recall_gate_and_is_persisted(repo):

@@ -1,5 +1,6 @@
 """JSON-API для программ (FR-13, план 5А): ключ доступа, ошибки JSON, чаты, очистка, восстановление, правки."""
 from concurrent.futures import Executor, Future
+from email.message import EmailMessage
 
 import pytest
 
@@ -294,6 +295,31 @@ def test_file_is_queued_and_its_result_polled(api):
     assert response.status_code == 202, response.text
     result = program.get(f"/api/v1/chats/{chat_id}/items/{response.json()['item_id']}").json()
     assert result["status"] == "done" and "doc@x.example" not in result["sanitized"]
+
+
+def test_email_attachment_count_is_visible_without_names(api, ivan, repo):
+    program = api("ivan")
+    chat_id = chat(program)
+    mail = EmailMessage()
+    mail.set_content("See the attachment.")
+    mail.add_alternative("<p>See the attachment.</p>", subtype="html")
+    mail.add_attachment(b"hidden-payload", maintype="application", subtype="octet-stream", filename="hidden-name.txt")
+    nested = EmailMessage()
+    nested.set_content("A forwarded message")
+    nested.add_attachment(b"nested", maintype="application", subtype="octet-stream", filename="nested.txt")
+    mail.add_attachment(nested)
+    uploaded = program.post(f"/api/v1/chats/{chat_id}/files", files={"file": ("mail.eml", mail.as_bytes())})
+    assert uploaded.status_code == 202, uploaded.text
+    item_id = uploaded.json()["item_id"]
+    result = program.get(f"/api/v1/chats/{chat_id}/items/{item_id}")
+    assert result.json()["omitted_attachments"] == 2
+    review = ivan.get(f"/chats/{chat_id}/items/{item_id}").text
+    assert "Вложений письма вне очищенного текста — 2" in review
+    assert "Загрузите нужные вложения отдельными файлами" in review
+    assert "вложений — 2" in ivan.get(f"/chats/{chat_id}").text
+    for value in ("hidden-name.txt", "hidden-payload", "nested.txt"):
+        assert value not in str(repo.item(chat_id, item_id).meta)
+        assert value not in result.text and value not in review
 
 
 def test_file_over_the_limit_is_413(api, app):

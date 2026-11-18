@@ -18,6 +18,9 @@ Environment="TRANSFORMERS_OFFLINE=1"
 Environment="HF_HUB_DISABLE_TELEMETRY=1"
 Environment="DO_NOT_TRACK=1"
 Environment="TOKENIZERS_PARALLELISM=false"
+RuntimeDirectory=cleaner
+RuntimeDirectoryMode=0700
+Environment="CLEANER_DRAIN_SOCKET=/run/cleaner/drain.sock"
 # Без таблицы nftables cleaner_egress выход наружу не ограничен — тогда служба не стартует.
 # «+» — проверка от root: правила nftables учётной записи cleaner не видны.
 ExecStartPre=+/usr/local/sbin/cleaner-egress.sh check
@@ -33,6 +36,7 @@ RestrictSUIDSGID=yes
 ReadWritePaths=/var/lib/cleaner
 Restart=always
 RestartSec=20
+TimeoutStopSec=90s
 # Выход наружу (этап 3, SEC-15): только TCP 443 — таблица nftables cleaner_egress (cleaner-egress.sh) по учётной
 # записи cleaner; IPAddressDeny=, как у остальных служб сервера, закрыл бы и его.
 

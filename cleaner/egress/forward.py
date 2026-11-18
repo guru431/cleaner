@@ -85,9 +85,18 @@ class Upstream:
         self._lock = threading.Lock()
         self._closed = False
         # Длинные первыми: «Bearer <токен>» убирается целиком, а не оставляет «Bearer ***».
-        self._secrets = sorted({secret.encode("utf-8") for secret in secrets if secret}, key=len, reverse=True)
+        raw_secrets = {secret for secret in secrets if secret}
+        wire_secrets = raw_secrets | {json.dumps(secret, ensure_ascii=ascii_only)[1:-1]
+                                      for secret in raw_secrets for ascii_only in (False, True)}
+        self._secrets = sorted((secret.encode("utf-8") for secret in wire_secrets), key=len, reverse=True)
         self.status = response.status_code
-        self.headers = {name: response.headers[name] for name in passed if name in response.headers}
+        self.headers = {}
+        for name in passed:
+            if name in response.headers:
+                value = response.headers[name]
+                for secret in self._secrets:
+                    value = value.replace(secret.decode("utf-8"), "***")
+                self.headers[name] = value
 
     def lines(self) -> Iterator[str]:
         secrets = tuple(secret.decode("utf-8") for secret in self._secrets)

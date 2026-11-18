@@ -5,11 +5,13 @@ import base64
 import copy
 import hashlib
 import json
+import secrets
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 
 from cleaner.core.pipeline import sanitize
 from cleaner.core.detect import dictionary
+from cleaner.core.entities import hostmap
 from cleaner.core.types import EntityType, Policy
 from cleaner.eval import runner
 from cleaner.service import _cached_layers
@@ -19,6 +21,9 @@ from cleaner.storage.repo import Repository
 
 _AAD = "settings-impact"
 _UNDO = "settings.impact.undo"
+_PREVIEW_TTL = 600
+_MAX_PENDING = 128
+_MAX_BYTES = 64 * 1024 * 1024
 # Счётчики по чужим чатам показываются, только если затронуты чаты не меньше чем трёх других владельцев. Иначе
 # оценка одной записи словаря отвечала бы, есть ли строка в текстах конкретного человека (раздел 4 ТЗ): при одном
 # или двух владельцах администратор, знающий круг подозреваемых, узнаёт чей текст. Ноль тоже скрыт — иначе
@@ -27,9 +32,10 @@ MIN_OWNERS = 3
 
 
 def snapshot(repo):
-    """Политики и словарь в виде JSON: типы — строками, варианты — списками, как после квитанции."""
-    return json.loads(json.dumps({"policies": {t.value: p.value for t, p in repo.policies().items()},
-                                  "dictionary": [asdict(row) for row in repo.dictionary()]}))
+    """Политики и словарь в виде JSON: типы строками, варианты списками."""
+    return {"policies": {t.value: p.value for t, p in repo.policies().items()},
+            "dictionary": [asdict(row) | {"type": row.type.value if row.type else None, "aliases": list(row.aliases)}
+                           for row in repo.dictionary()]}
 
 
 def _fields(row):
@@ -50,21 +56,21 @@ def listed(before, config):
                          if before["policies"].get(t) != p]}
 
 
-def settings_for(repo, config):
+def settings_for(settings, config):
     rows = config["dictionary"]
-    return replace(repo.settings(), policies={EntityType(t): Policy(p) for t, p in config["policies"].items()},
+    return replace(settings, policies={EntityType(t): Policy(p) for t, p in config["policies"].items()},
                    always=tuple(dictionary.entry(EntityType(r["type"]), r["value"], tuple(r["aliases"]), r.get("inflect", False))
                                 for r in rows if r["list"] == "always"),
                    never=frozenset(v.strip().lower() for r in rows if r["list"] == "never" for v in (r["value"], *r["aliases"]) if v.strip()))
 
 
-def _binding(repo):
+def _binding(repo, config, settings, tuning):
     """Подтверждение связано с настройками и эталоном, но не с версиями чатов: каждый ход агента и каждый новый
     текст поднимают версию, и пока кто-то работает, применить было бы нельзя. Тексты, изменённые после оценки,
     в её числах не учтены и очищаются уже по новым настройкам при обычных действиях Cleaner."""
-    raw = [snapshot(repo), runner.settings_fingerprint(repo.settings(), repo.global_key),
-           runner.fingerprint(runner.gold_examples(repo), repo.global_key), repo.setting("settings.impact.version")]
-    return hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
+    raw = [config, runner.settings_fingerprint(settings, repo.global_key),
+           runner.fingerprint(tuning, repo.global_key), repo.setting("settings.impact.version")]
+    return hashlib.sha256(json.dumps(raw, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
 @contextmanager
@@ -97,8 +103,8 @@ def _undo(repo):
     return json.loads(crypto.unseal(repo.global_key, base64.b64decode(raw), _UNDO))
 
 
-def changed(repo, operation):
-    config = copy.deepcopy(snapshot(repo))
+def changed(repo, operation, before):
+    config = {"policies": before["policies"].copy(), "dictionary": before["dictionary"].copy()}
     if operation["kind"] == "policies":
         config["policies"].update(operation["policies"])
     elif operation["kind"] == "add":
@@ -131,6 +137,26 @@ def changed(repo, operation):
     return config
 
 
+def _prune_previews(repo, now):
+    for receipt, (expires, _) in list(repo.settings_previews.items()):
+        if expires <= now:
+            del repo.settings_previews[receipt]
+
+
+def _issue(repo, user_id, binding, operation):
+    receipt = secrets.token_urlsafe(24)
+    payload = {"user": user_id, "binding": binding, "operation": operation}
+    sealed = crypto.seal(repo.global_key, json.dumps(payload, ensure_ascii=False).encode(), _AAD + receipt)
+    with repo.lock:
+        now = repo.clock.now().timestamp()
+        _prune_previews(repo, now)
+        used = sum(len(value) for _, value in repo.settings_previews.values())
+        if len(repo.settings_previews) >= _MAX_PENDING or used + len(sealed) > _MAX_BYTES:
+            raise ValueError("Слишком много ожидающих подтверждений: примените готовую правку или повторите позже")
+        repo.settings_previews[receipt] = (now + _PREVIEW_TTL, sealed)
+    return receipt
+
+
 def _changes(before, config, imported=False):
     """События журнала по каждому изменению — с теми же полями, что пишут прямые правки (FR-11.1), без значений.
     imported — правка из импорта CSV (признак import операции): добавленные — как импорт, при любом их числе;
@@ -157,8 +183,9 @@ def _changes(before, config, imported=False):
 def preview(repo, user_id, operation):
     with _reading(repo) as snap:
         before_config = snapshot(snap)
-        config = changed(snap, operation)
-        before, after = snap.settings(), settings_for(snap, config)
+        config = changed(snap, operation, before_config)
+        before = snap.settings(apply_suffixes=False)
+        after = settings_for(before, config)
         mine, others = (dict(chats=0, items=0, blocked=0, replacements=0) for _ in range(2))
         owners, pending, frozen = set(), 0, 0
         own = []
@@ -179,7 +206,8 @@ def preview(repo, user_id, operation):
                         pending += 1
                         continue
                     layers, _ = _cached_layers(item, on)
-                    a, b = sanitize(old, item.original, before, layers), sanitize(new, item.original, after, layers)
+                    with hostmap.using_suffixes(before.internal_suffixes):
+                        a, b = sanitize(old, item.original, before, layers), sanitize(new, item.original, after, layers)
                     if (a.sanitized, bool(a.blocked), bool(a.blocked_surrogates)) != (b.sanitized, bool(b.blocked), bool(b.blocked_surrogates)):
                         touched = True
                         counts["items"] += 1
@@ -190,12 +218,12 @@ def preview(repo, user_id, operation):
                 counts["chats"] += touched
                 if touched and user.id != user_id:
                     owners.add(user.id)
-        examples = runner.gold_examples(snap)
+        examples = runner.gold_examples(snap, "tuning")
         old = runner.run(examples, before, ["1-3"], None)["1-3"]
         new = runner.run(examples, after, ["1-3"], None)["1-3"]
         quality = [{"title": title, "before": runner.share(*old.classes.get(title, (0, 0))),
                     "after": runner.share(*new.classes.get(title, (0, 0)))} for title in set(old.classes) | set(new.classes)]
-        binding = _binding(snap)
+        binding = _binding(snap, before_config, before, examples)
         # Возврат по снимку прежнего вида подставляет конфигурацию целиком: страница объясняет, почему удаляются
         # записи, добавленные после последнего применения.
         former = operation["kind"] == "undo" and "dictionary" in _undo(snap)
@@ -206,41 +234,48 @@ def preview(repo, user_id, operation):
                added=sum(1 for r in config["dictionary"] if r["id"] not in was),
                removed=sum(1 for r in before_config["dictionary"] if r["id"] not in will),
                edited=len(listed(before_config, config)["edited"]))
-    payload = {"user": user_id, "expires": repo.clock.now().timestamp() + 600, "binding": binding, "config": config,
-               "import": bool(operation.get("import"))}
-    receipt = base64.urlsafe_b64encode(crypto.seal(repo.global_key, json.dumps(payload).encode(), _AAD)).decode()
+    receipt = _issue(repo, user_id, binding, operation)
     shown = len(owners) >= MIN_OWNERS
     return {"mine": mine, "others": others if shown else None, "owners": len(owners) if shown else None,
             "min_owners": MIN_OWNERS, "pending": pending, "frozen": frozen, "own": own, "quality": quality,
+            "tuning_examples": len(examples),
             "receipt": receipt, "kind": operation["kind"], "changes": listed(before_config, config), "former": former}
 
 
 def apply(repo, user_id, receipt):
-    try:
-        payload = json.loads(crypto.unseal(repo.global_key, base64.b64decode(receipt, altchars=b"-_", validate=True), _AAD))
-    except (ValueError, crypto.CryptoError):
-        raise ValueError("Предпросмотр недействителен") from None
-    with repo.lock, transaction(repo.conn):
-        if payload["user"] != user_id or payload["expires"] <= repo.clock.now().timestamp() or payload["binding"] != _binding(repo):
-            raise ValueError("Настройки изменились: оцените влияние ещё раз")
-        current = snapshot(repo)
-        changes = listed(current, payload["config"])
-        repo.set_setting("settings.impact.version", str(int(repo.setting("settings.impact.version") or "0") + 1))
-        repo.conn.execute("DELETE FROM policies")
-        for type_, policy in payload["config"]["policies"].items():
-            repo.set_policy(EntityType(type_), Policy(policy))
-        for row in changes["removed"]:
-            repo.delete_dictionary(row["id"])
-        added = [repo._insert_dictionary(row["list"], row["value"], EntityType(row["type"]) if row["type"] else None,
-                                         tuple(row["aliases"]), row["comment"], row.get("inflect", False))
-                 for row in changes["added"]]
-        for _, row in changes["edited"]:
-            repo.update_dictionary(row["id"], tuple(row["aliases"]), row["comment"], row.get("inflect", False))
-        # Для возврата хранится обратная правка этого применения, а не прежняя конфигурация целиком: иначе возврат
-        # молча удалял бы записи, добавленные после применения мимо оценки.
-        undo = {"added": added, "removed": changes["removed"], "edited": [was for was, _ in changes["edited"]],
-                "policies": {type_: [was, policy] for type_, was, policy in changes["policies"]}}
-        repo.set_setting(_UNDO, base64.b64encode(crypto.seal(repo.global_key, json.dumps(undo).encode(), _UNDO)).decode())
-        for event, details in _changes(current, payload["config"], payload.get("import", False)):
-            repo.audit(event, user_id, **details)
-        repo.audit("settings_changed", user_id, section="shared", action="preview_applied")
+    stale = "Настройки изменились или подтверждение истекло: оцените влияние ещё раз"
+    with repo.lock:
+        _prune_previews(repo, repo.clock.now().timestamp())
+        entry = repo.settings_previews.get(receipt)
+        if entry is None:
+            raise ValueError(stale)
+        payload = json.loads(crypto.unseal(repo.global_key, entry[1], _AAD + receipt))
+        if payload["user"] != user_id:
+            raise ValueError("Предпросмотр недействителен")
+        with transaction(repo.conn):
+            current = snapshot(repo)
+            settings = repo.settings(apply_suffixes=False)
+            if payload["binding"] != _binding(repo, current, settings, runner.gold_examples(repo, "tuning")):
+                raise ValueError(stale)
+            operation = payload["operation"]
+            config = changed(repo, operation, current)
+            changes = listed(current, config)
+            repo.set_setting("settings.impact.version", str(int(repo.setting("settings.impact.version") or "0") + 1))
+            repo.conn.execute("DELETE FROM policies")
+            for type_, policy in config["policies"].items():
+                repo.set_policy(EntityType(type_), Policy(policy))
+            for row in changes["removed"]:
+                repo.delete_dictionary(row["id"])
+            added = [repo._insert_dictionary(row["list"], row["value"], EntityType(row["type"]) if row["type"] else None,
+                                             tuple(row["aliases"]), row["comment"], row.get("inflect", False))
+                     for row in changes["added"]]
+            for _, row in changes["edited"]:
+                repo.update_dictionary(row["id"], tuple(row["aliases"]), row["comment"], row.get("inflect", False))
+            # Обратная правка сохраняет записи, добавленные мимо оценки после применения.
+            undo = {"added": added, "removed": changes["removed"], "edited": [was for was, _ in changes["edited"]],
+                    "policies": {type_: [was, policy] for type_, was, policy in changes["policies"]}}
+            repo.set_setting(_UNDO, base64.b64encode(crypto.seal(repo.global_key, json.dumps(undo).encode(), _UNDO)).decode())
+            for event, details in _changes(current, config, operation.get("import", False)):
+                repo.audit(event, user_id, **details)
+            repo.audit("settings_changed", user_id, section="shared", action="preview_applied")
+        del repo.settings_previews[receipt]

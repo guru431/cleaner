@@ -119,11 +119,14 @@ class Jobs:
 
         def finished(future):
             self._pending.discard(future)
+            with task.lock:
+                cancelling = task.state == "cancelled"
             if future.cancelled():
                 task.cancel(FILE_INTERRUPTED if kind == "file" else INTERRUPTED)
+            elif not cancelling:
+                reservation.release()
             if task.timer:
                 task.timer.cancel()
-            reservation.release()
             with self._lock:
                 self._tasks.pop(task.id, None)
 

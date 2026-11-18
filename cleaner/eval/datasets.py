@@ -158,7 +158,7 @@ def write_snapshot(out: Path, name: str, records: Sequence[dict], source: str, r
     return path
 
 
-def check_snapshot(path: Path) -> tuple[str, dict | None, list[str]]:
+def check_snapshot(path: Path, *, sha256: str | None = None) -> tuple[str, dict | None, list[str]]:
     """Имя набора (для базового замера и паспорта), манифест и расхождения снимка с ним."""
     try:
         manifest = json.loads(manifest_path(path).read_text(encoding="utf-8"))
@@ -167,7 +167,7 @@ def check_snapshot(path: Path) -> tuple[str, dict | None, list[str]]:
     if not isinstance(manifest, dict):
         return path.stem, None, ["нет манифеста: источник, ревизия и версия конвертера неизвестны"]
     problems = []
-    if manifest.get("sha256") != file_sha256(path):
+    if manifest.get("sha256") != (file_sha256(path) if sha256 is None else sha256):
         problems.append("файл не совпадает с манифестом (sha256): снимок изменён после загрузки")
     if manifest.get("converter") != CONVERTER:
         problems.append(
@@ -175,3 +175,18 @@ def check_snapshot(path: Path) -> tuple[str, dict | None, list[str]]:
             "скачайте наборы заново (scripts/fetch_open_sets.py)"
         )
     return str(manifest.get("name") or path.stem), manifest, problems
+
+
+def read_snapshot(path: Path) -> tuple[str, bytes, dict]:
+    """Контрольная сумма и разметка получаются из одних прочитанных байтов."""
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    name, manifest, problems = check_snapshot(path, sha256=digest)
+    if manifest is None:
+        status = "missing"
+    elif manifest.get("sha256") != digest:
+        status = "mismatch"
+    else:
+        status = "match"
+    source = (manifest or {}) | {"sha256": digest, "manifest_status": status, "warnings": problems}
+    return name, data, source

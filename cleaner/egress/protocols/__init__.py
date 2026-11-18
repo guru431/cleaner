@@ -10,4 +10,4 @@ def provider_error(error: object, status: int | None = None) -> ProviderError:
         kind, message = str(error.get("type") or error.get("code") or ""), str(error.get("message") or "")
     else:
         kind, message = "", str(error or "")
-    return ProviderError(status=status, kind=kind, detail=message[:300])
+    return ProviderError(status=status, kind=kind, detail=message)

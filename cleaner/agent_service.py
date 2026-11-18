@@ -295,12 +295,14 @@ class AgentService:
 
         add("key", True, "ключ действует")
         url, protocol, allowed = "", "", ()
+        unrestricted = False
         if not key.upstream:
             add("access", False, "у ключа нет доступа к модели — он только для /api/v1")
         elif key.upstream in SUBSCRIPTIONS:
             protocol, url = SUBSCRIPTIONS[key.upstream][0], self.subscription_urls[key.upstream]
             add("access", user.role == "admin", "подписка" if user.role == "admin" else "доступ по подписке — только у администратора")
             allowed = key.models
+            unrestricted = not allowed
             add("login", True if login else None,
                 "агент прислал вход подписки" if login else "вход подписки агента проверяется на первом запросе")
         else:
@@ -317,10 +319,12 @@ class AgentService:
                         "responses": "/agent/openai/v1/responses"}[protocol]
             add("protocol", protocol in wanted, f"агенту — {endpoint}")
             if model:
-                add("model", not allowed or model in allowed, "модель разрешена ключу" if not allowed or model in allowed
-                    else "модель не разрешена ключу")
+                permitted = unrestricted or model in allowed
+                add("model", permitted, "модель разрешена ключу" if permitted else "модель не разрешена ключу")
+            elif unrestricted:
+                add("model", True, "разрешены все модели")
             else:
-                add("model", True, f"разрешены: {', '.join(allowed)}" if allowed else "разрешены все модели")
+                add("model", bool(allowed), f"разрешены: {', '.join(allowed)}" if allowed else "нет разрешённых моделей")
         layers = [name for name in ("ner", "llm") if key.layers.get(name)]
         if layers:
             try:
@@ -411,11 +415,12 @@ class AgentService:
 
     def _chat(self, key: ApiKey, conv_id: str, session: str) -> str:
         """Чат разговора: свой, если разговор уже идёт, иначе текущий чат ключа — или новый, если текущего нет или он
-        старше AGENT_CHAT_DAYS (6.3). Под замком ключа: два новых разговора не заводят два чата."""
-        conversation = self.repo.conversation(conv_id)
-        if conversation is not None:
-            return conversation.chat_id
-        with self._lock(f"key:{key.id}"):
+        старше AGENT_CHAT_DAYS (6.3). Блокировка репозитория защищает выбор и продление разговора от фоновой уборки."""
+        with self.repo.lock:
+            conversation = self.repo.conversation(conv_id)
+            if conversation is not None:
+                self.repo.touch_conversation(conv_id, session)
+                return conversation.chat_id
             current = self.repo.api_key(key.id).chat_id
             chat = self.repo.chat(current) if current else None
             fresh = chat is not None and chat.kind == "agent" and (
@@ -426,7 +431,9 @@ class AgentService:
                 current = self.repo.create_chat(key.user_id, title, kind="agent")
                 self.repo.set_key_chat(key.id, current)
                 self.repo.audit("agent_chat_created", key.user_id, current, key=key.id)
-            return self.repo.add_conversation(conv_id, current, key.id, session).chat_id
+            conversation = self.repo.add_conversation(conv_id, current, key.id, session)
+            self.repo.touch_conversation(conv_id, session)
+            return conversation.chat_id
 
     def handle(self, call: AgentCall) -> AgentReply:
         started = time.perf_counter()
@@ -471,7 +478,6 @@ class AgentService:
         self, call: AgentCall, proto: GatewayProtocol, chat_id: str, conv_id: str, access: _Access,
         prepared: _Prepared, started: float,
     ) -> AgentReply:
-        self.repo.touch_conversation(conv_id, "")
         for direction, digests in prepared.repeated.items():
             if digests:
                 self.repo.touch_ledger(chat_id, conv_id, direction, digests)
@@ -799,12 +805,15 @@ class AgentService:
             try:
                 attempt("close", upstream.close)
                 recorded = attempt("ledger", lambda: self._record(proto, chat_id, conv_id, prepared, stream))
+                reason = "" if finished else getattr(stream, "failure_reason", "stream_interrupted")
+                if not recorded:
+                    reason = "stream_record_failed"
                 audited = attempt("audit", lambda: self.repo.audit(
-                    "agent_send", call.user.id, chat_id, **audit, status=200 if recorded else 502,
-                    finished=finished and recorded, usage=usage,
+                    "agent_send", call.user.id, chat_id, **audit, status=502 if reason else 200,
+                    finished=not reason, usage=usage, **({"reason": reason} if reason else {}),
                 ))
-                reason = ("stream_record_failed" if not recorded or not audited else
-                          "" if finished else getattr(stream, "failure_reason", "stream_interrupted"))
+                if not audited:
+                    reason = "stream_record_failed"
                 attempt("receipt", lambda: self._receipt(
                     call, proto, chat_id, conv_id, access, prepared, started, 502 if reason else 200, reason,
                 ))
@@ -879,7 +888,9 @@ class AgentService:
                         continue
                     if not isinstance(event, dict):
                         continue
-                    failed = failed or event.get("type") == "error" or "error" in event
+                    if event.get("type") in ("error", "response.failed") or "error" in event:
+                        failed = True
+                        stream.failure_reason = "provider_stream_error"
                     usage.update(proto.usage(event))
                     for out in stream.feed(event):
                         yield proto.sse(out)
@@ -895,7 +906,7 @@ class AgentService:
             finished = done = False
             stream.failure_reason = "response_limit"
         finally:
-            end(finished or done, usage)
+            end((finished or done) and not failed, usage)
         if limited:
             yield proto.sse(proto.error_event("Cleaner: превышен предел размера ответа или аргументов инструмента"))
             return

@@ -35,7 +35,7 @@ _LISTED_PAGES = 5           # больше — в заголовке ленты 
 
 def partial_extraction(meta: dict[str, object]) -> str:
     """Что из файла не попало в текст или могло не попасть — для «извлечено частично» в ленте. Только номера
-    страниц и число листов из meta (FR-11.2)."""
+    страниц и счётчики из meta (FR-11.2)."""
     pages = sorted(set(meta.get("unread_pages", [])) | set(meta.get("doubtful_pages", [])) | set(meta.get("failed_pages", [])))
     parts = []
     if pages:
@@ -43,6 +43,8 @@ def partial_extraction(meta: dict[str, object]) -> str:
                      f"страниц{'а' if len(pages) == 1 else 'ы'} {', '.join(str(number) for number in pages)}")
     if meta.get("hidden_sheets"):
         parts.append(f"скрытых листов — {meta['hidden_sheets']}")
+    if meta.get("omitted_attachments"):
+        parts.append(f"вложений — {meta['omitted_attachments']}")
     return "; ".join(parts)
 
 
@@ -512,9 +514,14 @@ def add_answer(request: Request, chat_id: str, form: dict[str, str] = Depends(ge
     if not answer.strip():
         raise HTTPException(400, "Вставьте ответ модели")
     try:
-        item = service_of(request).add_answer(chat_id, viewer.user.id, answer)
+        item = service_of(request).add_answer(
+            chat_id, viewer.user.id, answer, form.get("manual_receipt", ""),
+            remembered_receipt=request.app.state.manual_copies.receipt(viewer.session.token_hash, chat_id),
+        )
     except TextTooLong as exc:
         raise HTTPException(413, str(exc)) from None
+    except EditRefused as exc:
+        raise HTTPException(409, str(exc)) from None
     return RedirectResponse(f"/chats/{chat_id}#item-{item.id}", status_code=303)
 
 

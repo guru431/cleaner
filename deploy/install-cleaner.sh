@@ -35,6 +35,7 @@ EGRESS=/usr/local/sbin/cleaner-egress.sh
 EGRESS_UNIT=/etc/systemd/system/cleaner-egress.service
 EGRESS_WATCH=/etc/systemd/system/cleaner-egress-watch
 HOST_ENV=$ETC/host.env
+DRAIN_SOCKET=/run/cleaner/drain.sock
 PORT=5464
 STAMP=$(date +%Y%m%d-%H%M%S)
 
@@ -78,7 +79,35 @@ PROFILE="$SRC/deploy/hosts/$HOST_NAME.conf"
 . "$PROFILE"
 [[ -n "${HOST_IP:-}" && -n "${CLIENTS:-}" && -n "${INTERNAL:-}" && -n "${GATEWAY:-}" && -n "${CERT_NAME:-}" ]] \
     || fail "профиль $PROFILE неполон: нужны HOST_IP, CLIENTS, INTERNAL, GATEWAY, CERT_NAME"
+if ! python3.12 - "$CLIENTS" "$INTERNAL" <<'PY'
+import ipaddress
+import sys
+
+try:
+    networks = []
+    for field in sys.argv[1:]:
+        values = field.split()
+        if not values or field != " ".join(values):
+            raise ValueError("Укажите сети CLIENTS и INTERNAL через один пробел")
+        parsed = [ipaddress.IPv4Network(value) for value in values]
+        for value, network in zip(values, parsed, strict=True):
+            if value not in (network.with_prefixlen, str(network.network_address)):
+                raise ValueError(f"Нестандартная запись сети: {value}")
+        networks.append(parsed)
+    clients, internal = networks
+    coverage = tuple(ipaddress.collapse_addresses(internal))
+    for client in clients:
+        if not any(client.subnet_of(network) for network in coverage):
+            raise ValueError(f"CLIENTS: сеть {client} выходит за пределы INTERNAL")
+except ValueError as exc:
+    sys.exit(str(exc))
+PY
+then
+    fail "неверные сети в профиле $PROFILE"
+fi
 log "профиль хоста: $HOST_NAME ($HOST_IP, клиенты: $CLIENTS)"
+exec 9>/run/cleaner-install.lock
+flock -n 9 || fail "другая установка Cleaner уже выполняется"
 # Первая установка или обновление — решается до любых изменений: откат обновления не должен
 # останавливать работающую службу, если до замены файлов дело не дошло.
 FIRST_INSTALL=1
@@ -127,8 +156,6 @@ id -u cleaner >/dev/null 2>&1 || useradd --system --no-create-home --home-dir "$
 install -d -o root -g cleaner -m 0750 "$APP" "$ETC" "$TLS"
 install -d -o cleaner -g cleaner -m 0700 "$DATA"
 install -d -o cleaner -g cleaner -m 0750 "$APP/models"     # модели слоя 4 и Docling: пишет только models download
-# Профиль — для cleaner-egress.sh и check-cleaner.sh, которые живут вне каталога доставки. Секретов в нём нет.
-install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"
 
 # --- настройки: ставятся один раз, адрес службы — из профиля хоста -----------------
 if [[ ! -f "$CONF" ]]; then
@@ -192,9 +219,23 @@ STOPPED=0
 # Останавливается в любом состоянии, кроме inactive и failed: служба, падающая по кругу (Restart=always), между
 # попытками в activating (auto-restart), и отложенный запуск новой версии успел бы поднять схему базы до её копии.
 stop_service() {
-    local state
+    local state drain_status
     state=$(systemctl is-active cleaner.service 2>/dev/null || true)
     if [[ $STOPPED -eq 0 && -n "$state" && "$state" != "inactive" && "$state" != "failed" ]]; then
+        if [[ "$state" == "active" || "$state" == "reloading" ]]; then
+            if python3.12 "$SRC/deploy/drain_cleaner.py" "$DRAIN_SOCKET" "${CLEANER_DRAIN_TIMEOUT:-900}"; then
+                STOPPED=1
+            else
+                drain_status=$?
+                if [[ $drain_status -eq 3 ]]; then
+                    STOPPED=1
+                    rollback "служба не остановилась после завершения операций"
+                fi
+                rollback "служба не подтвердила готовность к обновлению"
+            fi
+            log "служба остановлена после завершения операций"
+            return
+        fi
         STOPPED=1
         # Ловушка ERR внутри функций без set -E не срабатывает: set -e вышел бы без отката.
         systemctl stop cleaner.service || rollback "служба не остановилась"
@@ -225,7 +266,11 @@ rollback() {
     trap - ERR
     log "ОТКАТ: $1"
     local swapped=0 aux=0
-    if [[ -n "$PREV_CODE" ]]; then rm -rf "$APP/cleaner"; mv "$PREV_CODE" "$APP/cleaner"; swapped=1; fi
+    if [[ -n "$PREV_CODE" && -d "$PREV_CODE" ]]; then
+        rm -rf "$APP/cleaner"
+        mv -T -- "$PREV_CODE" "$APP/cleaner"
+        swapped=1
+    fi
     if [[ -n "$PREV_VENV" ]]; then rm -rf "$APP/.venv"; mv "$PREV_VENV" "$APP/.venv"; swapped=1; fi
     if [[ -n "$PREV_UNIT" ]]; then cp -a "$PREV_UNIT" "$UNIT"; swapped=1; fi
     if restore_aux; then aux=1; log "сценарии и юниты границ выхода наружу возвращены"; fi
@@ -261,6 +306,15 @@ rollback() {
 }
 trap 'rollback "сбой в строке $LINENO"' ERR
 
+# Код готовится целиком до остановки службы, без изменения рабочего каталога пакета.
+rm -rf "$APP/cleaner.new"
+# Время файлов сохраняется: git archive ставит им время коммита, и дата отпечатка кода (cleaner verify, подвал) — его.
+cp -r --preserve=timestamps "$SRC/cleaner" "$APP/cleaner.new"
+find "$APP/cleaner.new" -name __pycache__ -prune -exec rm -rf {} +
+chown -R root:cleaner "$APP/cleaner.new"
+find "$APP/cleaner.new" -type d -exec chmod 0750 {} +
+find "$APP/cleaner.new" -type f -exec chmod 0640 {} +
+
 # --- окружение Python: пересобирается, только если изменился файл зависимостей ---
 # Пакеты качает установщик от root, а не служба: её выход наружу ограничен портом 443 и записывается.
 if ! cmp -s "$SRC/requirements-linux.txt" "$APP/.venv/requirements-linux.txt"; then
@@ -286,17 +340,10 @@ else
 fi
 
 # --- код: каталог заменяется целиком, прежний уезжает в копию --------------------
-rm -rf "$APP/cleaner.new"
-# Время файлов сохраняется: git archive ставит им время коммита, и дата отпечатка кода (cleaner verify, подвал) — его.
-cp -r --preserve=timestamps "$SRC/cleaner" "$APP/cleaner.new"
-find "$APP/cleaner.new" -name __pycache__ -prune -exec rm -rf {} +
-chown -R root:cleaner "$APP/cleaner.new"
-find "$APP/cleaner.new" -type d -exec chmod 0750 {} +
-find "$APP/cleaner.new" -type f -exec chmod 0640 {} +
 if [[ -d "$APP/cleaner" ]]; then
     stop_service
+    mv -T -- "$APP/cleaner" "$APP/cleaner.bak-$STAMP"
     PREV_CODE="$APP/cleaner.bak-$STAMP"
-    mv "$APP/cleaner" "$PREV_CODE"
 fi
 mv "$APP/cleaner.new" "$APP/cleaner"
 mapfile -t backups < <(ls -1dt "$APP"/cleaner.bak-* 2>/dev/null || true)
@@ -305,6 +352,8 @@ for old in "${backups[@]:3}"; do
 done
 
 # --- юнит и проверка ---------------------------------------------------------------
+# Профиль — для cleaner-egress.sh и check-cleaner.sh, которые живут вне каталога доставки. Секретов в нём нет.
+install -o root -g root -m 0644 "$PROFILE" "$HOST_ENV"
 if [[ -f "$UNIT" ]] && ! cmp -s "$SRC/deploy/cleaner.service" "$UNIT"; then
     PREV_UNIT="$UNIT.bak-$STAMP"
     cp -a "$UNIT" "$PREV_UNIT"

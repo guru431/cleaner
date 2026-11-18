@@ -46,7 +46,7 @@ def test_answer_shows_the_replacements_of_the_texts_since_the_previous_answer(iv
     ivan.post(f"/chats/{chat_id}/input", text="ещё c@x.example")
     ivan.post(f"/chats/{chat_id}/answer", answer="Ответ <EMAIL_3>")
     page = ivan.get(f"/chats/{chat_id}").text
-    assert re.findall(r"Замен в текстах после прошлого ответа: (\d+), восстановлено: (\d+)", page) == [
+    assert re.findall(r"Замен в запросе: (\d+), восстановлено: (\d+)", page) == [
         ("2", "1"), ("1", "1"),
     ]
 
@@ -95,7 +95,8 @@ def test_chat_is_deleted_with_its_gold_examples_unless_the_owner_keeps_them(ivan
     отметка оставляет их под общим ключом, и форма говорит это заранее. В журнал — только числа."""
     other = gold_chat(ivan, repo, source="Договор 7")
     chat_id = gold_chat(ivan, repo, source="Договор 9")
-    ivan.post(f"/chats/{chat_id}/items/{repo.items(chat_id)[0].id}/gold", purpose="tuning", source="Договор 9")
+    ivan.post(f"/chats/{chat_id}/input", text="почта b@x.example")
+    ivan.post(f"/chats/{chat_id}/items/{repo.items(chat_id)[-1].id}/gold", purpose="tuning", source="Договор 9")
     page = ivan.get(f"/chats/{chat_id}").text
     assert re.search(r'<input type="checkbox" name="gold" value="yes" checked> Удалить и примеры эталона из этого чата — 2', page)
     assert "останутся в эталонном наборе под общим ключом" in page

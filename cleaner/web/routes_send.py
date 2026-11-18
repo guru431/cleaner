@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Iterable
+from datetime import timedelta
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,6 +20,34 @@ from cleaner.web.deps import Viewer, get_form, get_viewer, own_chat, page, repo_
 
 router = APIRouter()
 _TICK = 1.0           # как часто поток ответа показывает новые фрагменты, секунды: каждый показ — восстановление префикса
+
+
+class ManualCopies:
+    """Последний явно скопированный запрос чата в этой сессии. В памяти только шифрованная квитанция."""
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.copies = OrderedDict()
+
+    def remember(self, session: str, chat_id: str, receipt: str) -> None:
+        key = session, chat_id
+        with self.lock:
+            self.copies[key] = (self.clock.now() + timedelta(hours=24), receipt)
+            self.copies.move_to_end(key)
+            if len(self.copies) > 1024:
+                self.copies.popitem(last=False)
+
+    def receipt(self, session: str, chat_id: str) -> str:
+        key = session, chat_id
+        with self.lock:
+            entry = self.copies.get(key)
+            if entry is None:
+                return ""
+            if entry[0] <= self.clock.now():
+                del self.copies[key]
+                return ""
+            return entry[1]
 
 
 @router.post("/chats/{chat_id}/provider")
@@ -118,8 +149,22 @@ def manual(request: Request, chat_id: str, viewer: Viewer = Depends(get_viewer))
         context = outgoing.context
         text = render.dialogue(context.system, [(m.role, m.text) for m in context.messages], outgoing.leaks)
     return page(
-        request, "manual.html", viewer, chat=chat, text=text, stale=preview.stale, back="manual", **shown,
+        request, "manual.html", viewer, chat=chat, text=text, stale=preview.stale, back="manual",
+        manual_receipt=preview.manual_receipt, **shown,
     )
+
+
+@router.post("/chats/{chat_id}/manual/copied", status_code=204)
+def manual_copied(request: Request, chat_id: str, form: dict[str, str] = Depends(get_form),
+                  viewer: Viewer = Depends(get_viewer)) -> Response:
+    writable_chat(request, chat_id, viewer)
+    receipt = form.get("receipt", "")
+    try:
+        service_of(request).manual_snapshot(chat_id, receipt)
+    except EditRefused as exc:
+        raise HTTPException(409, str(exc)) from None
+    request.app.state.manual_copies.remember(viewer.session.token_hash, chat_id, receipt)
+    return Response(status_code=204)
 
 
 @router.post("/chats/{chat_id}/request")
